@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+tool_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+binary_root="${UNITY_MICRO_EDITOR_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/unity-micro-editor}/bin"
+
+mkdir -p -- "$binary_root"
+
+# Go's build cache checks both local modules; no interpreter is in the run path.
+CGO_ENABLED=0 go -C "$tool_root/WorkerProbe" build -trimpath -ldflags='-s -w' \
+  -o "$binary_root/unity-micro-editor" .
+export GOMEMLIMIT="${GOMEMLIMIT:-384MiB}"
+export UNITY_MICRO_EDITOR_ROOT="$tool_root"
+exec "$binary_root/unity-micro-editor" "$@"

@@ -1,0 +1,2 @@
+# Unity emits spaces after empty metadata values; preserve imported metadata bytes.
+*.meta whitespace=-blank-at-eol

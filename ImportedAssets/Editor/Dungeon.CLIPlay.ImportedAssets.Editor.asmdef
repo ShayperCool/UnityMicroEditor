@@ -1,0 +1,8 @@
+{
+  "name": "Dungeon.CLIPlay.ImportedAssets.Editor",
+  "rootNamespace": "Dungeon.CLIPlay.ImportedAssets.Editor",
+  "references": ["Dungeon.CLIPlay"],
+  "includePlatforms": ["Editor"],
+  "autoReferenced": true,
+  "noEngineReferences": false
+}
