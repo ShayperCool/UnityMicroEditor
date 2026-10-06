@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>Unity.Netcode.Editor.CodeGen</AssemblyName>
+    <UseAppHost>false</UseAppHost>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <DefineConstants>$(DefineConstants);$(NetcodeDefines)</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="CodeGen/*.cs" />
+    <Reference Include="Unity.CompilationPipeline.Common" HintPath="Dependencies/Unity.CompilationPipeline.Common.dll" />
+    <Reference Include="Mono.Cecil" HintPath="Dependencies/Mono.Cecil.dll" />
+    <Reference Include="Mono.Cecil.Rocks" HintPath="Dependencies/Mono.Cecil.Rocks.dll" />
+    <Reference Include="Mono.Cecil.Pdb" HintPath="Dependencies/Mono.Cecil.Pdb.dll" />
+    <Reference Include="Mono.Cecil.Mdb" HintPath="Dependencies/Mono.Cecil.Mdb.dll" />
+    <Reference Include="Unity.Netcode.Runtime" HintPath="Dependencies/Unity.Netcode.Runtime.dll" />
+    <Reference Include="Unity.Collections" HintPath="Dependencies/Unity.Collections.dll" />
+    <Reference Include="UnityEngine.CoreModule" HintPath="Dependencies/UnityEngine.CoreModule.dll" />
+    <Reference Include="UnityEngine.ScriptingModule" HintPath="Dependencies/UnityEngine.ScriptingModule.dll" />
+  </ItemGroup>
+</Project>

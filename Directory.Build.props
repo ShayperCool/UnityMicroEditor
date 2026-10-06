@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <UnityEditor Condition="'$(UnityEditor)' == '' and '$(UNITY_EDITOR)' != ''">$(UNITY_EDITOR)</UnityEditor>
+    <UnityEditor Condition="'$(UnityEditor)' == ''">$(HOME)/Unity/Hub/Editor/6000.6.3f1/Editor/Unity</UnityEditor>
+    <UnityData Condition="'$(UnityData)' == ''">$([System.IO.Path]::GetDirectoryName('$(UnityEditor)'))/Data</UnityData>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,14 @@
+{
+    "name": "Dungeon.CLIPlay.Tests.EditMode",
+    "rootNamespace": "Dungeon.CLIPlay.Tests",
+    "references": ["Dungeon.CLIPlay", "UnityEngine.TestRunner", "UnityEditor.TestRunner"],
+    "includePlatforms": ["Editor"],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": ["nunit.framework.dll"],
+    "autoReferenced": false,
+    "defineConstraints": ["UNITY_INCLUDE_TESTS"],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
