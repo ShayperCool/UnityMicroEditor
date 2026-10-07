@@ -84,8 +84,8 @@ func (importer *nativeProjectImporter) retainNativeModelMeshCPU(entry goproject.
 }
 
 func readOwnedNativeMeshFile(project, path string) ([]byte, error) {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path || !withinDirectory(path, filepath.Join(project, "Temp")) {
-		return nil, errors.New("native Mesh CPU file must be owned beneath project Temp")
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || !goproject.IsOwnedCachePath(project, path) {
+		return nil, errors.New("native Mesh CPU file must be owned beneath project Temp or Library/UnityMicroEditor")
 	}
 	canonical, err := filepath.EvalSymlinks(path)
 	if err != nil || canonical != path {

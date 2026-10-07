@@ -47,45 +47,56 @@ type dependency struct {
 	SourcePath string `json:"sourcePath,omitempty"`
 }
 type catalog struct {
-	SchemaVersion int          `json:"schemaVersion"`
-	EngineVersion string       `json:"engineVersion"`
-	Project       string       `json:"project"`
-	SourceRoots   []sourceRoot `json:"sourceRoots"`
-	ModelPrefabs  []struct {
-		GUID    string     `json:"guid"`
-		Path    string     `json:"path"`
-		Objects []Document `json:"objects"`
+	SchemaVersion          int          `json:"schemaVersion"`
+	EngineVersion          string       `json:"engineVersion"`
+	Project                string       `json:"project"`
+	Backend                string       `json:"backend"`
+	Success                bool         `json:"success"`
+	ContainsScenes         bool         `json:"containsScenes"`
+	SceneLoader            string       `json:"sceneLoader"`
+	CookedRegistryVerified bool         `json:"cookedRegistryVerified"`
+	SourceRoots            []sourceRoot `json:"sourceRoots"`
+	ModelPrefabs           []struct {
+		GUID       string     `json:"guid"`
+		Path       string     `json:"path"`
+		RootFileID string     `json:"rootFileId"`
+		Objects    []Document `json:"objects"`
 	} `json:"modelPrefabs"`
-	Assets                 []map[string]any `json:"assets"`
-	PrefabObservations     []map[string]any `json:"prefabObservations"`
-	IgnoredPrefabOverrides []map[string]any `json:"ignoredPrefabOverrides"`
-	SourceDependencies     []dependency     `json:"sourceDependencies"`
+	Assets                 []map[string]any      `json:"assets"`
+	Packs                  []nativeDiscoveryPack `json:"packs"`
+	ExcludedRuntimeAssets  []map[string]any      `json:"excludedRuntimeAssets"`
+	ModelAnimationClips    []map[string]any      `json:"modelAnimationClips"`
+	PrefabObservations     []map[string]any      `json:"prefabObservations"`
+	IgnoredPrefabOverrides []map[string]any      `json:"ignoredPrefabOverrides"`
+	DeferredBindings       []map[string]any      `json:"deferredBindings"`
+	SourceDependencies     []dependency          `json:"sourceDependencies"`
 }
 
 // Session owns caches for one project. Native content and managed assembly
 // bindings are inherited from a validated host preparation, never rebuilt here.
 type Session struct {
-	mu                 sync.Mutex
-	project            string
-	baseline           map[string]any
-	catalog            catalog
-	files              map[string]fileRecord
-	documents          map[string]yamlRecord
-	observed           map[string]identity
-	stats              CacheStats
-	byGUID             map[string]string
-	byPath             map[string]string
-	models             map[string][]Document
-	assets             map[string]map[string]any
-	scriptTypes        map[string]string
-	dependencies       map[string]dependency
-	critical           map[string]string
-	prefabObservations map[string]map[string]any
-	ignoredOverrides   map[string]bool
-	indexDirty         bool
-	explicitSources    map[string]string
-	nativeOverlays     map[string]NativeReplacement
-	extraAssets        []string
+	mu                               sync.Mutex
+	project                          string
+	baseline                         map[string]any
+	catalog                          catalog
+	files                            map[string]fileRecord
+	documents                        map[string]yamlRecord
+	observed                         map[string]identity
+	stats                            CacheStats
+	byGUID                           map[string]string
+	byPath                           map[string]string
+	models                           map[string][]Document
+	assets                           map[string]map[string]any
+	scriptTypes                      map[string]string
+	dependencies                     map[string]dependency
+	critical                         map[string]string
+	prefabObservations               map[string]map[string]any
+	ignoredOverrides                 map[string]bool
+	indexDirty                       bool
+	explicitSources                  map[string]string
+	nativeOverlays                   map[string]NativeReplacement
+	extraAssets                      []string
+	ignoredPrefabOverrideDiagnostics []PrefabOverrideDiagnostic
 }
 
 type Prepared struct {
@@ -351,7 +362,25 @@ func (s *Session) checkedPath(path, root string) (string, error) {
 	}
 	library := filepath.Join(s.project, "Library")
 	if canonical == library || strings.HasPrefix(canonical, library+string(filepath.Separator)) {
-		return "", fmt.Errorf("project Library is not a raw source: %s", path)
+		packageSource := false
+		for _, declared := range s.catalog.SourceRoots {
+			if !strings.HasPrefix(declared.Path, "Packages/") {
+				continue
+			}
+			declaredRoot, err := filepath.EvalSymlinks(declared.Source)
+			if err != nil || declaredRoot != base {
+				continue
+			}
+			for _, permitted := range []string{filepath.Join(library, "PackageCache"), filepath.Join(library, "UnityMicroEditor/package-sources")} {
+				relative, err := filepath.Rel(permitted, base)
+				if err == nil && relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+					packageSource = true
+				}
+			}
+		}
+		if !packageSource {
+			return "", fmt.Errorf("project Library is not a declared package source: %s", path)
+		}
 	}
 	return canonical, nil
 }
@@ -459,6 +488,7 @@ func (s *Session) Prepare(outputRoot string) (Prepared, error) {
 	s.stats = CacheStats{}
 	s.observed = map[string]identity{}
 	s.dependencies = map[string]dependency{}
+	s.ignoredPrefabOverrideDiagnostics = nil
 	if err := s.validateRetainedBuiltinShaders(); err != nil {
 		return Prepared{}, err
 	}
@@ -494,11 +524,12 @@ func (s *Session) Prepare(outputRoot string) (Prepared, error) {
 	if err != nil {
 		return Prepared{}, err
 	}
-	assetList, err := s.prepareAssets(expanded)
+	preparedAssets, err := s.prepareAssets(expanded)
 	if err != nil {
 		return Prepared{}, err
 	}
-	manifest["assets"] = assetList
+	manifest["assets"] = preparedAssets.Assets
+	manifest["importedAssetBindings"] = preparedAssets.ImportedBindings
 	if err := s.publishNativeContent(manifest); err != nil {
 		return Prepared{}, err
 	}
@@ -508,6 +539,7 @@ func (s *Session) Prepare(outputRoot string) (Prepared, error) {
 	}
 	sort.Slice(deps, func(i, j int) bool { return deps[i].Path < deps[j].Path })
 	manifest["sourceDependencies"] = deps
+	manifest["ignoredPrefabOverrideDiagnostics"] = s.sortedIgnoredPrefabOverrideDiagnostics()
 	depJSON, _ := json.Marshal(deps)
 	hash := sha256.Sum256(depJSON)
 	manifest["contentHash"] = hex.EncodeToString(hash[:])
@@ -547,7 +579,7 @@ func (s *Session) Prepare(outputRoot string) (Prepared, error) {
 		os.RemoveAll(directory)
 		return Prepared{}, err
 	}
-	prepared := Prepared{path, revision, s.project, scene, len(objects), len(assetList), time.Since(started).Seconds(), s.stats}
+	prepared := Prepared{path, revision, s.project, scene, len(objects), len(preparedAssets.Assets), time.Since(started).Seconds(), s.stats}
 	return prepared, nil
 }
 

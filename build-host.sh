@@ -34,10 +34,11 @@ for host_proc in /proc/[0-9]*/cmdline; do
     host_args=()
     mapfile -d '' -t host_args < "$host_proc" 2>/dev/null || continue
     [[ ${host_args[0]:-} == */Unity ]] || continue
-    for host_arg in "${host_args[@]}"; do
-        if [[ $host_arg == -projectPath ]]; then
+    for ((host_index=0; host_index<${#host_args[@]}; host_index++)); do
+        if [[ ${host_args[host_index]} == -projectPath ]] &&
+            [[ $(realpath -m -- "${host_args[host_index+1]:-}") == "$host_project" ]]; then
             host_pid=${host_proc#/proc/}
-            printf 'Close the running Unity Editor before building the host. PID %s\n' "${host_pid%%/*}" >&2
+            printf 'Close the Unity Editor using the host project before building it. PID %s\n' "${host_pid%%/*}" >&2
             exit 2
         fi
     done

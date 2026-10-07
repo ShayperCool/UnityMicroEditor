@@ -261,8 +261,8 @@ func stageNativeResources(manifest, runDirectory string) error {
 			}
 			mounts = append(mounts, mount{destination, contents})
 			if file.Path != "" {
-				if !filepath.IsAbs(file.Path) || doc.Project == "" || !withinDirectory(file.Path, filepath.Join(doc.Project, "Temp")) {
-					return errors.New("native resource content file must be owned beneath project Temp")
+				if !filepath.IsAbs(file.Path) || doc.Project == "" || !goproject.IsOwnedCachePath(doc.Project, file.Path) {
+					return errors.New("native resource content file must be owned beneath project Temp or Library/UnityMicroEditor")
 				}
 				local := filepath.Join(filepath.Dir(file.Path), filepath.FromSlash(resource.VirtualPath))
 				canonical, err := canonicalDestination(local)

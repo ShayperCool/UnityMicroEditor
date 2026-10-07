@@ -66,6 +66,65 @@ func TestPreparedArtifactRejectsConflictingHashes(t *testing.T) {
 	}
 }
 
+func TestPreparedNativeOnlySceneRequiresVerifiedHostRegistrations(t *testing.T) {
+	project := t.TempDir()
+	player := filepath.Join(project, "Library/UnityMicroEditor/Host/Game.x86_64")
+	registrations := filepath.Join(filepath.Dir(player), "Game_Data/ScriptingAssemblies.json")
+	if err := os.MkdirAll(filepath.Dir(registrations), 0700); err != nil {
+		t.Fatal(err)
+	}
+	contents := []byte(`{"names":["Dungeon.CLIPlay.dll","UnityEngine.CoreModule.dll"]}`)
+	if err := os.WriteFile(registrations, contents, 0600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(project, "manifest.json")
+	value := map[string]any{"schemaVersion": 1, "supported": true, "projectRoot": project,
+		"unityVersion": fixtureUnityVersion, "assemblies": []string{},
+		"compiler": map[string]any{"nativeOnly": true, "nativeSlotsSha256": bytesSHA(contents)}}
+	validate := func() error {
+		t.Helper()
+		data, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(manifest, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err = validatePreparedScene(preparedLaunch{Project: project, Player: player}, manifest, bytesSHA(data), map[string]string{})
+		return err
+	}
+	if err := validate(); err != nil {
+		t.Fatal(err)
+	}
+	delete(value, "compiler")
+	if err := validate(); err == nil {
+		t.Fatal("unproved empty game assembly list was accepted")
+	}
+	value["compiler"] = map[string]any{"nativeOnly": true}
+	if err := validate(); err == nil {
+		t.Fatal("native-only scene without registration digest was accepted")
+	}
+	value["compiler"] = map[string]any{"nativeOnly": true, "nativeSlotsSha256": bytesSHA(contents)}
+	if err := os.WriteFile(registrations, []byte(`{"names":["Other.dll"]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validate(); err == nil {
+		t.Fatal("changed native host registrations were accepted")
+	}
+	missingBridge := []byte(`{"names":["UnityEngine.CoreModule.dll"]}`)
+	if err := os.WriteFile(registrations, missingBridge, 0600); err != nil {
+		t.Fatal(err)
+	}
+	value["compiler"] = map[string]any{"nativeOnly": true, "nativeSlotsSha256": bytesSHA(missingBridge)}
+	if err := validate(); err == nil {
+		t.Fatal("registered runtime bridge was not required")
+	}
+	value["assemblies"] = []string{"Game.dll"}
+	if err := validate(); err == nil {
+		t.Fatal("native-only proof accepted additional game assemblies")
+	}
+}
+
 func TestPreparedPackageSourceResolvesCacheAndRejectsAmbiguity(t *testing.T) {
 	project := t.TempDir()
 	logical := "Packages/com.unity.test/Shaders/Unlit.shader"

@@ -89,6 +89,19 @@ func makeScenePatch(previous, next string) (string, string, error) {
 				allowed = map[string]bool{"m_LocalPosition": true, "m_LocalRotation": true, "m_LocalScale": true, "m_LocalEulerAnglesHint": true, "m_Children": true}
 			} else if class == sceneRootsClass {
 				allowed = map[string]bool{"m_Roots": true}
+				// Native Player SetSiblingIndex does not reorder scene roots.
+				// Appending new roots preserves enumeration; insertion/reordering
+				// needs reconstruction in the new authored creation order.
+				previousRoots, _ := old.data[id]["m_Roots"].([]any)
+				nextRoots, _ := data["m_Roots"].([]any)
+				if len(nextRoots) < len(previousRoots) {
+					return "", "", nil
+				}
+				for index, root := range previousRoots {
+					if !patchValueEqual(root, nextRoots[index]) {
+						return "", "", nil
+					}
+				}
 			}
 			if !patchMapsEqualExcept(old.data[id], data, allowed) {
 				return "", "", nil
@@ -280,6 +293,9 @@ func validatePatchGraph(scene patchScene) error {
 	if rootMetadata == 1 {
 		seen := map[string]bool{}
 		for _, ref := range rootList {
+			if guid, _ := patchMap(ref)["guid"].(string); guid != "" {
+				return errors.New("SceneRoots requires local authored references")
+			}
 			id := patchReference(ref)
 			if !rootIDs[id] || seen[id] {
 				return errors.New("SceneRoots list does not match root Transforms")

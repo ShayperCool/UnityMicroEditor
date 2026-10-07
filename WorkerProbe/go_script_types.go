@@ -39,6 +39,9 @@ func (compiler *goCompiler) ScriptTypeNames(ctx context.Context) (map[string]str
 	}
 	sort.Strings(paths)
 	if len(paths) == 0 {
+		if compiler.manifest.NativeOnly && len(compiler.manifest.Scripts) == 0 {
+			return map[string]string{}, nil
+		}
 		return nil, errors.New("script type inventory has no defining assemblies")
 	}
 	cacheKey, err := compiler.scriptTypeCacheKey(helper, byAssembly)
@@ -75,6 +78,22 @@ func (compiler *goCompiler) ScriptTypeNames(ctx context.Context) (map[string]str
 		}
 		if len(candidates) == 1 {
 			result[script.GUID] = candidates[0]
+		}
+		if script.HostProvided && script.TypeName != "" {
+			for _, full := range definitions[path] {
+				if full == script.TypeName {
+					result[script.GUID] = full
+					break
+				}
+			}
+		}
+		if primary := compiler.proofs[script.Assembly].ScriptTypes[script.Path]; primary != "" {
+			for _, full := range definitions[path] {
+				if full == primary {
+					result[script.GUID] = primary
+					break
+				}
+			}
 		}
 		for expected, guid := range compiler.expectedTypes[script.Assembly] {
 			if guid == script.GUID {

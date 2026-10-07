@@ -13,10 +13,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
 	"time"
+
+	goproject "unitymicroeditor/project"
 )
 
 type runtimeInitializer struct {
@@ -35,16 +38,18 @@ type compileUpdate struct {
 	SourceHashes        map[string]string    `json:"sourceHashes"`
 	DeclarationChanged  []string             `json:"declarationChanged"`
 	CacheReused         bool                 `json:"cacheReused,omitempty"`
+	DLLHashes           map[string]string    `json:"dllHashes,omitempty"`
 }
 
 type goCompileAssembly struct {
-	Name              string           `json:"name"`
-	Path              string           `json:"path"`
-	SHA256            string           `json:"sha256"`
-	Sources           []string         `json:"sources"`
-	References        []string         `json:"references"`
-	AssemblyInputHash string           `json:"assemblyInputHash"`
-	LifecycleBarrier  goLifecycleProof `json:"lifecycleBarrier"`
+	Name                 string           `json:"name"`
+	Path                 string           `json:"path"`
+	SHA256               string           `json:"sha256"`
+	Sources              []string         `json:"sources"`
+	References           []string         `json:"references"`
+	AssemblyInputHash    string           `json:"assemblyInputHash"`
+	LifecycleBarrier     goLifecycleProof `json:"lifecycleBarrier"`
+	NetcodePostprocessor string           `json:"netcodePostprocessor,omitempty"`
 }
 
 type goLifecycleProof struct {
@@ -55,6 +60,7 @@ type goLifecycleProof struct {
 	RuntimeInitializers     []runtimeInitializer  `json:"runtimeInitializers"`
 	Callbacks               int                   `json:"callbacks"`
 	Methods                 []goLifecycleCallback `json:"methods"`
+	ScriptTypes             map[string]string     `json:"scriptTypes,omitempty"`
 }
 
 type goLifecycleCallback struct {
@@ -66,27 +72,39 @@ type goLifecycleCallback struct {
 }
 
 type goCompileManifest struct {
-	Schema         int                 `json:"schema"`
-	Project        string              `json:"project"`
-	Unity          string              `json:"unity"`
-	Assemblies     []goCompileAssembly `json:"assemblies"`
-	CompilerInputs map[string]string   `json:"compilerInputs"`
-	Scripts        []struct {
-		GUID         string `json:"guid"`
-		Path         string `json:"path"`
-		Assembly     string `json:"assembly"`
-		TypeName     string `json:"typeName"`
-		HostProvided bool   `json:"hostProvided"`
-	} `json:"scripts"`
+	BaseReferences          []string            `json:"baseReferences,omitempty"`
+	EngineReferences        []string            `json:"engineReferences,omitempty"`
+	Backend                 string              `json:"backend,omitempty"`
+	EngineProfileSHA256     string              `json:"engineProfileSHA256,omitempty"`
+	PackageResolutionSHA256 string              `json:"packageResolutionSHA256,omitempty"`
+	Schema                  int                 `json:"schema"`
+	Project                 string              `json:"project"`
+	Unity                   string              `json:"unity"`
+	NativeOnly              bool                `json:"nativeOnly,omitempty"`
+	NativeSlotsSHA          string              `json:"nativeSlotsSha256,omitempty"`
+	Assemblies              []goCompileAssembly `json:"assemblies"`
+	CompilerInputs          map[string]string   `json:"compilerInputs"`
+	Scripts                 []goCompileScript   `json:"scripts"`
+}
+
+type goCompileScript struct {
+	GUID         string `json:"guid"`
+	Path         string `json:"path"`
+	Assembly     string `json:"assembly"`
+	TypeName     string `json:"typeName"`
+	HostProvided bool   `json:"hostProvided"`
 }
 
 type goAssemblyConfig struct {
-	Name         string   `json:"name"`
-	Sources      []string `json:"sources"`
-	Dependencies []string `json:"dependencies"`
-	Defines      []string `json:"defines"`
-	NativeBase   []string `json:"nativeBaseAssemblies"`
-	Config       struct {
+	ResponseFiles      []string `json:"responseFiles,omitempty"`
+	CompilerReferences []string `json:"compilerReferences,omitempty"`
+	CompilerOptions    []string `json:"compilerOptions,omitempty"`
+	Name               string   `json:"name"`
+	Sources            []string `json:"sources"`
+	Dependencies       []string `json:"dependencies"`
+	Defines            []string `json:"defines"`
+	NativeBase         []string `json:"nativeBaseAssemblies"`
+	Config             struct {
 		AllowUnsafe        bool     `json:"allowUnsafeCode"`
 		NoEngineReferences bool     `json:"noEngineReferences"`
 		OverrideReferences bool     `json:"overrideReferences"`
@@ -100,6 +118,7 @@ type goCompiler struct {
 	configs                                             map[string]goAssemblyConfig
 	configurationHashes                                 map[string]string
 	sources, configuration, currentDLLs                 map[string]string
+	acceptedDLLHashes                                   map[string]string
 	proofs                                              map[string]goLifecycleProof
 	baseReferences, engineReferences, generators        []string
 	hostRoots                                           []string
@@ -161,50 +180,111 @@ func goCompilerManifest(filename string) (goCompileManifest, string, error) {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return manifest, "", err
 	}
-	if manifest.Schema != 1 || len(manifest.Assemblies) == 0 || len(manifest.Assemblies) > 256 || len(manifest.CompilerInputs) == 0 {
+	if manifest.Schema != 1 || len(manifest.Assemblies) == 0 && !manifest.NativeOnly || len(manifest.Assemblies) > 256 || len(manifest.CompilerInputs) == 0 ||
+		manifest.NativeOnly && (len(manifest.Assemblies) != 0 || !validSHA256(manifest.NativeSlotsSHA)) {
 		return manifest, "", errors.New("baseline lacks a verified raw compiler plan")
+	}
+	if manifest.Backend != "" && manifest.Backend != "go_authored_source" || manifest.Backend == "go_authored_source" && (!validSHA256(manifest.EngineProfileSHA256) || !validSHA256(manifest.PackageResolutionSHA256)) {
+		return manifest, "", errors.New("compiler source backend lacks exact engine/package provenance")
+	}
+	if manifest.NativeOnly {
+		for _, script := range manifest.Scripts {
+			if !script.HostProvided {
+				return manifest, "", errors.New("native-only baseline contains an unverified gameplay script")
+			}
+		}
+	}
+	if len(wrapper.Compiler) > 0 && string(wrapper.Compiler) != "null" && wrapper.Manifest != "" {
+		// An accepted DLL can remain in the compiler-preparation directory while
+		// its new exact configuration lives in the sibling source-preparation.
+		// Use the explicit scene locator, never scan arbitrary sibling caches.
+		locator := wrapper.Manifest
+		canonical, err := filepath.EvalSymlinks(locator)
+		if err != nil || !filepath.IsAbs(locator) || filepath.Clean(locator) != locator || canonical != locator ||
+			!goproject.IsOwnedCachePath(manifest.Project, locator) {
+			return manifest, "", errors.New("compiler scene locator must be canonical and inside owned project cache")
+		}
+		stamp, err := os.Stat(locator)
+		if err != nil || !stamp.Mode().IsRegular() || stamp.Size() > 32<<20 {
+			return manifest, "", errors.New("compiler scene locator must name a bounded regular manifest")
+		}
+		content, err := os.ReadFile(locator)
+		if err != nil {
+			return manifest, "", err
+		}
+		var scene struct {
+			SchemaVersion int    `json:"schemaVersion"`
+			Supported     bool   `json:"supported"`
+			ProjectRoot   string `json:"projectRoot"`
+		}
+		if err := json.Unmarshal(content, &scene); err != nil || scene.SchemaVersion != 1 || !scene.Supported || scene.ProjectRoot != manifest.Project {
+			return manifest, "", errors.New("compiler scene locator does not describe the same supported project")
+		}
+		filename = locator
 	}
 	return manifest, filename, nil
 }
 
-func readGoAssemblyConfiguration(baselinePath string, assembly goCompileAssembly) (goAssemblyConfig, string, error) {
+func readGoAssemblyConfiguration(baselinePath string, assembly goCompileAssembly, expectedManifest ...goCompileManifest) (goAssemblyConfig, string, error) {
 	var configuration goAssemblyConfig
-	for folder := filepath.Dir(baselinePath); ; folder = filepath.Dir(folder) {
-		filename := filepath.Join(folder, "compiler-cache", "assemblies", assembly.AssemblyInputHash, "compile.json")
-		data, err := os.ReadFile(filename)
-		if err == nil {
-			var descriptor struct {
-				AssemblyConfiguration json.RawMessage     `json:"assemblyConfiguration"`
-				CompilerInputs        map[string]string   `json:"compilerInputs"`
-				Assemblies            []goCompileAssembly `json:"assemblies"`
+	starts := []string{filepath.Dir(baselinePath)}
+	if filepath.IsAbs(assembly.Path) && filepath.Clean(assembly.Path) == assembly.Path {
+		// A scene/content baseline may embed the compiler plan elsewhere.
+		// Its immutable DLL still locates the original verified descriptors.
+		starts = append(starts, filepath.Dir(assembly.Path))
+	}
+	visited := map[string]bool{}
+	for _, start := range starts {
+		for folder := start; ; folder = filepath.Dir(folder) {
+			if visited[folder] {
+				break
 			}
-			if err := json.Unmarshal(data, &descriptor); err != nil {
-				return configuration, "", err
+			visited[folder] = true
+			for _, cacheDirectory := range []string{"compiler-cache/assemblies", "compiler-cache/baseline-assemblies", "baseline-assemblies"} {
+				filename := filepath.Join(folder, filepath.FromSlash(cacheDirectory), assembly.AssemblyInputHash, "compile.json")
+				data, err := os.ReadFile(filename)
+				if err == nil {
+					var descriptor struct {
+						Backend                 string              `json:"backend"`
+						EngineProfileSHA256     string              `json:"engineProfileSHA256"`
+						PackageResolutionSHA256 string              `json:"packageResolutionSHA256"`
+						AssemblyConfiguration   json.RawMessage     `json:"assemblyConfiguration"`
+						CompilerInputs          map[string]string   `json:"compilerInputs"`
+						Assemblies              []goCompileAssembly `json:"assemblies"`
+					}
+					if err := json.Unmarshal(data, &descriptor); err != nil {
+						return configuration, "", err
+					}
+					if len(expectedManifest) > 0 && (descriptor.Backend != expectedManifest[0].Backend || descriptor.EngineProfileSHA256 != expectedManifest[0].EngineProfileSHA256 || descriptor.PackageResolutionSHA256 != expectedManifest[0].PackageResolutionSHA256) {
+						return configuration, "", errors.New("exact configuration backend/profile differs from compiler baseline: " + assembly.Name)
+					}
+					if err := json.Unmarshal(descriptor.AssemblyConfiguration, &configuration); err != nil {
+						return configuration, "", err
+					}
+					var canonical any
+					decoder := json.NewDecoder(bytes.NewReader(descriptor.AssemblyConfiguration))
+					decoder.UseNumber()
+					if err := decoder.Decode(&canonical); err != nil {
+						return configuration, "", err
+					}
+					encoded, _ := json.Marshal(canonical)
+					digest := bytesSHA(encoded)
+					if configuration.Name != assembly.Name || !equalStrings(configuration.Sources, assembly.Sources) ||
+						!equalStrings(configuration.Dependencies, assembly.References) || descriptor.CompilerInputs["assemblyConfiguration"] != digest ||
+						len(descriptor.Assemblies) != 1 || descriptor.Assemblies[0].SHA256 != assembly.SHA256 ||
+						(descriptor.Backend != "go_authored_source" && (configuration.Config.OverrideReferences || len(configuration.Config.Precompiled) != 0 || len(configuration.CompilerReferences) != 0 || len(configuration.CompilerOptions) != 0)) ||
+						(descriptor.Backend == "go_authored_source" && (!validSHA256(descriptor.EngineProfileSHA256) || !validSHA256(descriptor.PackageResolutionSHA256))) || len(configuration.Defines) == 0 {
+						return configuration, "", errors.New("baseline assembly configuration/proof mismatch: " + assembly.Name)
+					}
+					return configuration, digest, nil
+				}
+				if !errors.Is(err, os.ErrNotExist) {
+					return configuration, "", err
+				}
 			}
-			if err := json.Unmarshal(descriptor.AssemblyConfiguration, &configuration); err != nil {
-				return configuration, "", err
+			if filepath.Dir(folder) == folder {
+				break
 			}
-			var canonical any
-			decoder := json.NewDecoder(bytes.NewReader(descriptor.AssemblyConfiguration))
-			decoder.UseNumber()
-			if err := decoder.Decode(&canonical); err != nil {
-				return configuration, "", err
-			}
-			encoded, _ := json.Marshal(canonical)
-			digest := bytesSHA(encoded)
-			if configuration.Name != assembly.Name || !equalStrings(configuration.Sources, assembly.Sources) ||
-				!equalStrings(configuration.Dependencies, assembly.References) || descriptor.CompilerInputs["assemblyConfiguration"] != digest ||
-				len(descriptor.Assemblies) != 1 || descriptor.Assemblies[0].SHA256 != assembly.SHA256 ||
-				configuration.Config.OverrideReferences || len(configuration.Config.Precompiled) != 0 || len(configuration.Defines) == 0 {
-				return configuration, "", errors.New("baseline assembly configuration/proof mismatch: " + assembly.Name)
-			}
-			return configuration, digest, nil
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return configuration, "", err
-		}
-		if filepath.Dir(folder) == folder {
-			break
 		}
 	}
 	return configuration, "", errors.New("exact assembly configuration cache is missing: " + assembly.Name)
@@ -242,10 +322,20 @@ func validGoLifecycleProof(proof goLifecycleProof, name string) bool {
 			return false
 		}
 	}
+	for source, name := range proof.ScriptTypes {
+		if source == "" || name == "" || len(name) > 1024 || strings.ContainsAny(name, "\x00\r\n") {
+			return false
+		}
+	}
 	return true
 }
 
 func goLifecycleSourcesMatch(proof goLifecycleProof, sources []string) bool {
+	for source, name := range proof.ScriptTypes {
+		if name == "" || !slices.Contains(sources, source) {
+			return false
+		}
+	}
 	for _, callback := range proof.Methods {
 		found := false
 		for _, source := range sources {
@@ -275,8 +365,8 @@ func newGoCompiler(project, baselineManifest, stagedPlayer, editor, cache string
 		return nil, err
 	}
 	canonicalCache, err := canonicalDestination(cache)
-	if err != nil || canonicalCache != cache || !withinDirectory(cache, filepath.Join(project, "Temp")) {
-		return nil, errors.New("Go compiler cache must be under owned project Temp")
+	if err != nil || canonicalCache != cache || !goproject.IsOwnedCachePath(project, cache) {
+		return nil, errors.New("Go compiler cache must be under owned project Temp or Library/UnityMicroEditor")
 	}
 	manifest, baselinePath, err := goCompilerManifest(baselineManifest)
 	if err != nil {
@@ -287,7 +377,7 @@ func newGoCompiler(project, baselineManifest, stagedPlayer, editor, cache string
 	}
 	compiler := &goCompiler{project: project, editor: editor, cache: cache, player: stagedPlayer, baselinePlayer: stagedPlayer, manifest: manifest,
 		configs: map[string]goAssemblyConfig{}, configurationHashes: map[string]string{}, sources: map[string]string{},
-		configuration: map[string]string{}, currentDLLs: map[string]string{}, proofs: map[string]goLifecycleProof{}}
+		configuration: map[string]string{}, currentDLLs: map[string]string{}, acceptedDLLHashes: map[string]string{}, proofs: map[string]goLifecycleProof{}}
 	playerData := filepath.Join(filepath.Dir(stagedPlayer), strings.TrimSuffix(filepath.Base(stagedPlayer), filepath.Ext(stagedPlayer))+"_Data")
 	var scriptingSlots struct {
 		Names []string `json:"names"`
@@ -299,24 +389,28 @@ func newGoCompiler(project, baselineManifest, stagedPlayer, editor, cache string
 	for _, name := range scriptingSlots.Names {
 		slots[name] = true
 	}
-	data := filepath.Join(filepath.Dir(editor), "Data")
-	compiler.dotnet = filepath.Join(data, "DotNetSdk", "dotnet")
-	compilers, _ := filepath.Glob(filepath.Join(data, "DotNetSdk", "sdk", "*", "Roslyn", "bincore", "csc.dll"))
-	if len(compilers) == 0 {
-		return nil, errors.New("installed Unity Roslyn SDK is missing")
+	if manifest.NativeOnly {
+		actual, err := goFileHash(filepath.Join(playerData, "ScriptingAssemblies.json"))
+		if err != nil || actual != manifest.NativeSlotsSHA || !slots["Dungeon.CLIPlay.dll"] {
+			return nil, errors.New("native-only host registrations differ from its verified compiler baseline")
+		}
+		if _, err := goFileHash(filepath.Join(playerData, "Managed/Dungeon.CLIPlay.dll")); err != nil {
+			return nil, fmt.Errorf("native-only host runtime bridge is missing: %w", err)
+		}
 	}
-	sort.Strings(compilers)
-	compiler.csc = compilers[len(compilers)-1]
-	bcl := filepath.Join(data, "MonoBleedingEdge", "lib", "mono", "unityaot-linux")
-	compiler.baseReferences, _ = filepath.Glob(filepath.Join(bcl, "*.dll"))
-	facades, _ := filepath.Glob(filepath.Join(bcl, "Facades", "*.dll"))
-	compiler.baseReferences = deduplicateGoReferences(append(compiler.baseReferences, facades...))
-	engine := filepath.Join(data, "PlaybackEngines", "LinuxStandaloneSupport", "Variations", "mono", "Managed")
-	compiler.engineReferences, _ = filepath.Glob(filepath.Join(engine, "UnityEngine*.dll"))
-	scripting, _ := filepath.Glob(filepath.Join(engine, "Unity.Scripting.dll"))
-	compiler.engineReferences = append(compiler.engineReferences, scripting...)
-	for _, name := range []string{"Unity.Properties.SourceGenerator.dll", "Unity.SourceGenerators.dll", "Unity.UIToolkit.SourceGenerator.dll"} {
-		compiler.generators = append(compiler.generators, filepath.Join(data, "Tools/BuildPipeline/Unity.SourceGenerators", name))
+	if err := compiler.initializeSDK(); err != nil {
+		return nil, err
+	}
+	if manifest.Backend == "go_authored_source" {
+		if len(manifest.BaseReferences) == 0 || len(manifest.EngineReferences) == 0 {
+			return nil, errors.New("Go source baseline lacks exact engine/BCL reference sets")
+		}
+		compiler.baseReferences, compiler.engineReferences = slices.Clone(manifest.BaseReferences), slices.Clone(manifest.EngineReferences)
+		for _, path := range append(slices.Clone(manifest.BaseReferences), manifest.EngineReferences...) {
+			if hash, err := goFileHash(path); err != nil || hash != manifest.CompilerInputs[path] {
+				return nil, errors.New("Go source baseline engine/BCL reference differs: " + path)
+			}
+		}
 	}
 	gameNames := make(map[string]bool)
 	for _, assembly := range manifest.Assemblies {
@@ -334,13 +428,14 @@ func newGoCompiler(project, baselineManifest, stagedPlayer, editor, cache string
 		}
 		ordered[assembly.Name] = true
 		if assembly.Name == "" || filepath.Base(assembly.Name) != assembly.Name || len(assembly.Sources) == 0 ||
+			assembly.NetcodePostprocessor != "" && (!goNeedsNetcode(assembly) || !validSHA256(assembly.NetcodePostprocessor)) ||
 			!validGoLifecycleProof(assembly.LifecycleBarrier, assembly.Name) || !goLifecycleSourcesMatch(assembly.LifecycleBarrier, assembly.Sources) {
 			return nil, errors.New("compiler baseline assembly lacks verified lifecycle barrier: " + assembly.Name)
 		}
 		if !slots[assembly.Name+".dll"] {
 			return nil, errors.New("game assembly lacks a registered native Mono slot: " + assembly.Name)
 		}
-		config, hash, err := readGoAssemblyConfiguration(baselinePath, assembly)
+		config, hash, err := readGoAssemblyConfiguration(baselinePath, assembly, manifest)
 		if err != nil {
 			return nil, err
 		}
@@ -351,6 +446,7 @@ func newGoCompiler(project, baselineManifest, stagedPlayer, editor, cache string
 			return nil, errors.New("staged Player game DLL differs from compiler baseline: " + assembly.Name)
 		}
 		compiler.currentDLLs[assembly.Name], compiler.proofs[assembly.Name] = dll, assembly.LifecycleBarrier
+		compiler.acceptedDLLHashes[assembly.Name] = assembly.SHA256
 		for _, source := range assembly.Sources {
 			if manifest.CompilerInputs[source] == "" {
 				return nil, errors.New("baseline lacks runtime source digest: " + source)
@@ -360,6 +456,9 @@ func newGoCompiler(project, baselineManifest, stagedPlayer, editor, cache string
 				compiler.configuration[source+".meta"] = hash
 			}
 		}
+	}
+	if err := compiler.verifyStagedNativeManagedInputs(filepath.Join(playerData, "Managed"), gameNames); err != nil {
+		return nil, err
 	}
 	for _, script := range manifest.Scripts {
 		if script.HostProvided && script.Assembly == "Dungeon.CLIPlay" && withinDirectory(script.Path, filepath.Join(project, "Assets")) {
@@ -371,7 +470,7 @@ func newGoCompiler(project, baselineManifest, stagedPlayer, editor, cache string
 	if err := compiler.collectExpectedScriptTypes(baselineManifest); err != nil {
 		return nil, err
 	}
-	if err := compiler.checkConfiguration(nil); err != nil {
+	if _, err := compiler.sourceGraphCandidate(nil); err != nil {
 		return nil, err
 	}
 	for _, filename := range append([]string{compiler.dotnet, compiler.csc}, compiler.generators...) {
@@ -385,6 +484,60 @@ func newGoCompiler(project, baselineManifest, stagedPlayer, editor, cache string
 		}
 	}
 	return compiler, nil
+}
+
+// The active Player is a copy of the prepared native host. Match native DLL
+// fingerprints against that copy, rather than checking only the original
+// cache paths. Our own bridge is intentionally refreshed by stageGoHost.
+func (compiler *goCompiler) verifyStagedNativeManagedInputs(managed string, gameNames map[string]bool) error {
+	expected := map[string]string{}
+	for path, hash := range compiler.manifest.CompilerInputs {
+		if filepath.Ext(path) != ".dll" || filepath.Base(filepath.Dir(path)) != "Managed" ||
+			!strings.HasSuffix(filepath.Base(filepath.Dir(filepath.Dir(path))), "_Data") {
+			continue
+		}
+		name := filepath.Base(path)
+		if name == "Dungeon.CLIPlay.dll" || gameNames[strings.TrimSuffix(name, ".dll")] {
+			continue
+		}
+		if previous := expected[name]; previous != "" && previous != hash {
+			return errors.New("native managed inputs disagree on their baseline digest: " + name)
+		}
+		expected[name] = hash
+	}
+	for name, hash := range expected {
+		path := filepath.Join(managed, name)
+		if canonical, err := canonicalDestination(path); err != nil || canonical != path {
+			return errors.New("staged native managed input contains a symlink: " + name)
+		}
+		if actual, err := goFileHash(path); err != nil || actual != hash {
+			return errors.New("staged native managed input differs from its verified compiler baseline: " + name)
+		}
+	}
+	return nil
+}
+
+func (compiler *goCompiler) initializeSDK() error {
+	data := filepath.Join(filepath.Dir(compiler.editor), "Data")
+	compiler.dotnet = filepath.Join(data, "DotNetSdk", "dotnet")
+	compilers, _ := filepath.Glob(filepath.Join(data, "DotNetSdk", "sdk", "*", "Roslyn", "bincore", "csc.dll"))
+	if len(compilers) == 0 {
+		return errors.New("installed Unity Roslyn SDK is missing")
+	}
+	sort.Strings(compilers)
+	compiler.csc = compilers[len(compilers)-1]
+	bcl := filepath.Join(data, "MonoBleedingEdge", "lib", "mono", "unityaot-linux")
+	compiler.baseReferences, _ = filepath.Glob(filepath.Join(bcl, "*.dll"))
+	facades, _ := filepath.Glob(filepath.Join(bcl, "Facades", "*.dll"))
+	compiler.baseReferences = deduplicateGoReferences(append(compiler.baseReferences, facades...))
+	engine := filepath.Join(data, "PlaybackEngines", "LinuxStandaloneSupport", "Variations", "mono", "Managed")
+	compiler.engineReferences, _ = filepath.Glob(filepath.Join(engine, "UnityEngine*.dll"))
+	scripting, _ := filepath.Glob(filepath.Join(engine, "Unity.Scripting.dll"))
+	compiler.engineReferences = append(compiler.engineReferences, scripting...)
+	for _, name := range []string{"Unity.Properties.SourceGenerator.dll", "Unity.SourceGenerators.dll", "Unity.UIToolkit.SourceGenerator.dll"} {
+		compiler.generators = append(compiler.generators, filepath.Join(data, "Tools/BuildPipeline/Unity.SourceGenerators", name))
+	}
+	return nil
 }
 
 func (compiler *goCompiler) collectConfigurationInputs() {
@@ -405,11 +558,14 @@ func (compiler *goCompiler) collectConfigurationInputs() {
 		if dllReference && compiler.hostBridgeReference(filename) {
 			continue
 		}
-		configuration := dllReference || extension == ".asmdef" || extension == ".asmref" || extension == ".rsp" ||
+		configuration := dllReference || extension == ".asmdef" || extension == ".asmref" || extension == ".rsp" || filepath.Base(filename) == "package.json" ||
 			strings.HasSuffix(filename, ".asmdef.meta") || strings.HasSuffix(filename, ".asmref.meta") ||
 			strings.HasPrefix(filename, filepath.Join(compiler.project, "ProjectSettings")+string(filepath.Separator)) ||
 			filename == filepath.Join(compiler.project, "Packages/manifest.json") || filename == filepath.Join(compiler.project, "Packages/packages-lock.json")
-		if configuration && (dllReference || withinDirectory(filename, compiler.project)) {
+		if compiler.manifest.Backend == "go_authored_source" && compiler.sources[filename] == "" && !compiler.hostBridgeReference(filename) {
+			configuration = true
+		}
+		if configuration && (compiler.manifest.Backend == "go_authored_source" || dllReference || withinDirectory(filename, compiler.project)) {
 			compiler.configuration[filename] = hash
 		}
 	}
@@ -425,7 +581,66 @@ func (compiler *goCompiler) hostBridgeReference(filename string) bool {
 }
 
 func (compiler *goCompiler) checkConfiguration(changed []string) error {
+	if err := compiler.checkFixedConfiguration(); err != nil {
+		return err
+	}
+	trackedSources := compiler.graphSourceAssemblies()
+	for _, filename := range changed {
+		if !filepath.IsAbs(filename) {
+			filename = filepath.Join(compiler.project, filename)
+		}
+		filename = filepath.Clean(filename)
+		if strings.HasSuffix(filename, ".cs") {
+			if _, tracked := trackedSources[filename]; !tracked && compiler.manifest.CompilerInputs[filename] == "" && !compiler.hostOwned(filename) && !editorGoSource(filename) {
+				return errors.New("C# source is outside the prepared managed graph: " + filename)
+			}
+		}
+		if (strings.EqualFold(filepath.Ext(filename), ".dll") || strings.HasSuffix(strings.ToLower(filename), ".dll.meta")) &&
+			compiler.configuration[filename] == "" && !compiler.hostOwned(filename) && !editorGoSource(filename) {
+			return errors.New("DLL reference/import configuration is outside the prepared managed graph: " + filename)
+		}
+		extension := strings.ToLower(filepath.Ext(filename))
+		configuration := extension == ".asmdef" || extension == ".asmref" || extension == ".rsp" || filepath.Base(filename) == "package.json" ||
+			strings.HasSuffix(filename, ".asmdef.meta") || strings.HasSuffix(filename, ".asmref.meta") || strings.HasSuffix(filename, ".rsp.meta")
+		untrackedScriptMeta := strings.HasSuffix(filename, ".cs.meta") && compiler.configuration[filename] == "" && compiler.manifest.CompilerInputs[filename] == ""
+		if ((configuration && compiler.configuration[filename] == "") || untrackedScriptMeta) && !compiler.hostOwned(filename) && !editorGoSource(filename) {
+			return errors.New("managed configuration/metadata is outside the prepared managed graph: " + filename)
+		}
+	}
+	return filepath.WalkDir(filepath.Join(compiler.project, "Assets"), func(filename string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() && (compiler.hostOwned(filename) || filepath.Base(filename) == "Editor") {
+			return filepath.SkipDir
+		}
+		if entry.IsDir() || compiler.manifest.CompilerInputs[filename] != "" || trackedSources[filename] != "" || editorGoSource(filename) {
+			return nil
+		}
+		switch strings.ToLower(filepath.Ext(filename)) {
+		case ".cs", ".asmdef", ".asmref", ".rsp", ".dll":
+			return errors.New("new C# source/configuration requires a fresh managed graph: " + filename)
+		case ".meta":
+			for _, suffix := range []string{".asmdef.meta", ".asmref.meta", ".rsp.meta", ".dll.meta"} {
+				if strings.HasSuffix(filename, suffix) {
+					return errors.New("new managed configuration metadata requires a fresh managed graph: " + filename)
+				}
+			}
+		default:
+			return nil
+		}
+		return nil
+	})
+}
+
+func (compiler *goCompiler) checkFixedConfiguration() error {
 	for filename, expected := range compiler.configuration {
+		if expected == "absent" {
+			if _, err := os.Lstat(filename); errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return errors.New("previously absent managed input appeared; regenerate source graph: " + filename)
+		}
 		actual, err := goFileHash(filename)
 		if err != nil || actual != expected {
 			return errors.New("managed assembly configuration/GUID changed; regenerate source graph: " + filename)
@@ -438,37 +653,7 @@ func (compiler *goCompiler) checkConfiguration(changed []string) error {
 			}
 		}
 	}
-	for _, filename := range changed {
-		if !filepath.IsAbs(filename) {
-			filename = filepath.Join(compiler.project, filename)
-		}
-		if strings.HasSuffix(filename, ".cs") {
-			if _, tracked := compiler.sources[filename]; !tracked && !compiler.hostOwned(filename) && !editorGoSource(filename) {
-				return errors.New("C# source is outside the prepared managed graph: " + filename)
-			}
-		}
-		if (strings.EqualFold(filepath.Ext(filename), ".dll") || strings.HasSuffix(strings.ToLower(filename), ".dll.meta")) &&
-			compiler.configuration[filename] == "" && !compiler.hostOwned(filename) && !editorGoSource(filename) {
-			return errors.New("DLL reference/import configuration is outside the prepared managed graph: " + filename)
-		}
-	}
-	return filepath.WalkDir(filepath.Join(compiler.project, "Assets"), func(filename string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() && (compiler.hostOwned(filename) || filepath.Base(filename) == "Editor") {
-			return filepath.SkipDir
-		}
-		if entry.IsDir() || compiler.manifest.CompilerInputs[filename] != "" || editorGoSource(filename) {
-			return nil
-		}
-		switch filepath.Ext(filename) {
-		case ".cs", ".asmdef", ".asmref", ".rsp", ".dll":
-			return errors.New("new C# source/configuration requires a fresh managed graph: " + filename)
-		default:
-			return nil
-		}
-	})
+	return nil
 }
 
 func editorGoSource(filename string) bool {
@@ -508,6 +693,29 @@ func (compiler *goCompiler) references(assembly goCompileAssembly, built map[str
 		refs = append(refs, compiler.engineReferences...)
 	}
 	managed := filepath.Dir(compiler.currentDLLs[assembly.Name])
+	if compiler.manifest.Backend == "go_authored_source" {
+		// Instrumented SDK output requires the source-owned lifecycle marker
+		// and public barrier ABI, independently of authored assembly imports.
+		refs = append(refs, filepath.Join(managed, "Dungeon.CLIPlay.dll"))
+		refs = append(refs, config.CompilerReferences...)
+		for _, dependency := range assembly.References {
+			filename := built[dependency]
+			if filename == "" {
+				filename = compiler.currentDLLs[dependency]
+			}
+			if filename == "" {
+				filename = filepath.Join(managed, dependency+".dll")
+			}
+			if strings.HasPrefix(dependency, "UnityEditor") {
+				return nil, errors.New("Editor dependency cannot be a Player reference: " + dependency)
+			}
+			if _, err := goFileHash(filename); err != nil {
+				return nil, fmt.Errorf("Go source dependency %s is unavailable: %w", dependency, err)
+			}
+			refs = append(refs, filename)
+		}
+		return deduplicateGoReferences(refs), nil
+	}
 	host, _ := filepath.Glob(filepath.Join(managed, "*.dll"))
 	for _, filename := range host {
 		name := strings.TrimSuffix(filepath.Base(filename), ".dll")
@@ -538,6 +746,27 @@ type goCompiledCache struct {
 }
 
 func (compiler *goCompiler) Compile(ctx context.Context, changedPaths []string) (*compileUpdate, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if changedPaths != nil && !compiler.compilerChanges(changedPaths) {
+		return nil, nil
+	}
+	candidate, err := compiler.sourceGraphCandidate(changedPaths)
+	if err != nil {
+		return nil, err
+	}
+	update, err := candidate.compileGraph(ctx, changedPaths)
+	if err != nil {
+		return nil, err
+	}
+	// Graph extensions become visible together with their verified DLLs.
+	// Rejected edits retain the last accepted graph and immutable Player.
+	*compiler = *candidate
+	return update, nil
+}
+
+func (compiler *goCompiler) compileGraph(ctx context.Context, changedPaths []string) (*compileUpdate, error) {
 	started := time.Now()
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -566,6 +795,18 @@ func (compiler *goCompiler) Compile(ctx context.Context, changedPaths []string) 
 	// networking assemblies once even when the source bytes are unchanged.
 	forcedNetcode := map[string]bool{}
 	for _, assembly := range compiler.manifest.Assemblies {
+		if goNeedsNetcode(assembly) && !compiler.netcodeProcessed[assembly.Name] && assembly.NetcodePostprocessor != "" {
+			processor, err := compiler.prepareNetcodeProcessor(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if processor.Key == assembly.NetcodePostprocessor {
+				if compiler.netcodeProcessed == nil {
+					compiler.netcodeProcessed = map[string]bool{}
+				}
+				compiler.netcodeProcessed[assembly.Name] = true
+			}
+		}
 		if goNeedsNetcode(assembly) && !compiler.netcodeProcessed[assembly.Name] {
 			forcedNetcode[assembly.Name], dirty[assembly.Name] = true, true
 		}
@@ -685,7 +926,7 @@ func (compiler *goCompiler) Compile(ctx context.Context, changedPaths []string) 
 	}
 	player := filepath.Join(playerFolder, filepath.Base(compiler.player))
 	managed := filepath.Join(playerFolder, strings.TrimSuffix(filepath.Base(player), filepath.Ext(player))+"_Data", "Managed")
-	update := &compileUpdate{Player: player, CompiledAssemblies: compiled, SourceHashes: currentSources, RuntimeInitializers: []runtimeInitializer{}}
+	update := &compileUpdate{Player: player, CompiledAssemblies: compiled, SourceHashes: currentSources, RuntimeInitializers: []runtimeInitializer{}, DLLHashes: map[string]string{}}
 	for _, assembly := range compiler.manifest.Assemblies {
 		destination := filepath.Join(managed, assembly.Name+".dll")
 		if rebuilt[assembly.Name] {
@@ -704,6 +945,11 @@ func (compiler *goCompiler) Compile(ctx context.Context, changedPaths []string) 
 			}
 		}
 		update.Assemblies = append(update.Assemblies, destination)
+		hash, err := goFileHash(destination)
+		if err != nil {
+			return nil, err
+		}
+		update.DLLHashes[assembly.Name] = hash
 		if declarationsChanged[assembly.Name] {
 			update.DeclarationChanged = append(update.DeclarationChanged, assembly.Name)
 		}
@@ -871,6 +1117,17 @@ func (compiler *goCompiler) validateCompiledScriptTypes(ctx context.Context, hel
 	if !hasScripts {
 		return nil
 	}
+	if previousDLL == "" {
+		output, err := goCompilerCommand(ctx, compiler.cache, compiler.dotnet, helper, "--type-definitions", nextDLL)
+		if err != nil {
+			return err
+		}
+		var definitions map[string][]string
+		if err := json.Unmarshal(output, &definitions); err != nil || len(definitions) != 1 || definitions[nextDLL] == nil {
+			return errors.New("SDK source output lacks exact type definition proof: " + assembly)
+		}
+		return compiler.validateRequiredScriptTypes(assembly, nil, definitions[nextDLL])
+	}
 	output, err := goCompilerCommand(ctx, compiler.cache, compiler.dotnet, helper, "--type-definitions", previousDLL, nextDLL)
 	if err != nil {
 		return fmt.Errorf("validate baseline script types in %s: %w", assembly, err)
@@ -893,6 +1150,9 @@ func (compiler *goCompiler) validateRequiredScriptTypes(assembly string, previou
 	for _, script := range compiler.manifest.Scripts {
 		if script.Assembly != assembly || script.HostProvided || script.GUID == "" {
 			continue
+		}
+		if name := compiler.proofs[assembly].ScriptTypes[script.Path]; name != "" {
+			required[name] = script.GUID
 		}
 		base := strings.TrimSuffix(filepath.Base(script.Path), filepath.Ext(script.Path))
 		for _, name := range previous {
@@ -1105,13 +1365,14 @@ func (compiler *goCompiler) compileAssembly(ctx context.Context, staging, helper
 			Assembly, TypeName, MethodName string
 			Phase                          int
 		}
+		ScriptTypes map[string]string
 	}
 	if err := json.Unmarshal(output, &wireProof); err != nil {
 		return "", goLifecycleProof{}, err
 	}
 	proof := goLifecycleProof{SchemaVersion: wireProof.SchemaVersion, Verified: wireProof.Verified,
 		Phases: wireProof.Phases, ScriptableObjectBarrier: wireProof.ScriptableObjectBarrier, RuntimeInitializers: []runtimeInitializer{},
-		Callbacks: len(wireProof.Callbacks), Methods: wireProof.Callbacks}
+		Callbacks: len(wireProof.Callbacks), Methods: wireProof.Callbacks, ScriptTypes: wireProof.ScriptTypes}
 	for _, initializer := range wireProof.RuntimeInitializers {
 		proof.RuntimeInitializers = append(proof.RuntimeInitializers, runtimeInitializer{initializer.Assembly, initializer.TypeName, initializer.MethodName, initializer.Phase})
 	}
@@ -1123,6 +1384,7 @@ func (compiler *goCompiler) compileAssembly(ctx context.Context, staging, helper
 	if config.Config.AllowUnsafe {
 		arguments[7] = "-unsafe+"
 	}
+	arguments = append(arguments, config.CompilerOptions...)
 	for _, reference := range refs {
 		arguments = append(arguments, "-reference:"+reference)
 	}

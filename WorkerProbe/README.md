@@ -1,5 +1,9 @@
 # Собственный координатор Unity AssetImportWorker
 
+Основной Go executable также запускает MCP-сервер для агентов: `unity-micro-editor mcp --project /absolute/project`. Настройка stdio/Streamable HTTP, source/runtime-инструменты и проверки ревизий описаны в [AGENT_MCP.md](../AGENT_MCP.md). Автоподготовка разрешает пакеты и строит Player-граф из `.asmdef`/`.asmref` нашим Go-кодом, затем компилирует C# через SDK. Совместимый нативный Mono host и его профиль готовятся один раз; неподдержанный контент всё ещё может требовать Editor. Префабы редактируются на нашей стороне. `cache-component-defaults` один раз сохраняет native defaults, после чего `component_schema` и `component_add` работают без Editor. Сравнение с настоящим Editor и Coplay MCP находится в [Integrations/EditorParity](../Integrations/EditorParity/README.md).
+
+Сохраняйте agent compiler/baseline, native staging и runtime-сессии в `Library/UnityMicroEditor` явно выбранного проекта. Native import, extraction и adoption принимают этот собственный cache-подкаталог либо прежние пути под `Temp`; существующий native catalog автоматически не переносится. Перезапуск Unity Editor удаляет проектный `Temp`, что уже воспроизведено при сравнении. Произвольные каталоги `Library`, соседние проекты и symlink-пути не разрешены. Графы собственного backend и независимого публичного Editor oracle имеют разное происхождение; их нельзя переименовывать друг в друга. `--no-editor` запрещает запуск основного Editor и явно отклоняет отсутствующий native bootstrap. **Сборка проекта через `project_build` остаётся прокси в настоящий Editor** и явно отмечается в ответе.
+
 Координатор используется в [Go runner для Dungeon](../GO_RUNNER.md), включая cache и прямую доставку поддержанных native FBX/WAV/PNG в Mono Player. [Project import](#импорт-файлов-проекта) принимает выбранные исходные файлы вместо фиксированных fixtures. Runtime readback и ограничения описаны в [RuntimeDeliveryProbe/README.md](RuntimeDeliveryProbe/README.md).
 
 Исходный режим `--mode import` ниже проверяет маленький FBX из Dungeon и детерминированный PCM WAV. Его замеры и строгие validators относятся к этим двум fixtures. Основной процесс Editor, GUI, AssetBundle и заранее импортированная `Library` для worker запуска не нужны.
@@ -11,7 +15,7 @@
 Из корня ворктри можно импортировать настоящий WAV в новый собственный context:
 
 ```bash
-$UNITY_MICRO_EDITOR_ROOT/unity-play-go project-import --project . \
+$UNITY_MICRO_EDITOR_ROOT/unity-micro-editor project-import --project . \
   --output "$PWD/Temp/UnityPlay/project-import-manual-01" \
   --asset Assets/Dungeon/Audio/Generated/door_crank_loop.wav \
   --timeout 45s
@@ -24,7 +28,7 @@ $UNITY_MICRO_EDITOR_ROOT/unity-play-go project-import --project . \
 Перед expansion runner обходит GUID-ссылки выбранной сцены, runtime prefabs и их authored зависимостей. Новые или изменённые FBX/WAV и PNG, требующие нативного resize/compression, импортируются пакетами по 32 ассета в одном worker. Неизменённый baseline/cache и PNG в поддержанном raw profile пропускаются. Этим же способом обновляется прежний index с изменившейся средой импорта. Существующий успешный `project-import` можно принять в runtime cache без повторного запуска worker:
 
 ```bash
-$UNITY_MICRO_EDITOR_ROOT/unity-play-go native-adopt --project . \
+$UNITY_MICRO_EDITOR_ROOT/unity-micro-editor native-adopt --project . \
   --output "$PWD/Temp/UnityPlay/go-project" \
   --report "$PWD/Temp/UnityPlay/project-import-manual-01/result.json"
 ```
@@ -37,7 +41,7 @@ Descriptor `meshCpuRetention` передаёт original readability. Loader вы
 
 ## Запуск
 
-Нужны Go 1.24 или новее, указанная установка Unity и исходный Dungeon с `R_Floor.fbx`. Из корня ворктри:
+Нужны Go 1.25 или новее, указанная установка Unity и исходный Dungeon с `R_Floor.fbx`. MCP использует официальный Go SDK v1.8.0. Из корня ворктри:
 
 ```bash
 mkdir -p Temp/UnityPlay/worker-probe/bin
@@ -84,7 +88,7 @@ TextureImporter получает `graphics/texture-import-overrides` с явны
 Go runner записывает `environmentSha256` в каждый новый native cache entry. Fingerprint включает ревизию pinned protocol, путь Unity, точный SHA256 `ProjectSettings.asset`, разобранные настройки и wire environment. Старый index без fingerprint или с другой средой пропускается и требует повторного импорта; неизменяемые runtime файлы сохраняются. Изменение этой среды внутри запущенного runner требует его перезапуска, чтобы прежние native objects не выдавались за новый импорт. Текущий fingerprint можно прочитать без Unity процессов:
 
 ```bash
-$UNITY_MICRO_EDITOR_ROOT/unity-play-go native-environment --project .
+$UNITY_MICRO_EDITOR_ROOT/unity-micro-editor native-environment --project .
 ```
 
 В warm-artifact proof `settingsSourceSha256` фиксирует текущие настройки при извлечении. Его SourceAssetDB/ArtifactDB проверка доказывает совпадение source/meta и native importer revision. Сам этот guard не доказывает совпадение всех глобальных настроек с исторической средой, в которой Editor создал warm artifact.
@@ -163,4 +167,4 @@ Wire protocol, LMDB schema и UDS layout получены для одной ве
 
 Fixed fixture validators проверяют указанный FBX и PCM WAV. Дополнительно Go runner прошёл native Player readback настоящего preloaded Vorbis `door_crank_loop.wav` и его обновления в SampleScene, а PNG проверен через точное совпадение native output с Unity artifact. Нет доказанной общей поддержки анимации, skinned meshes, сложных model settings, произвольных texture settings, остальных audio codecs, platform overrides, пользовательских AssetPostprocessor и всех зависимостей произвольного проекта. Mesh/FSB5 validators намеренно принимают только наблюдаемые fixture layouts. UDS-reader поддерживает inline и concatenated storage, ограничивает один файл 64 МиБ и отвергает остальные варианты; LMDB-reader рассчитан на наблюдаемый Linux x64 формат.
 
-Доставка поддержанных native SerializedFile, GUID/local-ID binding и проверяемый cache реализованы в [Go runner](../GO_RUNNER.md). Неизменённые тяжёлые зависимости продолжают загружаться из подготовленного bundle; общий bootstrap и произвольные import profiles пока не готовы. Координатор запускает worker на требуемый импорт, постоянная native служба пока не используется. `.unity`/`.prefab` остаются на собственном loader и не собираются в AssetBundle.
+Доставка поддержанных native SerializedFile, GUID/local-ID binding и проверяемый cache реализованы в [Go runner](../GO_RUNNER.md). Неизменённые тяжёлые зависимости продолжают загружаться из подготовленного bundle. Автоподготовка поддержанного профиля доступна через `auto-prepare`; покрытие произвольных import profiles остаётся неполным. Координатор запускает worker на требуемый импорт, постоянная native служба пока не используется. `.unity`/`.prefab` остаются на собственном loader и не собираются в AssetBundle.

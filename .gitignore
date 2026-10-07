@@ -6,8 +6,6 @@
 **/Logs/
 **/UserSettings/
 **/MemoryCaptures/
-__pycache__/
-*.py[cod]
 *.dll
 *.so
 *.exe

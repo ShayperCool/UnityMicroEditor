@@ -31,6 +31,7 @@ namespace Dungeon.CLIPlay.Raw
             private readonly Dictionary<Scene, AsyncOperation> unloading = new Dictionary<Scene, AsyncOperation>();
             private bool disposed;
             public Scene Scene { get; private set; }
+            public string ProjectRoot { get; private set; }
             public string Revision { get; private set; }
             public int ReloadCount { get; private set; }
             public bool LastReloadRestartRequired { get; private set; }
@@ -41,7 +42,7 @@ namespace Dungeon.CLIPlay.Raw
             public void ReleaseRetiredNativeFiles() { ReleaseRetiredNativeContent(cache); }
 
             internal LiveSession(RawSceneManifest manifest, string manifestPath)
-            { identity = CaptureIdentity(manifest); Revision = ManifestRevision(manifestPath); }
+            { identity = CaptureIdentity(manifest); Revision = ManifestRevision(manifestPath); ProjectRoot = manifest.projectRoot; }
 
             internal void LoadInitial(RawSceneManifest manifest)
             {

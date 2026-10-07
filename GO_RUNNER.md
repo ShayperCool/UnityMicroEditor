@@ -1,6 +1,6 @@
 # Dungeon через Go runner
 
-`unity-play-go` запускает настоящую Dungeon SampleScene и следит за исходниками. Go готовит сценовый граф, кэш и запуск Player; C# собирает SDK Roslyn. Во время запуска и проверенных итераций Python и основной Unity Editor не вызываются. Рендеринг и физику выполняет Unity Mono Player.
+`unity-micro-editor` запускает настоящую Dungeon SampleScene и следит за исходниками. Go готовит сценовый граф, кэш и запуск Player; C# собирает SDK Roslyn. Во время запуска и проверенных итераций Python и основной Unity Editor не вызываются. Рендеринг и физику выполняет Unity Mono Player.
 
 Проверено на Linux с Unity `6000.6.3f1`, RTX 4060 и OpenGL Core. По умолчанию runner запрашивает OpenGL Core, окно 960×540, ограничение 60 FPS и выключенный VSync. Ready check отклоняет отсутствующий/Null renderer и известные software renderer, включая llvmpipe, softpipe, lavapipe и SwiftShader. Это проверка известных имён, а не универсальное доказательство аппаратного исполнения для любого vendor. В проверенных ready reports устройство указано как `NVIDIA GeForce RTX 4060/PCIe/SSE2`.
 
@@ -9,14 +9,14 @@
 Из корня этого ворктри:
 
 ```bash
-$UNITY_MICRO_EDITOR_ROOT/unity-play-go run --project . \
+$UNITY_MICRO_EDITOR_ROOT/unity-micro-editor run --project . \
   --output Temp/UnityPlay/go-project/native-live --watch
 ```
 
 `--watch` держит Player открытым и обновляет его после изменений в проекте. Ctrl+C останавливает runner и его Player. Для конечной проверки:
 
 ```bash
-$UNITY_MICRO_EDITOR_ROOT/unity-play-go run --project . \
+$UNITY_MICRO_EDITOR_ROOT/unity-micro-editor run --project . \
   --output Temp/UnityPlay/go-project/check --frames 120
 ```
 
@@ -28,7 +28,7 @@ Wrapper собирает статический Go executable через ста�
 
 Runner использует существующий `Temp/UnityPlay/hybrid-sample/current.json`. `--baseline /absolute/current.json` выбирает другую проверенную подготовку. Baseline должен принадлежать этому же проекту и содержать пути к raw manifest, native catalog и готовому универсальному Mono host. Нужны также сохранённый compiler plan, assembly configurations и соответствующая установка Unity SDK.
 
-Запуск произвольного чистого проекта без baseline пока не готов. Историческая подготовка host и исходного тяжёлого контента описана в [RAW_PROJECTS.md](RAW_PROJECTS.md). Новая команда использует её результат; она не превращает любую папку с `Assets` в готовый Player.
+Запуск произвольного чистого проекта без baseline пока не готов. Историческая подготовка host и исходного тяжёлого контента описана в [RAW_PROJECTS.md](docs/history/RAW_PROJECTS.md). Новая команда использует её результат; она не превращает любую папку с `Assets` в готовый Player.
 
 Неизменённые модели, анимации, UI, URP и остальные тяжёлые зависимости SampleScene продолжают загружаться из существующего native bundle. Он сохраняется при проверенных обновлениях WAV и сцены. Исходные `.unity` и авторские `.prefab` читает наш loader, они не сериализуются в AssetBundle.
 
@@ -87,4 +87,4 @@ Runner печатает JSON events `ready`, `updated`, `code-updated`, `native-
 - `Temp/UnityPlay/native-content-production-proof/real-audio/proof.json` проверяет настоящий Vorbis clip и `AudioSource.isPlaying`.
 - `Temp/UnityPlay/fast-patch-production-proof/proof.json` проверяет сохранение EntityId, runtime position, layer, tag и active state после rename, child addition и root addition.
 
-Прямой worker import и границы адаптации описаны в [WorkerProbe/README.md](WorkerProbe/README.md) и [RuntimeDeliveryProbe/README.md](WorkerProbe/RuntimeDeliveryProbe/README.md). Команда `$UNITY_MICRO_EDITOR_ROOT/unity-play` остаётся отдельным прежним Python CLI; её инструкции и старые замеры не описывают скорость нового Go runner.
+Прямой worker import и границы адаптации описаны в [WorkerProbe/README.md](WorkerProbe/README.md) и [RuntimeDeliveryProbe/README.md](WorkerProbe/RuntimeDeliveryProbe/README.md).

@@ -90,8 +90,17 @@ func (s *Session) nativeReferenceGUIDs(path string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if before.Mode&syscall.S_IFMT != syscall.S_IFREG || before.Size > maxTextBytes {
+	if before.Mode&syscall.S_IFMT != syscall.S_IFREG {
 		return nil, fmt.Errorf("unsupported nonregular or oversized native discovery source: %s", path)
+	}
+	var largeProof *largeNativeDiscoveryProof
+	byteLimit := int64(maxTextBytes)
+	if before.Size > byteLimit {
+		largeProof, err = s.verifiedLargeNativeDiscovery(path, before.Size)
+		if err != nil {
+			return nil, err
+		}
+		byteLimit = before.Size
 	}
 	if previous, exists := s.observed[path]; exists && previous != before {
 		return nil, fmt.Errorf("source changed during native discovery, retry: %s", path)
@@ -103,7 +112,7 @@ func (s *Session) nativeReferenceGUIDs(path string) ([]string, error) {
 	}
 	defer f.Close()
 	hash := sha256.New()
-	input := &io.LimitedReader{R: io.TeeReader(f, hash), N: maxTextBytes + 1}
+	input := &io.LimitedReader{R: io.TeeReader(f, hash), N: byteLimit + 1}
 	reader := bufio.NewReaderSize(input, nativeReferenceLineBytes)
 	guids, fallback, err := scanNativeReferenceGUIDs(reader)
 	if err != nil {
@@ -132,6 +141,14 @@ func (s *Session) nativeReferenceGUIDs(path string) ([]string, error) {
 		return nil, fmt.Errorf("source changed while scanning native dependencies, retry: %s", path)
 	}
 	digest := hex.EncodeToString(hash.Sum(nil))
+	if largeProof != nil {
+		if err := largeProof.validateCurrent(digest); err != nil {
+			return nil, err
+		}
+		if fallback {
+			return nil, fmt.Errorf("oversized cooked AnimationClip requires canonical bounded reference scanning; full YAML fallback is unsupported: %s", path)
+		}
+	}
 	// Keep an existing text cache only if it already belongs to this revision.
 	content := []byte(nil)
 	if old, ok := s.files[path]; ok && old.stamp == after {

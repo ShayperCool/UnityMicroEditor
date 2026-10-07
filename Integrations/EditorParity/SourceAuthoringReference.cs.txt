@@ -1,0 +1,175 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using UnityEditor;
+using UnityEditor.SceneManagement;
+using UnityEngine;
+using UnityEngine.SceneManagement;
+
+namespace AgentParity.Editor
+{
+    // Install only in an isolated reference copy. This captures saved source
+    // through public Editor APIs; it never saves a scene or prefab.
+    public static class SourceAuthoringReference
+    {
+        [Serializable] public sealed class Report
+        {
+            public int schemaVersion = 1;
+            public string unityVersion;
+            public string scene;
+            public bool sceneDirty;
+            public List<ObjectSnapshot> objects = new List<ObjectSnapshot>();
+            public List<AssetSnapshot> assets = new List<AssetSnapshot>();
+        }
+        [Serializable] public sealed class ObjectSnapshot
+        {
+            public string path;
+            public string sourceFileId;
+            public string instanceFileId;
+            public string prefabType;
+            public string prefabPath;
+            public string prefabSourceGuid;
+            public string prefabSourceFileId;
+            public bool active;
+            public List<ComponentSnapshot> components = new List<ComponentSnapshot>();
+        }
+        [Serializable] public sealed class ComponentSnapshot
+        {
+            public string type;
+            public string sourceFileId;
+            public string instanceFileId;
+            public string prefabSourceGuid;
+            public string prefabSourceFileId;
+            public List<PropertySnapshot> properties = new List<PropertySnapshot>();
+        }
+        [Serializable] public sealed class PropertySnapshot
+        {
+            public string path;
+            public string type;
+            public string value;
+            public string referenceGuid;
+            public string referenceFileId;
+        }
+        [Serializable] public sealed class AssetSnapshot
+        {
+            public string path;
+            public string guid;
+            public string fileId;
+            public string type;
+            public List<PropertySnapshot> properties;
+        }
+
+        public static void Capture()
+        {
+            string[] arguments = Environment.GetCommandLineArgs();
+            string scenePath = Option(arguments, "-sourceAuthoringScene");
+            string output = Option(arguments, "-sourceAuthoringOutput");
+            if (!Application.isBatchMode || !scenePath.StartsWith("Assets/", StringComparison.Ordinal) || !Path.IsPathRooted(output))
+                throw new ArgumentException("Use an isolated batch reference, saved Assets scene and absolute output.");
+            Scene scene = EditorSceneManager.OpenScene(scenePath, OpenSceneMode.Single);
+            var report = new Report { unityVersion = Application.unityVersion, scene = scene.path, sceneDirty = scene.isDirty };
+            foreach (GameObject root in scene.GetRootGameObjects()) CaptureObject(root.transform, "", report.objects);
+            for (int index = 0; index + 1 < arguments.Length; index++)
+                if (arguments[index] == "-sourceAuthoringAssets")
+                    foreach (string assetPath in arguments[index + 1].Split(','))
+                    {
+                        if (!assetPath.StartsWith("Assets/", StringComparison.Ordinal)) throw new ArgumentException("Reference asset must be under Assets.");
+                        UnityEngine.Object asset = AssetDatabase.LoadMainAssetAtPath(assetPath);
+                        if (asset == null || !AssetDatabase.TryGetGUIDAndLocalFileIdentifier(asset, out string guid, out long fileId))
+                            throw new InvalidDataException("Reference asset is absent: " + assetPath);
+                        report.assets.Add(new AssetSnapshot { path = assetPath, guid = guid, fileId = fileId.ToString(CultureInfo.InvariantCulture),
+                            type = asset.GetType().FullName, properties = CaptureProperties(asset) });
+                    }
+            Directory.CreateDirectory(Path.GetDirectoryName(output));
+            File.WriteAllText(output, JsonUtility.ToJson(report, true));
+        }
+
+        private static string Option(string[] arguments, string name)
+        {
+            for (int index = 0; index + 1 < arguments.Length; index++) if (arguments[index] == name) return arguments[index + 1];
+            throw new ArgumentException("Missing " + name);
+        }
+
+        private static void CaptureObject(Transform transform, string parent, List<ObjectSnapshot> objects)
+        {
+            string path = parent.Length == 0 ? transform.name : parent + "/" + transform.name;
+            GlobalObjectId identity = GlobalObjectId.GetGlobalObjectIdSlow(transform.gameObject);
+            var result = new ObjectSnapshot { path = path, sourceFileId = identity.targetObjectId.ToString(CultureInfo.InvariantCulture),
+                instanceFileId = identity.targetPrefabId.ToString(CultureInfo.InvariantCulture),
+                active = transform.gameObject.activeSelf,
+                prefabType = PrefabUtility.GetPrefabAssetType(transform.gameObject).ToString(),
+                prefabPath = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(transform.gameObject) };
+            SourceIdentity(transform.gameObject, out result.prefabSourceGuid, out result.prefabSourceFileId);
+            foreach (Component component in transform.GetComponents<Component>())
+            {
+                if (component == null) throw new InvalidDataException("Reference contains a missing component: " + path);
+                GlobalObjectId componentIdentity = GlobalObjectId.GetGlobalObjectIdSlow(component);
+                var snapshot = new ComponentSnapshot { type = component.GetType().FullName,
+                    sourceFileId = componentIdentity.targetObjectId.ToString(CultureInfo.InvariantCulture),
+                    instanceFileId = componentIdentity.targetPrefabId.ToString(CultureInfo.InvariantCulture), properties = CaptureProperties(component) };
+                SourceIdentity(component, out snapshot.prefabSourceGuid, out snapshot.prefabSourceFileId);
+                result.components.Add(snapshot);
+            }
+            objects.Add(result);
+            foreach (Transform child in transform) CaptureObject(child, path, objects);
+        }
+
+        private static void SourceIdentity(UnityEngine.Object value, out string guid, out string fileId)
+        {
+            guid = null; fileId = null;
+            UnityEngine.Object source = PrefabUtility.GetCorrespondingObjectFromSource(value);
+            if (source != null)
+            {
+                if (!AssetDatabase.TryGetGUIDAndLocalFileIdentifier(source, out guid, out long id))
+                    throw new InvalidDataException("Public prefab source identity is absent.");
+                fileId = id.ToString(CultureInfo.InvariantCulture);
+            }
+        }
+
+        private static List<PropertySnapshot> CaptureProperties(UnityEngine.Object owner)
+        {
+            var properties = new List<PropertySnapshot>();
+            using (var serialized = new SerializedObject(owner))
+            {
+                SerializedProperty property = serialized.GetIterator();
+                while (property.Next(true))
+                {
+                    var value = new PropertySnapshot { path = property.propertyPath, type = property.propertyType.ToString() };
+                    switch (property.propertyType)
+                    {
+                        case SerializedPropertyType.Boolean: value.value = property.boolValue ? "1" : "0"; break;
+                        case SerializedPropertyType.Integer: value.value = property.longValue.ToString(CultureInfo.InvariantCulture); break;
+                        case SerializedPropertyType.Float: value.value = property.doubleValue.ToString("R", CultureInfo.InvariantCulture); break;
+                        case SerializedPropertyType.String: value.value = property.stringValue; break;
+                        case SerializedPropertyType.Enum: value.value = property.intValue.ToString(CultureInfo.InvariantCulture); break;
+                        case SerializedPropertyType.ArraySize: value.value = property.intValue.ToString(CultureInfo.InvariantCulture); break;
+                        case SerializedPropertyType.Vector2: value.value = Numbers(property.vector2Value.x, property.vector2Value.y); break;
+                        case SerializedPropertyType.Vector3: value.value = Numbers(property.vector3Value.x, property.vector3Value.y, property.vector3Value.z); break;
+                        case SerializedPropertyType.Vector4: value.value = Numbers(property.vector4Value.x, property.vector4Value.y, property.vector4Value.z, property.vector4Value.w); break;
+                        case SerializedPropertyType.Quaternion: value.value = Numbers(property.quaternionValue.x, property.quaternionValue.y, property.quaternionValue.z, property.quaternionValue.w); break;
+                        case SerializedPropertyType.Color: value.value = Numbers(property.colorValue.r, property.colorValue.g, property.colorValue.b, property.colorValue.a); break;
+                        case SerializedPropertyType.ObjectReference:
+                            if (property.objectReferenceValue == null) value.referenceFileId = "0";
+                            else if (AssetDatabase.TryGetGUIDAndLocalFileIdentifier(property.objectReferenceValue, out string guid, out long fileId))
+                            { value.referenceGuid = guid; value.referenceFileId = fileId.ToString(CultureInfo.InvariantCulture); }
+                            else
+                            { GlobalObjectId referenced = GlobalObjectId.GetGlobalObjectIdSlow(property.objectReferenceValue);
+                              value.referenceGuid = referenced.assetGUID.ToString(); value.referenceFileId = referenced.targetObjectId.ToString(CultureInfo.InvariantCulture); }
+                            break;
+                        default: continue;
+                    }
+                    properties.Add(value);
+                }
+            }
+            return properties;
+        }
+
+        private static string Numbers(params float[] values)
+        {
+            var parts = new string[values.Length];
+            for (int index = 0; index < values.Length; index++) parts[index] = values[index].ToString("R", CultureInfo.InvariantCulture);
+            return string.Join("|", parts);
+        }
+    }
+}

@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	goproject "unitymicroeditor/project"
 )
 
 const modelSource = "Assets/Dungeon/ShipGen/Art/Custom/Shell/R_Floor.fbx"
@@ -139,17 +141,12 @@ func CreateFixture(sourceProject, output string, includeReference bool) (Fixture
 	if err != nil {
 		return result, err
 	}
-	temporary := filepath.Join(sourceProject, "Temp")
 	canonicalOutput, err := canonicalDestination(output)
 	if err != nil {
 		return result, err
 	}
-	canonicalTemporary, err := canonicalDestination(temporary)
-	if err != nil {
-		return result, err
-	}
-	if !withinDirectory(output, temporary) || !withinDirectory(canonicalOutput, canonicalTemporary) || !withinDirectory(canonicalTemporary, sourceProject) {
-		return result, fmt.Errorf("worker fixture output must stay inside source project Temp")
+	if canonicalOutput != output || !goproject.IsOwnedCachePath(sourceProject, output) {
+		return result, fmt.Errorf("worker fixture output must stay inside source project Temp or Library/UnityMicroEditor")
 	}
 	if _, err = os.Lstat(filepath.Join(output, "fixture.json")); err == nil {
 		return result, fmt.Errorf("worker fixture already exists: %s", output)

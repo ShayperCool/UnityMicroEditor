@@ -32,7 +32,11 @@ type preparedScene struct {
 	Project       string   `json:"projectRoot"`
 	UnityVersion  string   `json:"unityVersion"`
 	Assemblies    []string `json:"assemblies"`
-	Dependencies  []struct {
+	Compiler      struct {
+		NativeOnly     bool   `json:"nativeOnly"`
+		NativeSlotsSHA string `json:"nativeSlotsSha256"`
+	} `json:"compiler"`
+	Dependencies []struct {
 		Path       string `json:"path"`
 		SourcePath string `json:"sourcePath"`
 		SHA256     string `json:"sha256"`
@@ -112,8 +116,33 @@ func validatePreparedScene(launch preparedLaunch, path, expected string, observe
 	if err := readJSONFile(path, &scene); err != nil {
 		return scene, err
 	}
-	if scene.SchemaVersion != 1 || !scene.Supported || scene.Project != launch.Project || scene.UnityVersion != "6000.6.3f1" || len(scene.Assemblies) == 0 {
+	if scene.SchemaVersion != 1 || !scene.Supported || scene.Project != launch.Project || scene.UnityVersion != "6000.6.3f1" {
 		return scene, errors.New("prepared manifest does not match the supported source project/engine")
+	}
+	if scene.Compiler.NativeOnly {
+		if len(scene.Assemblies) != 0 || !validSHA256(scene.Compiler.NativeSlotsSHA) || !filepath.IsAbs(launch.Player) {
+			return scene, errors.New("native-only prepared manifest requires its verified host assembly registrations and no game assemblies")
+		}
+		playerData := filepath.Join(filepath.Dir(launch.Player), strings.TrimSuffix(filepath.Base(launch.Player), filepath.Ext(launch.Player))+"_Data")
+		registrations := filepath.Join(playerData, "ScriptingAssemblies.json")
+		if err := requirePreparedFile(registrations, scene.Compiler.NativeSlotsSHA, observed); err != nil {
+			return scene, err
+		}
+		var slots struct {
+			Names []string `json:"names"`
+		}
+		if err := readJSONFile(registrations, &slots); err != nil {
+			return scene, err
+		}
+		bridge := false
+		for _, name := range slots.Names {
+			bridge = bridge || name == "Dungeon.CLIPlay.dll"
+		}
+		if !bridge {
+			return scene, errors.New("native-only prepared host has no registered runtime bridge")
+		}
+	} else if len(scene.Assemblies) == 0 {
+		return scene, errors.New("prepared manifest with no game assemblies requires a verified native-only compiler baseline")
 	}
 	for _, assembly := range scene.Assemblies {
 		resolved, err := resolvePreparedSource(launch.Project, assembly)

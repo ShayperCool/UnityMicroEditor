@@ -1,0 +1,11 @@
+<linker>
+  <assembly fullname="Dungeon.CLIPlay">
+    <type fullname="Dungeon.CLIPlay.AgentToolAttribute" preserve="all" />
+    <type fullname="Dungeon.CLIPlay.AgentToolArgumentAttribute" preserve="all" />
+    <type fullname="Dungeon.CLIPlay.AgentRuntimeTools" preserve="all" />
+    <type fullname="Dungeon.CLIPlay.AgentToolExecutionException" preserve="all" />
+    <type fullname="Dungeon.CLIPlay.AgentRuntimeCommands" preserve="all" />
+    <type fullname="Dungeon.CLIPlay.AgentRuntimeSnapshot" preserve="all" />
+    <type fullname="Dungeon.CLIPlay.AgentCaptureRunner" preserve="all" />
+  </assembly>
+</linker>

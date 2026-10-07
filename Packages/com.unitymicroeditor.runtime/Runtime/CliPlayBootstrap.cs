@@ -69,6 +69,7 @@ namespace Dungeon.CLIPlay
             private bool loadRequested;
             private bool rawLoaded;
             private Dungeon.CLIPlay.Raw.RawSceneLoader.LiveSession rawSession;
+            private AgentControl agentControl;
             private DateTime reloadFileWriteTime;
             private long reloadFileLength = -1;
             private double nextReloadPoll;
@@ -102,6 +103,8 @@ namespace Dungeon.CLIPlay
                 Application.quitting += OnQuitting;
                 try
                 {
+                    if (!string.IsNullOrEmpty(options.ControlDirectory))
+                        agentControl = new AgentControl(options.ControlDirectory, () => rawSession);
                     if (options.TargetFrameRate.HasValue) Application.targetFrameRate = options.TargetFrameRate.Value;
                     if (options.NoVsync) QualitySettings.vSyncCount = 0;
                     if (string.IsNullOrEmpty(options.RawManifestPath) && !string.IsNullOrEmpty(options.ContentManifestPath))
@@ -263,6 +266,7 @@ namespace Dungeon.CLIPlay
                         CompleteRawReload(null);
                     frames++;
                     if (frames == 1) WriteReady(active);
+                    if (agentControl != null) agentControl.Poll();
                     if (!options.Interactive && frames >= options.Frames)
                     {
                         completedAt = Time.realtimeSinceStartupAsDouble;
@@ -316,6 +320,7 @@ namespace Dungeon.CLIPlay
                     graphicsDeviceVersion = SystemInfo.graphicsDeviceVersion,
                     graphicsMemorySizeMB = SystemInfo.graphicsMemorySize,
                     rawReloadRequestPath = options.RawReloadRequestPath ?? string.Empty,
+                    controlDirectory = options.ControlDirectory ?? string.Empty,
                     pid = System.Diagnostics.Process.GetCurrentProcess().Id,
                     rawReloadCount = rawSession == null ? 0 : rawSession.ReloadCount,
                     nativeLoadCount = rawSession == null ? 0 : rawSession.NativeLoadCount,
@@ -373,6 +378,7 @@ namespace Dungeon.CLIPlay
                     report.exitCode = exitCode;
                     report.success = exitCode == 0;
                     report.requestedScene = options.Scene ?? string.Empty;
+                    report.controlDirectory = options.ControlDirectory ?? string.Empty;
                     report.frames = frames;
                     report.requestedFrames = options.Frames;
                     report.elapsedSeconds = (completedAt > 0 ? completedAt : Time.realtimeSinceStartupAsDouble) - startedAt;
@@ -422,6 +428,7 @@ namespace Dungeon.CLIPlay
                     {
                         try
                         {
+                            if (agentControl != null) agentControl.Dispose();
                             if (content != null) content.Dispose();
                             if (rawSession != null) rawSession.Dispose();
                         }

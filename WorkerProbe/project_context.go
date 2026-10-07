@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	goproject "unitymicroeditor/project"
 )
 
 type ProjectImportSource struct {
@@ -146,11 +148,8 @@ func CreateProjectImportContext(ctx context.Context, sourceProject, output strin
 	if err != nil {
 		return result, err
 	}
-	temporary := filepath.Join(sourceProject, "Temp")
-	canonicalTemporary, err := canonicalDestination(temporary)
-	if err != nil || output != canonical || !withinDirectory(output, temporary) || output == temporary ||
-		!withinDirectory(canonical, canonicalTemporary) || !withinDirectory(canonicalTemporary, sourceProject) {
-		return result, errors.New("project import output must be a new directory inside source project Temp without symlink ancestors")
+	if output != canonical || !goproject.IsOwnedCachePath(sourceProject, output) {
+		return result, errors.New("project import output must be a new directory inside source project Temp or Library/UnityMicroEditor without symlink ancestors")
 	}
 	if _, err := os.Lstat(output); !errors.Is(err, os.ErrNotExist) {
 		return result, errors.New("project import output already exists")

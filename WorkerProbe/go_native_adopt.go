@@ -24,7 +24,7 @@ func runNativeAdoptCLI(args []string) error {
 	var reportPath string
 	flags.StringVar(&opts.Project, "project", ".", "source Unity project")
 	flags.StringVar(&opts.Baseline, "baseline", "", "validated host current.json")
-	flags.StringVar(&opts.Output, "output", "", "session cache beneath project Temp")
+	flags.StringVar(&opts.Output, "output", "", "owned session cache beneath project Temp or Library/UnityMicroEditor")
 	flags.StringVar(&opts.Editor, "editor", defaultUnityEditor(), "matching pinned native executable")
 	flags.StringVar(&reportPath, "report", "", "successful project-import result.json")
 	if err := flags.Parse(args); err != nil {
@@ -50,8 +50,8 @@ func runNativeAdoptCLI(args []string) error {
 		return err
 	}
 	canonical, err := canonicalDestination(opts.Output)
-	if err != nil || canonical != opts.Output || !withinDirectory(canonical, filepath.Join(project, "Temp")) {
-		return errors.New("native adoption output must be owned beneath project Temp without symlink ancestors")
+	if err != nil || canonical != opts.Output || !goproject.IsOwnedCachePath(project, canonical) {
+		return errors.New("native adoption output must be owned beneath project Temp or Library/UnityMicroEditor without symlink ancestors")
 	}
 	reportPath, err = filepath.Abs(reportPath)
 	if err != nil {
@@ -119,7 +119,10 @@ func readColdAdoptionReport(ctx context.Context, project, reportPath string) (*p
 	var report probeReport
 	var prepared ProjectImportContext
 	var content projectImportContent
-	if err := validateAdoptionFile(reportPath, filepath.Join(project, "Temp"), 32<<20); err != nil {
+	if !goproject.IsOwnedCachePath(project, reportPath) {
+		return nil, prepared, content, errors.New("native adoption report must be in the project's owned cache")
+	}
+	if err := validateAdoptionFile(reportPath, project, 32<<20); err != nil {
 		return nil, prepared, content, err
 	}
 	data, err := os.ReadFile(reportPath)
