@@ -112,8 +112,7 @@ RectTransform. Creating a prefab directly from an inherited subtree requires an
 explicit variant operation instead. Compound array overrides keep their existing
 element count; resizing is not supported by this authoring API. These restrictions
 do not invoke an Editor fallback. Native readback on an isolated project verifies
-the supported nested/variant and added-component paths; see
-[source prefab comparison](../../../Integrations/EditorParity/SOURCE_PREFAB_GO_PARITY.md).
+the supported nested/variant and added-component paths.
 
 `CreateAsset` creates an explicit Unity YAML `.mat`, `.asset` or `.prefab` and its
 metadata with expected revision `absent`. Materials require a Material record;

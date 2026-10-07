@@ -2,7 +2,7 @@
 
 Keep the tool independent of the game checkout. Resolve tool sources through the installation directory and accept target project paths as arguments. Optional tests that need real game assets must take an explicit project path.
 
-The Go runner and official MCP Go SDK server are the current implementation. Use Go 1.25 or later; CI tests Go 1.26.0. Do not add Python to the tool's build, launch, watch, import, scene update or MCP execution path. The earlier Python prototype was removed; its notes are in `docs/history`. Coplay's own Python server is confined to the isolated Editor comparison environment.
+The Go runner and official MCP Go SDK server are the current implementation. Use Go 1.25 or later; CI tests Go 1.26.0. Do not add Python to the tool's build, launch, watch, import, scene update or MCP execution path. Coplay's own Python server is confined to the isolated Editor comparison environment.
 
 Run these checks before committing:
 

@@ -47,19 +47,17 @@ attributes and element scopes remain authored data. The cache owns these copies
 and retains their dependencies; source assets and cached native bytes are not
 modified. Missing or conflicting slots/targets fail before scene activation.
 
-The actual GPU Player regression for the project Boot scene passed: the Lobby
-VTA exposes both native Terminal and Lobby stylesheets, their content hashes
-match the imported data, both are attached to the UI root, and every element
-carrying `.hidden` resolves to `DisplayStyle.None`. That run reported zero
-errors or exceptions. This checks rendered runtime behavior in addition to the
-standalone extraction and SDK binding tests; it does not establish cold import
-support for changed UXML/USS sources.
+This route was checked in a GPU Player on a real UI scene: the visual tree exposed
+its native stylesheets with matching content hashes, both were attached to the UI
+root, and elements carrying a `display: none` class resolved to
+`DisplayStyle.None`. It does not establish cold import support for changed
+UXML/USS sources.
 
 The extraction regression uses the existing runtime cache without launching
 Editor or Player:
 
 ```bash
-UNITY_NATIVE_UI_PROJECT=/absolute/path/to/Dungeon \
+UNITY_NATIVE_UI_PROJECT=/absolute/project \
 UNITY_NATIVE_UI_INDEX=/absolute/Temp/output/native/index.json \
 go test ./cmd/unity-micro-editor -run '^TestNativeUIActualCacheBindingReadbackWithoutEditor$' -v
 ```
@@ -72,9 +70,9 @@ exact-cache route preserves existing import results without hiding that gap.
 Run the optional real-project extraction tests with:
 
 ```bash
-UNITY_WORKER_UI_PROJECT=/absolute/path/to/Dungeon go test ./...
+UNITY_WORKER_UI_PROJECT=/absolute/project go test ./...
 ```
 
 Native UI projection fixture tests additionally accept
 `UNITY_WORKER_UI_FIXTURES` pointing at a directory containing the original
-Lobby UXML/USS primary artifacts named by their source GUID plus `.bin`.
+UXML/USS primary artifacts named by their source GUID plus `.bin`.
