@@ -14,7 +14,7 @@ import (
 	"strconv"
 	"strings"
 
-	goproject "unitymicroeditor/project"
+	goproject "unitymicroeditor/internal/project"
 )
 
 type component struct {

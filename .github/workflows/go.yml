@@ -5,17 +5,10 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        module: [GoProject, WorkerProbe, Integrations/EditorParity]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.0'
-          cache-dependency-path: |
-            GoProject/go.sum
-            WorkerProbe/go.sum
-            Integrations/EditorParity/go.mod
-      - run: go -C ${{ matrix.module }} test -race ./...
-      - run: go -C ${{ matrix.module }} vet ./...
+      - run: go test -race ./...
+      - run: go vet ./...

@@ -16,28 +16,30 @@ Scene and authored prefab iteration uses our loader. It does not require rebuild
 
 This is a standalone Git repository. The tool, shared runtime package, minimal host project, and regression tests live here. Target games and their asset caches live in separate directories.
 
-- `unity-micro-editor` builds and launches the Go CLI.
-- `GoProject/` prepares source graphs and scene revisions; `authoring/` edits supported authored files with revision checks and recoverable transactions.
-- `WorkerProbe/` contains the runner, importer coordinator, native artifact readers, and Go tests.
+- `unity-micro-editor` builds and launches the Go CLI. `build-host.sh` builds the reusable host Player.
+- `cmd/unity-micro-editor/` is the CLI: runner, importer coordinator, compiler driver, and agent commands. The other `cmd/` entries are small standalone utilities.
+- `internal/project/` prepares source graphs and scene revisions; its `authoring/` package edits supported authored files with revision checks and recoverable transactions, and `packages/` resolves Unity packages.
+- `internal/mcpserver/`, `internal/agentcontrol/`, `internal/editorbridge/` and `internal/runtimeartifact/` hold the MCP server, Player control, Editor bridge client, and native artifact readers.
 - `Packages/com.unitymicroeditor.runtime/` is the shared Unity package containing the loader, runtime bridge, Editor utilities, and EditMode tests.
 - `HostProject/` is a minimal Unity project that references this package, engine modules, SRP Core `17.6.0`, and Collections `6.6.0`. It contains no Dungeon gameplay or ship assets.
-- `LifecycleCompiler/` instruments lifecycle callbacks using SDK Roslyn.
-- `NetcodePostProcessor/` runs matching Netcode package code generation outside the Editor.
+- `tools/LifecycleCompiler/` instruments lifecycle callbacks using SDK Roslyn. `tools/NetcodePostProcessor/` runs matching Netcode package code generation outside the Editor.
+- `tests/` holds standalone C# regression projects for runtime sources. Go tests sit next to the code they cover.
+- `proofs/` holds the multiplayer, runtime delivery and code-update validation drivers.
 - `Profiles/dungeon-linux-mono/` records the package versions and dependency resolution used by the tested game.
+- `Samples/RawProject/` is a small authored project used as a fixture.
 - `Integrations/EditorParity/` runs the isolated Unity Editor/Coplay reference and Go comparison clients.
-- [AGENT_MCP.md](AGENT_MCP.md) explains agent configuration, project preparation, supported tools and verification.
-- [AGENT_VALIDATION.md](AGENT_VALIDATION.md) records actual Editor/Coplay comparisons, resilience checks and remaining differences.
+- `docs/` holds the detailed guides: [AGENT_MCP.md](docs/AGENT_MCP.md) for agent configuration, preparation and tools; [AGENT_VALIDATION.md](docs/AGENT_VALIDATION.md) for actual Editor/Coplay comparisons and remaining differences; [GO_RUNNER.md](docs/GO_RUNNER.md) and [WORKER_IMPORT.md](docs/WORKER_IMPORT.md) for the Dungeon run and the import worker coordinator.
 - [docs/history/](docs/history/README.md) keeps the research notes and measurements from the earlier Python prototype. The prototype itself was removed; the tool has no Python in it.
 
 Assembly names and namespaces such as `Dungeon.CLIPlay` remain unchanged to preserve existing asset GUIDs, compiled references, and runtime contracts. They do not introduce a dependency on Dungeon game assemblies.
 
 ## Pinned environment
 
-The machine-readable profile is [WorkerProbe/engine-profile.json](WorkerProbe/engine-profile.json). `./unity-micro-editor version` prints the profile embedded in the executable.
+The machine-readable profile is [cmd/unity-micro-editor/engine-profile.json](cmd/unity-micro-editor/engine-profile.json). `./unity-micro-editor version` prints the profile embedded in the executable.
 
 The supported engine is Unity `6000.6.3f1`, revision `45d8eee7de74`, with Linux x64 Mono build support. The tested graphics backend is OpenGL Core on an NVIDIA RTX 4060. The runner rejects a Null renderer and known software renderer names.
 
-Use Go 1.25 or later. The tested toolchain is Go 1.26.0. The runner uses the official MCP Go SDK v1.8.0, YAML v3.0.1 and XXH3 v1.0.2; their pinned transitive dependencies are in `WorkerProbe/go.mod` and the engine profile. `GoProject` and `WorkerProbe` have dependency locks; the third Go module, `Integrations/EditorParity`, uses the standard library. The launcher builds with `CGO_ENABLED=0`.
+Use Go 1.25 or later. The tested toolchain is Go 1.26.0. The runner uses the official MCP Go SDK v1.8.0, YAML v3.0.1 and XXH3 v1.0.2; their pinned transitive dependencies are in `go.mod` and the engine profile. The repository is one Go module, `unitymicroeditor`. The launcher builds with `CGO_ENABLED=0`.
 
 C# tooling targets .NET 8 and uses the Unity installation's .NET SDK `8.0.318`, Roslyn, Mono reference assemblies, and Unity source generators. A system `dotnet` installation is unnecessary. Native import also needs the matching `Unity`, `Unity.DataStore`, and inspection tools from that installation.
 
@@ -65,7 +67,7 @@ Use the selected project's `Library/UnityMicroEditor` for agent preparation, nat
 
 Run `./unity-micro-editor` from this repository, or add its directory to `PATH`. Existing target-project `Temp/UnityPlay` and `Builds/CLIPlay*` names are retained so caches and reports remain easy to find. Moving the runtime into a local package changes the project's package configuration. Baselines produced before that change must be refreshed; the runner deliberately rejects stale compiler configuration.
 
-See [GO_RUNNER.md](GO_RUNNER.md) for the detailed Dungeon run instructions and [WorkerProbe/MultiplayerProof/README.md](WorkerProbe/MultiplayerProof/README.md) for the ship validation procedure.
+See [GO_RUNNER.md](docs/GO_RUNNER.md) for the detailed Dungeon run instructions and [proofs/multiplayer/README.md](proofs/multiplayer/README.md) for the ship validation procedure.
 
 ## Connect an agent
 
@@ -78,7 +80,7 @@ Configure the agent's MCP client to launch with an explicit project and saved sc
   --scene Assets/Scenes/SampleScene.unity
 ```
 
-Stdio is the default transport. `--transport http --listen 127.0.0.1:8091` exposes Streamable HTTP locally at `/mcp`, with optional bearer authentication. Starting a session without a baseline queues automatic preparation; an existing validated baseline can be supplied with `--baseline`. Source tools cover paged inventories, resolved prefab hierarchies, asset/script creation, revision-checked edits and undo. Prefab authoring runs in our source writer. Native component defaults are captured once with `cache-component-defaults`, bound to the engine/context profile, and reused without launching Editor. Runtime tools expose simulation, input and attributed project commands as dynamic MCP tools. `--no-editor` explicitly disables main Editor bootstrap and build calls. Source commits and runtime behavior are verified separately. See [AGENT_MCP.md](AGENT_MCP.md) for configuration and backend details.
+Stdio is the default transport. `--transport http --listen 127.0.0.1:8091` exposes Streamable HTTP locally at `/mcp`, with optional bearer authentication. Starting a session without a baseline queues automatic preparation; an existing validated baseline can be supplied with `--baseline`. Source tools cover paged inventories, resolved prefab hierarchies, asset/script creation, revision-checked edits and undo. Prefab authoring runs in our source writer. Native component defaults are captured once with `cache-component-defaults`, bound to the engine/context profile, and reused without launching Editor. Runtime tools expose simulation, input and attributed project commands as dynamic MCP tools. `--no-editor` explicitly disables main Editor bootstrap and build calls. Source commits and runtime behavior are verified separately. See [AGENT_MCP.md](docs/AGENT_MCP.md) for configuration and backend details.
 
 **Project builds are proxied to the real Unity Editor.** `project_build` and `build-project` invoke public `BuildPipeline` with explicit scenes and a new owned Linux Mono output. Their replies identify `unity_editor_proxy` and carry the actual build report; an installed matching Editor is required. General Editor windows/custom inspectors and an EditMode execution service are outside the requested integration.
 
@@ -121,15 +123,11 @@ Build a fresh host for the new version. Compare imported meshes, audio, UI, and 
 ## Development checks
 
 ```bash
-go -C GoProject test ./...
-go -C WorkerProbe test ./...
-go -C Integrations/EditorParity test ./...
-go -C GoProject vet ./...
-go -C WorkerProbe vet ./...
-go -C Integrations/EditorParity vet ./...
+go test ./...
+go vet ./...
 ```
 
-For SDK-only runtime checks, set `UNITY_GO_LIFECYCLE_SDK` and `UNITY_GO_DECLARATION_SDK` to the matching `Editor/Unity` path when running the worker tests. These use the installed C# SDK, without starting the Editor. The standalone C# regression projects also live in this directory.
+For SDK-only runtime checks, set `UNITY_GO_LIFECYCLE_SDK` and `UNITY_GO_DECLARATION_SDK` to the matching `Editor/Unity` path when running the `cmd/unity-micro-editor` tests. These use the installed C# SDK, without starting the Editor. The standalone C# regression projects live in `tests/`.
 
 Optional Netcode and real native-model integration checks also need `UNITY_MICRO_EDITOR_TEST_PROJECT` pointing to a separately prepared game project. They do not infer a game directory from the repository's location.
 
