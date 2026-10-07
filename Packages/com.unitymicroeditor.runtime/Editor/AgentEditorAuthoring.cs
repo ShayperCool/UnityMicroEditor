@@ -6,7 +6,7 @@ using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
-namespace Dungeon.CLIPlay.Editor
+namespace UnityMicroEditor.Editor
 {
     /// <summary>Capture actual Unity defaults for a supported native component.</summary>
     public static class AgentEditorAuthoring

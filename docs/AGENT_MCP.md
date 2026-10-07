@@ -143,7 +143,7 @@ EditMode runner are outside this integration's requested scope.
 ## Register project tools with attributes
 
 ```csharp
-using Dungeon.CLIPlay; // the runtime package namespace
+using UnityMicroEditor;
 using UnityEngine;
 
 public sealed class SetCounterArgs

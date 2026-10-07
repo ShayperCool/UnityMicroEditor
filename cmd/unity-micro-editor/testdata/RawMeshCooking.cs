@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
-using Dungeon.CLIPlay.Raw;
+using UnityMicroEditor.Raw;
 using UnityEngine;
 
 internal static class Program
@@ -68,7 +68,7 @@ internal static class Program
     }
 }
 
-namespace Dungeon.CLIPlay.Raw
+namespace UnityMicroEditor.Raw
 {
     internal sealed class RawSceneManifest { internal RawSceneObject[] objects; internal RawSceneAsset[] assets; }
     internal sealed class RawSceneObject { internal int classId; internal string dataJson; }

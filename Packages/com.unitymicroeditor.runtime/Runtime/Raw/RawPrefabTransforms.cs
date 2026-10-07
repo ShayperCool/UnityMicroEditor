@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 
-namespace Dungeon.CLIPlay.Raw
+namespace UnityMicroEditor.Raw
 {
     /// <summary>Authored prefab hierarchy queries for inactive raw templates.</summary>
     public static class RawPrefabTransforms

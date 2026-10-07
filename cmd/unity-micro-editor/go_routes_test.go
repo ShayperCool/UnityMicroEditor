@@ -12,7 +12,7 @@ import (
 
 func TestSceneRouteRequiresExactAuthoredPathAndGUID(t *testing.T) {
 	guid := "a4c2d5e87cc894d488ffbfd8c52ed16a"
-	path := "Assets/Dungeon/ShipGen/Scenes/ShipGenDemo.unity"
+	path := "Assets/Scenes/Demo.unity"
 	gotGUID, gotPath, err := parseContentScene(guid + "=" + path)
 	if err != nil || gotGUID != guid || gotPath != path {
 		t.Fatalf("route mismatch %s %s %v", gotGUID, gotPath, err)

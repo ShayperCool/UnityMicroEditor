@@ -4,7 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Reflection;
 
-namespace Dungeon.CLIPlay.Raw
+namespace UnityMicroEditor.Raw
 {
     // Unity's binary-YAML collections use hex UInt8 ('y') or little-endian Int32 ('i').
     // Only field type metadata is inspected: object values stay with JsonUtility.

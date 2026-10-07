@@ -123,8 +123,8 @@ internal static class DeclarationHash
 internal static class Program
 {
     internal static readonly string[] Phases = { "Awake", "OnEnable", "OnDisable", "OnDestroy" };
-    internal const string Lifecycle = "global::Dungeon.CLIPlay.Raw.RawLifecycle";
-    internal const string PrefabTransforms = "global::Dungeon.CLIPlay.Raw.RawPrefabTransforms";
+    internal const string Lifecycle = "global::UnityMicroEditor.Raw.RawLifecycle";
+    internal const string PrefabTransforms = "global::UnityMicroEditor.Raw.RawPrefabTransforms";
 
     public static int Main(string[] args)
     {
@@ -190,14 +190,14 @@ internal static class Program
             }
             // Every source assembly is marked after all its lifecycle methods
             // have passed validation. The native loader verifies this attribute.
-            var marker = compilation.GetTypeByMetadataName("Dungeon.CLIPlay.Raw.RawLifecycleInstrumentedAttribute");
-            var api = compilation.GetTypeByMetadataName("Dungeon.CLIPlay.Raw.RawLifecycle");
+            var marker = compilation.GetTypeByMetadataName("UnityMicroEditor.Raw.RawLifecycleInstrumentedAttribute");
+            var api = compilation.GetTypeByMetadataName("UnityMicroEditor.Raw.RawLifecycle");
             if (marker is null || api is null || !api.GetMembers("ShouldCollect").Any() || !api.GetMembers("Enqueue").Any()
                 || (activeAndEnabledReads != 0 && !api.GetMembers("IsActiveAndEnabled").Any()))
                 throw new InvalidOperationException("Host lacks lifecycle barrier API/marker; prepare a matching universal host");
             if (setActiveCalls != 0 && !api!.GetMembers("SetActive").Any())
                 throw new InvalidOperationException("Host lacks lifecycle SetActive bridge; prepare a matching universal host");
-            var prefabTransforms = compilation.GetTypeByMetadataName("Dungeon.CLIPlay.Raw.RawPrefabTransforms");
+            var prefabTransforms = compilation.GetTypeByMetadataName("UnityMicroEditor.Raw.RawPrefabTransforms");
             if (transformRootReads != 0 && prefabTransforms?.GetMembers("Root").OfType<IMethodSymbol>().Any(method =>
                 method.IsStatic && method.DeclaredAccessibility == Accessibility.Public && method.Parameters.Length == 1
                 && method.Parameters[0].Type.ToDisplayString() == "UnityEngine.Transform"
@@ -220,14 +220,14 @@ internal static class Program
                         throw new InvalidOperationException("Host lacks prefab GetComponentInChildren bridge overloads; prepare a matching universal host");
                 }
             }
-            var scriptableMarker = compilation.GetTypeByMetadataName("Dungeon.CLIPlay.Raw.RawScriptableObjectInstrumentedAttribute");
+            var scriptableMarker = compilation.GetTypeByMetadataName("UnityMicroEditor.Raw.RawScriptableObjectInstrumentedAttribute");
             bool scriptableObjectBarrier = scriptableMarker is not null && api!.GetMembers("ShouldCollect").OfType<IMethodSymbol>().Any(m =>
                 m.Parameters.Length == 2 && m.Parameters[0].Type.ToDisplayString() == "UnityEngine.ScriptableObject");
             if (scriptableObjectCallbacks != 0 && !scriptableObjectBarrier)
                 throw new InvalidOperationException("Host lacks ScriptableObject lifecycle barrier API/marker; prepare a matching universal host");
             File.WriteAllText(request.MarkerPath,
-                "[assembly: global::Dungeon.CLIPlay.Raw.RawLifecycleInstrumentedAttribute(1)]\n" +
-                (scriptableObjectBarrier ? "[assembly: global::Dungeon.CLIPlay.Raw.RawScriptableObjectInstrumentedAttribute(1)]\n" : ""));
+                "[assembly: global::UnityMicroEditor.Raw.RawLifecycleInstrumentedAttribute(1)]\n" +
+                (scriptableObjectBarrier ? "[assembly: global::UnityMicroEditor.Raw.RawScriptableObjectInstrumentedAttribute(1)]\n" : ""));
             foreach (var output in outputs)
             {
                 Directory.CreateDirectory(System.IO.Path.GetDirectoryName(output.Source.OutputPath)!);
@@ -513,7 +513,7 @@ internal static class Program
             && !method.IsStatic && method.ReturnsVoid && method.Parameters.Length == 0;
 
         private bool VerifiedAssembly(IAssemblySymbol assembly, bool scriptable) => assembly.GetAttributes().Any(a =>
-            a.AttributeClass?.ToDisplayString() == "Dungeon.CLIPlay.Raw." + (scriptable ? "RawScriptableObjectInstrumentedAttribute" : "RawLifecycleInstrumentedAttribute")
+            a.AttributeClass?.ToDisplayString() == "UnityMicroEditor.Raw." + (scriptable ? "RawScriptableObjectInstrumentedAttribute" : "RawLifecycleInstrumentedAttribute")
             && a.ConstructorArguments.Length == 1 && a.ConstructorArguments[0].Value is int value && value == 1);
 
         private bool IsNativeBase(IMethodSymbol method) => request.NativeBaseAssemblies?.Contains(

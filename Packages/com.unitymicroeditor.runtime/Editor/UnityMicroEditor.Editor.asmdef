@@ -1,7 +1,7 @@
 {
-    "name": "Dungeon.CLIPlay.Editor",
-    "rootNamespace": "Dungeon.CLIPlay.Editor",
-    "references": ["Dungeon.CLIPlay"],
+    "name": "UnityMicroEditor.Editor",
+    "rootNamespace": "UnityMicroEditor.Editor",
+    "references": ["UnityMicroEditor"],
     "includePlatforms": ["Editor"],
     "excludePlatforms": [],
     "allowUnsafeCode": false,

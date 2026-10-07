@@ -5,7 +5,7 @@ using System.IO;
 using UnityEngine;
 using UnityEngine.Rendering;
 
-namespace Dungeon.CLIPlay.Raw
+namespace UnityMicroEditor.Raw
 {
     // Restores a source-authored Mesh.asset's existing geometry. No
     // interchange model import, compression, recalculation or optimization.

@@ -91,7 +91,7 @@ func normalize(list []any) ([]any, error) {
 			return nil, fmt.Errorf("object %s has no component list", path)
 		}
 		// Ignore the resource owner only if both its reserved name and runtime type match.
-		if path == "Raw scene imported assets" && hasComponent(components, "Dungeon.CLIPlay.Raw.RawSceneResources") {
+		if path == "Raw scene imported assets" && hasComponent(components, "UnityMicroEditor.Raw.RawSceneResources") {
 			continue
 		}
 		copy := make(map[string]any, len(object))

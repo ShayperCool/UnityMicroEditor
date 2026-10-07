@@ -99,7 +99,7 @@ func TestAllRealProjectAuthoredMeshes(t *testing.T) {
 		t.Skip("Set UNITY_GO_MESH_SOURCE_PROJECT to source project")
 	}
 	count := 0
-	err := filepath.WalkDir(filepath.Join(root, "Assets/Dungeon"), func(path string, entry fs.DirEntry, err error) error {
+	err := filepath.WalkDir(filepath.Join(root, "Assets"), func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}

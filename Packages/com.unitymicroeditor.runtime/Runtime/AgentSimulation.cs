@@ -4,7 +4,7 @@ using System.IO;
 using UnityEngine;
 using UnityEngine.LowLevel;
 
-namespace Dungeon.CLIPlay
+namespace UnityMicroEditor
 {
     /// <summary>Gates game PlayerLoop stages while the bridge and renderer continue to run.</summary>
     internal sealed class AgentSimulation : IDisposable

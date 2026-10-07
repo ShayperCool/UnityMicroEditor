@@ -262,7 +262,7 @@ func captureGoSourceEngineProfile(ctx context.Context, project, editor, player, 
 			return nil, errors.New("native host compiled configuration differs from public graph: " + exported.Name)
 		}
 		profile.NativeAssemblies[exported.Name] = fact
-		if exported.Name != "Dungeon.CLIPlay" {
+		if exported.Name != "UnityMicroEditor" {
 			profile.Inputs[path] = hash
 		}
 	}
@@ -280,7 +280,7 @@ func captureGoSourceEngineProfile(ctx context.Context, project, editor, player, 
 			return nil, err
 		}
 		profile.NativeAssemblies[name] = goSourceNativeAssembly{Name: name, SHA256: hash}
-		if name != "Dungeon.CLIPlay" {
+		if name != "UnityMicroEditor" {
 			profile.Inputs[path] = hash
 		}
 	}

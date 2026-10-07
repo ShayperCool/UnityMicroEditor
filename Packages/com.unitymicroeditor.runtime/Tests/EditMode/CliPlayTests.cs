@@ -3,7 +3,7 @@ using System.IO;
 using NUnit.Framework;
 using UnityEngine.LowLevel;
 
-namespace Dungeon.CLIPlay.Tests
+namespace UnityMicroEditor.Tests
 {
     public sealed class CliPlayTests
     {

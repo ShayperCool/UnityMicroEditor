@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	goproject "unitymicroeditor/internal/project"
 	"unitymicroeditor/internal/editorbridge"
+	goproject "unitymicroeditor/internal/project"
 )
 
 // Native bootstrap captures engine facts only. Target SDK assemblies and the

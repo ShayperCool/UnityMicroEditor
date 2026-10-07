@@ -38,7 +38,7 @@ func TestGoSourceGraphNewAsmdefPackageAndBodyChangeSDK(t *testing.T) {
 	player := writeGoGraphFile(t, project, "Temp/native/Host.x86_64", "synthetic SDK executable, never launched")
 	managed := goSourceManagedDirectory(player)
 	bridgeSource := writeGoGraphFile(t, project, "Temp/Bridge.cs", `using System; using UnityEngine;
-namespace Dungeon.CLIPlay.Raw {
+namespace UnityMicroEditor.Raw {
 [AttributeUsage(AttributeTargets.Assembly)] public sealed class RawLifecycleInstrumentedAttribute : Attribute { public RawLifecycleInstrumentedAttribute(int version) {} }
 [AttributeUsage(AttributeTargets.Assembly)] public sealed class RawScriptableObjectInstrumentedAttribute : Attribute { public RawScriptableObjectInstrumentedAttribute(int version) {} }
 public static class RawLifecycle { public enum Phase { Awake, OnEnable, OnDisable, OnDestroy }
@@ -50,7 +50,7 @@ public static void Enqueue(ScriptableObject value,Phase phase,Action callback,in
 	if err := os.MkdirAll(managed, 0700); err != nil {
 		t.Fatal(err)
 	}
-	args := []string{sdk.csc, "-nologo", "-target:library", "-nostdlib+", "-out:" + filepath.Join(managed, "Dungeon.CLIPlay.dll")}
+	args := []string{sdk.csc, "-nologo", "-target:library", "-nostdlib+", "-out:" + filepath.Join(managed, "UnityMicroEditor.dll")}
 	for _, path := range deduplicateGoReferences(append(slices.Clone(sdk.baseReferences), sdk.engineReferences...)) {
 		args = append(args, "-reference:"+path)
 	}
@@ -58,7 +58,7 @@ public static void Enqueue(ScriptableObject value,Phase phase,Action callback,in
 	if _, err := goCompilerCommand(context.Background(), project, sdk.dotnet, args...); err != nil {
 		t.Fatal(err)
 	}
-	writeGoGraphFile(t, project, "Temp/native/Host_Data/ScriptingAssemblies.json", `{"names":["Dungeon.CLIPlay.dll"],"types":[16],"retainNative":true}`)
+	writeGoGraphFile(t, project, "Temp/native/Host_Data/ScriptingAssemblies.json", `{"names":["UnityMicroEditor.dll"],"types":[16],"retainNative":true}`)
 	writeGoGraphFile(t, project, "Temp/native/Host_Data/RuntimeInitializeOnLoads.json", `{"root":[{"assemblyName":"Pure.Package","methodName":"Old"},{"assemblyName":"Native.Engine","methodName":"Retain"}]}`)
 	profile := &goSourceEngineProfile{SchemaVersion: 1, UnityVersion: fixtureUnityVersion, UnityRevision: "45d8eee7de74", Editor: editor, Player: player, Target: "LinuxStandalone64", ScriptingBackend: "Mono", Development: true, BaseDefines: []string{"UNITY_6000_6", "UNITY_STANDALONE_LINUX", "ENABLE_MONO"}, BaseReferences: sdk.baseReferences, EngineReferences: sdk.engineReferences, Inputs: map[string]string{}, NativeAssemblies: map[string]goSourceNativeAssembly{}}
 	for _, path := range append(slices.Clone(sdk.baseReferences), sdk.engineReferences...) {

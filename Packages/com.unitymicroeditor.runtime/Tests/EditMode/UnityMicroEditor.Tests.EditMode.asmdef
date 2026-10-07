@@ -1,7 +1,7 @@
 {
-    "name": "Dungeon.CLIPlay.Tests.EditMode",
-    "rootNamespace": "Dungeon.CLIPlay.Tests",
-    "references": ["Dungeon.CLIPlay", "UnityEngine.TestRunner", "UnityEditor.TestRunner"],
+    "name": "UnityMicroEditor.Tests.EditMode",
+    "rootNamespace": "UnityMicroEditor.Tests",
+    "references": ["UnityMicroEditor", "UnityEngine.TestRunner", "UnityEditor.TestRunner"],
     "includePlatforms": ["Editor"],
     "excludePlatforms": [],
     "allowUnsafeCode": false,

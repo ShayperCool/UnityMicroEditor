@@ -1,7 +1,7 @@
 using System;
 using UnityEngine;
 
-namespace Dungeon.CLIPlay.Raw
+namespace UnityMicroEditor.Raw
 {
     // Native importer output is content only. Scene objects are built by RawSceneLoader.
     public sealed class ImportedAssetRegistry : ScriptableObject

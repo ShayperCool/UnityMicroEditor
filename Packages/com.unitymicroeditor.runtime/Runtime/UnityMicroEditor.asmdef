@@ -1,6 +1,6 @@
 {
-  "name": "Dungeon.CLIPlay",
-  "rootNamespace": "Dungeon.CLIPlay",
+  "name": "UnityMicroEditor",
+  "rootNamespace": "UnityMicroEditor",
   "references": [
     "Unity.RenderPipelines.Core.Runtime",
     "Unity.Collections"

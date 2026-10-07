@@ -4,12 +4,12 @@ using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
-using Dungeon.CLIPlay.Raw;
+using UnityMicroEditor.Raw;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using Object = UnityEngine.Object;
 
-namespace Dungeon.CLIPlay
+namespace UnityMicroEditor
 {
     /// <summary>Project commands register explicitly and execute on Unity's main thread.</summary>
     public static class AgentRuntimeCommands

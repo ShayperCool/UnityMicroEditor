@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace Dungeon.CLIPlay.Raw
+namespace UnityMicroEditor.Raw
 {
     // Ownership follows the objects created by one import transaction, even
     // when their callbacks move them to another scene or DontDestroyOnLoad.

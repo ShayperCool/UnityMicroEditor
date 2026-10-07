@@ -30,7 +30,7 @@ func TestGuardedShaderExtractionActualArchiveAndImmutableOutput(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(shader), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(shader, []byte("Shader \"Dungeon/Screen\" {\n#include \"Optional.hlsl\"\n}\n"), 0600); err != nil {
+	if err := os.WriteFile(shader, []byte("Shader \"Sample/Screen\" {\n#include \"Optional.hlsl\"\n}\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(shader+".meta", []byte("fileFormatVersion: 2\nguid: 2cbfcd0349c944ee788f6e2919b9d66c\nShaderImporter:\n"), 0600); err != nil {
@@ -43,7 +43,7 @@ func TestGuardedShaderExtractionActualArchiveAndImmutableOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	output := filepath.Join(project, "Temp/Shader/runtime.bin")
-	args := []string{"--input", input, "--input-sha256", fileDigest(data), "--guid", "2cbfcd0349c944ee788f6e2919b9d66c", "--shader-name", "Dungeon/Screen", "--output", output, "--project", project, "--source", source, "--origin", origin, "--environment-sha256", strings.Repeat("a", 64)}
+	args := []string{"--input", input, "--input-sha256", fileDigest(data), "--guid", "2cbfcd0349c944ee788f6e2919b9d66c", "--shader-name", "Sample/Screen", "--output", output, "--project", project, "--source", source, "--origin", origin, "--environment-sha256", strings.Repeat("a", 64)}
 	var stdout bytes.Buffer
 	if err := run(args, &stdout); err != nil {
 		t.Fatal(err)

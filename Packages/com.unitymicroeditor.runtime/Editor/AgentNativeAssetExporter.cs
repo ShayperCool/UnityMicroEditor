@@ -8,7 +8,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
-using Dungeon.CLIPlay.Raw;
+using UnityMicroEditor.Raw;
 using UnityEditor;
 using UnityEditor.Build;
 using UnityEditor.Compilation;
@@ -19,7 +19,7 @@ using Object = UnityEngine.Object;
 using PackageInfo = UnityEditor.PackageManager.PackageInfo;
 using Debug = UnityEngine.Debug;
 
-namespace Dungeon.CLIPlay.Editor
+namespace UnityMicroEditor.Editor
 {
     /// <summary>Native import/export of assets. Scene construction stays outside BuildPipeline.</summary>
     public static class AgentNativeAssetExporter

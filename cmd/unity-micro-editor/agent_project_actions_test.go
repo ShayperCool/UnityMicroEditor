@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"unitymicroeditor/internal/project/authoring"
 	"unitymicroeditor/internal/agentcontrol"
+	"unitymicroeditor/internal/project/authoring"
 )
 
 func agentReviewProject(t *testing.T) string {

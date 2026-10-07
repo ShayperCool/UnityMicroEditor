@@ -106,8 +106,8 @@ func TestGoCompilerNativeManagedProofChecksActiveCopy(t *testing.T) {
 	hash, _ := goFileHash(original)
 	compiler := &goCompiler{manifest: goCompileManifest{CompilerInputs: map[string]string{
 		original: hash,
-		filepath.Join(project, "baseline/Host_Data/Managed/Dungeon.CLIPlay.dll"): "bridge SDK refresh permitted",
-		filepath.Join(project, "baseline/Host_Data/Managed/Game.dll"):            "game proof checked separately",
+		filepath.Join(project, "baseline/Host_Data/Managed/UnityMicroEditor.dll"): "bridge SDK refresh permitted",
+		filepath.Join(project, "baseline/Host_Data/Managed/Game.dll"):             "game proof checked separately",
 	}}}
 	managed := filepath.Dir(active)
 	if err := compiler.verifyStagedNativeManagedInputs(managed, map[string]bool{"Game": true}); err != nil {
@@ -342,8 +342,8 @@ func TestGoCompilerNewMonoBehaviourAndRestartSDK(t *testing.T) {
 		t.Fatal(err)
 	}
 	managed := filepath.Join(filepath.Dir(player), "Host_Data/Managed")
-	bridge := filepath.Join(managed, "Dungeon.CLIPlay.dll")
-	bridgeText := `using System; using UnityEngine; namespace Dungeon.CLIPlay.Raw {
+	bridge := filepath.Join(managed, "UnityMicroEditor.dll")
+	bridgeText := `using System; using UnityEngine; namespace UnityMicroEditor.Raw {
 [AttributeUsage(AttributeTargets.Assembly)] public sealed class RawLifecycleInstrumentedAttribute : Attribute { public RawLifecycleInstrumentedAttribute(int version) {} }
 [AttributeUsage(AttributeTargets.Assembly)] public sealed class RawScriptableObjectInstrumentedAttribute : Attribute { public RawScriptableObjectInstrumentedAttribute(int version) {} }
 public static class RawLifecycle {
@@ -368,7 +368,7 @@ namespace Package.Second { [UnityEngine.DefaultExecutionOrder(-5000)] public cla
 	packageEditor := filepath.Join(project, "Library/ScriptAssemblies/Package.Runtime.dll")
 	compile(packageHost, packageText)
 	compile(packageEditor, packageText+editorOnlyText)
-	writeGoGraphFile(t, project, "Temp/native-host/Host_Data/ScriptingAssemblies.json", `{"names":["Dungeon.CLIPlay.dll","Package.Runtime.dll"],"types":[16,16],"fixtureFlag":true}`)
+	writeGoGraphFile(t, project, "Temp/native-host/Host_Data/ScriptingAssemblies.json", `{"names":["UnityMicroEditor.dll","Package.Runtime.dll"],"types":[16,16],"fixtureFlag":true}`)
 	knownText := `namespace Baseline { public class Known : Package.Second.Known { public int seed = 3; } }`
 	known := writeGoGraphFile(t, project, "Assets/Known.cs", knownText)
 	writeGoGraphFile(t, project, "Assets/Known.cs.meta", "guid: 10000000000000000000000000000001\nMonoImporter:\n  executionOrder: 0\n")
@@ -383,7 +383,7 @@ namespace Package.Second { [UnityEngine.DefaultExecutionOrder(-5000)] public cla
 	graph := goCompilerGraphExport{SchemaVersion: 1, Project: project, Unity: editor,
 		Assemblies: []goCompilerGraphAssembly{
 			{goAssemblyConfig: goAssemblyConfig{Name: "Consumer", Sources: []string{consumer}, Defines: []string{"UNITY_6000_6"}}, Path: consumerDLL, References: []string{"Assembly-CSharp"}},
-			{goAssemblyConfig: goAssemblyConfig{Name: "Assembly-CSharp", Sources: []string{known}, Defines: []string{"UNITY_6000_6"}}, Path: knownDLL, References: []string{"Dungeon.CLIPlay", "Package.Runtime"}},
+			{goAssemblyConfig: goAssemblyConfig{Name: "Assembly-CSharp", Sources: []string{known}, Defines: []string{"UNITY_6000_6"}}, Path: knownDLL, References: []string{"UnityMicroEditor", "Package.Runtime"}},
 		}, Scripts: []goCompileScript{{GUID: "10000000000000000000000000000001", Path: known, Assembly: "Assembly-CSharp", TypeName: "Baseline.Known"}, {GUID: "10000000000000000000000000000002", Path: consumer, Assembly: "Consumer", TypeName: "Consumer"},
 			{GUID: "10000000000000000000000000000006", Path: editorOnlySource, Assembly: "Package.Runtime", TypeName: "Package.DownloadableSample", HostProvided: true},
 			{GUID: "10000000000000000000000000000005", Path: packageSource, Assembly: "Package.Runtime", TypeName: "Package.Second.Known", HostProvided: true}},
@@ -407,8 +407,8 @@ namespace Package.Second { [UnityEngine.DefaultExecutionOrder(-5000)] public cla
 	}
 	// A public Editor export can reference a newer bridge than the prepared
 	// native host. Never conceal this deployment drift with the Editor DLL.
-	editorBridge := filepath.Join(project, "Library/ScriptAssemblies/Dungeon.CLIPlay.dll")
-	api := `namespace Dungeon.CLIPlay { public static class AgentRuntimeCommands { public static int Register() => 2; public sealed class Token {} } internal class EditorDetail { public class Hidden {} } }`
+	editorBridge := filepath.Join(project, "Library/ScriptAssemblies/UnityMicroEditor.dll")
+	api := `namespace UnityMicroEditor { public static class AgentRuntimeCommands { public static int Register() => 2; public sealed class Token {} } internal class EditorDetail { public class Hidden {} } }`
 	compile(editorBridge, bridgeText+api)
 	oldBridgeHash, err := goFileHash(bridge)
 	if err != nil {
@@ -424,7 +424,7 @@ namespace Package.Second { [UnityEngine.DefaultExecutionOrder(-5000)] public cla
 		t.Fatal("stale host was overwritten with the Editor bridge")
 	}
 	// Matching public types allow different implementation details and bodies.
-	compile(bridge, bridgeText+`namespace Dungeon.CLIPlay { public static class AgentRuntimeCommands { public static int Register() => 1; public sealed class Token {} } }`)
+	compile(bridge, bridgeText+`namespace UnityMicroEditor { public static class AgentRuntimeCommands { public static int Register() => 1; public sealed class Token {} } }`)
 	missingRuntime := `namespace Package { public class EditorOnlyMissing : UnityEngine.MonoBehaviour {} }`
 	writeGoGraphFile(t, project, "Library/PackageCache/com.test.runtime@fixture/Known.cs", packageText+missingRuntime)
 	compile(packageEditor, packageText+editorOnlyText+missingRuntime)
@@ -657,7 +657,7 @@ namespace Package.Second { [UnityEngine.DefaultExecutionOrder(-5000)] public cla
 			t.Fatal(err)
 		}
 		slots := filepath.Join(filepath.Dir(nativePrepared.Player), "Host_Data/ScriptingAssemblies.json")
-		if err := os.WriteFile(slots, []byte(`{"names":["Dungeon.CLIPlay.dll"],"types":[16]}`), 0600); err != nil {
+		if err := os.WriteFile(slots, []byte(`{"names":["UnityMicroEditor.dll"],"types":[16]}`), 0600); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := newGoCompiler(project, nativeBaseline, nativePrepared.Player, editor, filepath.Join(project, "Temp/native-revisions")); err == nil || !strings.Contains(err.Error(), "native-only host registrations differ") {

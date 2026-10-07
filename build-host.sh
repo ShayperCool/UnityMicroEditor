@@ -21,7 +21,7 @@ host_output_dir=$(dirname -- "$host_output")
 host_report="$host_output_dir/host-build.json"
 host_log="$host_project/Logs/host-build.log"
 host_command=( "$host_editor" -batchmode -nographics -buildTarget Linux64 -projectPath "$host_project"
-    -executeMethod Dungeon.CLIPlay.HostBuild.Build.FromCommandLine -logFile "$host_log" )
+    -executeMethod UnityMicroEditor.HostBuild.Build.FromCommandLine -logFile "$host_log" )
 if ((host_dry_run)); then
     printf 'UNITY_RAW_HOST_OUTPUT=%q UNITY_RAW_HOST_REPORT=%q ' "$host_output" "$host_report"
     printf '%q ' "${host_command[@]}"

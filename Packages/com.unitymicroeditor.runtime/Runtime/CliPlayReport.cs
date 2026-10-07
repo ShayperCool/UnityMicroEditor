@@ -6,7 +6,7 @@ using UnityEngine;
 using UnityEngine.LowLevel;
 using UnityEngine.SceneManagement;
 
-namespace Dungeon.CLIPlay
+namespace UnityMicroEditor
 {
     [Serializable]
     public sealed class CliPlayReport

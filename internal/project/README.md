@@ -56,12 +56,12 @@ The standalone preparation command is useful for inspecting a revision:
 
 ```sh
 cd $UNITY_MICRO_EDITOR_ROOT
-CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /absolute/project/Temp/UnityPlay/go-prepare ./cmd/prepare
-/absolute/project/Temp/UnityPlay/go-prepare \
+CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /tmp/go-prepare ./cmd/prepare
+/tmp/go-prepare \
   --project /absolute/project \
   --manifest /absolute/path/to/validated/scene.json \
   --native-catalog /absolute/path/to/catalog.json \
-  --output /absolute/project/Temp/UnityPlay/go-project/output
+  --output /absolute/project/Library/UnityMicroEditor/revisions
 ```
 
 Scene and prefab support includes nested prefabs and model hierarchies, stripped

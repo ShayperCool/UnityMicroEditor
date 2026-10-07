@@ -16,7 +16,7 @@ using UnityEngine.SceneManagement;
 using UnityEngine.Rendering;
 using PackageInfo = UnityEditor.PackageManager.PackageInfo;
 
-namespace Dungeon.CLIPlay.Editor
+namespace UnityMicroEditor.Editor
 {
     /// <summary>Owned file protocol for public Editor preparation and build APIs.</summary>
     [InitializeOnLoad]
@@ -152,7 +152,7 @@ namespace Dungeon.CLIPlay.Editor
         {
             // Only the two named public adapters in this package's own Editor
             // assembly are callable. No request supplies a type or member name.
-            Type type = typeof(AgentEditorBridge).Assembly.GetType("Dungeon.CLIPlay.Editor." + name, false);
+            Type type = typeof(AgentEditorBridge).Assembly.GetType("UnityMicroEditor.Editor." + name, false);
             var method = type == null ? null : type.GetMethod("Execute", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static,
                 null, new[] { typeof(Dictionary<string, object>), typeof(string), typeof(string) }, null);
             if (method == null) throw new InvalidOperationException("This installed package has no " + name + " preparation adapter.");
@@ -371,7 +371,7 @@ namespace Dungeon.CLIPlay.Editor
             bool createdParent = !AssetDatabase.IsValidFolder(parent);
             SceneSetup[] setup = EditorSceneManager.GetSceneManagerSetup();
             var excluded = new HashSet<string>(CompilationPipeline.GetAssemblies(AssembliesType.PlayerWithoutTestAssemblies)
-                .Where(x => x.name != "Dungeon.CLIPlay" && x.sourceFiles.Any(source => source.StartsWith("Assets/", StringComparison.Ordinal)))
+                .Where(x => x.name != "UnityMicroEditor" && x.sourceFiles.Any(source => source.StartsWith("Assets/", StringComparison.Ordinal)))
                 .Select(x => x.name), StringComparer.Ordinal);
             ManagedStrippingLevel stripping = PlayerSettings.GetManagedStrippingLevel(NamedBuildTarget.Standalone);
             bool stripEngine = PlayerSettings.stripEngineCode, background = PlayerSettings.runInBackground;

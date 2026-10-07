@@ -4,7 +4,7 @@ using System.Reflection;
 using UnityEngine;
 using UnityEngine.Scripting;
 
-namespace Dungeon.CLIPlay
+namespace UnityMicroEditor
 {
     // End-of-frame coroutines remain in the ungated render stages while the
     // agent pauses game Update/FixedUpdate. The object is owned by the bridge.

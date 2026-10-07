@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	goproject "unitymicroeditor/internal/project"
 	"unitymicroeditor/internal/editorbridge"
+	goproject "unitymicroeditor/internal/project"
 )
 
 func agentSetting(project, path string) (map[string]any, error) {

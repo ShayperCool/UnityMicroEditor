@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	goproject "unitymicroeditor/internal/project"
 	"unitymicroeditor/internal/agentcontrol"
+	goproject "unitymicroeditor/internal/project"
 )
 
 func agentRequiresNewGraph(message string) bool {

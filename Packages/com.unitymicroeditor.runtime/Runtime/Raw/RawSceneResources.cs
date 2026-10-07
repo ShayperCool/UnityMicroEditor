@@ -1,6 +1,6 @@
 using UnityEngine;
 
-namespace Dungeon.CLIPlay.Raw
+namespace UnityMicroEditor.Raw
 {
     // Scene ownership keeps imported textures/materials bounded across reloads.
     public sealed class RawSceneResources : MonoBehaviour

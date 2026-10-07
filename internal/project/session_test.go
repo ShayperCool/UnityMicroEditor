@@ -210,7 +210,7 @@ SceneRoots:
 	}
 }
 
-// Opt-in parity check reads the real Dungeon scene and import catalog without
+// Opt-in parity check reads a real project scene and import catalog without
 // mutating either. This is also used for full-scene preparation measurements.
 func TestActualSampleSceneParity(t *testing.T) {
 	project := os.Getenv("UNITY_PLAY_PARITY_PROJECT")

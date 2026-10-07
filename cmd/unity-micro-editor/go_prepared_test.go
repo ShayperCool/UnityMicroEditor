@@ -73,7 +73,7 @@ func TestPreparedNativeOnlySceneRequiresVerifiedHostRegistrations(t *testing.T) 
 	if err := os.MkdirAll(filepath.Dir(registrations), 0700); err != nil {
 		t.Fatal(err)
 	}
-	contents := []byte(`{"names":["Dungeon.CLIPlay.dll","UnityEngine.CoreModule.dll"]}`)
+	contents := []byte(`{"names":["UnityMicroEditor.dll","UnityEngine.CoreModule.dll"]}`)
 	if err := os.WriteFile(registrations, contents, 0600); err != nil {
 		t.Fatal(err)
 	}

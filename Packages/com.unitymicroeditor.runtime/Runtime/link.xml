@@ -1,11 +1,11 @@
 <linker>
-  <assembly fullname="Dungeon.CLIPlay">
-    <type fullname="Dungeon.CLIPlay.AgentToolAttribute" preserve="all" />
-    <type fullname="Dungeon.CLIPlay.AgentToolArgumentAttribute" preserve="all" />
-    <type fullname="Dungeon.CLIPlay.AgentRuntimeTools" preserve="all" />
-    <type fullname="Dungeon.CLIPlay.AgentToolExecutionException" preserve="all" />
-    <type fullname="Dungeon.CLIPlay.AgentRuntimeCommands" preserve="all" />
-    <type fullname="Dungeon.CLIPlay.AgentRuntimeSnapshot" preserve="all" />
-    <type fullname="Dungeon.CLIPlay.AgentCaptureRunner" preserve="all" />
+  <assembly fullname="UnityMicroEditor">
+    <type fullname="UnityMicroEditor.AgentToolAttribute" preserve="all" />
+    <type fullname="UnityMicroEditor.AgentToolArgumentAttribute" preserve="all" />
+    <type fullname="UnityMicroEditor.AgentRuntimeTools" preserve="all" />
+    <type fullname="UnityMicroEditor.AgentToolExecutionException" preserve="all" />
+    <type fullname="UnityMicroEditor.AgentRuntimeCommands" preserve="all" />
+    <type fullname="UnityMicroEditor.AgentRuntimeSnapshot" preserve="all" />
+    <type fullname="UnityMicroEditor.AgentCaptureRunner" preserve="all" />
   </assembly>
 </linker>

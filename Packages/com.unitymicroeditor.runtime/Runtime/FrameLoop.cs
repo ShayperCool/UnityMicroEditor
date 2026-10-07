@@ -1,7 +1,7 @@
 using System;
 using UnityEngine.LowLevel;
 
-namespace Dungeon.CLIPlay
+namespace UnityMicroEditor
 {
     /// <summary>Edits a copy of the public PlayerLoop without replacing existing engine or package systems.</summary>
     public static class FrameLoop
