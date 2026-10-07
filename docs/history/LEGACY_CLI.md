@@ -1,6 +1,6 @@
 # Unity Player из CLI
 
-Текущий Go runner запускает Dungeon SampleScene и наблюдает за сценой, C# и поддержанными native-ассетами без Python и основного Editor. Команда запуска, необходимые baseline/host, замеры и ограничения находятся в [GO_RUNNER.md](../../GO_RUNNER.md). `$UNITY_MICRO_EDITOR_ROOT/unity-micro-editor` использует уже подготовленный тяжёлый контент; запуск чистого произвольного проекта пока не готов.
+Текущий Go runner запускает Dungeon SampleScene и наблюдает за сценой, C# и поддержанными native-ассетами без Python и основного Editor. Команда запуска, необходимые baseline/host, замеры и ограничения находятся в [GO_RUNNER.md](../GO_RUNNER.md). `$UNITY_MICRO_EDITOR_ROOT/unity-micro-editor` использует уже подготовленный тяжёлый контент; запуск чистого произвольного проекта пока не готов.
 
 Ниже описан прежний Python CLI `$UNITY_MICRO_EDITOR_ROOT/unity-play` и его этапы подготовки.
 
@@ -12,11 +12,11 @@
 
 Первый импорт, подготовка Player и экспорт изменённых ассетов в прежнем пути требуют установленный Unity Editor. Запуск сцены и поддерживаемая перекомпиляция кода обходятся без него. В этом прежнем пути файлы `.unity`, `.prefab`, материалы и шейдеры должны пройти штатный asset pipeline. `-nographics` отключает графику, но не убирает физику и native runtime. Это не полный аналог Editor Play Mode, где состояние сцены может ещё не быть сохранено.
 
-Подробности моддинга, порядок запуска движка и первоисточники собраны в [RESEARCH.md](RESEARCH.md). Эксперимент с обычным .NET находится в [ManagedProbe](../../ManagedProbe/README.md). Возможность работать с сырым контентом без Editor исследована отдельно в [NO_EDITOR_CONTENT.md](NO_EDITOR_CONTENT.md), прямые API пробы — в ContentProbe. `--project /absolute/project install` копирует bridge без Dungeon benchmark-сцен; существующие изменённые файлы не перезаписывает.
+Подробности моддинга, порядок запуска движка и первоисточники собраны в [RESEARCH.md](RESEARCH.md). Эксперимент с обычным .NET находится в ManagedProbe. Возможность работать с сырым контентом без Editor исследована отдельно в [NO_EDITOR_CONTENT.md](NO_EDITOR_CONTENT.md), прямые API пробы — в ContentProbe. `--project /absolute/project install` копирует bridge без Dungeon benchmark-сцен; существующие изменённые файлы не перезаписывает.
 
 Штатные native импортёры, import workers и проверенный независимый FBX SDK разобраны в [NATIVE_IMPORTERS.md](NATIVE_IMPORTERS.md).
 
-[Go-координатор AssetImportWorker](../../WorkerProbe/README.md) импортирует тяжёлые ассеты без основного Editor через собственные SourceAssetDB/DataStore и штатные FBX/WAV импортёры. Прямую доставку native SerializedFile в Player теперь использует [Go runner](../../GO_RUNNER.md); для неизменённых зависимостей он сохраняет прежний bundle. Старые microbenchmarks двух ассетов относятся к отдельному worker prototype. `unity-play` остаётся прежним Python CLI, а его `import-assets` использует Editor.
+[Go-координатор AssetImportWorker](../WORKER_IMPORT.md) импортирует тяжёлые ассеты без основного Editor через собственные SourceAssetDB/DataStore и штатные FBX/WAV импортёры. Прямую доставку native SerializedFile в Player теперь использует [Go runner](../GO_RUNNER.md); для неизменённых зависимостей он сохраняет прежний bundle. Старые microbenchmarks двух ассетов относятся к отдельному worker prototype. `unity-play` остаётся прежним Python CLI, а его `import-assets` использует Editor.
 
 Собственный pipeline развивается через сравнение с настоящим Editor Play Mode. Одинаковые исходные сцены запускаются в изолированном Editor и в raw Player; общий observer сравнивает восстановленные данные и lifecycle. Cooked результаты Editor в raw запуск не передаются.
 

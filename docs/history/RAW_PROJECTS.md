@@ -1,6 +1,6 @@
 # Сырой Unity проект через универсальный Player
 
-Новый [Go runner для Dungeon](../../GO_RUNNER.md) использует `$UNITY_MICRO_EDITOR_ROOT/unity-micro-editor`: scene patch, SDK compile и прямую доставку поддержанных native worker artifacts. Он требует существующий baseline, native catalog/compiler configuration и готовый Mono host. Ниже описан прежний Python CLI `$UNITY_MICRO_EDITOR_ROOT/unity-play`, включая его минимальный режим и подготовку гибрида; его ограничения и замеры отличаются от нового runner.
+Новый [Go runner для Dungeon](../GO_RUNNER.md) использует `$UNITY_MICRO_EDITOR_ROOT/unity-micro-editor`: scene patch, SDK compile и прямую доставку поддержанных native worker artifacts. Он требует существующий baseline, native catalog/compiler configuration и готовый Mono host. Ниже описан прежний Python CLI `$UNITY_MICRO_EDITOR_ROOT/unity-play`, включая его минимальный режим и подготовку гибрида; его ограничения и замеры отличаются от нового runner.
 
 Минимальный режим `raw-run` компилирует исходный C# и загружает сохранённые `.unity`, `.prefab`, `.mat`, `.asset` и PNG/JPEG собственным загрузчиком. Входному проекту не нужны `Library`, готовый Player или AssetBundle. Рендеринг, физика, MonoBehaviour и PlayerLoop исполняются настоящим Unity runtime.
 
@@ -144,7 +144,7 @@ Frontend восстанавливает 857 scene records с native моделя
 ```bash
 python3 -m unittest discover -s $UNITY_MICRO_EDITOR_ROOT/tests -v
 /path/to/Unity/Editor/Data/DotNetSdk/dotnet run \
-  --project $UNITY_MICRO_EDITOR_ROOT/RawRuntimeTests/RawRuntimeTests.csproj
+  --project $UNITY_MICRO_EDITOR_ROOT/tests/RawRuntimeTests/RawRuntimeTests.csproj
 python3 $UNITY_MICRO_EDITOR_ROOT/benchmark_raw.py
 ```
 

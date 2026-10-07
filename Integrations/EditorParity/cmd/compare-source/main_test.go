@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	goproject "unitymicroeditor/project"
+	goproject "unitymicroeditor/internal/project"
 )
 
 func TestSourceReadbackDetectsNativeValueOwnershipAndHierarchyDifferences(t *testing.T) {

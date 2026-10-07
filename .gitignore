@@ -1,6 +1,7 @@
 **/bin/
 **/obj/
-**/Temp/
+**/Temp/*
+!/Temp/go.mod
 **/Library/
 **/Builds/
 **/Logs/
