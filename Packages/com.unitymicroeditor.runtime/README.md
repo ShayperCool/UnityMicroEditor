@@ -1,8 +1,8 @@
 # Unity Micro Editor runtime
 
-The shared C# package implements source scene loading, lifecycle barriers, native content delivery, scene patches, runtime reports and the agent control bridge. It has no compile-time dependency on Dungeon gameplay assemblies.
+The shared C# package implements source scene loading, lifecycle barriers, native content delivery, scene patches, runtime reports and the agent control bridge. It has no dependency on any game's assemblies.
 
-Both Dungeon and the minimal host reference this directory as a local Unity package. It requires SRP Core `17.6.0` and Collections `6.6.0`. Script `.meta` files, assembly names, and namespaces are preserved so existing component references continue to resolve. The assembly remains `Dungeon.CLIPlay` for compatibility.
+The host project and target projects reference this directory as a local Unity package. It requires SRP Core `17.6.0` and Collections `6.6.0`. The assembly and namespace are named `Dungeon.CLIPlay`; script `.meta` files and that name are kept so existing component references continue to resolve.
 
 Public project methods annotated with `[AgentTool("name")]` become discoverable agent tools. `[AgentToolArgument]` describes required fields and constraints on public DTOs. Calls execute on the Unity main thread; public MonoBehaviour methods bind to explicit live targets. The runtime also provides game-loop pause/step, supported Input System events, public UI dispatch and screen/camera capture. See [the agent guide](../../docs/AGENT_MCP.md) for MCP registration, identity guards and retry semantics.
 

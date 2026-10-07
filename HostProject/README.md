@@ -6,4 +6,4 @@ The project references the sibling `com.unitymicroeditor.runtime` package and Un
 
 Run `../build-host.sh --dry-run` to inspect the command, or `../build-host.sh` to build the Linux x64 Mono Player. Close other Unity Editor projects first. Build output, imports, logs, and generated resources stay local.
 
-This project defines the basic runtime profile. A target using URP, Input System, Netcode, or other packages needs a matching package-aware host and validated compiler/native baseline. The current Dungeon proof uses an existing host with those packages. Do not treat this minimal Player as a compatible binary for every Unity project or engine version.
+This project defines the basic runtime profile. A target using URP, Input System, Netcode, or other packages needs a matching package-aware host and validated compiler/native baseline. Do not treat this minimal Player as a compatible binary for every Unity project or engine version.

@@ -21,8 +21,8 @@ engine/native-host profile. Rider/Visual Studio packages use Unity's public
 CompilationPipeline for their assembly inventories; our implementation derives
 target ownership and references directly from source.
 
-This package prepares Dungeon's `SampleScene` from authored `.unity` and `.prefab`
-files without running Python, the Unity Editor or a Player. The existing C# raw
+This package prepares a scene from authored `.unity` and `.prefab` files without
+running the Unity Editor or a Player. The existing C# raw
 loader consumes its schema 1 `scene.json` without an adapter.
 
 It currently starts from a validated scene manifest and a compatible cached native
@@ -61,7 +61,7 @@ CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /absolute/project/Temp/Unit
   --project /absolute/project \
   --manifest /absolute/path/to/validated/scene.json \
   --native-catalog /absolute/path/to/catalog.json \
-  --output ../../../Temp/UnityPlay/go-project/output
+  --output /absolute/project/Temp/UnityPlay/go-project/output
 ```
 
 Scene and prefab support includes nested prefabs and model hierarchies, stripped
@@ -111,8 +111,9 @@ are checked again before writing a revision. The input project's `Library` is ne
 read. Cached package sources must be declared in `catalog.sourceRoots`.
 
 The optional full-scene checks compare every object identity, type, serialized
-field and custom runtime prefab against the previously validated Dungeon manifest.
-They also copy the source tree with XFS reflinks and change the copied SampleScene,
+field and custom runtime prefab against a previously validated manifest of a real
+project.
+They also copy the source tree with XFS reflinks and change the copied scene,
 leaving the original Assets untouched:
 
 ```sh
@@ -125,7 +126,5 @@ UNITY_PLAY_PARITY_CATALOG=/absolute/catalog.json \
   go test ./internal/project -run TestActualSampleScene -v
 ```
 
-On the current Dungeon scene, the parity run reproduced 857 objects and 1,264
-assets. A repeated preparation took about 220 ms with zero source reads and zero
-YAML parses. These times cover preparation only, not C# compilation or Player
-scene replacement.
+A repeated preparation of an unchanged project does no source reads and no YAML
+parses.

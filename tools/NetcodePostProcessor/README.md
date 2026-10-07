@@ -1,21 +1,20 @@
-# NGO после компиляции через SDK
+# Netcode post-processing after SDK compilation
 
-Go compiler запускает этот небольшой C# executable после Roslyn для сборок, чей подготовленный граф ссылается на `Unity.Netcode.Runtime`. Используются неизменённые исходники `Editor/CodeGen` из закреплённого NGO package: `INetworkSerializableILPP`, `INetworkMessageILPP` и `NetworkBehaviourILPP`. Каждый процессор вызывается через публичный `ILPostProcessor.Process(ICompiledAssembly)`; Unity Editor не запускается.
+The Go compiler runs this small C# executable after Roslyn for assemblies whose prepared graph references `Unity.Netcode.Runtime`. It uses the unmodified `Editor/CodeGen` sources from the project's pinned Netcode for GameObjects package: `INetworkSerializableILPP`, `INetworkMessageILPP` and `NetworkBehaviourILPP`. Each processor is called through the public `ILPostProcessor.Process(ICompiledAssembly)`. The Unity Editor is not started.
 
-Helper собирается SDK .NET 8 из установленной Unity. Он ссылается на `Unity.CompilationPipeline.Common`, пакет Mono.Cecil, runtime Unity modules и unstripped standalone NGO reference из `Library/Bee/artifacts/StandaloneLinux64_CodeGen`. Последний нужен потому, что linker готового Player удаляет friend-access metadata, необходимую самому package CodeGen. При обработке игровых DLL resolver получает настоящие Player references.
+The helper is built with the .NET 8 SDK from the Unity installation. It references `Unity.CompilationPipeline.Common`, the Mono.Cecil package, Unity runtime modules and the unstripped standalone Netcode reference from `Library/Bee/artifacts/StandaloneLinux64_CodeGen`. The last is needed because the Player's linker removes friend-access metadata that the package's CodeGen requires. When processing game DLLs, the resolver gets the real Player references.
 
-В package source упоминание Editor initialization attribute находится внутри обычного `if`, хотя `using UnityEditor` условный. В helper есть недостижимый placeholder этого типа. Запросы с `UNITY_EDITOR` отклоняются; сборки UnityEditor не загружаются. Исходники стороннего package не меняются.
+In the package source, a reference to an Editor initialization attribute sits inside an ordinary `if`, although `using UnityEditor` is conditional. The helper has an unreachable placeholder for that type. Requests with `UNITY_EDITOR` defined are refused and UnityEditor assemblies are not loaded. Third-party package sources are not changed.
 
-После ILPP проверяются RPC handlers, send/registration paths и serializer calls для payloads. Публичные runtime bridges из исходного lifecycle compiler должны сохраниться. NGO initialization для `NetworkVariable` оборачивается в публичный `__UnityPlay_RuntimeInitialize_Netcode`; его descriptor передаётся raw loader для вызова после создания сцены и до `Start`.
+After post-processing, the helper checks RPC handlers, send and registration paths, and serializer calls for payloads. Public runtime bridges added by the lifecycle compiler must survive. Netcode initialization for `NetworkVariable` is wrapped in a public `__UnityPlay_RuntimeInitialize_Netcode`; its descriptor is passed to the loader, which calls it after the scene is created and before `Start`.
 
-Roslyn убирает неиспользованные assembly references. Если emitted DLL фактически не использует NGO, helper возвращает её исходные байты с подтверждённым `required=false`. Для сетевой сборки `Dungeon.Net` проверены все 11 RPC и сохранение 15 lifecycle callbacks.
+Roslyn drops unused assembly references. If the emitted DLL does not actually use Netcode, the helper returns its original bytes with a confirmed `required=false`.
 
-Кэш учитывает helper source, package CodeGen source, SDK/compiler binaries, все helper dependencies и хеши собранного helper. Обработанные DLL/PDB проверяются при повторном использовании. Старый raw baseline без RPC generation пересобирается один раз; дальнейшая компиляция тела метода по-прежнему переиспользует зависимости, когда объявления не изменились.
+The cache key covers the helper source, the package CodeGen source, SDK and compiler binaries, every helper dependency and the hashes of the built helper. Processed DLLs and PDBs are verified on reuse.
 
-SDK-only проверка без Player и Editor:
+SDK-only check, without a Player or Editor:
 
 ```bash
-cd $UNITY_MICRO_EDITOR_ROOT
 UNITY_GO_NETCODE_SDK=/absolute/Unity/Editor/Unity \
   go test ./cmd/unity-micro-editor -run TestGoNetcodePostprocessorSDK -v
 ```

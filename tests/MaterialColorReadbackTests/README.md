@@ -1,12 +1,12 @@
 # Material color readback regression
 
 ```bash
-/home/shaypercool/Unity/Hub/Editor/6000.6.3f1/Editor/Data/DotNetSdk/dotnet run \
-  --project $UNITY_MICRO_EDITOR_ROOT/tests/MaterialColorReadbackTests/MaterialColorReadbackTests.csproj
+"$UNITY_DATA/DotNetSdk/dotnet" run \
+  --project tests/MaterialColorReadbackTests/MaterialColorReadbackTests.csproj
 ```
 
-Этот SDK executable проверяет production `RawFloatReadback` без Player или Editor. Значения взяты из finite GPU probe Unity 6000.6.3f1: `Dungeon/PixelLit`, `_BaseColor`, `MainColor`, Linear space. При SetColor `(0.82, 0.47, 0.16, 1)` GetColor и GetVector вернули `(0.82, 0.4699999, 0.159999967, 1)`.
+`UNITY_DATA` is the `Editor/Data` directory of the Unity installation.
 
-В последующем запуске `Decor_SignFace` цвет `(0.05, 0.05, 0.06, 1)` вернулся как `(0.0499999821, 0.0499999821, 0.0599999651, 1)`, с отклонением до 9 ULP.
+This SDK executable checks the production `RawFloatReadback` without a Player or Editor. Its values come from a GPU probe on Unity 6000.6.3f1 in Linear color space: after `SetColor(0.82, 0.47, 0.16, 1)`, `GetColor` and `GetVector` returned `(0.82, 0.4699999, 0.159999967, 1)`. A second sample, `(0.05, 0.05, 0.06, 1)`, came back as `(0.0499999821, 0.0499999821, 0.0599999651, 1)`, up to 9 ULP away.
 
-Допуск ограничен 32 ULP на канал float32. Проверки отвергают 33 ULP, изменение tint/alpha, смену знака, NaN, Infinity и крупное отличие после перепутанного linear/gamma преобразования. Исходные значения материала loader передаёт в SetColor без изменения. Vector свойства, которые Unity тоже хранит в `m_Colors`, восстанавливаются отдельно через SetVector с точным GetVector readback; это сохраняет Infinity sentinel у `_CameraFadeParams`. Отчёт finite probe сохраняется в игнорируемом `Temp/UnityPlay/material-color-proof/diagnostic-readback.json`.
+The tolerance is 32 ULP per float32 channel. The checks reject 33 ULP, a changed tint or alpha, a sign change, NaN, Infinity, and the large difference produced by a mixed-up linear/gamma conversion. The loader passes authored material values to `SetColor` unchanged. Vector properties, which Unity also stores in `m_Colors`, are restored separately through `SetVector` with an exact `GetVector` readback, which preserves the Infinity sentinel in `_CameraFadeParams`.

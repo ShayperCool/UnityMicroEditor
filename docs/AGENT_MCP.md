@@ -143,7 +143,7 @@ EditMode runner are outside this integration's requested scope.
 ## Register project tools with attributes
 
 ```csharp
-using Dungeon.CLIPlay;
+using Dungeon.CLIPlay; // the runtime package namespace
 using UnityEngine;
 
 public sealed class SetCounterArgs
@@ -310,19 +310,15 @@ markers. Screenshots require a graphics device and return a PNG path, hash,
 dimensions and frame. Viewport-dependent UI and advancing counters need aligned
 checkpoints for comparisons.
 
-## Validate against Editor and Coplay
+## Known differences from the Editor
 
-[Integrations/EditorParity](../Integrations/EditorParity/README.md) uses an isolated
-Unity Editor and pinned official Coplay MCP 10.2.0. Coplay's external Python server
-is confined to the reference; our CLI, MCP, coordination and clients are Go, with
-C# runtime/compiler helpers. Compare complete authored and runtime readbacks using
-public APIs, exact source identities, aligned simulation checkpoints and explicit
-numeric tolerances. A saved source edit, successful SDK compilation, readiness ACK
-and observed gameplay assertion are separate results.
+- Rendering is close but not pixel-identical. Geometry and background match in the reference scene; shading and antialiasing differ slightly.
+- In the standalone Player, `Transform.GetSiblingIndex()` returns `0` for root objects. MCP hierarchy reports root order from authored order and `Scene.GetRootGameObjects()`. Game code that depends on the native root index can behave differently. Child sibling order uses the native API.
+- Legacy `pause` sets scaled time to zero. It does not suspend the whole PlayerLoop the way Editor Pause does; use `simulation_pause` and `simulation_step` for that.
+- A C# change restarts the Player and resets game state. There is no domain reload equivalent.
+- Fresh native import is bound to verified profiles. Baked lighting and navigation, arbitrary shader and importer settings, complete animation behavior and multiplayer state are not implied by a successful preparation.
+- General `CustomEditor`/`EditorWindow` execution and an EditMode test runner are out of scope.
 
-[AGENT_VALIDATION.md](AGENT_VALIDATION.md) and the integration reports distinguish
-executed comparisons from untested coverage. Supported fresh native import is
-profile-bound; baked lighting/navigation, arbitrary shader/importer settings,
-complete animation behavior, multiplayer state and domain reload equivalence are
-not implied by preparation success. Run the relevant race/vet and SDK checks from
-[CONTRIBUTING.md](../CONTRIBUTING.md).
+## Compare against the Editor
+
+[Integrations/EditorParity](../Integrations/EditorParity/README.md) sets up an isolated Unity Editor with the Coplay MCP server as a reference and provides Go clients that compare its readbacks with ours. Use it when changing authoring, the compiler graph or the runtime bridge. A saved source edit, a successful SDK compilation, a readiness acknowledgement and an observed gameplay assertion are separate results; check each one. The required Go and SDK checks are in [CONTRIBUTING.md](../CONTRIBUTING.md).
