@@ -54,14 +54,14 @@ func runProjectImportCLI(args []string) error {
 	var assets repeatedAssetFlag
 	flags.StringVar(&opts.Editor, "editor", defaultUnityEditor(), "supported native Unity executable")
 	flags.StringVar(&opts.Project, "project", ".", "source Unity project, read only")
-	flags.StringVar(&opts.Output, "output", "", "new directory beneath source project Temp")
+	flags.StringVar(&opts.Output, "output", "", "new directory beneath project Library/UnityMicroEditor or Temp")
 	flags.Var(&assets, "asset", "native source asset path; repeat for multiple imports")
 	flags.DurationVar(&opts.Timeout, "timeout", 45*time.Second, "whole import deadline, at most 5m")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 || opts.Output == "" || len(assets) == 0 || opts.Timeout <= 0 || opts.Timeout > 5*time.Minute {
-		return errors.New("use project-import --project <source> --output <new Temp directory> --asset Assets/path.fbx [--asset ...] --timeout 45s")
+		return errors.New("use project-import --project <source> --output <new directory> --asset Assets/path.fbx [--asset ...] --timeout 45s")
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -99,7 +99,7 @@ func runProjectImport(ctx context.Context, opts options, assets []string) (repor
 	if err != nil {
 		return nil, err
 	}
-	opts.Context, opts.Registry, opts.ProjectContext, opts.Mode = prepared.Project, &registry, prepared, "import"
+	opts.Context, opts.Registry, opts.ProjectContext = prepared.Project, &registry, prepared
 	preparationSeconds := time.Since(started).Seconds()
 	report, err = runProbe(ctx, opts)
 	if report == nil {

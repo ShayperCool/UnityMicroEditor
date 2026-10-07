@@ -7,7 +7,7 @@ using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
-namespace Dungeon.CLIPlay.Editor
+namespace UnityMicroEditor.Editor
 {
     /// <summary>PrefabUtility operations in an isolated authored project snapshot.</summary>
     public static class AgentPrefabAuthoring

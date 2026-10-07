@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
 
-namespace Dungeon.CLIPlay.Raw
+namespace UnityMicroEditor.Raw
 {
     // Content identity, rather than revision paths, allows scene-only revisions
     // to reuse assemblies that are already registered with Unity's native host.

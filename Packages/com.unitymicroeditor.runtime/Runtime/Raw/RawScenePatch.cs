@@ -7,7 +7,7 @@ using UnityEngine;
 using UnityEngine.SceneManagement;
 using Object = UnityEngine.Object;
 
-namespace Dungeon.CLIPlay.Raw
+namespace UnityMicroEditor.Raw
 {
     [Serializable]
     public sealed class RawScenePatch

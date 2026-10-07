@@ -15,10 +15,10 @@ import (
 	"syscall"
 	"time"
 
+	"unitymicroeditor/internal/editorbridge"
 	goproject "unitymicroeditor/internal/project"
 	"unitymicroeditor/internal/project/authoring"
 	unitypackages "unitymicroeditor/internal/project/packages"
-	"unitymicroeditor/internal/editorbridge"
 )
 
 type agentDefaultsProfile struct {

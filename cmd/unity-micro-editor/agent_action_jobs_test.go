@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"unitymicroeditor/internal/project/authoring"
 	"unitymicroeditor/internal/agentcontrol"
+	"unitymicroeditor/internal/project/authoring"
 )
 
 func waitAgentJob(t *testing.T, service *agentProjectService, action string, raw json.RawMessage, run func(context.Context, string, json.RawMessage) (any, error)) (any, error) {

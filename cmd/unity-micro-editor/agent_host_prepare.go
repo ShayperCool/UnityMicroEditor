@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	goproject "unitymicroeditor/internal/project"
 	"unitymicroeditor/internal/editorbridge"
+	goproject "unitymicroeditor/internal/project"
 )
 
 type agentHostPreparation struct {
@@ -239,7 +239,7 @@ func snapshotAgentHostArtifacts(ctx context.Context, project, stage, phase, play
 	if err != nil {
 		return nil, err
 	}
-	if result["Project_Data/Managed/Dungeon.CLIPlay.dll"] == "" || result["Project_Data/ScriptingAssemblies.json"] == "" {
+	if result["Project_Data/Managed/UnityMicroEditor.dll"] == "" || result["Project_Data/ScriptingAssemblies.json"] == "" {
 		return nil, errors.New("staged host lacks its native runtime bridge/Mono registrations")
 	}
 	var slots struct {
@@ -249,7 +249,7 @@ func snapshotAgentHostArtifacts(ctx context.Context, project, stage, phase, play
 		return nil, err
 	}
 	for _, name := range slots.Names {
-		if name == "Dungeon.CLIPlay.dll" {
+		if name == "UnityMicroEditor.dll" {
 			return result, nil
 		}
 	}

@@ -7,7 +7,7 @@ using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.Rendering;
 
-namespace Dungeon.CLIPlay.HostBuild
+namespace UnityMicroEditor.HostBuild
 {
     /// <summary>Creates only missing host content in a dedicated tool project.</summary>
     public static partial class Build

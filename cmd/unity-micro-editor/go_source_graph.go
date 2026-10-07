@@ -497,7 +497,7 @@ func buildGoSourceGraph(ctx context.Context, options goSourceGraphOptions) (*goC
 				}
 			}
 		}
-		if name == "Dungeon.CLIPlay" {
+		if name == "UnityMicroEditor" {
 			// Editor-only adapters may change independently. The bridge's exact
 			// runtime source and asmdef/config proof must still match its DLL.
 			native = fact.Name == name && equalStrings(sortedGoSourceStrings(fact.Configuration.Defines), config.Defines) && fact.Configuration.Config.AllowUnsafe == config.Config.AllowUnsafe && fact.Configuration.Config.NoEngineReferences == config.Config.NoEngineReferences && fact.Configuration.Config.OverrideReferences == config.Config.OverrideReferences && equalStrings(sortedGoSourceStrings(fact.Configuration.Dependencies), config.Dependencies) && equalStrings(sortedGoSourceStrings(fact.Configuration.Config.Precompiled), sortedGoSourceStrings(config.Config.Precompiled))

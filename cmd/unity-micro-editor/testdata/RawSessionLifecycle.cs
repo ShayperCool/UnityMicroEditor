@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
-using Dungeon.CLIPlay.Raw;
+using UnityMicroEditor.Raw;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using Object = UnityEngine.Object;
@@ -61,7 +61,7 @@ namespace UnityEngine.SceneManagement
         { loaded.Remove(scene.handle); return new AsyncOperation(); }
     }
 }
-namespace Dungeon.CLIPlay.Raw
+namespace UnityMicroEditor.Raw
 {
     [Serializable] public sealed class RawSceneManifest
     {

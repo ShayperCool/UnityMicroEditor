@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using UnityEngine;
 
-namespace Dungeon.CLIPlay.Raw
+namespace UnityMicroEditor.Raw
 {
     // Link the actual Particle adapter without constructing Unity native objects.
     // Curve/Gradient native creation is deliberately unavailable in this SDK test.

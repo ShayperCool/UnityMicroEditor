@@ -11,9 +11,9 @@ import (
 	"strings"
 	"syscall"
 
-	goproject "unitymicroeditor/internal/project"
 	"unitymicroeditor/internal/agentcontrol"
 	"unitymicroeditor/internal/mcpserver"
+	goproject "unitymicroeditor/internal/project"
 )
 
 func runCompilerPrepareCLI(args []string) error {

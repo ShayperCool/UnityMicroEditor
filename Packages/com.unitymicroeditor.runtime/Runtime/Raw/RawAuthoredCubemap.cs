@@ -5,7 +5,7 @@ using System.IO;
 using UnityEngine;
 using Object = UnityEngine.Object;
 
-namespace Dungeon.CLIPlay.Raw
+namespace UnityMicroEditor.Raw
 {
     public static partial class RawSceneLoader
     {

@@ -43,7 +43,7 @@ func runNativeAdoptCLI(args []string) error {
 	}
 	opts.Project = project
 	if opts.Baseline == "" {
-		opts.Baseline = filepath.Join(project, "Temp/UnityPlay/hybrid-sample/current.json")
+		return errors.New("native-adopt requires --baseline")
 	}
 	opts.Output, err = filepath.Abs(opts.Output)
 	if err != nil {

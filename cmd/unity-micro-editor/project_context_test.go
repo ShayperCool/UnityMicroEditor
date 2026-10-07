@@ -50,7 +50,7 @@ func TestProjectContextCopiesSourceIdentityWithoutSeedingLibrary(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(project, "Library/SourceAssetDB"), []byte("must not seed worker"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(project, "Assets/Dungeon.meta"), []byte("guid: c1d15452ab70b6a669e9b8e3c0b91251\nfolderAsset: yes\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(project, "Assets/Models.meta"), []byte("guid: c1d15452ab70b6a669e9b8e3c0b91251\nfolderAsset: yes\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(project, "ProjectSettings/ProjectSettings.asset"), []byte("PlayerSettings:\n  m_ColorSpace: 1\n"), 0600); err != nil {
@@ -64,7 +64,7 @@ func TestProjectContextCopiesSourceIdentityWithoutSeedingLibrary(t *testing.T) {
 	if len(prepared.Assets) != 1 || prepared.Assets[0].GUID != "b1d15452ab70b6a669e9b8e3c0b91251" {
 		t.Fatalf("source identities changed: %+v", prepared)
 	}
-	for _, logical := range []string{modelSource, modelSource + ".meta", "Assets/Dungeon.meta", "ProjectSettings/ProjectVersion.txt", "ProjectSettings/ProjectSettings.asset"} {
+	for _, logical := range []string{modelSource, modelSource + ".meta", "Assets/Models.meta", "ProjectSettings/ProjectVersion.txt", "ProjectSettings/ProjectSettings.asset"} {
 		source, err := os.ReadFile(filepath.Join(project, logical))
 		if err != nil {
 			t.Fatal(err)
@@ -79,7 +79,7 @@ func TestProjectContextCopiesSourceIdentityWithoutSeedingLibrary(t *testing.T) {
 		t.Fatal("project context copied Editor import state")
 	}
 	registry, err := WriteProjectSourceRegistry(ProjectRegistryInput{Project: prepared.Project, Assets: []ProjectRegistryAsset{{Path: modelSource}}})
-	if err != nil || registry.GUIDPaths["c1d15452ab70b6a669e9b8e3c0b91251"] != "Assets/Dungeon" {
+	if err != nil || registry.GUIDPaths["c1d15452ab70b6a669e9b8e3c0b91251"] != "Assets/Models" {
 		t.Fatalf("folder GUID was not available to own source registry: %+v %v", registry, err)
 	}
 	if err := VerifyProjectImportSources(context.Background(), prepared); err != nil {

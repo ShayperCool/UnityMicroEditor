@@ -8,7 +8,7 @@ using UnityEngine;
 using UnityEngine.UIElements;
 using Object = UnityEngine.Object;
 
-namespace Dungeon.CLIPlay.Raw
+namespace UnityMicroEditor.Raw
 {
     // Physical ContentFiles retain the exact imported UI data, but their Editor
     // GUID references are not linked by the Player's global asset database.

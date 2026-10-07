@@ -13,8 +13,8 @@ import (
 	"sort"
 	"strings"
 
-	goproject "unitymicroeditor/internal/project"
 	"unitymicroeditor/internal/editorbridge"
+	goproject "unitymicroeditor/internal/project"
 )
 
 // This graph is exported through Unity's public CompilationPipeline APIs.
@@ -364,7 +364,7 @@ func prepareGoCompilerGraph(ctx context.Context, project, editor, player, graphF
 		if ownGraph {
 			break
 		}
-		if slices.Contains(assembly.References, "Dungeon.CLIPlay") {
+		if slices.Contains(assembly.References, "UnityMicroEditor") {
 			if err := compiler.validatePreparedHostBridge(ctx, helper, managed); err != nil {
 				return nil, err
 			}
@@ -376,7 +376,7 @@ func prepareGoCompilerGraph(ctx context.Context, project, editor, player, graphF
 	for index, assembly := range ordered {
 		refs := append([]string(nil), compiler.baseReferences...)
 		if ownGraph {
-			refs = append(refs, filepath.Join(managed, "Dungeon.CLIPlay.dll"))
+			refs = append(refs, filepath.Join(managed, "UnityMicroEditor.dll"))
 		}
 		if !compiler.configs[assembly.Name].Config.NoEngineReferences {
 			refs = append(refs, compiler.engineReferences...)
@@ -521,7 +521,7 @@ func prepareGoCompilerGraph(ctx context.Context, project, editor, player, graphF
 		var registration struct {
 			Names []string `json:"names"`
 		}
-		if err := readJSONFile(filepath.Join(filepath.Dir(managed), "ScriptingAssemblies.json"), &registration); err != nil || !slices.Contains(registration.Names, "Dungeon.CLIPlay.dll") {
+		if err := readJSONFile(filepath.Join(filepath.Dir(managed), "ScriptingAssemblies.json"), &registration); err != nil || !slices.Contains(registration.Names, "UnityMicroEditor.dll") {
 			return nil, errors.New("native-only host lacks its runtime bridge registration")
 		}
 		compiler.manifest.NativeSlotsSHA, err = goFileHash(filepath.Join(filepath.Dir(managed), "ScriptingAssemblies.json"))
@@ -719,13 +719,13 @@ func (compiler *goCompiler) filterPreparedHostScripts(ctx context.Context, helpe
 // Editor DLLs can contain newer public APIs than an older prepared native host;
 // replacing the Player bridge with an Editor-compiled DLL would conceal drift.
 func (compiler *goCompiler) validatePreparedHostBridge(ctx context.Context, helper, managed string) error {
-	host := filepath.Join(managed, "Dungeon.CLIPlay.dll")
+	host := filepath.Join(managed, "UnityMicroEditor.dll")
 	if _, err := goFileHash(host); err != nil {
 		return fmt.Errorf("native host lacks its runtime bridge; rebuild the matching host before compiler preparation: %w", err)
 	}
 	// Public Editor graphs report this project/package assembly by name rather
 	// than in compiledReferences. SDK-only exported fixtures need no Editor DLL.
-	editor := filepath.Join(compiler.project, "Library/ScriptAssemblies/Dungeon.CLIPlay.dll")
+	editor := filepath.Join(compiler.project, "Library/ScriptAssemblies/UnityMicroEditor.dll")
 	before, err := goFileHash(editor)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil

@@ -87,17 +87,3 @@ func TestWorkerEnvironmentRejectsAmbiguousOrUnprovenSettings(t *testing.T) {
 		t.Fatalf("native environment lost exact PlayerSettings proof: %+v %v", environment, err)
 	}
 }
-
-func TestWorkerEnvironmentExactProjectSettings(t *testing.T) {
-	project := os.Getenv("UNITY_WORKER_UI_PROJECT")
-	if project == "" {
-		t.Skip("set UNITY_WORKER_UI_PROJECT to the pinned Dungeon project")
-	}
-	environment, err := readWorkerEnvironment(project)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if environment.ColorSpace != 1 || environment.ShaderPrecisionModel != 0 || environment.GraphicsAPIMask != 2228224 {
-		t.Fatalf("project graphics settings changed: %+v", environment)
-	}
-}

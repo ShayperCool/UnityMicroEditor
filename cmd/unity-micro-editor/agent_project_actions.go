@@ -19,10 +19,10 @@ import (
 	"syscall"
 	"time"
 
-	goproject "unitymicroeditor/internal/project"
-	"unitymicroeditor/internal/project/authoring"
 	"unitymicroeditor/internal/agentcontrol"
 	"unitymicroeditor/internal/editorbridge"
+	goproject "unitymicroeditor/internal/project"
+	"unitymicroeditor/internal/project/authoring"
 )
 
 var agentOperationID = regexp.MustCompile(`^[A-Za-z0-9-]{1,64}$`)

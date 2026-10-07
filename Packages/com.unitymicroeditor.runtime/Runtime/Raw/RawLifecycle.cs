@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 
-namespace Dungeon.CLIPlay.Raw
+namespace UnityMicroEditor.Raw
 {
     [AttributeUsage(AttributeTargets.Assembly, AllowMultiple = false)]
     public sealed class RawLifecycleInstrumentedAttribute : Attribute

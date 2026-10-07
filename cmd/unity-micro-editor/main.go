@@ -4,15 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -26,7 +23,6 @@ type probeReport struct {
 	Success           bool               `json:"success"`
 	Stage             string             `json:"stage"`
 	Error             string             `json:"error,omitempty"`
-	Fixture           any                `json:"fixture,omitempty"`
 	ProjectContext    any                `json:"projectContext,omitempty"`
 	MainEditorStarted bool               `json:"mainEditorStarted"`
 	SourceDBSeeded    bool               `json:"sourceDBSeeded"`
@@ -71,13 +67,12 @@ type importEvidence struct {
 }
 
 type options struct {
-	Editor, Project, Output, Reference string
-	Mode                               string
-	Timeout                            time.Duration
-	Context                            string
-	Registry                           *SourceRegistryReport
-	Jobs                               []nativeImportJob
-	ProjectContext                     any
+	Editor, Project, Output string
+	Timeout                 time.Duration
+	Context                 string
+	Registry                *SourceRegistryReport
+	Jobs                    []nativeImportJob
+	ProjectContext          any
 }
 
 type nativeImportJob struct {
@@ -173,68 +168,15 @@ func main() {
 		}
 		return
 	}
-	var opts options
-	flag.StringVar(&opts.Editor, "editor", defaultUnityEditor(), "installed matching Linux Unity executable")
-	flag.StringVar(&opts.Project, "project", ".", "source project; read only")
-	flag.StringVar(&opts.Output, "output", "", "new directory beneath the source project's Temp directory")
-	flag.StringVar(&opts.Reference, "reference", "", "optional successful Editor oracle for exact Mesh and PCM comparison")
-	flag.StringVar(&opts.Mode, "mode", "import", "initialize or import")
-	flag.DurationVar(&opts.Timeout, "timeout", 45*time.Second, "whole experiment deadline")
-	flag.Parse()
-	if flag.NArg() != 0 || opts.Output == "" || (opts.Mode != "initialize" && opts.Mode != "import") || opts.Timeout <= 0 || opts.Timeout > 5*time.Minute {
-		fmt.Fprintln(os.Stderr, "use --output <new Temp directory> --mode initialize|import --timeout 45s")
-		os.Exit(2)
-	}
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-	ctx, deadlineCancel := context.WithTimeout(ctx, opts.Timeout)
-	defer deadlineCancel()
-	started := time.Now()
-	report, err := runProbe(ctx, opts)
-	if err == nil && report != nil && report.Stage == "native-imports-completed" {
-		content, contentErr := validateImportedContent(ctx, opts, report)
-		report.Content = content
-		if contentErr != nil {
-			err = contentErr
-			report.Error = contentErr.Error()
-		} else {
-			report.Success = true
-			report.Stage = "content-validated"
-		}
-	}
-	if report != nil {
-		report.ElapsedSeconds = time.Since(started).Seconds()
-		report.CoordinatorRSSKiB = rssKiB(os.Getpid())
-		data, marshalErr := json.MarshalIndent(report, "", "  ")
-		if marshalErr != nil {
-			err = errors.Join(err, marshalErr)
-		} else {
-			if writeErr := os.WriteFile(filepath.Join(opts.Output, "result.json"), append(data, '\n'), 0600); writeErr != nil {
-				err = errors.Join(err, writeErr)
-				report.Success = false
-				report.Error = err.Error()
-				data, _ = json.MarshalIndent(report, "", "  ")
-			}
-			fmt.Println(string(data))
-		}
-	}
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	fmt.Fprintln(os.Stderr, "usage: unity-micro-editor <run|mcp|auto-prepare|build-project|resolve-packages|cache-component-defaults|project-import|native-adopt|native-environment|source-graph|compiler-source-prepare|compiler-prepare|prepare-project|engine-profile-capture|version> [flags]")
+	os.Exit(2)
 }
 
 func runProbe(ctx context.Context, opts options) (report *probeReport, returnedErr error) {
 	started := time.Now()
-	var fixture Fixture
 	project := opts.Context
 	if project == "" {
-		var err error
-		fixture, err = CreateFixture(opts.Project, opts.Output, false)
-		if err != nil {
-			return nil, err
-		}
-		project = fixture.Project
+		return nil, errors.New("native import requires a prepared project context")
 	}
 	output, err := filepath.Abs(opts.Output)
 	if err != nil {
@@ -244,17 +186,12 @@ func runProbe(ctx context.Context, opts options) (report *probeReport, returnedE
 	if err := os.MkdirAll(logs, 0700); err != nil {
 		return nil, err
 	}
-	report = &probeReport{SchemaVersion: 1, Experiment: "native-import-worker-own-coordinator", Stage: "fixture",
+	report = &probeReport{SchemaVersion: 1, Experiment: "native-import-worker-own-coordinator", Stage: "project-sources",
 		CoordinatorPID: os.Getpid(), Stages: map[string]float64{}, Frames: []frameEvidence{}, Imports: []importEvidence{}}
-	if opts.Context == "" {
-		report.Fixture = fixture
-	} else {
-		report.Stage = "project-sources"
-		report.ProjectContext = opts.ProjectContext
-		report.SourceRegistry = opts.Registry
-		report.maxFrames = min(65536, 256+8*len(opts.Jobs))
-		report.maxFrameBytes = min(128*1024*1024, 16*1024*1024+64*1024*len(opts.Jobs))
-	}
+	report.ProjectContext = opts.ProjectContext
+	report.SourceRegistry = opts.Registry
+	report.maxFrames = min(65536, 256+8*len(opts.Jobs))
+	report.maxFrameBytes = min(128*1024*1024, 16*1024*1024+64*1024*len(opts.Jobs))
 	defer func() {
 		report.NativeSeconds = time.Since(started).Seconds()
 		report.CoordinatorRSSKiB = rssKiB(os.Getpid())
@@ -264,20 +201,10 @@ func runProbe(ctx context.Context, opts options) (report *probeReport, returnedE
 			report.Success = false
 		}
 	}()
-	if opts.Mode == "import" && opts.Context == "" {
-		registry, err := WriteSourceRegistry(fixture)
-		if err != nil {
-			return report, err
-		}
-		report.SourceRegistry = registry
-	}
-	if opts.Context != "" {
-		// Minimal FBX/WAV fixtures retain their earlier protocol profile. A
-		// project with PlayerSettings supplies exact graphics values instead.
-		report.Environment, err = readWorkerEnvironment(project)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return report, err
-		}
+	// A project with PlayerSettings supplies exact graphics values.
+	report.Environment, err = readWorkerEnvironment(project)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return report, err
 	}
 	initialize, prepare := initializeMessage(24), prepareMessage(24)
 	if report.Environment != nil {
@@ -419,14 +346,7 @@ func runProbe(ctx context.Context, opts options) (report *probeReport, returnedE
 	report.Stage = "initialized"
 	report.Stages["workerInitialize"] = time.Since(stageStarted).Seconds()
 	report.Stages["workerReadyTotal"] = time.Since(started).Seconds()
-	if opts.Mode == "initialize" {
-		report.Success = true
-		return report, nil
-	}
 	jobs := opts.Jobs
-	if opts.Context == "" {
-		jobs = []nativeImportJob{{fixture.ModelGUID, -1}, {fixture.AudioGUID, -1}}
-	}
 	if len(jobs) == 0 {
 		return report, errors.New("native import context has no source asset jobs")
 	}

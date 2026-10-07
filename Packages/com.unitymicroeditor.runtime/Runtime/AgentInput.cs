@@ -5,7 +5,7 @@ using System.IO;
 using System.Reflection;
 using UnityEngine;
 
-namespace Dungeon.CLIPlay
+namespace UnityMicroEditor
 {
     internal sealed class AgentInputExecutionException : InvalidOperationException
     { internal AgentInputExecutionException(string message, Exception inner) : base(message, inner) { } }

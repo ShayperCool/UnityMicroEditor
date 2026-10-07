@@ -53,8 +53,8 @@ func runGoCLI(args []string) error {
 	var opts launchOptions
 	flags := flag.NewFlagSet("run", flag.ContinueOnError)
 	flags.StringVar(&opts.Project, "project", ".", "source project")
-	flags.StringVar(&opts.Baseline, "baseline", "", "validated native host preparation current.json")
-	flags.StringVar(&opts.Output, "output", "", "owned Go session cache beneath project Temp")
+	flags.StringVar(&opts.Baseline, "baseline", "", "validated preparation current.json; required unless --prepared")
+	flags.StringVar(&opts.Output, "output", "", "owned session cache beneath project Library/UnityMicroEditor or Temp")
 	flags.StringVar(&opts.Editor, "editor", defaultUnityEditor(), "matching Unity SDK, used for native import and C# compiler")
 	flags.StringVar(&opts.Scene, "scene", "", "authored Assets/...unity scene, reusing the prepared host")
 	flags.StringVar(&opts.Prepared, "prepared", "", "immutable launch descriptor produced from prepared source/content manifests")
@@ -95,11 +95,11 @@ func runGoCLI(args []string) error {
 		return err
 	}
 	opts.Project = project
-	if opts.Baseline == "" {
-		opts.Baseline = filepath.Join(project, "Temp/UnityPlay/hybrid-sample/current.json")
+	if opts.Baseline == "" && opts.Prepared == "" {
+		return errors.New("run requires --baseline, the current.json reported by auto-prepare")
 	}
 	if opts.Output == "" {
-		opts.Output = filepath.Join(project, "Temp/UnityPlay/go-project")
+		opts.Output = filepath.Join(project, "Library/UnityMicroEditor/Sessions/default")
 	}
 	opts.Output, err = filepath.Abs(opts.Output)
 	if err != nil {

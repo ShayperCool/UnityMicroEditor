@@ -1,6 +1,6 @@
 using System;
 
-namespace Dungeon.CLIPlay.Raw
+namespace UnityMicroEditor.Raw
 {
     // Unity's native Material color storage/readback can round a channel.
     // The pinned Linear Player returned 2–9 ULP for

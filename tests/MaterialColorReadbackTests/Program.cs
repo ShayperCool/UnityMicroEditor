@@ -1,5 +1,5 @@
 using System;
-using Dungeon.CLIPlay.Raw;
+using UnityMicroEditor.Raw;
 
 internal static class Program
 {
@@ -10,7 +10,7 @@ internal static class Program
 
     private static int Main()
     {
-        // Captured native Dungeon/PixelLit MainColor in Linear space on 6000.6.3f1.
+        // Captured native MainColor readback in Linear space on 6000.6.3f1.
         Check(RawFloatReadback.SameColorChannel(.82f, .82f), "exact native red");
         Check(RawFloatReadback.SameColorChannel(.47f, .4699999f), "captured native green roundtrip");
         Check(RawFloatReadback.SameColorChannel(.16f, .159999967f), "captured native blue roundtrip");

@@ -55,7 +55,7 @@ func stageGoHost(ctx context.Context, opts launchOptions, baseline baselineBuild
 		snapshots[path] = contents
 	}
 	cache := filepath.Join(opts.Output, "bridge", bytesSHA(input))
-	dll := filepath.Join(cache, "Dungeon.CLIPlay.dll")
+	dll := filepath.Join(cache, "UnityMicroEditor.dll")
 	var cached struct {
 		SHA256 string `json:"sha256"`
 	}
@@ -90,7 +90,7 @@ func stageGoHost(ctx context.Context, opts launchOptions, baseline baselineBuild
 			files, _ := filepath.Glob(pattern)
 			for _, file := range files {
 				base := filepath.Base(file)
-				if base == "Dungeon.CLIPlay.dll" || seen[base] {
+				if base == "UnityMicroEditor.dll" || seen[base] {
 					continue
 				}
 				seen[base] = true
@@ -123,7 +123,7 @@ func stageGoHost(ctx context.Context, opts launchOptions, baseline baselineBuild
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(filepath.Join(managed, "Dungeon.CLIPlay.dll"), contents, 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(managed, "UnityMicroEditor.dll"), contents, 0600); err != nil {
 		return "", err
 	}
 	return filepath.Join(destination, filepath.Base(baseline.Player)), nil

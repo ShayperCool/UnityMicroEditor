@@ -72,10 +72,6 @@ The loader calls the public `Physics.BakeMesh` with the authored `convex` and `c
 
 Unchanged UXML, USS and font assets are extracted from an existing Unity import cache rather than imported cold. See [UI_IMPORTS.md](../internal/runtimeartifact/UI_IMPORTS.md).
 
-## Reference oracle
-
-[`WorkerImportReference.cs`](../tools/WorkerImportReference/WorkerImportReference.cs) is a separate measurement aid. It runs only in a disposable reference project, imports the same inputs in-process and reads objects, hierarchy, local file IDs, mesh arrays and PCM through public Unity APIs. It is not part of the importer and is not the source of its `SourceAssetDB`.
-
 ## Limits
 
 - The wire protocol, LMDB schema and DataStore layout were derived for one Unity version and are not a stable public API. A worker version mismatch is refused, and another engine version needs its own verification.

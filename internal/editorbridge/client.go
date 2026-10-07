@@ -311,7 +311,7 @@ func (c *Client) startBatch() error {
 		return err
 	}
 	owner := newID()
-	command := exec.Command(c.options.Editor, "-batchmode", "-nographics", "-projectPath", c.options.Project, "-buildTarget", "Linux64", "-executeMethod", "Dungeon.CLIPlay.Editor.AgentEditorBridge.RunBatch", "-logFile", filepath.Join(c.mailbox, "editor.log"))
+	command := exec.Command(c.options.Editor, "-batchmode", "-nographics", "-projectPath", c.options.Project, "-buildTarget", "Linux64", "-executeMethod", "UnityMicroEditor.Editor.AgentEditorBridge.RunBatch", "-logFile", filepath.Join(c.mailbox, "editor.log"))
 	command.Env = append(os.Environ(), "UNITY_MICRO_EDITOR_BRIDGE_OWNER="+owner)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Unity logs to its owned file. Avoid an unread stdout pipe blocking startup.

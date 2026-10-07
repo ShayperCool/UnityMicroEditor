@@ -6,7 +6,7 @@ using UnityEngine;
 using UnityEngine.LowLevel;
 using UnityEngine.SceneManagement;
 
-namespace Dungeon.CLIPlay
+namespace UnityMicroEditor
 {
     public static class CliPlayBootstrap
     {
@@ -68,7 +68,7 @@ namespace Dungeon.CLIPlay
             private CliPlayContent content;
             private bool loadRequested;
             private bool rawLoaded;
-            private Dungeon.CLIPlay.Raw.RawSceneLoader.LiveSession rawSession;
+            private UnityMicroEditor.Raw.RawSceneLoader.LiveSession rawSession;
             private AgentControl agentControl;
             private DateTime reloadFileWriteTime;
             private long reloadFileLength = -1;
@@ -137,7 +137,7 @@ namespace Dungeon.CLIPlay
                     // Bootstrap scene is loaded, but the first render has not
                     // constructed and cached the host's URP global settings.
                     rawLoaded = true;
-                    rawSession = Dungeon.CLIPlay.Raw.RawSceneLoader.OpenSession(options.RawManifestPath, options.RawContentRoutesPath);
+                    rawSession = UnityMicroEditor.Raw.RawSceneLoader.OpenSession(options.RawManifestPath, options.RawContentRoutesPath);
                 }
                 catch (Exception exception)
                 {

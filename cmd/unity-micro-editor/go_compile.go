@@ -391,10 +391,10 @@ func newGoCompiler(project, baselineManifest, stagedPlayer, editor, cache string
 	}
 	if manifest.NativeOnly {
 		actual, err := goFileHash(filepath.Join(playerData, "ScriptingAssemblies.json"))
-		if err != nil || actual != manifest.NativeSlotsSHA || !slots["Dungeon.CLIPlay.dll"] {
+		if err != nil || actual != manifest.NativeSlotsSHA || !slots["UnityMicroEditor.dll"] {
 			return nil, errors.New("native-only host registrations differ from its verified compiler baseline")
 		}
-		if _, err := goFileHash(filepath.Join(playerData, "Managed/Dungeon.CLIPlay.dll")); err != nil {
+		if _, err := goFileHash(filepath.Join(playerData, "Managed/UnityMicroEditor.dll")); err != nil {
 			return nil, fmt.Errorf("native-only host runtime bridge is missing: %w", err)
 		}
 	}
@@ -460,12 +460,6 @@ func newGoCompiler(project, baselineManifest, stagedPlayer, editor, cache string
 	if err := compiler.verifyStagedNativeManagedInputs(filepath.Join(playerData, "Managed"), gameNames); err != nil {
 		return nil, err
 	}
-	for _, script := range manifest.Scripts {
-		if script.HostProvided && script.Assembly == "Dungeon.CLIPlay" && withinDirectory(script.Path, filepath.Join(project, "Assets")) {
-			compiler.hostRoots = append(compiler.hostRoots, filepath.Join(project, "Assets/Dungeon/CLIPlay"))
-			break
-		}
-	}
 	compiler.collectConfigurationInputs()
 	if err := compiler.collectExpectedScriptTypes(baselineManifest); err != nil {
 		return nil, err
@@ -497,7 +491,7 @@ func (compiler *goCompiler) verifyStagedNativeManagedInputs(managed string, game
 			continue
 		}
 		name := filepath.Base(path)
-		if name == "Dungeon.CLIPlay.dll" || gameNames[strings.TrimSuffix(name, ".dll")] {
+		if name == "UnityMicroEditor.dll" || gameNames[strings.TrimSuffix(name, ".dll")] {
 			continue
 		}
 		if previous := expected[name]; previous != "" && previous != hash {
@@ -547,7 +541,7 @@ func (compiler *goCompiler) collectConfigurationInputs() {
 			var definition struct {
 				Name string `json:"name"`
 			}
-			if readJSONFile(filename, &definition) == nil && definition.Name == "Dungeon.CLIPlay" {
+			if readJSONFile(filename, &definition) == nil && definition.Name == "UnityMicroEditor" {
 				compiler.hostRoots = append(compiler.hostRoots, filepath.Dir(filename))
 			}
 		}
@@ -573,7 +567,7 @@ func (compiler *goCompiler) collectConfigurationInputs() {
 
 func (compiler *goCompiler) hostBridgeReference(filename string) bool {
 	filename = strings.TrimSuffix(filename, ".meta")
-	return filepath.Base(filename) == "Dungeon.CLIPlay.dll" && filepath.Base(filepath.Dir(filename)) == "Managed" &&
+	return filepath.Base(filename) == "UnityMicroEditor.dll" && filepath.Base(filepath.Dir(filename)) == "Managed" &&
 		strings.HasSuffix(filepath.Base(filepath.Dir(filepath.Dir(filename))), "_Data") &&
 		!withinDirectory(filename, filepath.Join(compiler.project, "Assets")) &&
 		!withinDirectory(filename, filepath.Join(compiler.project, "Packages")) &&
@@ -696,7 +690,7 @@ func (compiler *goCompiler) references(assembly goCompileAssembly, built map[str
 	if compiler.manifest.Backend == "go_authored_source" {
 		// Instrumented SDK output requires the source-owned lifecycle marker
 		// and public barrier ABI, independently of authored assembly imports.
-		refs = append(refs, filepath.Join(managed, "Dungeon.CLIPlay.dll"))
+		refs = append(refs, filepath.Join(managed, "UnityMicroEditor.dll"))
 		refs = append(refs, config.CompilerReferences...)
 		for _, dependency := range assembly.References {
 			filename := built[dependency]

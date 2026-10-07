@@ -136,7 +136,7 @@ func validatePreparedScene(launch preparedLaunch, path, expected string, observe
 		}
 		bridge := false
 		for _, name := range slots.Names {
-			bridge = bridge || name == "Dungeon.CLIPlay.dll"
+			bridge = bridge || name == "UnityMicroEditor.dll"
 		}
 		if !bridge {
 			return scene, errors.New("native-only prepared host has no registered runtime bridge")

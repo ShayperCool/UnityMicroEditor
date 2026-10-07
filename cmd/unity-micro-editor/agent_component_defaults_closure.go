@@ -14,9 +14,10 @@ import (
 	"sort"
 	"strings"
 
-	"gopkg.in/yaml.v3"
 	goproject "unitymicroeditor/internal/project"
 	unitypackages "unitymicroeditor/internal/project/packages"
+
+	"gopkg.in/yaml.v3"
 )
 
 const (

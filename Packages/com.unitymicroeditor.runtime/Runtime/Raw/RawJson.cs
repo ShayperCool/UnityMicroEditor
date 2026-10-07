@@ -4,7 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 
-namespace Dungeon.CLIPlay.Raw
+namespace UnityMicroEditor.Raw
 {
     // The manifest stores Unity's serialized field map as a JSON string. This small
     // parser lets us replace source GUID/fileID references with runtime instance IDs

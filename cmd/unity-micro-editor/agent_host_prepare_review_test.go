@@ -164,8 +164,8 @@ func agentHostReviewCachedFixture(t *testing.T) (*agentProjectService, string, s
 	player := filepath.Join(output, "Project.x86_64")
 	for path, contents := range map[string]string{
 		player: "native host executable",
-		filepath.Join(output, "Project_Data/Managed/Dungeon.CLIPlay.dll"): "pinned public runtime bridge",
-		filepath.Join(output, "Project_Data/ScriptingAssemblies.json"):    `{"names":["Dungeon.CLIPlay.dll","Assembly-CSharp.dll"]}`,
+		filepath.Join(output, "Project_Data/Managed/UnityMicroEditor.dll"): "pinned public runtime bridge",
+		filepath.Join(output, "Project_Data/ScriptingAssemblies.json"):     `{"names":["UnityMicroEditor.dll","Assembly-CSharp.dll"]}`,
 	} {
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 			t.Fatal(err)
@@ -241,7 +241,7 @@ func TestAgentHostReviewCachedReplayRejectsChangedSourceAndHostOutput(t *testing
 					t.Fatal(err)
 				}
 			case "missing-bridge":
-				if err := os.Remove(filepath.Join(output, "Project_Data/Managed/Dungeon.CLIPlay.dll")); err != nil {
+				if err := os.Remove(filepath.Join(output, "Project_Data/Managed/UnityMicroEditor.dll")); err != nil {
 					t.Fatal(err)
 				}
 			case "output-symlink":

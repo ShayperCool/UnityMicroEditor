@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 
-namespace Dungeon.CLIPlay.Raw
+namespace UnityMicroEditor.Raw
 {
     internal readonly struct RawMeshBakeProfile : IEquatable<RawMeshBakeProfile>
     {

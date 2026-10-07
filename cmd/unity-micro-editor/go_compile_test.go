@@ -89,15 +89,15 @@ func TestGoCompilerRejectsMissingOrRenamedBaselineScriptTypes(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"scripts":[{"guid":"known-guid","path":"/project/Assets/AmbientSound.cs","assembly":"Game"},{"guid":"other-guid","path":"/project/Assets/Helpers.cs","assembly":"Other"}]}`), &manifest); err != nil {
 		t.Fatal(err)
 	}
-	compiler := &goCompiler{manifest: manifest, expectedTypes: map[string]map[string]string{"Game": {"Dungeon.CustomPrimary": "explicit-scene-guid"}}}
-	previous := []string{"Dungeon.AmbientSound", "Dungeon.CustomPrimary", "Dungeon.PrivateHelper"}
-	if err := compiler.validateRequiredScriptTypes("Game", previous, []string{"Dungeon.AmbientSound", "Dungeon.CustomPrimary"}); err != nil {
+	compiler := &goCompiler{manifest: manifest, expectedTypes: map[string]map[string]string{"Game": {"Sample.CustomPrimary": "explicit-scene-guid"}}}
+	previous := []string{"Sample.AmbientSound", "Sample.CustomPrimary", "Sample.PrivateHelper"}
+	if err := compiler.validateRequiredScriptTypes("Game", previous, []string{"Sample.AmbientSound", "Sample.CustomPrimary"}); err != nil {
 		t.Fatalf("accepted body edit or unrelated private helper deletion was rejected: %v", err)
 	}
 	for _, next := range [][]string{
-		{"Dungeon.RenamedAmbientSound", "Dungeon.CustomPrimary"},
-		{"OtherNamespace.AmbientSound", "Dungeon.CustomPrimary"},
-		{"Dungeon.AmbientSound"},
+		{"Sample.RenamedAmbientSound", "Sample.CustomPrimary"},
+		{"OtherNamespace.AmbientSound", "Sample.CustomPrimary"},
+		{"Sample.AmbientSound"},
 	} {
 		if err := compiler.validateRequiredScriptTypes("Game", previous, next); err == nil {
 			t.Fatalf("published stale GUID/type bindings after removing or renaming required script: %v", next)
@@ -169,7 +169,7 @@ func TestGoCompilerRejectsInvalidLifecycleProofAndCacheTampering(t *testing.T) {
 
 func TestGoCompilerReferencesKeepMonoSDKAndEmittedDependencies(t *testing.T) {
 	managed := t.TempDir()
-	for _, name := range []string{"mscorlib.dll", "Dungeon.CLIPlay.dll", "Game.dll", "Dependency.dll"} {
+	for _, name := range []string{"mscorlib.dll", "UnityMicroEditor.dll", "Game.dll", "Dependency.dll"} {
 		if err := os.WriteFile(filepath.Join(managed, name), []byte(name), 0600); err != nil {
 			t.Fatal(err)
 		}

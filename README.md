@@ -91,7 +91,7 @@ The launcher sets `UNITY_MICRO_EDITOR_ROOT` to its own directory; runtime and co
 
 The output is `HostProject/Builds/Linux/UnityMicroEditorHost.x86_64` with `host-build.json` beside it. The script refuses to run while another Editor has `HostProject` open.
 
-One host serves projects whose engine and package requirements match it. A project using URP, Input System, Netcode or other packages needs a host built with them: package DLLs, native assembly registration, render pipeline resources and compiled shaders must match. `auto-prepare` builds such a host in an isolated copy of the target project. Building a host is the one step that runs the full Editor, in batch mode.
+One host serves projects whose engine and package requirements match it. A project using URP, Input System, Netcode or other packages needs a host built with them: package DLLs, native assembly registration, render pipeline resources and compiled shaders must match. `auto-prepare` builds such a host in an isolated copy of the target project. It accepts only hosts built this way, because it records a source profile next to the Player; the plain `build-host.sh` output cannot be passed to it as `--host-player`. Building a host is the one step that runs the full Editor, in batch mode.
 
 To use the runtime in a game project directly, reference the package from the game's `Packages/manifest.json` with a path relative to that `Packages` directory:
 
@@ -114,12 +114,10 @@ To use the runtime in a game project directly, reference the package from the ga
 - `internal/mcpserver/`, `internal/agentcontrol/`, `internal/editorbridge/`, `internal/runtimeartifact/`: MCP server, Player control, Editor bridge client and native artifact readers.
 - `Packages/com.unitymicroeditor.runtime/`: the Unity package with the loader, runtime bridge and Editor utilities.
 - `HostProject/`: the minimal host project.
-- `tools/`: C# helpers run through the SDK: lifecycle instrumentation, Netcode post-processing, the import reference oracle.
+- `tools/`: C# helpers run through the SDK: lifecycle instrumentation and Netcode post-processing.
 - `tests/`: standalone C# regression projects. Go tests sit next to their code.
 - `Samples/RawProject/`: a small authored project used as a fixture.
 - `Integrations/EditorParity/`: an isolated Unity Editor reference and Go clients for comparing it with the Player.
-
-The runtime package's assembly and namespace are still named `Dungeon.CLIPlay`, after the project the tool was extracted from. Existing script GUIDs and compiled references depend on that name.
 
 ## Porting to another Unity version
 

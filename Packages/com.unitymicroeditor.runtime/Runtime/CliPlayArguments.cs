@@ -2,7 +2,7 @@ using System;
 using System.Globalization;
 using System.IO;
 
-namespace Dungeon.CLIPlay
+namespace UnityMicroEditor
 {
     /// <summary>Arguments owned by the CLI observer. Unity's other player arguments are left alone.</summary>
     public sealed class CliPlayArguments

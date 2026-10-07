@@ -1,10 +1,7 @@
 package main
 
 import (
-	"bytes"
-	"context"
 	"encoding/binary"
-	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,62 +65,6 @@ func TestNativeTextureProfilePreservesEffectivePlatformSettingsAndCompressorGuar
 	if err := validateNativeConfiguration(project, "Assets/Texture.png", configuration); err == nil {
 		t.Fatal("changed BC7 compressor reused prior compressed artifact guard")
 	}
-}
-
-func TestWarmNativeBC7ExactProjectArtifact(t *testing.T) {
-	project := os.Getenv("UNITY_WORKER_UI_PROJECT")
-	if project == "" {
-		t.Skip("set UNITY_WORKER_UI_PROJECT for actual stopped-cache BC7 evidence")
-	}
-	logical := "Assets/Dungeon/ShipGen/Art/Sky/Starfield.png"
-	configuration, err := warmTextureConfiguration(project, logical)
-	if err != nil || len(configuration) == 0 {
-		t.Fatalf("BC7 configuration source proof missing: %v", err)
-	}
-	output := filepath.Join(t.TempDir(), "runtime.bin")
-	proof, err := extractWarmNativeUI(context.Background(), project, logical, output)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if proof.Metadata.Texture == nil || proof.Metadata.Texture.Format != 25 {
-		t.Fatalf("expected native BC7 Starfield Texture2D, got %+v", proof.Metadata.Texture)
-	}
-	store, err := OpenUDSArtifactStore(filepath.Join(project, "Library/DataStore"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	hash, _ := hex.DecodeString(proof.Primary.RawHashKey)
-	original, _, err := store.Read(hash)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := os.ReadFile(output)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dataOffset := binary.BigEndian.Uint64(original[32:40])
-	if !bytes.Equal(original[dataOffset:], runtime[dataOffset:]) {
-		t.Fatal("BC7 native object payload changed in runtime projection")
-	}
-	dependencyRecords, err := ReadLMDBTable(filepath.Join(project, "Library/ArtifactDB"), "ImportResultIDToArtifactDependencies")
-	if err != nil {
-		t.Fatal(err)
-	}
-	resultID, _ := hex.DecodeString(proof.ImportResult)
-	verifiedDependency := false
-	for _, record := range dependencyRecords {
-		if !bytes.Equal(record.Key, resultID) {
-			continue
-		}
-		if err := verifyWarmBC7Dependency(project, record.Value); err != nil {
-			t.Fatal(err)
-		}
-		verifiedDependency = true
-	}
-	if !verifiedDependency {
-		t.Fatal("actual BC7 importer dependency proof missing")
-	}
-	t.Logf("actual native BC7 texture=%+v, runtime=%s, compressor configuration=%v; no native worker started", *proof.Metadata.Texture, proof.Metadata.OutputSHA256, configuration)
 }
 
 func TestWarmBC7HistoricalDependencyPreventsRestampingOldCompressedArtifact(t *testing.T) {

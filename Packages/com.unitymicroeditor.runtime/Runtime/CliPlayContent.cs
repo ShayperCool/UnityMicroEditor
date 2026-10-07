@@ -5,7 +5,7 @@ using System.Security.Cryptography;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
-namespace Dungeon.CLIPlay
+namespace UnityMicroEditor
 {
     /// <summary>Loads an immutable, verified Linux scene-content revision at startup.</summary>
     public sealed class CliPlayContent : IDisposable

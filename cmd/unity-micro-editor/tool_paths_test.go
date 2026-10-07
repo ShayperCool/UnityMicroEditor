@@ -62,7 +62,7 @@ func TestPinnedEngineAndLocalPackageAgree(t *testing.T) {
 			t.Fatal("host or integration lacks the local runtime package")
 		}
 		packageRoot := filepath.Join(root, location, dependency[5:])
-		if _, err := os.Stat(filepath.Join(packageRoot, "Runtime/Dungeon.CLIPlay.asmdef")); err != nil {
+		if _, err := os.Stat(filepath.Join(packageRoot, "Runtime/UnityMicroEditor.asmdef")); err != nil {
 			t.Fatalf("local runtime package cannot be resolved: %v", err)
 		}
 	}

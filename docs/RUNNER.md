@@ -21,8 +21,8 @@ unity-micro-editor run \
 | Flag | Meaning |
 | --- | --- |
 | `--project` | Unity project root. Default: current directory. |
-| `--baseline` | Validated preparation `current.json` for this project. Default: `Temp/UnityPlay/hybrid-sample/current.json` in the project. |
-| `--output` | Session cache. Must be under the project's `Library/UnityMicroEditor` or `Temp`. Default: `Temp/UnityPlay/go-project`. |
+| `--baseline` | Validated preparation `current.json` for this project. Required unless `--prepared` is used. |
+| `--output` | Session cache. Must be under the project's `Library/UnityMicroEditor` or `Temp`. Default: `Library/UnityMicroEditor/Sessions/default`. |
 | `--editor` | Matching `Editor/Unity` executable, used for its SDK and import worker. Default: `UNITY_EDITOR`, then the pinned version under `$HOME/Unity/Hub/Editor`. |
 | `--scene` | Authored `Assets/...unity` scene to run on the prepared host. |
 | `--watch` | Watch sources and update the running Player. Implies `--interactive`. |

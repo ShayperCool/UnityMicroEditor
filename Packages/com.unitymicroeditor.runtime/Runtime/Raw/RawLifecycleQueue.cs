@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace Dungeon.CLIPlay.Raw
+namespace UnityMicroEditor.Raw
 {
     internal sealed class RawLifecycleQueue<T> where T : class
     {

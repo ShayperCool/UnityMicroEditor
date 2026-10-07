@@ -5,12 +5,12 @@ using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Threading;
-using Dungeon.CLIPlay.Raw;
+using UnityMicroEditor.Raw;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.Scripting;
 
-namespace Dungeon.CLIPlay
+namespace UnityMicroEditor
 {
     [Preserve]
     [AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]

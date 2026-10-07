@@ -1,7 +1,7 @@
 using System;
 using UnityEngine;
 
-namespace Dungeon.CLIPlay.Raw
+namespace UnityMicroEditor.Raw
 {
     [Serializable]
     public sealed class RawSceneManifest
