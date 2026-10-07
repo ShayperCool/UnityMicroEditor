@@ -344,7 +344,7 @@ namespace Dungeon.CLIPlay.Raw
             }
             if (reference.guid == BuiltinMeshGuid && Primitive(reference.fileId, out _)) return;
             if (reference.guid == BuiltinResourceGuid && reference.fileId == "10303") return;
-            if (record.classId == 21 && reference.property == "m_Shader" && reference.guid == BuiltinResourceGuid && reference.fileId == "108") return;
+            if (record.classId == 21 && reference.property == "m_Shader" && reference.guid == BuiltinResourceGuid && BuiltinShaderName(reference.fileId, out _)) return;
             if (record.classId == 104 && reference.guid == BuiltinResourceGuid && reference.fileId == "10304") return;
             if (record.classId == 104 && reference.property == "m_SpotCookie" && reference.guid == BuiltinMeshGuid && reference.fileId == "10001") return;
             if (emptyLightingDataVerified && record.classId == 157 && reference.property == "m_LightingDataAsset"
@@ -517,6 +517,16 @@ namespace Dungeon.CLIPlay.Raw
         private static bool IsNull(string fileId) { return string.IsNullOrEmpty(fileId) || fileId == "0"; }
         private static InvalidDataException Error(RawSceneObject record, string message)
         { return new InvalidDataException(record.sourcePath + " [" + record.fileId + "]: " + message); }
+        private static bool BuiltinShaderName(string id, out string name)
+        {
+            // Exact identities read from the pinned 6000.6.3f1 native engine resource.
+            switch (id)
+            {
+                case "46": name = "Standard"; return true;
+                case "108": name = "Skybox/Panoramic"; return true;
+                default: name = null; return false;
+            }
+        }
         private static bool Primitive(string id, out PrimitiveType type)
         {
             switch (id)
@@ -601,6 +611,7 @@ namespace Dungeon.CLIPlay.Raw
                         if (IsTransform(record.classId)) ConfigureTransform(record);
                     foreach (var record in manifest.objects)
                         if (IsTransform(record.classId)) ConfigureTransformChildren(record);
+                    ConfigureSceneRootOrder();
                     CreateAuthoredComponents();
                     foreach (var record in manifest.objects)
                         ConfigureComponent(record);
@@ -880,6 +891,48 @@ namespace Dungeon.CLIPlay.Raw
                     }
             }
 
+            private void ConfigureSceneRootOrder()
+            {
+                var roots = new List<Transform>();
+                var authoredRoots = new HashSet<Transform>();
+                foreach (var record in manifest.objects)
+                    if (record.classId == 1)
+                    {
+                        var root = ((GameObject)sceneObjects[record.fileId]).transform;
+                        if (root.parent == null) authoredRoots.Add(root);
+                    }
+                bool found = false;
+                foreach (var record in manifest.objects)
+                {
+                    if (record.classId != PatchSceneRootsClass) continue;
+                    if (found) throw Error(record, "Scene has multiple root-order records.");
+                    found = true;
+                    var data = ReadData<PatchSceneRootsData>(record.dataJson);
+                    if (data.m_Roots == null) throw Error(record, "Scene root-order record is missing roots.");
+                    foreach (var reference in data.m_Roots)
+                    {
+                        if (reference == null || IsNull(reference.fileID) || !string.IsNullOrEmpty(reference.guid) || !sceneObjects.TryGetValue(reference.fileID, out Object value)) throw Error(record, "Scene root order requires local authored Transform references.");
+                        var root = value as Transform;
+                        if (root == null || !authoredRoots.Contains(root) || roots.Contains(root)) throw Error(record, "Scene root order contains a duplicate or non-root Transform.");
+                        roots.Add(root);
+                    }
+                }
+                int count = 0;
+                foreach (var record in manifest.objects)
+                {
+                    if (record.classId != 1) continue;
+                    var root = ((GameObject)sceneObjects[record.fileId]).transform;
+                    if (root.parent != null) continue;
+                    count++;
+                    if (!found) roots.Add(root);
+                }
+                if (roots.Count != count) throw new InvalidDataException("Scene root order must list every authored root.");
+                // Validate authored order before scripts are added. Native Player
+                // root indexes remain an engine limitation; MCP reads the public
+                // root enumeration in the authored GameObject creation order.
+                for (int index = 0; index < roots.Count; index++) roots[index].SetSiblingIndex(index);
+            }
+
             private void ConfigureComponent(RawSceneObject record)
             {
                 switch (record.classId)
@@ -947,8 +1000,13 @@ namespace Dungeon.CLIPlay.Raw
                         light.shadowBias = Float(shadows, "m_Bias", .05f);
                         light.shadowNormalBias = Float(shadows, "m_NormalBias", .4f);
                         light.shadowNearPlane = Float(shadows, "m_NearPlane", .2f);
-                        light.shadowResolution = (LightShadowResolution)Int(shadows, "m_Resolution", -1);
-                        light.shadowCustomResolution = Int(shadows, "m_CustomResolution", -1);
+                        // SRP uses its own shadow resolution settings. Unity's
+                        // Built-In setter warns and ignores this value in SRP.
+                        if (GraphicsSettings.defaultRenderPipeline == null && QualitySettings.renderPipeline == null)
+                        {
+                            light.shadowResolution = (LightShadowResolution)Int(shadows, "m_Resolution", -1);
+                            light.shadowCustomResolution = Int(shadows, "m_CustomResolution", -1);
+                        }
                         light.useColorTemperature = Bool(map, "m_UseColorTemperature");
                         light.colorTemperature = Float(map, "m_ColorTemperature", 6570);
                         light.renderMode = (LightRenderMode)Int(map, "m_RenderMode");
@@ -1037,17 +1095,17 @@ namespace Dungeon.CLIPlay.Raw
                     if (!sceneObjects.TryGetValue(reference.fileID, out Object target)) throw new InvalidDataException("Reference is not an instantiated scene object: " + reference.fileID);
                     return target;
                 }
-                if (reference.guid == BuiltinResourceGuid && reference.fileID == "108")
+                if (reference.guid == BuiltinResourceGuid && BuiltinShaderName(reference.fileID, out string shaderName))
                 {
                     if (assets.TryGetValue(AssetKey(reference.guid, reference.fileID), out Object retained))
                     {
-                        if (!(retained is Shader nativeShader) || nativeShader.name != "Skybox/Panoramic" || !nativeShader.isSupported)
-                            throw new InvalidDataException("Retained Unity builtin Shader 108 must be supported Skybox/Panoramic.");
+                        if (!(retained is Shader nativeShader) || nativeShader.name != shaderName || !nativeShader.isSupported)
+                            throw new InvalidDataException("Retained Unity builtin Shader " + reference.fileID + " must be supported " + shaderName + ".");
                         return nativeShader;
                     }
-                    Shader shader = Shader.Find("Skybox/Panoramic");
+                    Shader shader = Shader.Find(shaderName);
                     if (shader == null || !shader.isSupported)
-                        throw new InvalidDataException("Prepared host does not retain Unity builtin Shader 108 (Skybox/Panoramic).");
+                        throw new InvalidDataException("Prepared host does not retain Unity builtin Shader " + reference.fileID + " (" + shaderName + ").");
                     return shader;
                 }
                 if (reference.guid == BuiltinMeshGuid && Primitive(reference.fileID, out PrimitiveType primitive))
@@ -1072,7 +1130,7 @@ namespace Dungeon.CLIPlay.Raw
                     {
                         Shader shader = Shader.Find("Standard");
                         if (shader == null || !shader.isSupported) throw new InvalidDataException("Prepared host lacks Standard shader.");
-                        material = new Material(shader); ownedAssets.Add(material); assets.Add(key, material);
+                        material = new Material(shader) { name = "Default-Material" }; ownedAssets.Add(material); assets.Add(key, material);
                     }
                     return material;
                 }

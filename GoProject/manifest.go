@@ -149,6 +149,9 @@ func orderSceneRoots(objects []any) ([]any, error) {
 		data := map[string]any{}
 		_ = jsonDecodeString(str(o["dataJson"]), &data)
 		for i, r := range array(data["m_Roots"]) {
+			if str(object(r)["guid"]) != "" {
+				return nil, fmt.Errorf("SceneRoots requires local authored references")
+			}
 			id := fileID(r)
 			if _, exists := ranks[id]; exists {
 				return nil, fmt.Errorf("SceneRoots contains duplicate %s", id)
@@ -275,7 +278,8 @@ func (s *Session) validate(objects []*expandedObject) error {
 	return nil
 }
 
-func (s *Session) prepareAssets(sceneObjects []*expandedObject) ([]any, error) {
+func (s *Session) prepareAssets(sceneObjects []*expandedObject) (*assetPreparation, error) {
+	bindings := s.importedBindingClosure()
 	assets := map[string]map[string]any{}
 	for key, a := range s.assets {
 		assets[key] = clone(a).(map[string]any)
@@ -284,7 +288,18 @@ func (s *Session) prepareAssets(sceneObjects []*expandedObject) ([]any, error) {
 	for _, a := range s.catalog.Assets {
 		catalogAssets[assetKey(str(a["guid"]), str(a["fileId"]))] = a
 	}
-	pending := []map[string]any{}
+	pending := newAssetReferenceWorklist()
+	for _, collection := range []string{"preloadedAssets", "renderPipelineGlobalSettings"} {
+		for _, item := range array(s.baseline[collection]) {
+			value := object(item)
+			if err := pending.addIdentity(str(value["guid"]), str(value["fileId"])); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := pending.addIdentity(str(s.baseline["renderPipelineGuid"]), str(s.baseline["renderPipelineFileId"])); err != nil {
+		return nil, err
+	}
 	for _, path := range s.extraAssets {
 		guid := s.byPath[path]
 		if guid == "" {
@@ -306,31 +321,65 @@ func (s *Session) prepareAssets(sceneObjects []*expandedObject) ([]any, error) {
 		if root == "" || root == "0" {
 			return nil, fmt.Errorf("runtime-addressed prefab has no root: %s", path)
 		}
-		pending = append(pending, map[string]any{"guid": guid, "fileID": root})
+		if err := pending.addIdentity(guid, root); err != nil {
+			return nil, err
+		}
 	}
-	queue := func(data any) {
+	queue := func(data any) error {
+		var queueErr error
 		visitReferences(data, "", func(_ string, r map[string]any) {
-			if fileID(r) != "0" && str(r["guid"]) != "" && !builtinGUID(str(r["guid"])) {
-				pending = append(pending, r)
+			if queueErr == nil {
+				queueErr = pending.add(r)
 			}
 		})
+		return queueErr
 	}
 	for _, o := range sceneObjects {
 		if o.MissingScript {
 			data := clone(o.Data).(map[string]any)
 			delete(data, "m_Script")
-			queue(data)
+			if err := queue(data); err != nil {
+				return nil, err
+			}
 		} else {
-			queue(o.Data)
+			if err := queue(o.Data); err != nil {
+				return nil, err
+			}
 		}
 	}
-	for _, a := range assets {
+	initialAssetKeys := make([]string, 0, len(assets))
+	for key := range assets {
+		initialAssetKeys = append(initialAssetKeys, key)
+	}
+	sort.Strings(initialAssetKeys)
+	for _, key := range initialAssetKeys {
+		a := assets[key]
 		if err := s.refreshAsset(a); err != nil {
+			return nil, err
+		}
+		currentKey := assetKey(str(a["guid"]), str(a["fileId"]))
+		if currentKey != key {
+			if assets[currentKey] != nil {
+				return nil, fmt.Errorf("refreshed asset identity collides with another descriptor: %s", currentKey)
+			}
+			delete(assets, key)
+			assets[currentKey] = a
+		}
+		if err := bindings.queue(a, pending); err != nil {
+			return nil, err
+		}
+		importedReferences, err := s.importedSourceReferences(a, catalogAssets)
+		if err != nil {
+			return nil, err
+		}
+		if err := pending.addAll(importedReferences); err != nil {
 			return nil, err
 		}
 		for _, r := range array(a["references"]) {
 			v := object(r)
-			pending = append(pending, map[string]any{"guid": v["guid"], "fileID": v["fileId"]})
+			if err := pending.addIdentity(str(v["guid"]), str(v["fileId"])); err != nil {
+				return nil, err
+			}
 		}
 		for _, v := range array(a["objects"]) {
 			for _, r := range array(object(v)["references"]) {
@@ -338,17 +387,18 @@ func (s *Session) prepareAssets(sceneObjects []*expandedObject) ([]any, error) {
 				if object(v)["skipMissingScript"] == true && str(ref["property"]) == "m_Script" {
 					continue
 				}
-				pending = append(pending, map[string]any{"guid": ref["guid"], "fileID": ref["fileId"]})
+				if err := pending.addIdentity(str(ref["guid"]), str(ref["fileId"])); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
-	for len(pending) > 0 {
-		r := pending[len(pending)-1]
-		pending = pending[:len(pending)-1]
-		guid, id := str(r["guid"]), fileID(r)
-		if guid == "" || builtinGUID(guid) || id == "0" {
-			continue
+	for {
+		r, exists := pending.pop()
+		if !exists {
+			break
 		}
+		guid, id := r.guid, r.fileID
 		key := assetKey(guid, id)
 		if assets[key] != nil {
 			continue
@@ -378,6 +428,16 @@ func (s *Session) prepareAssets(sceneObjects []*expandedObject) ([]any, error) {
 			a["kind"] = "imported"
 			assets[key] = a
 			if err := s.depend(str(a["path"])); err != nil {
+				return nil, err
+			}
+			if err := bindings.queue(a, pending); err != nil {
+				return nil, err
+			}
+			importedReferences, err := s.importedSourceReferences(a, catalogAssets)
+			if err != nil {
+				return nil, err
+			}
+			if err := pending.addAll(importedReferences); err != nil {
 				return nil, err
 			}
 			continue
@@ -439,7 +499,9 @@ func (s *Session) prepareAssets(sceneObjects []*expandedObject) ([]any, error) {
 		assets[assetKey(guid, str(a["fileId"]))] = a
 		for _, r := range array(a["references"]) {
 			ref := object(r)
-			pending = append(pending, map[string]any{"guid": ref["guid"], "fileID": ref["fileId"]})
+			if err := pending.addIdentity(str(ref["guid"]), str(ref["fileId"])); err != nil {
+				return nil, err
+			}
 		}
 		for _, v := range array(a["objects"]) {
 			for _, r := range array(object(v)["references"]) {
@@ -447,7 +509,9 @@ func (s *Session) prepareAssets(sceneObjects []*expandedObject) ([]any, error) {
 				if object(v)["skipMissingScript"] == true && str(ref["property"]) == "m_Script" {
 					continue
 				}
-				pending = append(pending, map[string]any{"guid": ref["guid"], "fileID": ref["fileId"]})
+				if err := pending.addIdentity(str(ref["guid"]), str(ref["fileId"])); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -463,7 +527,11 @@ func (s *Session) prepareAssets(sceneObjects []*expandedObject) ([]any, error) {
 		}
 		return str(a["fileId"]) < str(b["fileId"])
 	})
-	return list, nil
+	selectedBindings, err := bindings.result(assets)
+	if err != nil {
+		return nil, err
+	}
+	return &assetPreparation{Assets: list, ImportedBindings: selectedBindings}, nil
 }
 
 func (s *Session) refreshAsset(a map[string]any) error {

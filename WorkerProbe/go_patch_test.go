@@ -119,6 +119,27 @@ func TestScenePatchSemanticJSONFormattingIsNoOp(t *testing.T) {
 	}
 }
 
+func TestScenePatchRootInsertionAndReorderRequireReconstruction(t *testing.T) {
+	old := patchTestScene()
+	old["objects"] = append(old["objects"].([]any), patchTestObject("20", "21"), patchTestTransform("21", "20", "0"))
+	patchTestEdit(old, "roots", func(data map[string]any) { data["m_Roots"] = []any{patchTestReference("11"), patchTestReference("21")} })
+	next := patchTestClone(old)
+	next["revision"] = "next"
+	patchTestEdit(next, "roots", func(data map[string]any) { data["m_Roots"] = []any{patchTestReference("21"), patchTestReference("11")} })
+	if path, _, err := patchTestMake(t, old, next); err != nil || path != "" {
+		t.Fatalf("native root reorder incorrectly patched: %s %v", path, err)
+	}
+	next = patchTestClone(old)
+	next["revision"] = "next"
+	next["objects"] = append(next["objects"].([]any), patchTestObject("30", "31"), patchTestTransform("31", "30", "0"))
+	patchTestEdit(next, "roots", func(data map[string]any) {
+		data["m_Roots"] = []any{patchTestReference("11"), patchTestReference("31"), patchTestReference("21")}
+	})
+	if path, _, err := patchTestMake(t, old, next); err != nil || path != "" {
+		t.Fatalf("native root insertion incorrectly patched: %s %v", path, err)
+	}
+}
+
 func TestScenePatchRequiresCompleteLoaderForSettingsNativeAndDeletion(t *testing.T) {
 	for _, change := range []func(map[string]any){func(m map[string]any) { m["renderPipelineGuid"] = "changed" }, func(m map[string]any) {
 		m["nativeContentFiles"] = []any{map[string]any{"guid": "native", "sha256": "different"}}

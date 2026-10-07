@@ -109,7 +109,7 @@ func prepareGoContentRoutes(ctx context.Context, opts launchOptions, baseline ba
 		importer.session.Invalidate(changedPaths)
 		importer.session.SetManagedBindings(assemblies, scriptTypes, initializers)
 		if compiled != nil {
-			applyCompiledBindings(importer.session, compiled)
+			applyCompiledBindings(importer.session, compiled, scriptTypes)
 		}
 		if err := applyGoBuiltinShaders(importer.session, opts); err != nil {
 			return "", err

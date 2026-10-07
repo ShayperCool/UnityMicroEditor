@@ -37,6 +37,7 @@ namespace Dungeon.CLIPlay
         public string contentScenePath;
         public string contentRevision;
         public string rawReloadRequestPath;
+        public string controlDirectory;
         public int pid;
         public int rawReloadCount;
         public int nativeLoadCount;
@@ -175,6 +176,7 @@ namespace Dungeon.CLIPlay
         public string contentScenePath;
         public string contentRevision;
         public string rawReloadRequestPath;
+        public string controlDirectory;
         public int pid;
         public int rawReloadCount;
         public int nativeLoadCount;

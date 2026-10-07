@@ -60,7 +60,7 @@ func main() {
 	if defaultEditor == "" {
 		defaultEditor = filepath.Join(home, "Unity/Hub/Editor/6000.6.3f1/Editor/Unity")
 	}
-	flag.StringVar(&opts.Input, "input", "", "JSON or JSONL prepared event from unity-play-go run --prepare-only")
+	flag.StringVar(&opts.Input, "input", "", "JSON or JSONL prepared event from unity-micro-editor run --prepare-only")
 	flag.StringVar(&opts.Helper, "helper", "", "SDK-instrumented UnityPlay.MultiplayerProof.dll")
 	flag.StringVar(&opts.Output, "output-launch", "", "absolute launch descriptor path under project Temp")
 	flag.StringVar(&opts.MetadataHelper, "metadata-helper", "", "prepared LifecycleCompiler.dll for SDK metadata verification")

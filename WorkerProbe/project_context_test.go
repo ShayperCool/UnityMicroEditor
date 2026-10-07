@@ -20,6 +20,28 @@ func projectContextSource(t *testing.T) string {
 	return project
 }
 
+func TestProjectContextOwnedLibrarySurvivesEditorTempCleanup(t *testing.T) {
+	project := projectContextSource(t)
+	prepared, err := CreateProjectImportContext(context.Background(), project, filepath.Join(project, "Library/UnityMicroEditor/imports/model"), []string{modelSource})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(project, "Temp")); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyProjectImportSources(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(prepared.Project, modelSource)); err != nil {
+		t.Fatal("persistent native input disappeared", err)
+	}
+	for _, path := range []string{"Library/ScriptAssemblies/new", "Library/UnityMicroEditorOther/new", "Library/UnityMicroEditor"} {
+		if _, err := CreateProjectImportContext(context.Background(), project, filepath.Join(project, path), []string{modelSource}); err == nil {
+			t.Fatalf("foreign cache accepted: %s", path)
+		}
+	}
+}
+
 func TestProjectContextCopiesSourceIdentityWithoutSeedingLibrary(t *testing.T) {
 	project := projectContextSource(t)
 	if err := os.MkdirAll(filepath.Join(project, "Library"), 0700); err != nil {

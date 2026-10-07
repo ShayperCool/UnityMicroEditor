@@ -1,5 +1,26 @@
 # Raw scene preparation in Go
 
+The `authoring` package also performs revision-checked component and prefab source
+edits, including nested/variant create, overrides, apply/revert and unpack. Native
+default templates are supplied by a version-bound cache; these transactions do
+not run Editor. See [AGENT_MCP.md](../AGENT_MCP.md).
+
+The `packages` package resolves manifest and lock dependencies, embedded/file
+packages, scoped registries, exact Git commits/subdirectories and built-in SDK
+packages. Registry download and safe archive extraction use Go. Existing
+PackageCache directories are accepted only with source provenance checks; the
+resolver never trusts a directory suffix as a version or commit proof. It writes
+owned snapshots and a proposed lock under `Library/UnityMicroEditor/packages`,
+preserving the authored manifest and lock. Offline mode requires verified local
+sources. Use `unity-micro-editor resolve-packages --project /absolute/project`
+or the standalone `go run ./cmd/resolve-packages -help` entrypoint.
+
+Player assembly graph derivation lives in WorkerProbe. It uses these resolved
+roots and authored `.asmdef`/`.asmref` files, with a separately captured pinned
+engine/native-host profile. Rider/Visual Studio packages use Unity's public
+CompilationPipeline for their assembly inventories; our implementation derives
+target ownership and references directly from source.
+
 This package prepares Dungeon's `SampleScene` from authored `.unity` and `.prefab`
 files without running Python, the Unity Editor or a Player. The existing C# raw
 loader consumes its schema 1 `scene.json` without an adapter.
@@ -53,6 +74,25 @@ Existing FBX updates additionally require an independently verified reference
 graph and identical authored GameObject, Transform and renderer fields. Geometry
 may change while IDs, types and those fields remain stable. Skinned/Animator
 graphs, topology changes and other native asset profiles need a refreshed catalog.
+
+Native dependency discovery scans bounded lines and hashes each entire source.
+The ordinary text/YAML parser bound stays unchanged. Larger `.anim` sources may
+be scanned up to 1 GiB only when a current public raw cooked catalog proves the
+AnimationClip identity, exact source size/SHA256 and metadata SHA256, and its
+registry packs match the baseline and current pack hashes. Discovery still
+follows object references after the ordinary byte limit. An oversized source
+requiring full YAML fallback is rejected; no large parsed graph or source buffer
+is retained.
+
+Native deferred prefab references enter the source asset closure only when their
+exact owner is published as `imported`. The catalog supplies the complete binding
+inventory; preparation selects the active owners, follows target prefab and
+component references recursively, and publishes a deterministic
+`importedAssetBindings` list. Authored ScriptableObjects use their current source
+references. Targets must match the current GUID-to-path index and actual expanded
+prefab object/alias IDs. Cycles are deduplicated, conflicting properties and
+missing targets reject publication, and refreshed prefab roots replace stale
+cached asset keys.
 Existing raw material and texture descriptors can be reused unchanged, but this
 package does not update them.
 

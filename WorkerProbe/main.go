@@ -86,6 +86,61 @@ type nativeImportJob struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "resolve-packages" {
+		if err := runAgentPackageResolveCLI(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && (os.Args[1] == "source-graph" || os.Args[1] == "compiler-source-prepare" || os.Args[1] == "engine-profile-capture") {
+		if err := runGoSourceGraphCLI(os.Args[1], os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "cache-component-defaults" {
+		if err := runAgentComponentDefaultsCLI(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && (os.Args[1] == "auto-prepare" || os.Args[1] == "build-project") {
+		var err error
+		if os.Args[1] == "auto-prepare" {
+			err = runAgentAutoPrepareCLI(os.Args[2:])
+		} else {
+			err = runAgentBuildProjectCLI(os.Args[2:])
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "mcp" {
+		if err := runAgentMCPCLI(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "prepare-project" {
+		if err := runAgentProjectPrepareCLI(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "compiler-prepare" {
+		if err := runCompilerPrepareCLI(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) == 2 && (os.Args[1] == "version" || os.Args[1] == "profile") {
 		fmt.Print(string(engineProfile))
 		return

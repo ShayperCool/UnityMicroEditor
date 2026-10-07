@@ -6,4 +6,4 @@
 - Authored scenes, prefabs, materials, and `.meta` GUIDs are the source of truth. Do not silently overwrite them. Keep scene loading in our implementation and use the native importer for supported heavy content.
 - Use public Unity/package APIs for runtime access. Do not reach into foreign private members. Validate imported identities and dependencies before publishing content.
 - Keep caches, builds, reports, and SDK binaries out of Git. Run the relevant Go and SDK checks from `CONTRIBUTING.md` before committing.
-- Historical Python probes and Dungeon measurements are reference material. Document limitations explicitly when a path depends on prepared game content or retained shader output.
+- `docs/history` holds notes and Dungeon measurements from the removed Python prototype; they are reference material. Document limitations explicitly when a path depends on prepared game content or retained shader output.

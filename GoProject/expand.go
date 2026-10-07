@@ -185,25 +185,16 @@ func (s *Session) expand(logical, prefix string, stack []string) ([]*expandedObj
 			}
 			target := instance.lookup[targetKey(targetGUID, fileID(ref))]
 			if target == nil {
+				if proof := s.provenMissingNativeModelTarget(targetGUID, fileID(ref)); proof != nil {
+					s.recordIgnoredPrefabOverride(proof, logical, instance.instance.FileID, targetGUID, fileID(ref), str(override["propertyPath"]))
+					continue
+				}
 				observation := s.prefabObservations[targetGUID]
-				missing := observation["complete"] == true
-				if native, known := s.nativeOverlays[targetGUID]; known && len(native.ModelGraph) != 0 {
-					// The verified native import is a complete current model. Unity
-					// ignores saved overrides for objects removed by a reimport.
-					// Keep rejecting existing native objects absent from expansion.
-					missing = true
-					for _, item := range native.Content.Objects {
-						if item.FileID == fileID(ref) {
-							missing = false
-							break
-						}
-					}
-				} else {
-					for _, id := range array(observation["fileIds"]) {
-						if str(id) == fileID(ref) {
-							missing = false
-							break
-						}
+				missing := observation["complete"] == true && validNativeID(fileID(ref))
+				for _, id := range array(observation["fileIds"]) {
+					if str(id) == fileID(ref) {
+						missing = false
+						break
 					}
 				}
 				if missing {

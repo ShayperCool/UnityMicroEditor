@@ -25,6 +25,7 @@ type launchOptions struct {
 	BuiltinShaders                    stringListFlag
 	GameArguments                     []string
 	Watch, Interactive, PrepareOnly   bool
+	Control                           bool
 	Frames, Width, Height, FPS        int
 }
 
@@ -63,6 +64,7 @@ func runGoCLI(args []string) error {
 	flags.BoolVar(&opts.Watch, "watch", false, "watch sources and update the running Player")
 	flags.BoolVar(&opts.Interactive, "interactive", false, "keep the Player window open")
 	flags.BoolVar(&opts.PrepareOnly, "prepare-only", false, "prepare immutable source/content/managed manifests without starting a Player")
+	flags.BoolVar(&opts.Control, "control", false, "enable revision-checked agent commands in the interactive Player")
 	flags.IntVar(&opts.Frames, "frames", 120, "frames in finite verification mode")
 	flags.IntVar(&opts.Width, "width", 960, "window width")
 	flags.IntVar(&opts.Height, "height", 540, "window height")
@@ -80,6 +82,9 @@ func runGoCLI(args []string) error {
 	}
 	if opts.Watch {
 		opts.Interactive = true
+	}
+	if opts.Control && (!opts.Interactive || opts.PrepareOnly) {
+		return errors.New("--control requires an interactive Player run")
 	}
 	project, err := filepath.Abs(opts.Project)
 	if err != nil {
@@ -104,8 +109,8 @@ func runGoCLI(args []string) error {
 	if err != nil {
 		return err
 	}
-	if !withinDirectory(output, filepath.Join(project, "Temp")) {
-		return errors.New("Go session output must stay under project Temp")
+	if !goproject.IsOwnedCachePath(project, output) {
+		return errors.New("Go session output must stay under project Temp or Library/UnityMicroEditor")
 	}
 	opts.Output = output
 	if opts.Prepared != "" {
@@ -176,7 +181,7 @@ func runGoCLI(args []string) error {
 	}
 	session.SetManagedBindings(assemblies, nil, managed.Initializers)
 	if initialCompile != nil {
-		applyCompiledBindings(session, initialCompile)
+		applyCompiledBindings(session, initialCompile, scriptTypes)
 	}
 	if err := applyGoBuiltinShaders(session, opts); err != nil {
 		return err
@@ -284,7 +289,16 @@ func runGoCLI(args []string) error {
 			managedRejected = false
 			if compiled != nil {
 				pendingCompile = compiled
-				applyCompiledBindings(session, compiled)
+			}
+			if pendingCompile != nil {
+				nextScriptTypes, typeErr := compiler.ScriptTypeNames(ctx)
+				if typeErr != nil {
+					managedRejected = true
+					emitEvent(map[string]any{"event": "update-rejected", "error": typeErr.Error(), "paths": paths})
+					continue
+				}
+				scriptTypes = nextScriptTypes
+				applyCompiledBindings(session, pendingCompile, scriptTypes)
 			}
 			next, err := nativeImporter.Prepare(ctx)
 			if err != nil {
@@ -348,7 +362,7 @@ func runGoCLI(args []string) error {
 				return err
 			}
 			if same {
-				emitEvent(map[string]any{"event": "unchanged", "paths": paths, "prepareSeconds": next.ElapsedSeconds})
+				emitEvent(map[string]any{"event": "unchanged", "paths": paths, "prepareSeconds": next.ElapsedSeconds, "pid": player.command.Process.Pid, "revision": prepared.Revision})
 				continue
 			}
 			data, err := os.ReadFile(next.Manifest)
@@ -388,12 +402,12 @@ func runGoCLI(args []string) error {
 	}
 }
 
-func applyCompiledBindings(session *goproject.Session, compiled *compileUpdate) {
+func applyCompiledBindings(session *goproject.Session, compiled *compileUpdate, scriptTypes map[string]string) {
 	initializers := make([]map[string]any, 0, len(compiled.RuntimeInitializers))
 	for _, value := range compiled.RuntimeInitializers {
 		initializers = append(initializers, map[string]any{"assembly": value.Assembly, "typeName": value.TypeName, "methodName": value.MethodName, "phase": value.Phase})
 	}
-	session.SetManagedBindings(compiled.Assemblies, nil, initializers)
+	session.SetManagedBindings(compiled.Assemblies, scriptTypes, initializers)
 }
 
 type goPlayer struct {
@@ -423,6 +437,9 @@ func startGoPlayer(ctx context.Context, opts launchOptions, path, manifest, runD
 	}
 	if opts.Interactive {
 		args = append(args, "--unity-cli-interactive")
+		if opts.Control {
+			args = append(args, "--unity-cli-control", filepath.Join(runDirectory, "control"))
+		}
 		if opts.Watch {
 			args = append(args, "--unity-cli-raw-reload", request)
 		}
@@ -434,8 +451,11 @@ func startGoPlayer(ctx context.Context, opts launchOptions, path, manifest, runD
 	p.command.Dir = runDirectory
 	p.command.Stdout = p.log
 	p.command.Stderr = p.log
-	p.command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	p.command.Env = append(os.Environ(), "DISPLAY=:0")
+	p.command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGTERM}
+	p.command.Env = os.Environ()
+	if os.Getenv("DISPLAY") == "" {
+		p.command.Env = append(p.command.Env, "DISPLAY=:0")
+	}
 	if err := p.command.Start(); err != nil {
 		p.log.Close()
 		return nil, err

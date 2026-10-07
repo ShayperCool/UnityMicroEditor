@@ -87,6 +87,25 @@ internal static class Program
             Check(rejected, "Invalid live reload arguments rejected");
         }
         TestReloadIdentity();
+        string control = Path.Combine(Path.GetDirectoryName(report), "control");
+        Check(CliPlayArguments.TryParse(new[] { "--unity-cli-report", report, "--unity-cli-frames", "3",
+            "--unity-cli-raw-manifest", manifest, "--unity-cli-interactive", "--unity-cli-control", control }, out var controlArguments)
+            && controlArguments.ControlDirectory == control, "Agent control is bound to an interactive raw session's report directory");
+        foreach (string[] extra in new[] {
+            new[] { "--unity-cli-control", control },
+            new[] { "--unity-cli-raw-manifest", manifest, "--unity-cli-control", control },
+            new[] { "--unity-cli-raw-manifest", manifest, "--unity-cli-interactive", "--unity-cli-control", "relative" },
+            new[] { "--unity-cli-raw-manifest", manifest, "--unity-cli-interactive", "--unity-cli-control", Path.Combine(control, "outside") },
+            new[] { "--unity-cli-raw-manifest", manifest, "--unity-cli-interactive", "--unity-cli-control", control, "--unity-cli-control", control },
+            new[] { "--unity-cli-raw-manifest", manifest, "--unity-cli-interactive", "--unity-cli-control", report },
+            new[] { "--unity-cli-raw-manifest", manifest, "--unity-cli-interactive", "--unity-cli-control", report + ".ready.json" },
+        })
+        {
+            bool rejected = false;
+            var argv = new List<string> { "--unity-cli-report", report, "--unity-cli-frames", "3" }; argv.AddRange(extra);
+            try { CliPlayArguments.TryParse(argv.ToArray(), out _); } catch (FormatException) { rejected = true; }
+            Check(rejected, "Invalid agent-control lifecycle/path arguments rejected");
+        }
         TestLifecycle();
         Console.WriteLine("Raw runtime tests passed: " + assertions + " assertions.");
     }

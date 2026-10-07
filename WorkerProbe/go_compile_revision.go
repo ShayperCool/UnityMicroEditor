@@ -185,7 +185,7 @@ func (compiler *goCompiler) restoreCodeRevision(key string, sources map[string]s
 	}
 	managed := filepath.Join(filepath.Dir(player), strings.TrimSuffix(filepath.Base(player), filepath.Ext(player))+"_Data", "Managed")
 	update := &compileUpdate{Player: player, CacheReused: true, SourceHashes: sources,
-		CompiledAssemblies: []string{}, RuntimeInitializers: []runtimeInitializer{}, DeclarationChanged: []string{}}
+		CompiledAssemblies: []string{}, RuntimeInitializers: []runtimeInitializer{}, DeclarationChanged: []string{}, DLLHashes: map[string]string{}}
 	for _, assembly := range compiler.manifest.Assemblies {
 		proof, exists := entry.Proofs[assembly.Name]
 		if !exists || !validGoLifecycleProof(proof, assembly.Name) || !goLifecycleSourcesMatch(proof, assembly.Sources) {
@@ -197,6 +197,7 @@ func (compiler *goCompiler) restoreCodeRevision(key string, sources map[string]s
 			return nil
 		}
 		update.Assemblies = append(update.Assemblies, dll)
+		update.DLLHashes[assembly.Name] = entry.Files[filepath.ToSlash(relative)]
 		update.RuntimeInitializers = append(update.RuntimeInitializers, proof.RuntimeInitializers...)
 	}
 	// Assignment waits until the complete descriptor and Player have passed.
@@ -210,6 +211,7 @@ func (compiler *goCompiler) useCodeRevision(update *compileUpdate, proofs map[st
 	if compiler.netcodeProcessed == nil {
 		compiler.netcodeProcessed = map[string]bool{}
 	}
+	compiler.acceptedDLLHashes = update.DLLHashes
 	for index, assembly := range compiler.manifest.Assemblies {
 		compiler.currentDLLs[assembly.Name] = update.Assemblies[index]
 		if goNeedsNetcode(assembly) {

@@ -15,6 +15,7 @@ internal sealed record Request(string AssemblyName, string[] References, string[
     Dictionary<string, int>? ExecutionOrders = null, string[]? NativeBaseAssemblies = null);
 internal sealed record CallbackInfo(string Type, string Phase, string Source, int Order, bool Synthetic = false);
 internal sealed record RuntimeInitializerInfo(string Assembly, string TypeName, string MethodName, int Phase);
+internal sealed record SourceDeclarationRequest(string AssemblyName, string[] Defines, string[] EditorDefines, SourceInput[] Sources);
 
 internal static class DeclarationHash
 {
@@ -79,7 +80,7 @@ internal static class DeclarationHash
         hash.AppendData(bytes);
     }
 
-    internal static Dictionary<string, string[]> TypeDefinitions(string[] paths)
+    internal static Dictionary<string, string[]> TypeDefinitions(string[] paths, bool publicOnly = false)
     {
         if (paths.Length == 0 || paths.Length > 512)
             throw new InvalidOperationException("Expected a bounded list of managed DLLs");
@@ -104,7 +105,15 @@ internal static class DeclarationHash
                 string ns = reader.GetString(definition.Namespace);
                 return ns.Length == 0 ? name : ns + "." + name;
             }
-            result.Add(path, reader.TypeDefinitions.Select(FullName).Where(name => name != "<Module>")
+            bool IsPublic(TypeDefinitionHandle handle)
+            {
+                var definition = reader.GetTypeDefinition(handle);
+                var visibility = definition.Attributes & System.Reflection.TypeAttributes.VisibilityMask;
+                var parent = definition.GetDeclaringType();
+                return parent.IsNil ? visibility == System.Reflection.TypeAttributes.Public
+                    : visibility == System.Reflection.TypeAttributes.NestedPublic && IsPublic(parent);
+            }
+            result.Add(path, reader.TypeDefinitions.Where(handle => !publicOnly || IsPublic(handle)).Select(FullName).Where(name => name != "<Module>")
                 .OrderBy(name => name, StringComparer.Ordinal).ToArray());
         }
         return result;
@@ -126,9 +135,14 @@ internal static class Program
                 Console.WriteLine(JsonSerializer.Serialize(DeclarationHash.Read(args.Skip(1).ToArray())));
                 return 0;
             }
-            if (args.Length >= 2 && args[0] == "--type-definitions")
+            if (args.Length >= 2 && (args[0] == "--type-definitions" || args[0] == "--public-type-definitions"))
             {
-                Console.WriteLine(JsonSerializer.Serialize(DeclarationHash.TypeDefinitions(args.Skip(1).ToArray())));
+                Console.WriteLine(JsonSerializer.Serialize(DeclarationHash.TypeDefinitions(args.Skip(1).ToArray(), args[0] == "--public-type-definitions")));
+                return 0;
+            }
+            if (args.Length == 2 && args[0] == "--source-type-declarations")
+            {
+                Console.WriteLine(JsonSerializer.Serialize(ReadSourceDeclarations(args[1])));
                 return 0;
             }
             if (args.Length != 1) throw new InvalidOperationException("Expected one request JSON path");
@@ -152,9 +166,19 @@ internal static class Program
             var getComponentInChildrenCalls = 0;
             var scriptableObjectCallbacks = 0;
             var outputs = new List<(SourceInput Source, string Text)>();
+            var scriptTypes = new Dictionary<string, string>(StringComparer.Ordinal);
             for (int index = 0; index < trees.Length; index++)
             {
                 var model = compilation.GetSemanticModel(trees[index]);
+                string filenameType = Path.GetFileNameWithoutExtension(request.Sources[index].OriginalPath);
+                var primaryTypes = trees[index].GetRoot().DescendantNodes().OfType<ClassDeclarationSyntax>()
+                    .Select(node => model.GetDeclaredSymbol(node))
+                    .Where(type => type is not null && type.ContainingType is null && type.Arity == 0 && type.Name == filenameType)
+                    .Select(type => type!.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat))
+                    .Distinct(StringComparer.Ordinal).ToArray();
+                if (primaryTypes.Length > 1)
+                    throw new InvalidOperationException("Ambiguous primary MonoScript class in " + request.Sources[index].OriginalPath);
+                if (primaryTypes.Length == 1) scriptTypes.Add(request.Sources[index].OriginalPath, primaryTypes[0]);
                 var rewriter = new LifecycleRewriter(model, mono, callbacks, runtimeInitializers, request);
                 var rewritten = rewriter.Visit(trees[index].GetRoot())!.ToFullString();
                 activeAndEnabledReads += rewriter.ActiveAndEnabledReads;
@@ -211,6 +235,7 @@ internal static class Program
             }
             Console.WriteLine(JsonSerializer.Serialize(new { SchemaVersion = 1, Verified = true,
                 Callbacks = callbacks, Phases, ScriptableObjectBarrier = scriptableObjectBarrier, RuntimeInitializers = runtimeInitializers,
+                ScriptTypes = scriptTypes,
                 ActiveAndEnabledReads = activeAndEnabledReads, SetActiveCalls = setActiveCalls,
                 TransformRootReads = transformRootReads, GetComponentInChildrenCalls = getComponentInChildrenCalls }));
             return 0;
@@ -220,6 +245,39 @@ internal static class Program
             Console.Error.WriteLine(error.Message);
             return 1;
         }
+    }
+
+    private static Dictionary<string, object> ReadSourceDeclarations(string path)
+    {
+        var requests = JsonSerializer.Deserialize<SourceDeclarationRequest[]>(File.ReadAllText(path),
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? throw new InvalidOperationException("Empty Player declaration request");
+        var result = new Dictionary<string, object>(StringComparer.Ordinal);
+        foreach (SourceDeclarationRequest request in requests)
+        {
+            Dictionary<string, string[]> Parse(string[] defines)
+            {
+                var parse = new CSharpParseOptions(LanguageVersion.Latest, preprocessorSymbols: defines);
+                var sources = new Dictionary<string, string[]>(StringComparer.Ordinal);
+                foreach (SourceInput source in request.Sources)
+                {
+                    SyntaxTree tree = CSharpSyntaxTree.ParseText(File.ReadAllText(source.Path), parse, source.OriginalPath);
+                    var errors = tree.GetDiagnostics().Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error).ToArray();
+                    if (errors.Length != 0) throw new InvalidOperationException(string.Join("\n", errors.Select(error => error.ToString())));
+                    string FullName(ClassDeclarationSyntax declaration)
+                    {
+                        string namespaces = string.Join(".", declaration.Ancestors().OfType<BaseNamespaceDeclarationSyntax>().Reverse().Select(value =>
+                            string.Join(".", value.Name.DescendantTokens().Where(token => token.IsKind(SyntaxKind.IdentifierToken)).Select(token => token.ValueText))));
+                        string types = string.Join("+", declaration.Ancestors().OfType<TypeDeclarationSyntax>().Reverse().Append(declaration).Select(value =>
+                            value.Identifier.ValueText + ((value.TypeParameterList?.Parameters.Count ?? 0) == 0 ? "" : "`" + value.TypeParameterList!.Parameters.Count)));
+                        return namespaces.Length == 0 ? types : namespaces + "." + types;
+                    }
+                    sources.Add(source.OriginalPath, tree.GetRoot().DescendantNodes().OfType<ClassDeclarationSyntax>().Select(FullName).Distinct(StringComparer.Ordinal).OrderBy(name => name, StringComparer.Ordinal).ToArray());
+                }
+                return sources;
+            }
+            result.Add(request.AssemblyName, new { player = Parse(request.Defines), editor = Parse(request.EditorDefines) });
+        }
+        return result;
     }
 
     private sealed class LifecycleRewriter : CSharpSyntaxRewriter

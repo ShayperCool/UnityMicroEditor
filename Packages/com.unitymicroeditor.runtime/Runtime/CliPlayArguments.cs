@@ -14,6 +14,7 @@ namespace Dungeon.CLIPlay
         public string RawManifestPath { get; }
         public string RawContentRoutesPath { get; }
         public string RawReloadRequestPath { get; }
+        public string ControlDirectory { get; }
         public int Frames { get; }
         public string Scene { get; }
         public int? TargetFrameRate { get; }
@@ -21,7 +22,7 @@ namespace Dungeon.CLIPlay
         public bool Interactive { get; }
 
         private CliPlayArguments(string reportPath, string readyPath, string screenshotPath, string contentManifestPath, string rawManifestPath, string rawReloadRequestPath, string rawContentRoutesPath,
-            int frames, string scene, int? targetFrameRate, bool noVsync, bool interactive)
+            int frames, string scene, int? targetFrameRate, bool noVsync, bool interactive, string controlDirectory)
         {
             ReportPath = reportPath;
             ReadyPath = readyPath;
@@ -29,6 +30,7 @@ namespace Dungeon.CLIPlay
             ContentManifestPath = contentManifestPath;
             RawManifestPath = rawManifestPath;
             RawReloadRequestPath = rawReloadRequestPath;
+            ControlDirectory = controlDirectory;
             RawContentRoutesPath = rawContentRoutesPath;
             Frames = frames;
             Scene = scene;
@@ -56,6 +58,7 @@ namespace Dungeon.CLIPlay
             string rawManifestPath = null;
             string rawReloadRequestPath = null;
             string rawContentRoutesPath = null;
+            string controlDirectory = null;
             string scene = null;
             int? targetFrameRate = null;
             bool noVsync = false;
@@ -102,6 +105,11 @@ namespace Dungeon.CLIPlay
                 {
                     if (rawContentRoutesPath != null) throw new FormatException("Duplicate --unity-cli-raw-routes.");
                     rawContentRoutesPath = ReadAbsolutePath(arguments, ref index);
+                }
+                else if (argument == "--unity-cli-control")
+                {
+                    if (controlDirectory != null) throw new FormatException("Duplicate --unity-cli-control.");
+                    controlDirectory = ReadAbsolutePath(arguments, ref index);
                 }
                 else if (argument == "--unity-cli-fps")
                 {
@@ -159,7 +167,14 @@ namespace Dungeon.CLIPlay
                 throw new FormatException("Report, ready, screenshot and content manifest must use distinct file paths.");
             if (rawManifestPath == reportPath || rawManifestPath == readyPath || rawManifestPath == screenshotPath)
                 throw new FormatException("Raw manifest and report destinations must use distinct file paths.");
-            result = new CliPlayArguments(reportPath, readyPath, screenshotPath, contentManifestPath, rawManifestPath, rawReloadRequestPath, rawContentRoutesPath, frames, scene, targetFrameRate, noVsync, interactive);
+            if (controlDirectory != null && (!interactive || rawManifestPath == null
+                || Path.GetDirectoryName(controlDirectory) != Path.GetDirectoryName(reportPath)))
+                throw new FormatException("--unity-cli-control requires an interactive raw run and a directory beside its report.");
+            if (controlDirectory != null)
+                foreach (string file in new[] { reportPath, readyPath, screenshotPath, contentManifestPath, rawManifestPath, rawReloadRequestPath, rawReloadRequestPath == null ? null : rawReloadRequestPath + ".ack.json", rawContentRoutesPath })
+                    if (file != null && file == controlDirectory)
+                        throw new FormatException("Agent control directory and source/report destinations must use distinct paths.");
+            result = new CliPlayArguments(reportPath, readyPath, screenshotPath, contentManifestPath, rawManifestPath, rawReloadRequestPath, rawContentRoutesPath, frames, scene, targetFrameRate, noVsync, interactive, controlDirectory);
             return true;
         }
 

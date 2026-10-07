@@ -16,6 +16,8 @@ namespace Dungeon.CLIPlay.Raw
                 ?? throw new InvalidDataException("Material property must be a map.");
             private static List<object> List(object value) => value as List<object>
                 ?? throw new InvalidDataException("Material property must be a list.");
+            private static IEnumerable<object> IntProperties(Dictionary<string, object> saved) =>
+                saved.TryGetValue("m_Ints", out object value) ? List(value) : Array.Empty<object>();
             private static int Int(object value) => Convert.ToInt32(value, CultureInfo.InvariantCulture);
             private static float Float(object value) => Convert.ToSingle(value, CultureInfo.InvariantCulture);
             private static ReferenceData Reference(object value) => JsonUtility.FromJson<ReferenceData>(RawJson.Write(value));
@@ -35,7 +37,7 @@ namespace Dungeon.CLIPlay.Raw
                     throw new InvalidDataException("Unsupported material variant parent or serialized-property mask: " + asset.path);
                 var saved = Map(data["m_SavedProperties"]);
                 foreach (string group in new[] { "m_TexEnvs", "m_Ints", "m_Floats", "m_Colors" })
-                    foreach (object item in List(saved[group]))
+                    foreach (object item in group == "m_Ints" ? IntProperties(saved) : List(saved[group]))
                         if (Map(item).Count != 1) throw new InvalidDataException("Malformed material property: " + asset.path);
             }
 
@@ -134,7 +136,7 @@ namespace Dungeon.CLIPlay.Raw
                             if (material.HasProperty(id) && !material.GetFloat(id).Equals(value))
                                 throw new InvalidDataException("Material float readback differs: " + asset.path + ":" + property.Key);
                         }
-                    foreach (object item in List(saved["m_Ints"]))
+                    foreach (object item in IntProperties(saved))
                         foreach (var property in Map(item))
                         {
                             int id = Shader.PropertyToID(property.Key), value = Int(property.Value);

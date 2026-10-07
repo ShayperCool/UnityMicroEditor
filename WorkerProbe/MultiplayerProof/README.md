@@ -88,7 +88,7 @@ fi
 
 ```bash
 
-GOMEMLIMIT=1GiB $UNITY_MICRO_EDITOR_ROOT/unity-play-go run \
+GOMEMLIMIT=1GiB $UNITY_MICRO_EDITOR_ROOT/unity-micro-editor run \
   --project "$proof_project" \
   --baseline "$proof_project/Temp/UnityPlay/hybrid-sample/current.json" \
   --output "$proof_base" \
@@ -117,12 +117,12 @@ $UNITY_MICRO_EDITOR_ROOT/WorkerProbe/MultiplayerProof/compile.sh "$proof_dir/hel
 Для повторов сохраняйте `proof_base` вместе с referenced runtime/import files. Новый timestamp в `proof_dir` не сбрасывает этот cache. Новый `--output` заново импортирует недостающие модели и не наследует ship native index с retained Screen shader. Существующие успешные native batch reports можно принять без повторного worker в тот же ship cache:
 
 ```bash
-$UNITY_MICRO_EDITOR_ROOT/unity-play-go native-adopt --project "$proof_project" \
+$UNITY_MICRO_EDITOR_ROOT/unity-micro-editor native-adopt --project "$proof_project" \
   --baseline "$proof_project/Temp/UnityPlay/hybrid-sample/current.json" \
   --output "$proof_base/content/$proof_ship" \
   --report "$proof_project/Temp/UnityPlay/multiplayer-native-batch/result.json"
 
-$UNITY_MICRO_EDITOR_ROOT/unity-play-go native-adopt --project "$proof_project" \
+$UNITY_MICRO_EDITOR_ROOT/unity-micro-editor native-adopt --project "$proof_project" \
   --baseline "$proof_project/Temp/UnityPlay/hybrid-sample/current.json" \
   --output "$proof_base/content/$proof_ship" \
   --report "$proof_project/Temp/UnityPlay/multiplayer-native-batch-rest/result.json"
@@ -151,7 +151,7 @@ curl --fail --silent --show-error http://127.0.0.1:18091/healthz
 UNITY_PLAY_MULTIPLAYER_REPORT="$proof_dir/host.json" \
 UNITY_PLAY_MULTIPLAYER_COMMAND="$proof_dir/host-command.json" \
 UNITY_PLAY_MULTIPLAYER_ROLE=host \
-$UNITY_MICRO_EDITOR_ROOT/unity-play-go run --project "$proof_project" \
+$UNITY_MICRO_EDITOR_ROOT/unity-micro-editor run --project "$proof_project" \
   --prepared "$proof_dir/launch.json" --output "$proof_dir/host-run" \
   --interactive --fps 30 --width 640 --height 360 -- \
   -relay ws://127.0.0.1:18091/ws \
@@ -165,7 +165,7 @@ proof_room=$(cat "$proof_dir/room.txt")
 UNITY_PLAY_MULTIPLAYER_REPORT="$proof_dir/client.json" \
 UNITY_PLAY_MULTIPLAYER_COMMAND="$proof_dir/client-command.json" \
 UNITY_PLAY_MULTIPLAYER_ROLE=client \
-$UNITY_MICRO_EDITOR_ROOT/unity-play-go run --project "$proof_project" \
+$UNITY_MICRO_EDITOR_ROOT/unity-micro-editor run --project "$proof_project" \
   --prepared "$proof_dir/launch.json" --output "$proof_dir/client-run" \
   --interactive --fps 30 --width 640 --height 360 -- \
   -relay ws://127.0.0.1:18091/ws -join "$proof_room" -name Client

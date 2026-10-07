@@ -28,8 +28,8 @@ func (compiler *goCompiler) scriptTypeCacheKey(helper string, assemblies map[str
 		helperFiles["LifecycleCompiler.dll"] == "" || !verifyGoCacheFiles(filepath.Dir(helper), helperFiles) {
 		return "", errors.New("script inventory SDK helper payload is not verified")
 	}
-	identity := map[string]any{"mode": "go-script-types-v1", "assemblies": inputs, "helper": helperFiles,
-		"scripts": compiler.manifest.Scripts, "expectedTypes": compiler.expectedTypes}
+	identity := map[string]any{"mode": "go-script-types-v2", "assemblies": inputs, "helper": helperFiles,
+		"scripts": compiler.manifest.Scripts, "expectedTypes": compiler.expectedTypes, "proofs": compiler.proofs}
 	encoded, err := json.Marshal(identity)
 	if err != nil {
 		return "", err
