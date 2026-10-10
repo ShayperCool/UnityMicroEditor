@@ -5,6 +5,7 @@
 //! cannot reproduce exactly, so the caller can fall back to an Editor build.
 mod clip;
 mod controller;
+mod override_controller;
 mod serialized;
 mod source;
 mod typetree;
@@ -14,6 +15,7 @@ pub use controller::{
     ClipFacts, ControllerSources, Mask, bake_controller, bake_controller_object, read_clip_facts,
     read_mask,
 };
+pub use override_controller::{bake_override, bake_override_object};
 pub use serialized::{External, Object, write};
 pub use typetree::{TypeTree, Val};
 
@@ -40,6 +42,17 @@ pub fn controller_tree() -> Result<&'static TypeTree> {
     CONTROLLER_TREE
         .as_ref()
         .map_err(|error| anyhow::anyhow!("pinned AnimatorController type tree: {error}"))
+}
+
+static OVERRIDE_TREE: LazyLock<Result<TypeTree, String>> = LazyLock::new(|| {
+    TypeTree::parse(include_bytes!("engine/type-221.bin")).map_err(|error| error.to_string())
+});
+
+/// The Player layout of `AnimatorOverrideController` in the pinned engine.
+pub fn override_tree() -> Result<&'static TypeTree> {
+    OVERRIDE_TREE
+        .as_ref()
+        .map_err(|error| anyhow::anyhow!("pinned AnimatorOverrideController type tree: {error}"))
 }
 
 /// An authored feature the baker does not reproduce. The asset stays on the

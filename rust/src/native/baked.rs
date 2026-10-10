@@ -3,7 +3,7 @@
 use super::{
     importer::NativeProjectImporter,
     resolve_project_import_source,
-    support::{Event, is_not_exist, lower_ext, mkdir_all, read_file, wrap, write_file},
+    support::{Event, is_not_exist, lower_ext, mkdir_all, read_file, write_file},
 };
 use crate::{
     playerbake::{self, Baked, ClipFacts, ControllerSources, Mask, Unsupported},
@@ -12,13 +12,11 @@ use crate::{
     sha256, sysutil,
 };
 use anyhow::{Result, bail};
-use std::{cell::RefCell, collections::BTreeSet, time::Instant};
+use std::{collections::BTreeSet, time::Instant};
 
-/// Reads a controller's clips and masks from the project and records which
-/// clips it plays.
+/// Reads a controller's clips and masks from the project.
 struct ProjectSources<'a> {
     importer: &'a NativeProjectImporter,
-    clips: RefCell<BTreeSet<String>>,
 }
 
 impl ProjectSources<'_> {
@@ -40,7 +38,6 @@ impl ControllerSources for ProjectSources<'_> {
     fn clip(&self, guid: &str, _file_id: &str) -> Result<ClipFacts> {
         let path = self.path(guid, ".anim", "animation clip")?;
         let source = resolve_project_import_source(&self.importer.opts.project, &path)?;
-        self.clips.borrow_mut().insert(path.clone());
         playerbake::read_clip_facts(&read_file(&source)?, &path)
     }
     fn mask(&self, guid: &str) -> Result<Mask> {
@@ -58,33 +55,50 @@ impl NativeProjectImporter {
     }
 
     /// Bakes an authored animation source and publishes it as native content,
-    /// then refreshes the baked controllers that play it. A source using a
+    /// then refreshes the baked sources that refer to it. A source using a
     /// feature the baker refuses is reported, not approximated.
     pub(crate) fn import_baked(&mut self, logical: &str) -> Result<()> {
-        let guid = self.publish_baked(logical)?;
-        if lower_ext(logical) != ".anim" {
+        let guid = self.publish_baked(logical, 0)?;
+        self.refresh_dependents(&guid, logical, 0)
+    }
+
+    /// A controller holds facts of its clips and, once baked, refers to their
+    /// baked form; one built into the catalog never sees a baked clip. The
+    /// same holds for an override controller and its controller.
+    fn refresh_dependents(&mut self, guid: &str, logical: &str, depth: usize) -> Result<()> {
+        if lower_ext(logical) == ".overridecontroller" || depth > 2 {
             return Ok(());
         }
-        // A controller holds facts of its clips and, once baked, refers to
-        // their baked form; one built into the catalog never sees this clip.
-        let mut controllers = self.session.lock().native_asset_paths(".controller");
-        for entry in self.entries.values() {
-            if lower_ext(&entry.source_path) == ".controller" {
-                controllers.insert(entry.source_path.clone());
+        let mut dependents = BTreeSet::new();
+        {
+            let session = self.session.lock();
+            for extension in [".controller", ".overrideController"] {
+                dependents.extend(session.native_asset_paths(extension));
             }
         }
-        for controller in controllers {
-            let Ok(source) = resolve_project_import_source(&self.opts.project, &controller) else {
+        for entry in self.entries.values() {
+            if matches!(
+                lower_ext(&entry.source_path).as_str(),
+                ".controller" | ".overridecontroller"
+            ) {
+                dependents.insert(entry.source_path.clone());
+            }
+        }
+        for dependent in dependents {
+            if dependent == logical {
+                continue;
+            }
+            let Ok(source) = resolve_project_import_source(&self.opts.project, &dependent) else {
                 continue;
             };
             if !read_file(&source).is_ok_and(|data| contains(&data, guid.as_bytes())) {
                 continue;
             }
-            match self.publish_baked(&controller) {
-                Ok(_) => {}
+            match self.publish_baked(&dependent, 0) {
+                Ok(published) => self.refresh_dependents(&published, &dependent, depth + 1)?,
                 Err(error) if error.chain().any(|cause| cause.is::<Unsupported>()) => {
                     Event::new("native-bake-refused")
-                        .with("path", &controller)
+                        .with("path", &dependent)
                         .with("reason", &format!("{error:#}"))
                         .emit();
                 }
@@ -94,8 +108,11 @@ impl NativeProjectImporter {
         Ok(())
     }
 
-    /// Bakes one source and its baked dependencies; returns its GUID.
-    fn publish_baked(&mut self, logical: &str) -> Result<String> {
+    /// Bakes one source and the baked sources it refers to; returns its GUID.
+    fn publish_baked(&mut self, logical: &str, depth: usize) -> Result<String> {
+        if depth > 4 {
+            bail!("baked sources refer to each other too deeply: {logical}");
+        }
         let started = Instant::now();
         let source = resolve_project_import_source(&self.opts.project, logical)?;
         let data = read_file(&source)?;
@@ -103,30 +120,34 @@ impl NativeProjectImporter {
         let guid = meta_guid(&meta)?;
         let source_sha = sha256(&data);
         let meta_sha = sha256(&meta);
-        let (baked, clips) = match lower_ext(logical).as_str() {
-            ".anim" => (playerbake::bake_clip(&data), BTreeSet::new()),
-            ".controller" => {
-                let sources = ProjectSources {
-                    importer: self,
-                    clips: RefCell::new(BTreeSet::new()),
-                };
-                let baked = playerbake::bake_controller(&data, &sources);
-                (baked, sources.clips.into_inner())
-            }
+        let baked = match lower_ext(logical).as_str() {
+            ".anim" => playerbake::bake_clip(&data),
+            ".controller" => playerbake::bake_controller(&data, &ProjectSources { importer: self }),
+            ".overridecontroller" => playerbake::bake_override(&data),
             _ => bail!("no baker for {logical}"),
         };
-        let baked: Baked = baked.map_err(|error| wrap(&format!("bake native {logical}"), error))?;
-        // Every clip a controller refers to has to be published in baked form.
-        for clip in clips {
-            let current = resolve_project_import_source(&self.opts.project, &clip)
+        // Keeps the cause, so a refusal can be told from a failure.
+        let baked: Baked =
+            baked.map_err(|error| error.context(format!("bake native {logical}")))?;
+        // Every source this one refers to has to be published in baked form.
+        for external in &baked.externals {
+            let dependency = self.source_path(&external.guid)?;
+            if !matches!(lower_ext(&dependency).as_str(), ".anim" | ".controller") {
+                return Err(anyhow::Error::from(Unsupported(format!(
+                    "reference to {} {}, which is not a baked source",
+                    external.guid, dependency
+                )))
+                .context(format!("bake native {logical}")));
+            }
+            let current = resolve_project_import_source(&self.opts.project, &dependency)
                 .and_then(|source| read_file(&source))
                 .map(|data| sha256(&data))?;
             let published = self
                 .entries
-                .values()
-                .any(|entry| entry.source_path == clip && entry.source_sha256 == current);
+                .get(&external.guid)
+                .is_some_and(|entry| entry.source_sha256 == current);
             if !published {
-                self.publish_baked(&clip)?;
+                self.publish_baked(&dependency, depth + 1)?;
             }
         }
         let file_sha = sha256(&baked.file);
