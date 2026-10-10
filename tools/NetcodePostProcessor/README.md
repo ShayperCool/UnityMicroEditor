@@ -1,6 +1,6 @@
 # Netcode post-processing after SDK compilation
 
-The Go compiler runs this small C# executable after Roslyn for assemblies whose prepared graph references `Unity.Netcode.Runtime`. It uses the unmodified `Editor/CodeGen` sources from the project's pinned Netcode for GameObjects package: `INetworkSerializableILPP`, `INetworkMessageILPP` and `NetworkBehaviourILPP`. Each processor is called through the public `ILPostProcessor.Process(ICompiledAssembly)`. The Unity Editor is not started.
+The compiler runs this small C# executable after Roslyn for assemblies whose prepared graph references `Unity.Netcode.Runtime`. It uses the unmodified `Editor/CodeGen` sources from the project's pinned Netcode for GameObjects package: `INetworkSerializableILPP`, `INetworkMessageILPP` and `NetworkBehaviourILPP`. Each processor is called through the public `ILPostProcessor.Process(ICompiledAssembly)`. The Unity Editor is not started.
 
 The helper is built with the .NET 8 SDK from the Unity installation. It references `Unity.CompilationPipeline.Common`, the Mono.Cecil package, Unity runtime modules and the unstripped standalone Netcode reference from `Library/Bee/artifacts/StandaloneLinux64_CodeGen`. The last is needed because the Player's linker removes friend-access metadata that the package's CodeGen requires. When processing game DLLs, the resolver gets the real Player references.
 
@@ -15,6 +15,7 @@ The cache key covers the helper source, the package CodeGen source, SDK and comp
 SDK-only check, without a Player or Editor:
 
 ```bash
-UNITY_GO_NETCODE_SDK=/absolute/Unity/Editor/Unity \
-  go test ./cmd/unity-micro-editor -run TestGoNetcodePostprocessorSDK -v
+UME_NETCODE_SDK=/absolute/Unity/Editor/Unity \
+UNITY_MICRO_EDITOR_TEST_PROJECT=/absolute/prepared/game/project \
+  cargo test --locked --lib compiler::tests::netcode_postprocessor_sdk -- --nocapture
 ```

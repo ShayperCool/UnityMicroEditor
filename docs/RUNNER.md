@@ -1,6 +1,6 @@
 # Running a project
 
-`unity-micro-editor run` starts an authored scene in a reusable Unity Mono Player and, with `--watch`, applies source changes to it. Go prepares the scene graph, caches and Player launch. SDK Roslyn compiles C#. Unity's runtime does the rendering, physics and audio. The main Unity Editor is not started during a run.
+`unity-micro-editor run` starts an authored scene in a reusable Unity Mono Player and, with `--watch`, applies source changes to it. The runner prepares the scene graph, caches and Player launch. SDK Roslyn compiles C#. Unity's runtime does the rendering, physics and audio. The main Unity Editor is not started during a run.
 
 The runner needs a prepared baseline for the project: a compatible native host, a compiler plan and a native asset catalog. `unity-micro-editor auto-prepare` produces one; see [AGENT_MCP.md](AGENT_MCP.md#start-with-an-explicit-project-and-scene).
 
@@ -49,7 +49,7 @@ The runner asks for OpenGL Core with VSync off. Its readiness check rejects a mi
 | GameObject name, active state, layer or tag; Transform position, rotation or scale | A small scene patch is published. Changed source fields are applied; other runtime values are kept. |
 | New empty GameObject with a Transform, child or root | The patch adds the object and updates the hierarchy in the same Player. |
 | Other supported scene, prefab and raw asset changes | The loader rebuilds the scene in the same Player. Scene state resets; loaded assemblies and the native cache remain. |
-| Supported WAV, FBX or PNG with an existing GUID | Unity's AssetImportWorker imports the file in an owned context. Go adapts the result and loads it into the same Player, then the scene is rebuilt. |
+| Supported WAV, FBX or PNG with an existing GUID | Unity's AssetImportWorker imports the file in an owned context. The runner adapts the result and loads it into the same Player, then the scene is rebuilt. |
 | C# method body | The SDK recompiles the changed assembly and the runner restarts the Player. Process and scene state reset. |
 | C# API change | Dependent assemblies can be recompiled as well. The Player restarts. |
 

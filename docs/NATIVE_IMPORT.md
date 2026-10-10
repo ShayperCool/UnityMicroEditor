@@ -1,8 +1,8 @@
 # Native import
 
-Heavy content (models, audio, compressed textures) is imported by Unity's own AssetImportWorker, driven by a Go coordinator. The main Editor process, its GUI and a pre-imported `Library` are not needed for a worker run. Scenes and authored prefabs do not go through this path; the runtime loader reads them from source.
+Heavy content (models, audio, compressed textures) is imported by Unity's own AssetImportWorker, driven by this tool's coordinator. The main Editor process, its GUI and a pre-imported `Library` are not needed for a worker run. Scenes and authored prefabs do not go through this path; the runtime loader reads them from source.
 
-Only Unity `6000.6.3f1` on Linux x64 is supported. The coordinator is a static Go executable. It starts `Unity` in AssetImportWorker mode and a separate `Unity.DataStore` from the installed engine. The importers themselves stay inside Unity's executable.
+Only Unity `6000.6.3f1` on Linux x64 is supported. The coordinator starts `Unity` in AssetImportWorker mode and a separate `Unity.DataStore` from the installed engine. The importers themselves stay inside Unity's executable.
 
 ## Commands
 
@@ -47,10 +47,10 @@ Each cache entry records an `environmentSha256`. The fingerprint covers the pinn
 ## How an import works
 
 1. The coordinator creates an isolated context with its own `Assets`, `ProjectSettings`, `Packages`, `Library` and `Logs`, and copies the exact source and `.meta` bytes into it.
-2. Go writes a minimal `SourceAssetDB` directly: GUIDs, paths, importer settings and XXH3-128 file hashes taken from the sources. Nothing is copied from an Editor.
+2. The coordinator writes a minimal `SourceAssetDB` directly: GUIDs, paths, importer settings and XXH3-128 file hashes taken from the sources. Nothing is copied from an Editor.
 3. It starts a DataStore with a unique namespace, accepts the worker's local TCP connection, and sends `Initialize`, `Prepare` and `ImportRequest`.
 4. Requests use the primary importer ID `-1`, so the native pipeline picks the importer and reads its settings from `.meta`. Explicit importer IDs run an extra importer with default settings and are rejected by content validation.
-5. The worker is stopped through the protocol, then the DataStore. Go reads only the stopped store, following `ImportResponse.ArtifactBlobs[1]` → `ArtifactMetaInfo.Files[].Hash` → the stored file.
+5. The worker is stopped through the protocol, then the DataStore. It reads only the stopped store, following `ImportResponse.ArtifactBlobs[1]` → `ArtifactMetaInfo.Files[].Hash` → the stored file.
 
 Worker parameters come from an exact copy of `ProjectSettings.asset`: color space, shader precision and the Linux graphics API override. The profile is limited to the Linux standalone target, with OpenGLCore and Vulkan as the verified automatic API set. Unsupported or ambiguous settings are refused. The applied values and the settings hash are written to `environment` in the report.
 
@@ -64,13 +64,13 @@ Cold import is limited to ordinary uncompressed textures. A compressed PNG uses 
 
 ## Mesh colliders
 
-An Editor artifact for a mesh with `m_IsReadable=0` can hold vertex and index data but no cooked collision data for a Player. For a MeshCollider, Go writes a separate immutable runtime file with `m_IsReadable`, `m_KeepVertices` and `m_KeepIndices` enabled on the originally unreadable mesh. The FBX, its `.meta`, the scene and the collider geometry are not changed, and the projection is proven byte-identical to the import apart from those three flags.
+An Editor artifact for a mesh with `m_IsReadable=0` can hold vertex and index data but no cooked collision data for a Player. For a MeshCollider, the coordinator writes a separate immutable runtime file with `m_IsReadable`, `m_KeepVertices` and `m_KeepIndices` enabled on the originally unreadable mesh. The FBX, its `.meta`, the scene and the collider geometry are not changed, and the projection is proven byte-identical to the import apart from those three flags.
 
 The loader calls the public `Physics.BakeMesh` with the authored `convex` and `cookingOptions` values, then `UploadMeshData(true)` restores the original unreadable state before user callbacks run. Bounding-box substitutes are not used.
 
 ## UI and fonts
 
-Unchanged UXML, USS and font assets are extracted from an existing Unity import cache rather than imported cold. See [UI_IMPORTS.md](../internal/runtimeartifact/UI_IMPORTS.md).
+Unchanged UXML, USS and font assets are extracted from an existing Unity import cache rather than imported cold. See [UI_IMPORTS.md](UI_IMPORTS.md).
 
 ## Limits
 
@@ -82,18 +82,19 @@ Unchanged UXML, USS and font assets are extracted from an existing Unity import 
 
 ## Code
 
-The coordinator is part of `cmd/unity-micro-editor`:
+The coordinator lives in `rust/src/native/`, with the wire format, LMDB reader and SourceAssetDB writer beside it:
 
 | File | Responsibility |
 | --- | --- |
-| `project_import.go`, `go_native*.go` | Project import, adoption and the runtime cache |
-| `source_database.go` | The owned SourceAssetDB and native source hashes |
-| `protocol.go` | Wire format, requests, responses and `ArtifactMetaInfo` |
-| `datastore.go` | DataStore namespace, readiness and shutdown |
-| `lmdb.go` | Reading a stopped LMDB without a native library |
-| `artifact.go` | Extracting stored files and checking content keys |
-| `worker_environment.go` | The import environment fingerprint |
+| `rust/src/native/import.rs`, `adopt.rs`, `batch.rs`, `importer.rs`, `warm.rs` | Project import, adoption, cold batches and the runtime cache |
+| `rust/src/native/probe.rs` | One AssetImportWorker run |
+| `rust/src/registry.rs` | The owned SourceAssetDB and native source hashes |
+| `rust/src/protocol.rs` | Wire format, requests, responses and `ArtifactMetaInfo` |
+| `rust/src/native/datastore.rs` | DataStore namespace, readiness and shutdown |
+| `rust/src/lmdb.rs` | Reading a stopped LMDB without a native library |
+| `rust/src/native/artifact.rs` | Extracting stored files and checking content keys |
+| `rust/src/native/environment.rs` | The import environment fingerprint |
 
-`internal/runtimeartifact` adapts imported serialized files for the Player.
+`rust/src/runtimeartifact/` adapts imported serialized files for the Player.
 
 The ordinary tests check protocol and database bounds, corrupted content and wrong settings without starting Unity.

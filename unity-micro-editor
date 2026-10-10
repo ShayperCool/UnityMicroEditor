@@ -2,13 +2,13 @@
 set -euo pipefail
 
 tool_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-binary_root="${UNITY_MICRO_EDITOR_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/unity-micro-editor}/bin"
+cargo_command="${CARGO:-cargo}"
+if ! command -v "$cargo_command" >/dev/null 2>&1; then
+  cargo_command="$HOME/.cargo/bin/cargo"
+fi
+# Build outputs stay in the user cache; cargo's incremental build does the rest.
+target_root="${CARGO_TARGET_DIR:-${UNITY_MICRO_EDITOR_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/unity-micro-editor}/target}"
 
-mkdir -p -- "$binary_root"
-
-# Go's build cache does the incremental work; no interpreter is in the run path.
-CGO_ENABLED=0 go -C "$tool_root" build -trimpath -ldflags='-s -w' \
-  -o "$binary_root/unity-micro-editor" ./cmd/unity-micro-editor
-export GOMEMLIMIT="${GOMEMLIMIT:-384MiB}"
+"$cargo_command" build --quiet --locked --release --manifest-path "$tool_root/Cargo.toml" --target-dir "$target_root"
 export UNITY_MICRO_EDITOR_ROOT="$tool_root"
-exec "$binary_root/unity-micro-editor" "$@"
+exec "$target_root/release/unity-micro-editor" "$@"
