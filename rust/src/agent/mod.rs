@@ -15,6 +15,7 @@ mod defaults_closure;
 mod host;
 mod jobs;
 mod native;
+mod progress;
 mod scene;
 mod source_prepare;
 mod source_scene;
@@ -53,7 +54,7 @@ use crate::{
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{Arc, Condvar, Mutex, RwLock},
 };
 
@@ -99,6 +100,10 @@ pub struct Preparation {
     pub component_defaults_profile: String,
     #[serde(deserialize_with = "nz", skip_serializing_if = "is_empty")]
     pub reference_graph: String,
+    /// Where the host build left the Addressables content its build
+    /// processors produced. Absent when the host build produced none.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub host_content: BTreeMap<String, String>,
     pub backends: NilMap<String>,
 }
 
@@ -151,6 +156,7 @@ pub(crate) struct Inner {
     pub state: RwLock<Selection>,
     pub jobs: Mutex<Jobs>,
     pub job_wait: (Mutex<usize>, Condvar),
+    pub progress: Mutex<progress::Progress>,
 }
 
 /// Cheap to clone; clones share one service.
@@ -176,6 +182,7 @@ impl Service {
             }),
             jobs: Mutex::default(),
             job_wait: (Mutex::new(0), Condvar::new()),
+            progress: Mutex::default(),
         }))
     }
     pub fn project(&self) -> &str {

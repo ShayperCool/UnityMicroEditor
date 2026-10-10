@@ -38,6 +38,16 @@ namespace UnityMicroEditor
             return false;
         }
 
+        public static bool Contains(PlayerLoopSystem loop, Type marker)
+        {
+            if (marker == null) throw new ArgumentNullException(nameof(marker));
+            if (loop.type == marker) return true;
+            if (loop.subSystemList == null) return false;
+            foreach (PlayerLoopSystem child in loop.subSystemList)
+                if (Contains(child, marker)) return true;
+            return false;
+        }
+
         public static bool Remove(ref PlayerLoopSystem loop, Type marker)
         {
             if (marker == null) throw new ArgumentNullException(nameof(marker));

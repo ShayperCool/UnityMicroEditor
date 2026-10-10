@@ -1084,6 +1084,30 @@ impl Client {
     }
 }
 
+/// Whether an Editor or Player process has `project` open. A project nobody
+/// has open holds a consistent, stopped `Library`.
+pub fn project_is_open(project: &str) -> Result<bool> {
+    let project = sysutil::eval_symlinks(project)?;
+    let entries = std::fs::read_dir("/proc").map_err(|error| Error::os("open", "/proc", &error))?;
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|name| name.parse::<i64>().ok()) else {
+            continue;
+        };
+        let Ok(process) = process(pid) else {
+            continue;
+        };
+        let argument = argument(&process.args, "-projectPath");
+        if argument.first() == Some(&b'/')
+            && std::fs::canonicalize(sysutil::os_str(argument))
+                .is_ok_and(|path| path.as_os_str().as_bytes() == project.as_bytes())
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn validate_editor_executable(ctx: &Context, editor: &str) -> Result<()> {
     // A version-only invocation opens no project and acquires no project lock.
     // Validate before package installation can change authored inputs. Discard

@@ -99,7 +99,13 @@ fn controller_helper_process() {
         eprintln!("{error}");
         process::exit(4);
     }
-    if helper_write(&manifest, &json!({"revision": "rev-1"})).is_err() {
+    if helper_write(&manifest, &json!({"revision": "rev-1"})).is_err()
+        || helper_write(
+            &sysutil::join(&[&output, "helper-arguments.json"]),
+            &json!(args),
+        )
+        .is_err()
+    {
         process::exit(4);
     }
     let mut pid = i64::from(process::id());
@@ -1288,4 +1294,102 @@ fn recorded_cases_agree_on_journal_receipts_state_and_routing() {
         }
     });
     controller.close().unwrap();
+}
+
+#[test]
+fn start_arguments_reach_the_runner_and_reset_replaces_them() {
+    let c = controller_fixture("");
+    let ctx = seconds(3);
+    let launched = |c: &Controller| -> Vec<String> {
+        let path = sysutil::join(&[&c.0.options.output, "helper-arguments.json"]);
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    };
+    let scene = "0123456789abcdef0123456789abcdef=Assets/Extra.unity";
+    let start = json!({"action": "start", "arguments": {
+        "gameArguments": ["-content-url", "http://127.0.0.1:9/content"],
+        "contentScenes": [scene], "contentPrefabs": ["Assets/Extra.prefab"]}});
+    c.handle(&ctx, "session_control", &jsondoc::encode(&start))
+        .unwrap();
+    let ready = c.wait(&ctx, 0, true).unwrap();
+    assert_eq!(
+        ready.launch.game_arguments,
+        ["-content-url", "http://127.0.0.1:9/content"]
+    );
+    let args = launched(&c);
+    let separator = args.iter().rposition(|arg| arg == "--").unwrap();
+    assert_eq!(
+        args[separator + 1..],
+        ["-content-url", "http://127.0.0.1:9/content"],
+        "game arguments did not follow the runner's own flags"
+    );
+    let flag = |args: &[String], name: &str| {
+        args.iter()
+            .position(|arg| arg == name)
+            .map(|index| args[index + 1].clone())
+    };
+    assert_eq!(
+        flag(&args[..separator], "--content-scene").as_deref(),
+        Some(scene)
+    );
+    assert_eq!(
+        flag(&args[..separator], "--content-prefab").as_deref(),
+        Some("Assets/Extra.prefab")
+    );
+
+    // A running Player keeps its command line: other arguments need a reset.
+    let other = json!({"action": "start", "arguments": {"gameArguments": ["-other"]}});
+    assert!(
+        c.handle(&ctx, "session_control", &jsondoc::encode(&other))
+            .is_err(),
+        "start silently ignored different launch arguments"
+    );
+    c.handle(&ctx, "session_control", &jsondoc::encode(&start))
+        .unwrap();
+    let reset = json!({"action": "reset", "arguments": {"gameArguments": ["-other"]}});
+    c.handle(&ctx, "session_control", &jsondoc::encode(&reset))
+        .unwrap();
+    let again = c.wait(&ctx, ready.last_sequence, true).unwrap();
+    assert_ne!(again.pid, ready.pid);
+    let args = launched(&c);
+    let separator = args.iter().rposition(|arg| arg == "--").unwrap();
+    assert_eq!(args[separator + 1..], ["-other"]);
+    assert_eq!(
+        flag(&args[..separator], "--content-scene").as_deref(),
+        Some(scene),
+        "a reset that names only game arguments dropped the content scenes"
+    );
+    c.stop(&ctx).unwrap();
+    for invalid in [
+        json!({"gameArguments": ["--unity-cli-frames", "1"]}),
+        json!({"gameArguments": "-flag"}),
+        json!({"contentScenes": ["--watch"]}),
+    ] {
+        let start = json!({"action": "start", "arguments": invalid});
+        assert!(
+            c.handle(&ctx, "session_control", &jsondoc::encode(&start))
+                .is_err(),
+            "invalid launch arguments accepted: {start}"
+        );
+    }
+}
+
+#[test]
+fn rejection_that_needs_preparation_is_reported_until_an_update_applies() {
+    let c = controller_fixture("");
+    let ready = start_ready(&c);
+    emit_fixture_event(
+        &c,
+        json!({"event": "update-rejected", "error": "new source needs a slot; regenerate source graph", "preparationRequired": true}),
+    );
+    let state = c
+        .wait(&seconds(1), ready.last_sequence, false)
+        .expect_err("rejection was not reported")
+        .state;
+    assert!(
+        state.preparation_required && c.status().preparation_required,
+        "status hides that the Player stays on its old code: {state:?}"
+    );
+    emit_fixture_event(&c, updated(ready.pid));
+    let state = c.wait(&seconds(1), state.last_sequence, false).unwrap();
+    assert!(!state.preparation_required);
 }

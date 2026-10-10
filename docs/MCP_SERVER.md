@@ -76,7 +76,11 @@ JSON values; an omitted value remains absent.
 
 A configured Player adds `session_control`, `runtime_query`, `runtime_command`
 and `project_tools`. Start can return `phase: starting`; wait for readiness before
-queries. Query operations are `status`, `hierarchy`, `inspect`, `logs`, `raycast`
+queries. While start still prepares the project it returns `result_pending` with
+`progress` (stage and Editor log path), and `status`/`wait` report the same
+preparation. `start`/`reset` take `gameArguments`, `contentScenes`,
+`contentPrefabs` and `rebuildHost` in `arguments`; see
+[AGENT_MCP.md](AGENT_MCP.md). Query operations are `status`, `hierarchy`, `inspect`, `logs`, `raycast`
 and `tools`. Commands include `screenshot`, `pause`, `resume`, `wait_frames`,
 `custom`, `invoke`, `simulation_pause`, `simulation_resume`, `simulation_step` and
 `input`. Arguments go in `arguments`; `requestId`, `expectedPid` and

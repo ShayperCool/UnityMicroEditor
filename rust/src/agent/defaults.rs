@@ -478,6 +478,11 @@ impl Service {
                 ..Default::default()
             },
         )?;
+        self.stage(
+            "capture_component_defaults",
+            "capturing native component defaults in an owned staging copy",
+            &join(&[client.mailbox(), "editor.log"]),
+        );
         struct Close(Client);
         impl Drop for Close {
             fn drop(&mut self) {

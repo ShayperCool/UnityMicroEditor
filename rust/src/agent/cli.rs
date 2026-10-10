@@ -174,6 +174,11 @@ pub fn run_auto_prepare_cli(arguments: Vec<String>) -> Result<()> {
         false,
         "forbid main Editor execution, including native profile bootstrap",
     );
+    flags.bool(
+        "rebuild-host",
+        false,
+        "build a new host instead of reusing the newest one of an earlier preparation",
+    );
     flags.parse(arguments)?;
     let (project, scene) = (flags.get_string("project"), flags.get_string("scene"));
     if !flags.args().is_empty() || project.is_empty() || scene.is_empty() {
@@ -191,13 +196,17 @@ pub fn run_auto_prepare_cli(arguments: Vec<String>) -> Result<()> {
         ..Default::default()
     });
     let _closing = Closing(&service);
-    let raw = marshal(&Any::Object(obj([
+    let mut arguments = obj([
         ("scene", scene.into()),
         ("hostPlayer", flags.get_string("host-player").into()),
         ("requestId", flags.get_string("request-id").into()),
         ("nativeCatalog", flags.get_string("native-catalog").into()),
         ("activate", false.into()),
-    ])))?;
+    ]);
+    if flags.get_bool("rebuild-host") {
+        arguments.insert("rebuildHost".into(), true.into());
+    }
+    let raw = marshal(&Any::Object(arguments))?;
     let result = service.handle(&ctx, "project_prepare", &raw)?;
     emit(reply_bytes(&result))
 }

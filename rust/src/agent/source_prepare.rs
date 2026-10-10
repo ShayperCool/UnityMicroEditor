@@ -22,6 +22,10 @@ use serde::{Deserialize, Serialize};
 fn is_empty(text: &str) -> bool {
     text.is_empty()
 }
+/// `rebuildHost: true` skips the reuse of an earlier host.
+fn rebuild_host(args: &AnyMap) -> bool {
+    args.get("rebuildHost").is_some_and(Any::is_true)
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -38,6 +42,9 @@ pub(crate) struct PreparationSeed {
     pub engine_profile: String,
     #[serde(deserialize_with = "nz", skip_serializing_if = "is_empty")]
     pub reference_graph: String,
+    /// The requestId of the earlier preparation whose host was found and reused.
+    #[serde(deserialize_with = "nz", skip_serializing_if = "is_empty")]
+    pub reused_preparation: String,
 }
 
 impl Service {
@@ -51,22 +58,28 @@ impl Service {
     ) -> Result<PreparationSeed> {
         agent_immutable_json(
             &join(&[directory, "request.json"]),
-            &Any::Object(obj([
-                ("schemaVersion", 2.into()),
-                ("backend", "authored_source".into()),
-                ("project", self.0.project.clone().into()),
-                ("editor", self.0.editor.clone().into()),
-                ("scene", text(args, "scene").into()),
-                ("hostPlayer", text(args, "hostPlayer").into()),
-                ("nativeCatalog", text(args, "nativeCatalog").into()),
-                ("engineProfile", text(args, "engineProfile").into()),
-                ("configuredHostPlayer", self.0.host.clone().into()),
-                (
-                    "configuredEngineProfile",
-                    self.0.engine_profile_path.clone().into(),
-                ),
-                ("mainEditorAllowed", (!self.0.no_editor).into()),
-            ])),
+            &Any::Object(
+                obj([
+                    ("schemaVersion", 2.into()),
+                    ("backend", "authored_source".into()),
+                    ("project", self.0.project.clone().into()),
+                    ("editor", self.0.editor.clone().into()),
+                    ("scene", text(args, "scene").into()),
+                    ("hostPlayer", text(args, "hostPlayer").into()),
+                    ("nativeCatalog", text(args, "nativeCatalog").into()),
+                    ("engineProfile", text(args, "engineProfile").into()),
+                    ("configuredHostPlayer", self.0.host.clone().into()),
+                    (
+                        "configuredEngineProfile",
+                        self.0.engine_profile_path.clone().into(),
+                    ),
+                    ("mainEditorAllowed", (!self.0.no_editor).into()),
+                ])
+                .into_iter()
+                // Recorded only when set: earlier requests have no such member.
+                .chain(rebuild_host(args).then(|| ("rebuildHost".to_string(), true.into())))
+                .collect(),
+            ),
         )?;
         let seed_path = join(&[directory, "seed.json"]);
         match read_json::<PreparationSeed>(&seed_path, 1 << 20) {
@@ -90,6 +103,7 @@ impl Service {
             native_catalog: text(args, "nativeCatalog"),
             engine_profile: text(args, "engineProfile"),
             reference_graph: String::new(),
+            reused_preparation: String::new(),
         };
         if frozen.scene.is_empty() {
             frozen.scene = self.scene();
@@ -102,6 +116,18 @@ impl Service {
         }
         if frozen.native_catalog.is_empty() {
             frozen.native_catalog = previous.native_catalog.clone();
+        }
+        // A new requestId is a new preparation, not a new host. The newest host
+        // an earlier request built for this project is reused unless the caller
+        // asks for a rebuild; later stages still verify it against the sources.
+        let mut discovered = Preparation::default();
+        if frozen.host_player.is_empty() && !rebuild_host(args) {
+            discovered = self.discover_host();
+            frozen.host_player = discovered.host_player.clone();
+            frozen.reused_preparation = discovered.request_id.clone();
+            if frozen.native_catalog.is_empty() && discovered.scene == frozen.scene {
+                frozen.native_catalog = discovered.native_catalog.clone();
+            }
         }
         if frozen.engine_profile.is_empty() {
             frozen.engine_profile = self.0.engine_profile_path.clone();
@@ -118,8 +144,93 @@ impl Service {
                 frozen.reference_graph = join(&[&sysutil::dir(&previous.baseline), "graph.json"]);
             }
         }
+        if frozen.reference_graph.is_empty() && !discovered.host_player.is_empty() {
+            frozen.reference_graph = discovered.reference_graph.clone();
+        }
         agent_immutable_json(&seed_path, &frozen)?;
         Ok(frozen)
+    }
+
+    /// The newest confirmed preparation or engine bootstrap of this project
+    /// and Editor whose host Player still exists with its compiled-source
+    /// proof. Its content is verified where it is used, not here.
+    fn discover_host(&self) -> Preparation {
+        let project = self.0.project.as_str();
+        let root = join(&[project, "Library/UnityMicroEditor/preparations"]);
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            return Preparation::default();
+        };
+        let mut candidates: Vec<(std::time::SystemTime, String)> = entries
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let name = entry.file_name().into_string().ok()?;
+                let result = entry.path().join("result.json");
+                let modified = std::fs::symlink_metadata(&result).ok()?.modified().ok()?;
+                operation_id(&name).then_some((modified, name))
+            })
+            .collect();
+        candidates.sort_by(|a, b| b.cmp(a));
+        for (_, name) in candidates.into_iter().take(256) {
+            let directory = join(&[&root, &name]);
+            let Ok(result) = read_json::<Preparation>(&join(&[&directory, "result.json"]), 1 << 20)
+            else {
+                continue;
+            };
+            let request =
+                super::read_map(&join(&[&directory, "request.json"]), 1 << 20).unwrap_or_default();
+            let host = result.host_player.as_str();
+            if result.schema_version != 1
+                || result.project != project
+                || result.request_id != name
+                || text(&request, "editor") != self.0.editor
+                || !sysutil::is_abs(host)
+                || !sysutil::lstat(host)
+                    .is_ok_and(|info| info.is_regular() && info.mode & 0o111 != 0)
+                || bootstrap::source_engine_profile_cache_path(project, host).is_err()
+            {
+                continue;
+            }
+            return result;
+        }
+        Preparation::default()
+    }
+
+    /// The identity problems `project_inspect` reports, checked before any
+    /// Editor or compiler runs. Missing metadata only stops a preparation
+    /// that needs an Editor stage: that Editor would generate the identity in
+    /// its own copy, and the copy would no longer match the target.
+    pub(crate) fn check_authored_identity(&self, editor_stage: bool) -> Result<()> {
+        let store = crate::authoring::Store::new(std::path::Path::new(&self.0.project))
+            .map_err(super::store_error)?;
+        let info = store.inspect().map_err(super::store_error)?;
+        let issues: Vec<&String> = info
+            .identity_issues
+            .iter()
+            .filter(|issue| editor_stage || !issue.ends_with(": missing metadata"))
+            .collect();
+        if issues.is_empty() {
+            return Ok(());
+        }
+        Err(super::fail_with(
+            "invalid_identity",
+            &format!(
+                "authored metadata has {} identity issue(s), the first is: {}; fix them (project_inspect lists all) before preparation",
+                issues.len(),
+                issues[0]
+            ),
+            obj([
+                ("issueCount", (issues.len() as i64).into()),
+                (
+                    "issues",
+                    issues
+                        .iter()
+                        .take(64)
+                        .map(|issue| Any::from(issue.as_str()))
+                        .collect::<Vec<_>>()
+                        .into(),
+                ),
+            ]),
+        ))
     }
 
     /// The result of the currently activated preparation.
@@ -142,7 +253,7 @@ impl Service {
     }
 
     pub(crate) fn prepare_source(&self, ctx: &Context, args: &AnyMap) -> Result<Preparation> {
-        let (project, editor) = (self.0.project.as_str(), self.0.editor.as_str());
+        let project = self.0.project.as_str();
         let mut id = text(args, "requestId");
         if id.is_empty() {
             id = agent_id();
@@ -155,6 +266,48 @@ impl Service {
         }
         let directory = join(&[project, "Library/UnityMicroEditor/preparations", &id]);
         let seed = self.source_preparation_seed(args, &directory)?;
+        let outcome = self.prepare_seeded(ctx, id, &directory, &seed);
+        // A host found by discovery was built for earlier sources. When the
+        // stages that bind the host to the current project reject it, say how
+        // to get a new one instead of only why it failed. Later failures, such
+        // as a C# compile error, are the project's own.
+        let stage = self.0.progress.lock().unwrap().stage.clone();
+        match outcome {
+            Err(error)
+                if !seed.reused_preparation.is_empty()
+                    && matches!(
+                        stage.as_str(),
+                        "capture_engine_profile" | "build_source_graph"
+                    )
+                    && super::typed(&error).is_none()
+                    && !super::context_error(&error) =>
+            {
+                Err(super::fail_with(
+                    "host_reuse_failed",
+                    &format!(
+                        "the host reused from preparation {} does not fit the current project: {}; prepare again with a new requestId and rebuildHost: true",
+                        seed.reused_preparation,
+                        super::error_text(&error)
+                    ),
+                    obj([
+                        ("reusedPreparation", seed.reused_preparation.clone().into()),
+                        ("hostPlayer", seed.host_player.clone().into()),
+                    ]),
+                ))
+            }
+            outcome => outcome,
+        }
+    }
+
+    fn prepare_seeded(
+        &self,
+        ctx: &Context,
+        id: String,
+        directory: &str,
+        seed: &PreparationSeed,
+    ) -> Result<Preparation> {
+        let (project, editor) = (self.0.project.as_str(), self.0.editor.as_str());
+        let directory = directory.to_string();
         let (scene, mut host, mut native, mut profile_path) = (
             seed.scene.clone(),
             seed.host_player.clone(),
@@ -178,19 +331,42 @@ impl Service {
             Err(error) if !not_exist(&error) => return Err(error),
             Err(_) => {}
         }
-        let resolve = || packages::resolve(ctx, project, editor, packages::Options::default());
+        // Fail on what needs no work to detect before anything is resolved or built.
+        if host.is_empty() && self.0.no_editor {
+            return Err(fail(
+                "native_host_missing",
+                "no matching reusable Mono host was supplied; main Editor execution is disabled",
+            ));
+        }
+        self.stage(
+            "validate_sources",
+            "checking authored metadata identities",
+            "",
+        );
+        self.check_authored_identity(host.is_empty())?;
+        // The Player session reads the authored PlayerSettings. No Editor runs
+        // in the target any more, so nothing would generate them there.
+        if !super::regular(&join(&[project, "ProjectSettings/ProjectSettings.asset"])) {
+            return Err(fail(
+                "project_settings_missing",
+                "the project has no ProjectSettings/ProjectSettings.asset; open it in the Unity Editor once so that Unity writes its settings, the tool does not create authored files in the target",
+            ));
+        }
+        self.stage("resolve_packages", "", "");
+        let resolve = || {
+            packages::resolve(
+                ctx,
+                project,
+                editor,
+                packages::Options::default().with_runtime_package()?,
+            )
+        };
         let mut resolved = resolve()?;
         let bootstrap_id = phase_id(&id, "engine-profile-bootstrap");
         // A pinned native engine/host profile is bootstrapped once through the
         // explicit Editor backend. Subsequent target graphs never come from Editor.
         let mut bootstrap = Preparation::default();
         if host.is_empty() {
-            if self.0.no_editor {
-                return Err(fail(
-                    "native_host_missing",
-                    "no matching reusable Mono host was supplied; main Editor execution is disabled",
-                ));
-            }
             bootstrap = self.prepare_engine_bootstrap(
                 ctx,
                 &obj([
@@ -203,6 +379,11 @@ impl Service {
             native = bootstrap.native_catalog.clone();
             resolved = resolve()?;
         }
+        self.stage(
+            "capture_engine_profile",
+            "verifying the host's engine profile",
+            "",
+        );
         if profile_path.is_empty() {
             profile_path = bootstrap::source_engine_profile_cache_path(project, &host)?;
         }
@@ -234,6 +415,11 @@ impl Service {
                     native = bootstrap.native_catalog.clone();
                     resolved = resolve()?;
                 }
+                self.stage(
+                    "capture_engine_profile",
+                    "capturing the host's engine profile",
+                    "",
+                );
                 capture_engine_profile(
                     ctx,
                     project,
@@ -257,6 +443,7 @@ impl Service {
         if !bootstrap.reference_graph.is_empty() {
             // Initial native bootstrap also warms defaults once. Ordinary source-only
             // preparations never start an Editor merely to satisfy component tools.
+            self.stage("capture_component_defaults", "", "");
             defaults_profile = self.capture_component_defaults(ctx)?.profile_sha256;
         }
         let options = SourceGraphOptions {
@@ -266,16 +453,19 @@ impl Service {
             profile: Some(profile),
             packages: Some(resolved),
         };
+        self.stage("build_source_graph", "", "");
         let graph = build_source_graph(ctx, &options)?;
         let graph_path = join(&[&directory, "graph.json"]);
         agent_immutable_json(&graph_path, &graph)?;
         let proof_path = join(&[&directory, "scene-proof.json"]);
+        self.stage("prove_scene", &scene, "");
         super::build_source_scene_proof(ctx, project, editor, &scene, &proof_path)?;
         let compiler_path = join(&[&directory, "compiler.json"]);
         if let Err(error) = stat(&compiler_path) {
             if !not_exist(&error) {
                 return Err(error);
             }
+            self.stage("compile_scripts", "", "");
             prepare_source_compiler_graph(ctx, &options, &compiler_path)?;
         }
         if native.is_empty() {
@@ -286,6 +476,7 @@ impl Service {
                         "source graph is prepared, but this content requires a verified native catalog",
                     ));
                 }
+                self.check_authored_identity(true)?;
                 native = self.prepare_native(ctx, &scene, &id, &directory)?;
             } else {
                 native = super::native::identity_catalog(project, &graph_path, &directory)?;
@@ -297,6 +488,7 @@ impl Service {
             if !not_exist(&error) {
                 return Err(error);
             }
+            self.stage("publish_baseline", "", "");
             super::prepare_agent_project_with_native(
                 ctx,
                 project,
@@ -316,13 +508,14 @@ impl Service {
             &baseline,
             &join(&[&directory, "artifacts.json"]),
         )?;
+        let host_player = host;
         let mut result = Preparation {
             schema_version: 1,
             request_id: id,
             project: project.into(),
             scene,
             baseline,
-            host_player: host,
+            host_player: host_player.clone(),
             native_catalog: native,
             engine_profile: profile_path,
             package_snapshot: resolved.snapshot_path.clone(),
@@ -330,6 +523,7 @@ impl Service {
             artifact_receipt: artifacts,
             component_defaults_profile: defaults_profile,
             reference_graph: bootstrap.reference_graph.clone(),
+            host_content: super::host::host_content(&host_player),
             backends: [
                 ("sceneLoader", "raw_source"),
                 ("compiler", "dotnet_sdk"),
@@ -349,6 +543,11 @@ impl Service {
                 "nativeBootstrap",
                 "unity_editor_public_api_once".to_string(),
             );
+        }
+        if !seed.reused_preparation.is_empty() {
+            result
+                .backends
+                .insert("hostSource", format!("reused:{}", seed.reused_preparation));
         }
         agent_immutable_json(&result_path, &result)?;
         Ok(result)

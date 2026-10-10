@@ -190,6 +190,7 @@ struct ProjectPrepareInput {
     native_catalog: String,
     engine_profile: String,
     activate: Option<bool>,
+    rebuild_host: bool,
 }
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
@@ -355,6 +356,7 @@ impl ProjectPrepareInput {
         if let Some(activate) = self.activate {
             out.raw("activate", if activate { "true" } else { "false" });
         }
+        out.bool_omitempty("rebuildHost", self.rebuild_host);
         out.finish()
     }
 }
@@ -1008,7 +1010,7 @@ fn runtime_tools() -> Vec<StaticTool> {
         static_tool(
             write_tool(
                 "session_control",
-                "Control the configured Player session: start, stop, status, reset, wait, wait_update. Start can be asynchronous; wait for confirmed readiness. expectedPid/revision guard stale runtime sessions.",
+                "Control the configured Player session: start, stop, status, reset, wait, wait_update. Start can be asynchronous: while it prepares, start, status and wait report the preparation stage and log path. Wait for confirmed readiness. start/reset arguments: scene, gameArguments (the game's own command line, like the CLI's -- args), contentScenes (GUID=Assets/...unity), contentPrefabs (Assets/...prefab), rebuildHost. expectedPid/revision guard stale runtime sessions.",
                 false,
                 object(&[
                     (
@@ -1020,7 +1022,14 @@ fn runtime_tools() -> Vec<StaticTool> {
                     ("requestId", string(""), false),
                     ("expectedPid", integer(""), false),
                     ("expectedRevision", string(""), false),
-                    ("arguments", map(ANY, ""), false),
+                    (
+                        "arguments",
+                        map(
+                            ANY,
+                            "start/reset: scene, gameArguments[], contentScenes[], contentPrefabs[], rebuildHost",
+                        ),
+                        false,
+                    ),
                 ]),
             ),
             "SessionInput",
@@ -1056,7 +1065,7 @@ fn project_action_tools() -> Vec<StaticTool> {
         static_tool(
             write_tool(
                 "project_prepare",
-                "Prepare an explicit saved scene using our package resolver, authored Player assembly graph, source/native-resource scene validation and the SDK compiler. Reuses a verified native host/profile/catalog; initial native bootstrap or uncovered imports may require the explicit Editor backend. Poll identical arguments/requestId while pending. Preparation completion is separate from Player readiness; activate can select the result for this controller.",
+                "Prepare an explicit saved scene using our package resolver, authored Player assembly graph, source/native-resource scene validation and the SDK compiler. Authored metadata identities are checked first. Without hostPlayer the newest valid host an earlier preparation built for this project is found and reused; only a project without one runs the Editor bootstrap, in owned staging copies that never change Packages/manifest.json. Poll identical arguments/requestId while pending; the pending reply carries progress with the current stage and its log path. Preparation completion is separate from Player readiness; activate can select the result for this controller.",
                 true,
                 object(&[
                     (
@@ -1089,6 +1098,8 @@ fn project_action_tools() -> Vec<StaticTool> {
                         ),
                         false,
                     ),
+                    // true builds a new host instead of reusing an earlier one.
+                    ("rebuildHost", boolean(), false),
                 ]),
             ),
             "ProjectPrepareInput",
@@ -1099,7 +1110,7 @@ fn project_action_tools() -> Vec<StaticTool> {
         static_tool(
             write_tool(
                 "project_build",
-                "Build explicit authored scenes through the public Unity Editor build backend into a new owned output directory. development defaults to false for a release build. Poll identical arguments/requestId while status is pending. This invokes Unity BuildPipeline and reports its actual result.",
+                "Build explicit authored scenes through the public Unity Editor build backend into a new owned output directory. development defaults to false for a release build. Poll identical arguments/requestId while status is pending. This invokes Unity BuildPipeline in the target project's own Editor and reports its actual result. That Editor needs com.unitymicroeditor.runtime declared in the project's Packages/manifest.json; the tool never adds it and fails with runtime_package_missing otherwise.",
                 true,
                 object(&[
                     (

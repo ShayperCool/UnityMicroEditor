@@ -25,7 +25,7 @@ pub use host::{player_assembly_paths, stage_host};
 pub use metadata::{
     METADATA_GUID_BUFFER_SIZE, METADATA_GUID_MAXIMUM, MetadataGuidIdentity, MetadataGuidIndex,
 };
-pub use netcode::{NetcodeProcessor, needs_netcode};
+pub use netcode::{HOST_CODEGEN_DIRECTORY, NetcodeProcessor, needs_netcode};
 pub use nilable::{NilMap, NilVec};
 pub use prepare::{
     PublishBaseline, canonical_configuration, order_compiler_assemblies, prepare_compiler_graph,
@@ -501,6 +501,19 @@ pub struct Compiler {
 }
 
 /// `<player dir>/<player stem>_Data`.
+/// Whether a rejected update names a managed configuration change the
+/// prepared graph cannot absorb. Such an update needs a new preparation; an
+/// ordinary C# compile error does not.
+pub fn requires_new_graph(message: &str) -> bool {
+    [
+        "regenerate source graph",
+        "fresh managed graph",
+        "outside the prepared managed graph",
+    ]
+    .iter()
+    .any(|text| message.contains(text))
+}
+
 pub(crate) fn player_data(player: &str) -> String {
     let base = crate::sysutil::base(player);
     let stem = base

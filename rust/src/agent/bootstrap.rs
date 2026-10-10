@@ -2,12 +2,13 @@
 //! Target SDK assemblies and the playable baseline are always produced by the
 //! independent source coordinator.
 use super::{
-    Any, AnyMap, Preparation, Service, actions::request, authored_scene, join, join_errors,
-    not_exist, obj, operation_id, read_json, staging::phase_id, stat, text, unmarshal_any,
+    Any, AnyMap, Preparation, Service, authored_scene, join, join_errors, not_exist, obj,
+    operation_id, read_json, stat, text, unmarshal_any,
 };
 use crate::{
     cancel::Context,
     compiler::{NilMap, Walk, WalkEntry, walk_dir},
+    packages,
     project::is_owned_cache_path,
     sha256,
     sourcegraph::managed_directory,
@@ -57,21 +58,36 @@ impl Service {
             Err(error) if !not_exist(&error) => return Err(error),
             Err(_) => {}
         }
-        let mut client = self.editor_client(ctx)?;
-        let phase = |name: &str| phase_id(&id, name);
-        request(&client, ctx, &phase("initial-refresh"), "refresh", b"{}").1?;
+        self.check_authored_identity(true)?;
+        // Every Editor of a bootstrap runs in an owned staging copy. The target
+        // project is only read: its manifest and Library stay as authored.
         let mut host_evidence = String::new();
-        if host.is_empty() {
+        let stage_directory = if host.is_empty() {
             let (player, evidence) = super::host::prepare_agent_host(ctx, self, &id)?;
             host = player;
             host_evidence = join(&[&directory, "host-evidence.json"]);
             agent_immutable_json(&host_evidence, &Any::Object(evidence))?;
-            client = self.editor_client(ctx)?;
-        }
-        request(&client, ctx, &phase("refresh"), "refresh", b"{}").1?;
-        let graph = request(&client, ctx, &phase("graph"), "export_graph", b"{}").1?;
+            join(&[&directory, "host-stage"])
+        } else {
+            join(&[&directory, "graph-stage"])
+        };
         let graph_path = join(&[&directory, "graph.json"]);
-        agent_immutable_json(&graph_path, &unmarshal_any(&graph)?)?;
+        if !super::regular(&graph_path) {
+            let (stage, staged) = super::host::stage_graph(ctx, self, &id, &stage_directory)?;
+            let resolved = packages::resolve(
+                ctx,
+                project,
+                &self.0.editor,
+                packages::Options::default().with_runtime_package()?,
+            )?;
+            let graph = super::host::retarget_stage_graph(
+                &unmarshal_any(&read_agent_file(&staged, 80 << 20)?)?,
+                &stage,
+                project,
+                &resolved,
+            )?;
+            agent_immutable_json(&graph_path, &graph)?;
+        }
         let mut native = text(args, "nativeCatalog");
         if native.is_empty() {
             let candidate = join(&[&directory, "native-catalog.json"]);

@@ -76,6 +76,10 @@ pub struct State {
     pub last_update_rejected_sequence: u64,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub update_error: String,
+    /// The rejected update cannot be applied to this Player at all: the
+    /// project must be prepared again before its sources take effect.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub preparation_required: bool,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub last_error: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -87,6 +91,92 @@ pub struct State {
     /// The Player readiness report; numbers carry the shortest round-trip f64 formatting.
     #[serde(skip_serializing_if = "no_ready")]
     pub ready: Option<Map<String, Value>>,
+    /// What `session_control(start)` asked this launch to pass on.
+    #[serde(skip_serializing_if = "Launch::is_empty")]
+    pub launch: Launch,
+}
+/// Per-launch additions to the runner command: the game's own arguments
+/// (the CLI's `-- args`) and the additive runtime content it may address.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Launch {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub game_arguments: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub content_scenes: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub content_prefabs: Vec<String>,
+}
+impl Launch {
+    fn is_empty(&self) -> bool {
+        self.game_arguments.is_empty()
+            && self.content_scenes.is_empty()
+            && self.content_prefabs.is_empty()
+    }
+    /// Reads `gameArguments`, `contentScenes` and `contentPrefabs` from the
+    /// `arguments` of a start/reset. A list that is given replaces the
+    /// previous one; `None` when the request names none of them.
+    fn from_arguments(previous: &Launch, raw: Option<&Vec<u8>>) -> Result<Option<Launch>> {
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        let members = match jsondoc::parse(raw).map_err(Error::new)? {
+            Json::Null => return Ok(None),
+            Json::Object(members) => members,
+            other => return Err(Error::new(Target::VALUE.mismatch(other.kind(), "object"))),
+        };
+        let mut launch = previous.clone();
+        let mut given = false;
+        for member in &members {
+            let target = match member.key.as_str() {
+                "gameArguments" => &mut launch.game_arguments,
+                "contentScenes" => &mut launch.content_scenes,
+                "contentPrefabs" => &mut launch.content_prefabs,
+                _ => continue,
+            };
+            let invalid = || Error::new(format!("{} must be an array of strings", member.key));
+            let items = match &member.value {
+                Json::Null => &[][..],
+                Json::Array(items) => &items[..],
+                _ => return Err(invalid()),
+            };
+            *target = items
+                .iter()
+                .map(|item| item.as_str().map(str::to_string).ok_or_else(invalid))
+                .collect::<Result<_>>()?;
+            given = true;
+        }
+        if !given {
+            return Ok(None);
+        }
+        let total: usize = [
+            &launch.game_arguments,
+            &launch.content_scenes,
+            &launch.content_prefabs,
+        ]
+        .iter()
+        .flat_map(|list| list.iter())
+        .map(|value| value.len() + 1)
+        .sum();
+        if total > 32 * 1024 {
+            return Err(Error::new("launch arguments exceed 32 KiB"));
+        }
+        for value in &launch.game_arguments {
+            if value.starts_with("--unity-cli-") || value.contains('\0') {
+                return Err(Error::new(
+                    "gameArguments must not override the runner's --unity-cli-* protocol or contain NUL",
+                ));
+            }
+        }
+        for value in launch.content_scenes.iter().chain(&launch.content_prefabs) {
+            if value.trim().is_empty() || value.starts_with('-') || value.contains('\0') {
+                return Err(Error::new(
+                    "contentScenes are GUID=Assets/...unity and contentPrefabs are Assets/...prefab",
+                ));
+            }
+        }
+        Ok(Some(launch))
+    }
 }
 /// Runner stdout event; numbers keep their original literal text.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -185,6 +275,7 @@ struct Inner {
     last_ready_scene: String,
     preparation_update_pending: bool,
     launched: u64,
+    launch: Launch,
 }
 impl Inner {
     fn notify(&mut self) {
@@ -273,6 +364,7 @@ impl Controller {
             last_ready_scene: String::new(),
             preparation_update_pending: false,
             launched: 0,
+            launch: Launch::default(),
         };
         let controller = Controller(Arc::new(Shared {
             options,
@@ -378,6 +470,17 @@ impl Controller {
                 command.args([flag, value]);
             }
         }
+        for (flag, values) in [
+            ("--content-scene", &inner.launch.content_scenes),
+            ("--content-prefab", &inner.launch.content_prefabs),
+        ] {
+            for value in values {
+                command.args([flag, value]);
+            }
+        }
+        if !inner.launch.game_arguments.is_empty() {
+            command.arg("--").args(&inner.launch.game_arguments);
+        }
         let (stdout, writer) = io::pipe()
             .map_err(|error| Error::new(format!("pipe: {}", sysutil::errno_text(&error))))?;
         let stderr = Root::open(&options.output)?.open_file(
@@ -439,6 +542,7 @@ impl Controller {
             session_id: new_id(),
             last_sequence: inner.state.last_sequence,
             runner_stderr_path: sysutil::join(&[&options.output, STDERR_LOG]),
+            launch: inner.launch.clone(),
             ..State::default()
         };
         inner.notify();
@@ -725,6 +829,7 @@ impl Controller {
                 if name != "ready" || inner.preparation_update_pending {
                     inner.state.last_update_sequence = sequence;
                     inner.state.update_error.clear();
+                    inner.state.preparation_required = false;
                 }
                 if inner.preparation_update_pending {
                     if let Some(stored) = inner.state.events.last_mut() {
@@ -757,6 +862,7 @@ impl Controller {
                 inner.state.last_ready_sequence = sequence;
                 inner.state.last_error.clear();
                 inner.state.update_error.clear();
+                inner.state.preparation_required = false;
             }
             "unchanged" => {
                 let revision = text(event.get("revision"));
@@ -773,6 +879,7 @@ impl Controller {
                 inner.state.last_update_sequence = sequence;
                 inner.state.last_error.clear();
                 inner.state.update_error.clear();
+                inner.state.preparation_required = false;
             }
             "update-rejected" => {
                 let mut message = text(event.get("error"));
@@ -781,6 +888,8 @@ impl Controller {
                 }
                 inner.state.last_error = message.clone();
                 inner.state.update_error = message;
+                inner.state.preparation_required =
+                    event.get("preparationRequired") == Some(&Value::Bool(true));
                 inner.state.last_update_rejected_sequence = sequence;
             }
             _ => {}
@@ -909,6 +1018,17 @@ impl Controller {
         match operation.as_str() {
             "session_status" => return Ok(Reply::State(Box::new(self.status()))),
             "session_start" => {
+                let previous = self.lock().launch.clone();
+                if let Some(launch) = Launch::from_arguments(&previous, args.get("arguments"))? {
+                    let mut inner = self.lock();
+                    if inner.command.is_some() && inner.launch != launch {
+                        return Err(Error::new(
+                            "the Player already runs with other launch arguments; use session_control(reset) to relaunch with these",
+                        )
+                        .into());
+                    }
+                    inner.launch = launch;
+                }
                 return match self.start() {
                     Ok(state) => Ok(Reply::State(Box::new(state))),
                     Err(error) => Err(Failure {
@@ -919,8 +1039,13 @@ impl Controller {
             }
             "session_stop" => return Ok(Reply::State(Box::new(self.stop(ctx)?))),
             "session_reset" => {
+                let previous = self.lock().launch.clone();
+                let launch = Launch::from_arguments(&previous, args.get("arguments"))?;
                 if let Err(failure) = self.stop(ctx) {
                     return Err(failure.error.into());
+                }
+                if let Some(launch) = launch {
+                    self.lock().launch = launch;
                 }
                 return match self.start() {
                     Ok(state) => Ok(Reply::State(Box::new(state))),

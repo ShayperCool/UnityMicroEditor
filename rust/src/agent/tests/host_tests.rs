@@ -3,7 +3,7 @@ use crate::{
     editorbridge::{self, Client},
     util::{agent_immutable_json, agent_read_json, file_hash},
 };
-use host::{prepare_agent_host, snapshot_host_artifacts};
+use host::{host_content, prepare_agent_host, retarget_stage_graph, snapshot_host_artifacts};
 use native::seed_native_library;
 use serde_json::json;
 use staging::phase_id;
@@ -125,7 +125,7 @@ fn warm_library_seed_excludes_recursive_tool_stages_and_checks_provenance() {
         &join(&[&project, "Library/ArtifactDB"]),
         "completed owned importer database",
     );
-    seed_native_library(&ctx(), &project, &stage).unwrap();
+    seed_native_library(&ctx(), &project, &stage, true).unwrap();
     assert_eq!(
         fs::read_to_string(join(&[&stage, "Library/ArtifactDB"])).unwrap(),
         "completed owned importer database",
@@ -146,10 +146,10 @@ fn warm_library_seed_excludes_recursive_tool_stages_and_checks_provenance() {
             "{{\"copyMode\":\"reflink-auto\",\"excluded\":\"Library/UnityMicroEditor\",\"excludedTransientCaches\":[\"PackageManager\",\"ScriptAssemblies\",\"Bee\",\"*.pid\",\"*.lock\",\"*-lock\"],\"schemaVersion\":1,\"seedPolicy\":2,\"sourceEditorOwnedAndStopped\":true,\"sourceProject\":\"{project}\",\"stageProject\":\"{stage}\"}}\n"
         )
     );
-    seed_native_library(&ctx(), &project, &stage).expect("exact seed replay failed");
+    seed_native_library(&ctx(), &project, &stage, true).expect("exact seed replay failed");
     let (_other_guard, other) = review_project();
     assert!(
-        seed_native_library(&ctx(), &other, &stage).is_err(),
+        seed_native_library(&ctx(), &other, &stage, true).is_err(),
         "completed seed reused for another authored source"
     );
     verify_snapshot(&ctx(), &snapshot).expect("warm seed changed authored source");
@@ -190,7 +190,7 @@ fn library_seed_retains_imported_assets_without_source_process_state() {
             format!("{project}:{path}"),
         );
     }
-    seed_native_library(&ctx(), &project, &stage).unwrap();
+    seed_native_library(&ctx(), &project, &stage, true).unwrap();
     for path in retained {
         assert_eq!(
             fs::read_to_string(join(&[&stage, "Library", path])).ok(),
@@ -209,7 +209,7 @@ fn library_seed_retains_imported_assets_without_source_process_state() {
         );
     }
     verify_snapshot(&ctx(), &snapshot).expect("seed changed authored source");
-    seed_native_library(&ctx(), &project, &stage).expect("same-policy seed replay failed");
+    seed_native_library(&ctx(), &project, &stage, true).expect("same-policy seed replay failed");
 }
 
 struct Cached {
@@ -439,4 +439,243 @@ fn host_preparation_actual_editor() {
     let (replayed, _) = prepare_agent_host(&request, &service, &id).unwrap();
     assert_eq!(replayed, host, "confirmed host replay changed output");
     service.close();
+}
+
+#[test]
+fn stage_graph_is_retargeted_to_the_project_and_resolved_packages() {
+    let (_guard, project) = review_project();
+    let stage = join(&[
+        &project,
+        "Library/UnityMicroEditor/preparations/p/host-stage/project",
+    ]);
+    let resolved = crate::packages::Snapshot {
+        packages: vec![crate::packages::Package {
+            name: "com.unity.burst".into(),
+            logical_root: "Packages/com.unity.burst".into(),
+            path: "/resolved/com.unity.burst".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let cache = format!("{stage}/Library/PackageCache");
+    let graph = any(json!({
+        "project": stage,
+        "schemaVersion": 1,
+        "sourceRoots": [
+            {"path": "Packages/com.unity.burst", "source": format!("{cache}/com.unity.burst@1")},
+            {"path": "Packages/com.unity.other", "source": format!("{cache}/com.unity.other@2")},
+            {"path": "Packages/com.tool", "source": "/tool/Packages/com.tool"},
+        ],
+        "assemblies": [{
+            "path": format!("{stage}/Library/ScriptAssemblies/Game.dll"),
+            "sources": [format!("{stage}/Assets/Sample.cs"), format!("{cache}/com.unity.burst@1/Runtime/A.cs")],
+            "compiledReferences": ["/editor/Data/NetStandard/ref.dll", format!("{cache}/com.unity.other@2/Plugin.dll")],
+            "defines": ["/nowarn:0169"],
+        }],
+        "compilerInputs": {
+            format!("{stage}/Packages/manifest.json"): "staged-manifest-hash",
+            format!("{stage}/Packages/packages-lock.json"): "staged-lock-hash",
+            format!("{stage}/Assets/Sample.cs"): "source-hash",
+        },
+    }));
+    let retargeted = to_serde(&retarget_stage_graph(&graph, &stage, &project, &resolved).unwrap());
+    assert_eq!(retargeted["project"], project.as_str());
+    assert_eq!(
+        retargeted["sourceRoots"],
+        json!([
+            {"path": "Packages/com.unity.burst", "source": "/resolved/com.unity.burst"},
+            // No resolved package: the staged copy remains the existing source.
+            {"path": "Packages/com.unity.other", "source": format!("{cache}/com.unity.other@2")},
+            {"path": "Packages/com.tool", "source": "/tool/Packages/com.tool"},
+        ])
+    );
+    let assembly = &retargeted["assemblies"][0];
+    assert_eq!(
+        assembly["sources"],
+        json!([
+            format!("{project}/Assets/Sample.cs"),
+            "/resolved/com.unity.burst/Runtime/A.cs"
+        ])
+    );
+    assert_eq!(
+        assembly["compiledReferences"],
+        json!([
+            "/editor/Data/NetStandard/ref.dll",
+            format!("{cache}/com.unity.other@2/Plugin.dll")
+        ])
+    );
+    assert_eq!(
+        assembly["path"],
+        format!("{stage}/Library/ScriptAssemblies/Game.dll")
+    );
+    assert_eq!(assembly["defines"], json!(["/nowarn:0169"]));
+    // Authored package inputs carry the target's bytes, not the staged manifest's.
+    let manifest = join(&[&project, "Packages/manifest.json"]);
+    let inputs = retargeted["compilerInputs"].as_object().unwrap();
+    assert_eq!(inputs[&manifest], file_hash(&manifest).unwrap().as_str());
+    assert!(
+        !inputs.contains_key(&join(&[&project, "Packages/packages-lock.json"])),
+        "an absent authored lock kept the staged lock hash"
+    );
+    assert_eq!(
+        inputs[&join(&[&project, "Assets/Sample.cs"])],
+        "source-hash"
+    );
+    assert!(
+        retarget_stage_graph(&graph, "/another/stage", &project, &resolved).is_err(),
+        "a graph of another stage was accepted"
+    );
+}
+
+fn built_host(project: &str, request: &str, editor: &str) -> String {
+    let directory = join(&[project, "Library/UnityMicroEditor/preparations", request]);
+    let host = join(&[
+        &directory,
+        "host-stage/project/Builds/UnityMicroEditor/phase-host/Project.x86_64",
+    ]);
+    write_mode(&host, format!("player {request}"), 0o700);
+    write(
+        &join(&[
+            &directory,
+            "host-stage/project/Builds/UnityMicroEditor/phase-host/Project_Data/UnityMicroEditorSourceProfile.json",
+        ]),
+        "{}",
+    );
+    immutable(
+        &join(&[&directory, "request.json"]),
+        json!({"schemaVersion": 2, "editor": editor, "project": project}),
+    );
+    immutable(
+        &join(&[&directory, "result.json"]),
+        json!({"schemaVersion": 1, "requestId": request, "project": project, "scene": "Assets/Main.unity",
+            "baseline": "", "hostPlayer": host, "nativeCatalog": format!("{directory}/native-catalog.json"),
+            "referenceGraph": format!("{directory}/graph.json"), "backends": {"preparation": "native_engine_bootstrap"}}),
+    );
+    host
+}
+
+#[test]
+fn new_request_reuses_the_newest_existing_host_unless_a_rebuild_is_asked() {
+    let (_guard, project) = review_project();
+    let service = editor_service(&project, "/editor/Unity");
+    service.select("", "Assets/Main.unity");
+    let seed = |request: &str, args: Value| {
+        service
+            .source_preparation_seed(
+                &any_map(args),
+                &join(&[&project, "Library/UnityMicroEditor/preparations", request]),
+            )
+            .unwrap()
+    };
+    assert!(seed("no-host-yet", json!({})).host_player.is_empty());
+
+    built_host(&project, "other-editor", "/another/Unity");
+    let older = built_host(&project, "older", "/editor/Unity");
+    std::thread::sleep(Duration::from_millis(20));
+    let newest = built_host(&project, "newest", "/editor/Unity");
+    let found = seed("second", json!({}));
+    assert_eq!(
+        found.host_player, newest,
+        "newest valid host was not reused"
+    );
+    assert_eq!(found.reused_preparation, "newest");
+    assert!(
+        found
+            .native_catalog
+            .ends_with("/newest/native-catalog.json")
+    );
+    assert!(found.reference_graph.ends_with("/newest/graph.json"));
+    // A retry keeps the frozen choice even after another host appears.
+    built_host(&project, "later", "/editor/Unity");
+    assert_eq!(seed("second", json!({})).host_player, newest);
+    // Another scene reuses the host but not that scene's native catalog.
+    let other_scene = seed("other-scene", json!({"scene": "Assets/Other.unity"}));
+    assert!(
+        other_scene.host_player.ends_with(
+            "/later/host-stage/project/Builds/UnityMicroEditor/phase-host/Project.x86_64"
+        )
+    );
+    assert!(other_scene.native_catalog.is_empty());
+
+    assert!(
+        seed("rebuild", json!({"rebuildHost": true}))
+            .host_player
+            .is_empty(),
+        "rebuildHost still reused a host"
+    );
+    // A host whose Player is gone is skipped.
+    std::fs::remove_file(join(&[
+        &project,
+        "Library/UnityMicroEditor/preparations/later/host-stage/project/Builds/UnityMicroEditor/phase-host/Project.x86_64",
+    ]))
+    .unwrap();
+    assert_eq!(seed("after-removal", json!({})).host_player, newest);
+    let _ = older;
+}
+
+#[test]
+fn broken_metadata_stops_preparation_before_any_work() {
+    let (_guard, project) = review_project();
+    let service = editor_service(&project, "/editor/Unity");
+    service.check_authored_identity(true).unwrap();
+    // A script without metadata only matters when an Editor stage would run.
+    write(&join(&[&project, "Assets/New.cs"]), "public class New {}\n");
+    service.check_authored_identity(false).unwrap();
+    assert_eq!(
+        code(&service.check_authored_identity(true)),
+        "invalid_identity"
+    );
+
+    write(
+        &join(&[&project, "Assets/Sample.cs.meta"]),
+        "fileFormatVersion: 2\n",
+    );
+    let broken = service.check_authored_identity(false);
+    assert_eq!(code(&broken), "invalid_identity");
+    let detail = typed(broken.as_ref().unwrap_err()).unwrap();
+    assert!(
+        detail.message.contains("Assets/Sample.cs.meta")
+            && detail.details.as_ref().unwrap()["issueCount"] == 1,
+        "the failure does not name the broken metadata: {detail:?}"
+    );
+    // The same check is the first step of a preparation.
+    service.select("", "Assets/Main.unity");
+    let outcome = service.prepare_source(&ctx(), &any_map(json!({"requestId": "broken-meta"})));
+    assert_eq!(code(&outcome), "invalid_identity");
+    assert!(
+        absent(&join(&[&project, "Library/UnityMicroEditor/packages"])),
+        "packages were resolved before the metadata check"
+    );
+}
+
+#[test]
+fn host_content_names_the_staged_addressables_output() {
+    let (_guard, project) = review_project();
+    let host = built_host(&project, "content", "/editor/Unity");
+    assert!(host_content(&host).is_empty());
+    let stage = join(&[
+        &project,
+        "Library/UnityMicroEditor/preparations/content/host-stage/project",
+    ]);
+    write(
+        &join(&[&stage, "ProjectSettings/UnityMicroEditorStaging.json"]),
+        "{}",
+    );
+    write(
+        &join(&[&stage, "ServerData/StandaloneLinux64/catalog.json"]),
+        "{}",
+    );
+    write(
+        &join(&[
+            &crate::compiler::player_data(&host),
+            "StreamingAssets/aa/settings.json",
+        ]),
+        "{}",
+    );
+    let content = host_content(&host);
+    assert_eq!(
+        content["addressablesRemoteBuild"],
+        join(&[&stage, "ServerData/StandaloneLinux64"])
+    );
+    assert!(content["addressablesStreamingAssets"].ends_with("Project_Data/StreamingAssets/aa"));
 }
