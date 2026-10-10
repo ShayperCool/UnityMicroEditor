@@ -13,29 +13,10 @@ pub struct Object<'a> {
 }
 
 /// Another source asset this file refers to, in external-reference order.
+/// The loader has to pass its ContentFile at the same position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct External {
     pub guid: String,
-    /// Unity's file kind: 2 for a native-format asset, 3 for an imported one.
-    pub kind: u32,
-}
-
-fn native_guid(guid: &str) -> Result<[u8; 16]> {
-    let bytes = guid.as_bytes();
-    if bytes.len() != 32 {
-        bail!("external reference GUID is invalid");
-    }
-    let mut result = [0u8; 16];
-    for (index, pair) in bytes.chunks(2).enumerate() {
-        let digit = |c: u8| match c {
-            b'0'..=b'9' => Ok(c - b'0'),
-            b'a'..=b'f' => Ok(c - b'a' + 10),
-            _ => bail!("external reference GUID is invalid"),
-        };
-        // Unity stores GUID nibbles swapped within each byte.
-        result[index] = digit(pair[1])? << 4 | digit(pair[0])?;
-    }
-    Ok(result)
 }
 
 pub fn write(objects: &[Object<'_>], externals: &[External]) -> Result<Vec<u8>> {
@@ -86,10 +67,13 @@ pub fn write(objects: &[Object<'_>], externals: &[External]) -> Result<Vec<u8>> 
     }
     meta.extend_from_slice(&0u32.to_le_bytes()); // Script types.
     meta.extend_from_slice(&(externals.len() as u32).to_le_bytes());
-    for external in externals {
+    // An external reference carries no GUID or path: the Player then takes
+    // the file from the dependency list it is given, by position. With a GUID
+    // it would look the file up itself and find nothing.
+    for _ in externals {
         meta.push(0);
-        meta.extend_from_slice(&native_guid(&external.guid)?);
-        meta.extend_from_slice(&external.kind.to_le_bytes());
+        meta.extend_from_slice(&[0u8; 16]);
+        meta.extend_from_slice(&0u32.to_le_bytes());
         meta.push(0);
     }
     meta.extend_from_slice(&0u32.to_le_bytes()); // Serialized reference types.

@@ -82,7 +82,27 @@ The baker refuses what it does not reproduce exactly, and the session reports th
 - weighted tangents and negative infinite tangents;
 - a source larger than the 32 MiB text bound.
 
-A baked clip replaces the object that scripts and legacy `Animation` components reference. An `AnimatorController` built into the native catalog keeps pointing at the clip it was built with, so a clip played through an Animator still needs a refreshed catalog. Controllers are not baked yet.
+## Animator controllers
+
+A `.controller` file holds Editor objects (state machines, states, transitions, blend trees) that do not exist in a Player. A build flattens them into one constant per controller; the tool does the same (`rust/src/playerbake/controller.rs`). A new or changed controller is baked and published like a clip, and so is every clip it plays, because a baked controller refers to baked clips. The Player then runs a controller that no Editor has seen. When a clip changes, the baked controllers that play it are baked again, since a controller holds facts of its clips.
+
+The comparison with Unity `6000.6.3f1` covers every field of the built object, with two deliberate differences. The hash-to-name table has no fixed order in the engine and is compared as a set. `m_ControllerSize`, the memory the Player reserves before reading the constant, is an upper bound rather than the engine's figure: it stays above it for every reference controller.
+
+Covered: layers with blending, weights, avatar masks and synced layers with their override motions; nested state machines with entry, exit and any-state transitions; conditions, mute and solo; parameters; 1D, simple directional and direct blend trees, nested.
+
+Refused, never approximated:
+
+- freeform 2D blend trees;
+- state machine behaviours;
+- a clip stored inside a model, and any clip the clip baker refuses;
+- an avatar mask stored inside the controller.
+
+Limits of the path as a whole:
+
+- A controller built into the native catalog keeps pointing at the clips it was built with. A changed clip reaches an Animator only when its controller can be baked; otherwise the session reports `native-bake-refused` and the Animator keeps the catalog's clip.
+- An `AnimatorOverrideController` is not baked. One built into the catalog keeps its catalog controller and clips.
+- A changed avatar mask does not bake the controllers that use it again; edit or touch the controller.
+- `auto-prepare` publishes its baseline without this path, so a preparation whose scene refers to a controller or clip missing from the native catalog still needs a refreshed catalog. A running session accepts such a source.
 
 ## UI and fonts
 

@@ -4,11 +4,16 @@
 //! module reproduces that derivation for the pinned engine and refuses what it
 //! cannot reproduce exactly, so the caller can fall back to an Editor build.
 mod clip;
+mod controller;
 mod serialized;
 mod source;
 mod typetree;
 
 pub use clip::{bake_clip, bake_clip_object};
+pub use controller::{
+    ClipFacts, ControllerSources, Mask, bake_controller, bake_controller_object, read_clip_facts,
+    read_mask,
+};
 pub use serialized::{External, Object, write};
 pub use typetree::{TypeTree, Val};
 
@@ -24,6 +29,17 @@ pub fn clip_tree() -> Result<&'static TypeTree> {
     CLIP_TREE
         .as_ref()
         .map_err(|error| anyhow::anyhow!("pinned AnimationClip type tree: {error}"))
+}
+
+static CONTROLLER_TREE: LazyLock<Result<TypeTree, String>> = LazyLock::new(|| {
+    TypeTree::parse(include_bytes!("engine/type-91.bin")).map_err(|error| error.to_string())
+});
+
+/// The Player layout of `AnimatorController` in the pinned engine.
+pub fn controller_tree() -> Result<&'static TypeTree> {
+    CONTROLLER_TREE
+        .as_ref()
+        .map_err(|error| anyhow::anyhow!("pinned AnimatorController type tree: {error}"))
 }
 
 /// An authored feature the baker does not reproduce. The asset stays on the
