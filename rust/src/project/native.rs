@@ -29,6 +29,7 @@ pub(crate) fn native_content_class(type_name: &str) -> i32 {
         "UnityEngine.Shader" => 48,
         "UnityEngine.Material" => 21,
         "UnityEngine.Font" => 128,
+        "UnityEngine.AnimationClip" => 74,
         "UnityEngine.UIElements.StyleSheet" | "UnityEngine.UIElements.VisualTreeAsset" => 114,
         _ => 0,
     }
@@ -341,8 +342,13 @@ impl Inner {
         if canonical != path {
             bail!("native artifact is symlinked: {path}");
         }
+        // Unity's own import cache is not an artifact store; the tool's owned
+        // subtree of Library is.
         let library = lexpath::join(&[&self.project, "Library"]);
-        if path == library || path.starts_with(&format!("{library}/")) {
+        let owned = lexpath::join(&[&library, "UnityMicroEditor"]);
+        if (path == library || path.starts_with(&format!("{library}/")))
+            && !path.starts_with(&format!("{owned}/"))
+        {
             bail!("native artifact must be independent of project Library");
         }
         let (_, actual) = self.read(path, false)?;
@@ -379,6 +385,8 @@ impl Inner {
         let texture = matches!(profile.as_str(), ".png" | ".jpg" | ".jpeg");
         let ui = matches!(profile.as_str(), ".uss" | ".uxml" | ".ttf" | ".otf");
         let shader = profile == ".shader";
+        // Baked by this tool from the authored source; see `playerbake`.
+        let clip = profile == ".anim";
         for (logical, expected) in &r.config_source_sha256 {
             if !texture
                 || logical != "ProjectSettings/EditorSettings.asset"
@@ -396,7 +404,7 @@ impl Inner {
                 );
             }
         }
-        if profile != ".wav" && profile != ".fbx" && !texture && !ui && !shader {
+        if profile != ".wav" && profile != ".fbx" && !texture && !ui && !shader && !clip {
             bail!("native replacement profile is unsupported: {path}");
         }
         let mut expected: BTreeMap<String, String> = BTreeMap::new();
@@ -474,6 +482,10 @@ impl Inner {
                 for value in r.content.objects.iter() {
                     expected.insert(value.file_id.clone(), value.type_name.clone());
                 }
+            } else if clip {
+                for value in r.content.objects.iter() {
+                    expected.insert(value.file_id.clone(), value.type_name.clone());
+                }
             } else if profile == ".fbx" {
                 self.static_native_model_documents(r)?;
                 for value in r.content.objects.iter() {
@@ -530,6 +542,18 @@ impl Inner {
             {
                 bail!(
                     "standalone Shader replacement must contain only Shader 4800000 without native dependencies"
+                );
+            }
+        } else if clip {
+            if objects.len() != 1
+                || objects[0].type_name != "UnityEngine.AnimationClip"
+                || !r.model_graph.is_empty()
+                || !r.model_graph_sha256.is_empty()
+                || !r.content.resources.is_empty()
+                || !r.content.dependencies.is_empty()
+            {
+                bail!(
+                    "animation replacement must contain one AnimationClip without native dependencies"
                 );
             }
         } else if ui {

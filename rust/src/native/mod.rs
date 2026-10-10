@@ -3,6 +3,7 @@
 //! validated native cache that feeds a `project::Session`.
 mod adopt;
 mod artifact;
+mod baked;
 mod batch;
 mod builtin_shader;
 mod context;
