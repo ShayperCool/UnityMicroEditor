@@ -90,17 +90,18 @@ The comparison with Unity `6000.6.3f1` covers every field of the built object, w
 
 Covered: layers with blending, weights, avatar masks and synced layers with their override motions; nested state machines with entry, exit and any-state transitions; conditions, mute and solo; parameters; 1D, simple directional and direct blend trees, nested.
 
+An `.overrideController` is baked as well: its Player form holds the same references as the source, so it is published with the baked controller and clips it names, and baked again when one of them changes.
+
 Refused, never approximated:
 
 - freeform 2D blend trees;
 - state machine behaviours;
-- a clip stored inside a model, and any clip the clip baker refuses;
+- a clip stored inside a model, in a controller or as an override, and any clip the clip baker refuses;
 - an avatar mask stored inside the controller.
 
 Limits of the path as a whole:
 
-- A controller built into the native catalog keeps pointing at the clips it was built with. A changed clip reaches an Animator only when its controller can be baked; otherwise the session reports `native-bake-refused` and the Animator keeps the catalog's clip.
-- An `AnimatorOverrideController` is not baked. One built into the catalog keeps its catalog controller and clips.
+- A controller built into the native catalog keeps pointing at the clips it was built with. A changed clip reaches an Animator only when its controller can be baked; otherwise the session reports `native-bake-refused` and the Animator keeps the catalog's clip. The same holds for an override controller built into the catalog.
 - A changed avatar mask does not bake the controllers that use it again; edit or touch the controller.
 - `auto-prepare` publishes its baseline without this path, so a preparation whose scene refers to a controller or clip missing from the native catalog still needs a refreshed catalog. A running session accepts such a source.
 

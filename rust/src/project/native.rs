@@ -31,6 +31,7 @@ pub(crate) fn native_content_class(type_name: &str) -> i32 {
         "UnityEngine.Font" => 128,
         "UnityEngine.AnimationClip" => 74,
         "UnityEngine.RuntimeAnimatorController" => 91,
+        "UnityEngine.AnimatorOverrideController" => 221,
         "UnityEngine.UIElements.StyleSheet" | "UnityEngine.UIElements.VisualTreeAsset" => 114,
         _ => 0,
     }
@@ -388,7 +389,7 @@ impl Inner {
         let shader = profile == ".shader";
         // Baked by this tool from the authored source; see `playerbake`.
         let clip = profile == ".anim";
-        let controller = profile == ".controller";
+        let controller = profile == ".controller" || profile == ".overridecontroller";
         for (logical, expected) in &r.config_source_sha256 {
             if !texture
                 || logical != "ProjectSettings/EditorSettings.asset"
@@ -567,12 +568,17 @@ impl Inner {
             }
         } else if controller {
             if objects.len() != 1
-                || objects[0].type_name != "UnityEngine.RuntimeAnimatorController"
+                || objects[0].type_name
+                    != if profile == ".controller" {
+                        "UnityEngine.RuntimeAnimatorController"
+                    } else {
+                        "UnityEngine.AnimatorOverrideController"
+                    }
                 || !r.model_graph.is_empty()
                 || !r.model_graph_sha256.is_empty()
                 || !r.content.resources.is_empty()
             {
-                bail!("controller replacement must contain one RuntimeAnimatorController");
+                bail!("controller replacement must contain exactly its controller object");
             }
         } else if ui {
             validate_native_ui_objects(&profile, r)?;

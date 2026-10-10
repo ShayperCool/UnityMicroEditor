@@ -367,3 +367,95 @@ fn controller_corpus_matches_the_engine_build() {
     let roots: Vec<PathBuf> = roots.split(':').map(PathBuf::from).collect();
     compare_controllers(&roots, &Tree::scan(&sources));
 }
+
+/// Replaces each object reference with the order of its first appearance, so
+/// references of two builds compare by which objects are the same.
+fn label_references(value: &mut Val, seen: &mut Vec<Val>) {
+    match value {
+        Val::Map(fields) if fields.iter().any(|(name, _)| name == "m_PathID") => {
+            if matches!(value.field("m_PathID"), Some(Val::I(0))) {
+                *value = Val::Zero;
+                return;
+            }
+            let position = seen
+                .iter()
+                .position(|known| known == value)
+                .unwrap_or_else(|| {
+                    seen.push(value.clone());
+                    seen.len() - 1
+                });
+            *value = Val::U(position as u64 + 1);
+        }
+        Val::Map(fields) => fields
+            .iter_mut()
+            .for_each(|(_, field)| label_references(field, seen)),
+        Val::Seq(items) => items
+            .iter_mut()
+            .for_each(|item| label_references(item, seen)),
+        _ => {}
+    }
+}
+
+/// Compares every `<name>.overrideController` / `<name>.override.bin` pair of
+/// the given directories. An override clip stored in a model is absent from
+/// the reference build, so such a pair differs and is only counted.
+#[test]
+fn override_corpus_matches_the_engine_build() {
+    let Some(roots) = std::env::var("UNITY_PLAYERBAKE_OVERRIDE_CORPUS")
+        .ok()
+        .filter(|value| !value.is_empty())
+    else {
+        eprintln!("skipped: set UNITY_PLAYERBAKE_OVERRIDE_CORPUS");
+        return;
+    };
+    let (mut matched, mut differing) = (0, 0);
+    for root in roots.split(':') {
+        for entry in fs::read_dir(root).unwrap() {
+            let source = entry.unwrap().path();
+            if !source
+                .extension()
+                .is_some_and(|extension| extension == "overrideController")
+            {
+                continue;
+            }
+            let expected = fs::read(source.with_extension("override.bin")).unwrap();
+            let text = fs::read(&source).unwrap();
+            let documents = parse_unity_yaml_lexical(&text).unwrap();
+            let (actual, _) = playerbake::bake_override_object(&documents[0].data).unwrap();
+            let layout = playerbake::override_tree().unwrap();
+            let (mut actual, mut expected) = (
+                layout.decode(&actual).unwrap(),
+                layout.decode(&expected).unwrap(),
+            );
+            label_references(&mut actual, &mut Vec::new());
+            label_references(&mut expected, &mut Vec::new());
+            if actual == expected {
+                matched += 1;
+            } else if String::from_utf8_lossy(&text).contains("type: 3}") {
+                differing += 1;
+            } else {
+                panic!("{}: differs from the engine build", source.display());
+            }
+        }
+    }
+    eprintln!("matched {matched}, {differing} refer to clips inside models");
+    assert!(matched > 0);
+}
+
+#[test]
+fn override_controller_matches_the_engine_build() {
+    let source = fixture("controllers/Assets/Ctl/O01_Override.overrideController");
+    let documents = parse_unity_yaml_lexical(&fs::read(&source).unwrap()).unwrap();
+    let (actual, externals) = playerbake::bake_override_object(&documents[0].data).unwrap();
+    let layout = playerbake::override_tree().unwrap();
+    let expected = fs::read(source.with_extension("override.bin")).unwrap();
+    let (mut actual, mut expected) = (
+        layout.decode(&actual).unwrap(),
+        layout.decode(&expected).unwrap(),
+    );
+    label_references(&mut actual, &mut Vec::new());
+    label_references(&mut expected, &mut Vec::new());
+    assert_eq!(actual, expected);
+    // The controller, then four distinct clips.
+    assert_eq!(externals.len(), 5);
+}

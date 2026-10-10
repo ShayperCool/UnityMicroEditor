@@ -121,10 +121,12 @@ impl NativeProjectImporter {
             let stale: Vec<String> = current
                 .values()
                 .filter(|entry| {
-                    lower_ext(&entry.source_path) == ".controller"
-                        && entry.content.dependencies.iter().any(|dependency| {
-                            !dependency.global && !current.contains_key(&dependency.guid)
-                        })
+                    matches!(
+                        lower_ext(&entry.source_path).as_str(),
+                        ".controller" | ".overridecontroller"
+                    ) && entry.content.dependencies.iter().any(|dependency| {
+                        !dependency.global && !current.contains_key(&dependency.guid)
+                    })
                 })
                 .map(|entry| entry.guid.clone())
                 .collect();
@@ -250,7 +252,7 @@ impl NativeProjectImporter {
         if profile == "png" && native_png_needs_warm(&self.opts.project, logical)? {
             return self.import_warm_ui(ctx, logical, &mut HashSet::new());
         }
-        if matches!(profile, "anim" | "controller") {
+        if matches!(profile, "anim" | "controller" | "overridecontroller") {
             return self.import_baked(logical);
         }
         if !cold_native_profile(logical) {
