@@ -2,19 +2,21 @@
 //! owned clone of the target project.
 use super::{
     Any, AnyMap, Service, UNITY_VERSION, actions::request, error_text, fail, join, not_exist, nz,
-    obj, operation_id, read_json, staging::SourceSnapshot, staging::phase_id, text, unmarshal_map,
+    obj, operation_id, read_json, regular, staging::SourceSnapshot, staging::phase_id, text,
+    unmarshal_any, unmarshal_map,
 };
 use crate::{
     cancel::Context,
     compiler::{NilMap, Walk, WalkEntry, walk_dir},
     editorbridge::{self, Client},
+    packages,
     project::is_owned_cache_path,
     sysutil,
     util::{agent_canonical, agent_immutable_json, file_hash},
 };
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
-use std::{os::unix::fs::PermissionsExt, time::Duration};
+use std::{collections::BTreeMap, os::unix::fs::PermissionsExt, time::Duration};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -179,42 +181,21 @@ fn build_host(
         Err(_) => {}
     }
 
-    let mut warm = false;
-    if let Some(client) = service.client() {
-        let connection = client.own_process_or_attach(ctx)?;
-        if connection.owned {
-            client.close()?;
-            service.set_client(None);
-            warm = true;
-            super::verify_snapshot(ctx, snapshot)?;
-        }
-    }
     let (cloned, clone_snapshot) = super::clone_staging(ctx, project, directory)?;
     if cloned != stage || snapshot.files != clone_snapshot.files {
         return Err(anyhow!(
             "host clone no longer matches its immutable authored source snapshot"
         ));
     }
-    if warm {
-        super::native::seed_native_library(ctx, project, stage)?;
-    }
-    let lifetime = service.0.lifetime.clone().unwrap_or_else(|| ctx.clone());
-    let client = Client::new(
-        &lifetime,
-        editorbridge::Options {
-            project: stage.into(),
-            editor: editor.into(),
-            startup_timeout: Duration::from_secs(600),
-            ..Default::default()
-        },
-    )?;
-    struct Close(Client);
-    impl Drop for Close {
-        fn drop(&mut self) {
-            let _ = self.0.close();
-        }
-    }
+    let (warm, owned_warm) = super::native::seed_stage_library(ctx, service, stage)?;
+    super::verify_snapshot(ctx, snapshot)?;
+    let client = stage_editor(ctx, service, stage)?;
     let _close = Close(client.clone());
+    service.stage(
+        "build_host",
+        "building the reusable Mono host Player in an owned staging copy",
+        &join(&[client.mailbox(), "editor.log"]),
+    );
     request(
         &client,
         ctx,
@@ -251,6 +232,24 @@ fn build_host(
         ));
     }
     let host = text(&build, "outputPath");
+    // Unity's CodeGen step leaves the unstripped Netcode runtime only in the
+    // stage Library. The processor build needs it wherever this host is used,
+    // so it travels with the host.
+    let codegen = join(&[
+        stage,
+        "Library/Bee/artifacts/StandaloneLinux64_CodeGen/Unity.Netcode.Runtime.dll",
+    ]);
+    if regular(&codegen) {
+        let directory = join(&[
+            &crate::compiler::player_data(&host),
+            crate::compiler::HOST_CODEGEN_DIRECTORY,
+        ]);
+        agent_canonical(&directory)?;
+        sysutil::mkdir_all(&directory)?;
+        let destination = join(&[&directory, "Unity.Netcode.Runtime.dll"]);
+        std::fs::copy(&codegen, &destination)
+            .map_err(|error| sysutil::Error::os("copy", &destination, &error))?;
+    }
     let artifacts = snapshot_host_artifacts(ctx, project, stage, &host_phase, &host)?;
     let stage_manifest = join(&[stage, "Packages/manifest.json"]);
     let stage_package_hash = match file_hash(&stage_manifest) {
@@ -261,6 +260,14 @@ fn build_host(
             ));
         }
     };
+    // The same stage Editor exports the public Player graph: the target
+    // project never has to run an Editor or declare the runtime package.
+    service.stage(
+        "export_engine_graph",
+        "exporting the public Player assembly graph from the staging copy",
+        &join(&[client.mailbox(), "editor.log"]),
+    );
+    export_stage_graph(&client, ctx, id, &join(&[directory, STAGE_GRAPH]))?;
     client.close()?;
     let final_artifacts = snapshot_host_artifacts(ctx, project, stage, &host_phase, &host)?;
     if artifacts != final_artifacts {
@@ -289,7 +296,8 @@ fn build_host(
             snapshot.files.at("Packages/manifest.json").into(),
         ),
         ("stagePackageProfile", stage_package_hash.into()),
-        ("warmLibraryFromOwnedStoppedEditor", warm.into()),
+        ("warmLibraryFromOwnedStoppedEditor", owned_warm.into()),
+        ("warmLibraryFromStoppedProject", warm.into()),
         ("build", Any::Object(build)),
     ]);
     let record = HostPreparation {
@@ -305,6 +313,206 @@ fn build_host(
     };
     agent_immutable_json(&result_path, &record)?;
     Ok((host, evidence))
+}
+
+pub(crate) const STAGE_GRAPH: &str = "stage-graph.json";
+
+struct Close(Client);
+impl Drop for Close {
+    fn drop(&mut self) {
+        let _ = self.0.close();
+    }
+}
+
+fn stage_editor(ctx: &Context, service: &Service, stage: &str) -> Result<Client> {
+    if service.0.no_editor {
+        return Err(fail(
+            "editor_disabled",
+            "Editor execution is disabled; provide a compatible cached engine/host/native profile",
+        ));
+    }
+    let lifetime = service.0.lifetime.clone().unwrap_or_else(|| ctx.clone());
+    Ok(Client::new(
+        &lifetime,
+        editorbridge::Options {
+            project: stage.into(),
+            editor: service.0.editor.clone(),
+            startup_timeout: Duration::from_secs(600),
+            ..Default::default()
+        },
+    )?)
+}
+
+fn export_stage_graph(client: &Client, ctx: &Context, id: &str, path: &str) -> Result<()> {
+    if regular(path) {
+        return Ok(());
+    }
+    let graph = request(
+        client,
+        ctx,
+        &phase_id(id, "stage-graph"),
+        "export_graph",
+        b"{}",
+    )
+    .1?;
+    agent_immutable_json(path, &unmarshal_any(&graph)?)
+}
+
+/// The public Player graph exported by an Editor that runs in the owned stage
+/// below `directory`, as that Editor reported it: its paths still name the
+/// stage. A host build leaves this file next to its stage; a supplied host
+/// gets a stage for the export alone.
+pub(crate) fn stage_graph(
+    ctx: &Context,
+    service: &Service,
+    id: &str,
+    directory: &str,
+) -> Result<(String, String)> {
+    let path = join(&[directory, STAGE_GRAPH]);
+    let (stage, _) = super::clone_staging(ctx, &service.0.project, directory)?;
+    if regular(&path) {
+        return Ok((stage, path));
+    }
+    super::native::seed_stage_library(ctx, service, &stage)?;
+    let client = stage_editor(ctx, service, &stage)?;
+    let _close = Close(client.clone());
+    service.stage(
+        "export_engine_graph",
+        "exporting the public Player assembly graph from an owned staging copy",
+        &join(&[client.mailbox(), "editor.log"]),
+    );
+    request(
+        &client,
+        ctx,
+        &phase_id(id, "stage-refresh"),
+        "refresh",
+        b"{}",
+    )
+    .1?;
+    export_stage_graph(&client, ctx, id, &path)?;
+    client.close()?;
+    Ok((stage, path))
+}
+
+/// Rewrites a graph exported in `stage` so that it describes `project`. The
+/// stage holds the authored roots byte for byte, so their paths move to the
+/// project. A registered package root inside the stage's own PackageCache
+/// moves to the root our resolver verified for the same package; anything
+/// else below the stage `Library` stays there, where it exists.
+pub(crate) fn retarget_stage_graph(
+    graph: &Any,
+    stage: &str,
+    project: &str,
+    resolved: &packages::Snapshot,
+) -> Result<Any> {
+    let prefix = format!("{stage}/");
+    let mut roots: Vec<(String, String)> = Vec::new();
+    if let Any::Array(entries) = graph.field("sourceRoots") {
+        for entry in entries {
+            let (logical, source) = (
+                super::text_of(entry, "path"),
+                super::text_of(entry, "source"),
+            );
+            if !source.starts_with(&format!("{prefix}Library/")) {
+                continue;
+            }
+            if let Some(package) = resolved
+                .packages
+                .iter()
+                .find(|package| package.logical_root == logical)
+            {
+                roots.push((source, package.path.clone()));
+            }
+        }
+    }
+    let path = |text: &str| -> Option<String> {
+        if text == stage {
+            return Some(project.into());
+        }
+        let relative = text.strip_prefix(&prefix)?;
+        if ["Assets", "Packages", "ProjectSettings"]
+            .iter()
+            .any(|root| relative == *root || relative.starts_with(&format!("{root}/")))
+        {
+            return Some(join(&[project, relative]));
+        }
+        roots.iter().find_map(|(source, target)| {
+            if text == source {
+                return Some(target.clone());
+            }
+            let rest = text.strip_prefix(source)?.strip_prefix('/')?;
+            Some(join(&[target, rest]))
+        })
+    };
+    fn walk(value: &Any, path: &dyn Fn(&str) -> Option<String>) -> Any {
+        match value {
+            Any::String(text) => path(text).map_or_else(|| value.clone(), Any::String),
+            Any::Array(items) => Any::Array(items.iter().map(|item| walk(item, path)).collect()),
+            Any::Object(members) => Any::Object(
+                members
+                    .iter()
+                    .map(|(key, member)| {
+                        (path(key).unwrap_or_else(|| key.clone()), walk(member, path))
+                    })
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+    let mut retargeted = walk(graph, &path);
+    if retargeted.field("project").as_str() != Some(project) {
+        return Err(anyhow!(
+            "staged Player graph does not belong to its owned stage"
+        ));
+    }
+    // The staged manifest declares the runtime package and absolute local
+    // paths. Authored package inputs carry the target's own bytes.
+    if let Some(Any::Object(inputs)) = retargeted
+        .as_object_mut()
+        .and_then(|graph| graph.get_mut("compilerInputs"))
+    {
+        for name in ["Packages/manifest.json", "Packages/packages-lock.json"] {
+            let authored = join(&[project, name]);
+            if !inputs.contains_key(&authored) {
+                continue;
+            }
+            match file_hash(&authored) {
+                Ok(hash) => inputs.insert(authored, hash.into()),
+                Err(_) => inputs.remove(&authored),
+            };
+        }
+    }
+    Ok(retargeted)
+}
+
+/// The Addressables output of the host build, by kind. Build processors run
+/// in the staging copy, so remote groups land in that copy's `ServerData` and
+/// local groups in the host's StreamingAssets, never in the target project.
+/// The content is as old as the host: it is not rebuilt when assets change.
+pub(crate) fn host_content(host: &str) -> BTreeMap<String, String> {
+    let mut found = BTreeMap::new();
+    let has_files = |directory: &str| {
+        std::fs::read_dir(directory).is_ok_and(|mut entries| entries.next().is_some())
+    };
+    let local = join(&[&crate::compiler::player_data(host), "StreamingAssets/aa"]);
+    if has_files(&local) {
+        found.insert("addressablesStreamingAssets".to_string(), local);
+    }
+    // <stage>/Builds/UnityMicroEditor/<phase>/Project.x86_64
+    let mut stage = host.to_string();
+    for _ in 0..4 {
+        stage = sysutil::dir(&stage);
+    }
+    if regular(&join(&[
+        &stage,
+        "ProjectSettings/UnityMicroEditorStaging.json",
+    ])) {
+        let remote = join(&[&stage, "ServerData/StandaloneLinux64"]);
+        if has_files(&remote) {
+            found.insert("addressablesRemoteBuild".to_string(), remote);
+        }
+    }
+    found
 }
 
 /// The digests of the staged host build.

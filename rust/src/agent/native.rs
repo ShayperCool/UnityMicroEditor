@@ -1,13 +1,14 @@
 //! Project settings references, the native import catalog produced by an owned
 //! staging Editor, and the catalog seed of a source preparation.
 use super::{
-    Any, AnyMap, Service, UNITY_VERSION, actions::request, fail, join, marshal, not_exist, obj,
-    read_json, read_map, staging::phase_id, text, text_of, unmarshal_map,
+    Any, AnyMap, Service, UNITY_VERSION, actions::request, fail, join, lstat, marshal, not_exist,
+    obj, read_json, read_map, staging::phase_id, text, text_of, unmarshal_map,
 };
 use crate::{
     cancel::Context,
     compiler::{CompilerGraphExport, Walk, WalkEntry, compiler_command, walk_dir},
     editorbridge::{self, Client},
+    packages,
     project::{BUILTIN_RESOURCE_GUID, is_owned_cache_path, lexpath, parse_unity_yaml, value},
     sysutil,
     util::{agent_canonical, agent_immutable_json, file_hash, read_agent_file, within_directory},
@@ -214,6 +215,36 @@ pub(crate) fn may_need_native(project: &str) -> Result<bool> {
     Ok(needed || !settings?.is_empty())
 }
 
+/// Seeds a new stage from the importer cache of a project nobody has open:
+/// the stopped Editor this service owned, or a target without any Editor. A
+/// live AssetDB is never copied. Returns whether the stage is warm and whether
+/// that cache came from the owned Editor.
+pub(crate) fn seed_stage_library(
+    ctx: &Context,
+    service: &Service,
+    stage: &str,
+) -> Result<(bool, bool)> {
+    let project = service.0.project.as_str();
+    let mut owned = false;
+    if let Some(client) = service.client() {
+        let connection = client.own_process_or_attach(ctx)?;
+        if connection.owned {
+            client.close()?;
+            service.set_client(None);
+            owned = true;
+        }
+    }
+    let seeded = lstat(&join(&[stage, ".micro-editor-library-seed.json"])).is_ok();
+    let warm = seeded
+        || (lstat(&join(&[stage, "Library"])).is_err()
+            && lstat(&join(&[project, "Library/ArtifactDB"])).is_ok()
+            && !crate::editorbridge::project_is_open(project)?);
+    if warm {
+        seed_native_library(ctx, project, stage, owned)?;
+    }
+    Ok((warm, owned))
+}
+
 pub(crate) fn exclude_library_seed_entry(name: &str) -> bool {
     matches!(
         name,
@@ -225,7 +256,12 @@ pub(crate) fn exclude_library_seed_entry(name: &str) -> bool {
 
 /// Copies the importer cache of a stopped, owned
 /// Editor into a staging clone, once.
-pub(crate) fn seed_native_library(ctx: &Context, source: &str, stage: &str) -> Result<()> {
+pub(crate) fn seed_native_library(
+    ctx: &Context,
+    source: &str,
+    stage: &str,
+    owned: bool,
+) -> Result<()> {
     let library = join(&[stage, "Library"]);
     let marker = join(&[stage, ".micro-editor-library-seed.json"]);
     match read_map(&marker, 65536) {
@@ -235,8 +271,9 @@ pub(crate) fn seed_native_library(ctx: &Context, source: &str, stage: &str) -> R
             {
                 return Err(anyhow!("native Library seed belongs to another project"));
             }
+            let stopped = |key: &str| existing.get(key) == Some(&Any::Bool(true));
             if existing.get("seedPolicy") != Some(&Any::Float(2.0))
-                || existing.get("sourceEditorOwnedAndStopped") != Some(&Any::Bool(true))
+                || !(stopped("sourceEditorOwnedAndStopped") || stopped("sourceEditorStopped"))
             {
                 return Err(fail(
                     "staging_incomplete",
@@ -280,32 +317,35 @@ pub(crate) fn seed_native_library(ctx: &Context, source: &str, stage: &str) -> R
             &["-a", "--reflink=auto", "--", &path, &library],
         )?;
     }
-    agent_immutable_json(
-        &marker,
-        &Any::Object(obj([
-            ("schemaVersion", 1.into()),
-            ("seedPolicy", 2.into()),
-            ("sourceProject", source.into()),
-            ("stageProject", stage.into()),
-            ("sourceEditorOwnedAndStopped", true.into()),
-            ("copyMode", "reflink-auto".into()),
-            ("excluded", "Library/UnityMicroEditor".into()),
-            (
-                "excludedTransientCaches",
-                [
-                    "PackageManager",
-                    "ScriptAssemblies",
-                    "Bee",
-                    "*.pid",
-                    "*.lock",
-                    "*-lock",
-                ]
-                .map(Any::from)
-                .to_vec()
-                .into(),
-            ),
-        ])),
-    )
+    let mut record = obj([
+        ("schemaVersion", 1.into()),
+        ("seedPolicy", 2.into()),
+        ("sourceProject", source.into()),
+        ("stageProject", stage.into()),
+        ("sourceEditorOwnedAndStopped", owned.into()),
+        ("copyMode", "reflink-auto".into()),
+        ("excluded", "Library/UnityMicroEditor".into()),
+        (
+            "excludedTransientCaches",
+            [
+                "PackageManager",
+                "ScriptAssemblies",
+                "Bee",
+                "*.pid",
+                "*.lock",
+                "*-lock",
+            ]
+            .map(Any::from)
+            .to_vec()
+            .into(),
+        ),
+    ]);
+    // A project nobody has open is as consistent as one whose owned Editor
+    // stopped; the record says which of the two this seed came from.
+    if !owned {
+        record.insert("sourceEditorStopped".into(), true.into());
+    }
+    agent_immutable_json(&marker, &Any::Object(record))
 }
 
 /// Binds a native catalog and the project settings
@@ -411,22 +451,9 @@ impl Service {
         directory: &str,
     ) -> Result<String> {
         let project = self.0.project.as_str();
-        let mut owned_idle_source = false;
-        if let Some(client) = self.client() {
-            let connection = client.own_process_or_attach(ctx)?;
-            if connection.owned {
-                // Copy a completed importer cache only after its owned Editor exits.
-                // Never snapshot an interactive or foreign Editor's live AssetDB.
-                client.close()?;
-                self.set_client(None);
-                owned_idle_source = true;
-            }
-        }
         let (stage, snapshot) =
             super::clone_staging(ctx, project, &join(&[directory, "native-stage"]))?;
-        if owned_idle_source {
-            seed_native_library(ctx, project, &stage)?;
-        }
+        seed_stage_library(ctx, self, &stage)?;
         let (_, _, _, settings) = project_references(project)?;
         let client = Client::new(
             &self.lifetime(),
@@ -444,6 +471,11 @@ impl Service {
             }
         }
         let _close = Close(client.clone());
+        self.stage(
+            "import_native_content",
+            "importing the scene's native assets in an owned staging copy",
+            &join(&[client.mailbox(), "editor.log"]),
+        );
         let arguments = marshal(&Any::Object(obj([
             ("scenes", vec![Any::from(scene)].into()),
             (
@@ -498,6 +530,7 @@ impl Service {
             ));
         }
         let mut source_roots: BTreeMap<String, String> = BTreeMap::new();
+        let mut resolved: Option<packages::Snapshot> = None;
         if let Some(Any::Array(roots)) = catalog.get_mut("sourceRoots") {
             for root in roots {
                 let (logical, mut physical) = (text_of(root, "path"), text_of(root, "source"));
@@ -511,6 +544,25 @@ impl Service {
                     let relative = sysutil::rel(&stage, &physical)
                         .ok_or_else(|| anyhow!("Rel: can't make {physical} relative to {stage}"))?;
                     physical = join(&[project, &relative]);
+                    // The target's own PackageCache exists only when its Editor
+                    // resolved it. Our resolver holds the same verified content.
+                    if lstat(&physical).is_err() {
+                        if resolved.is_none() {
+                            resolved = Some(packages::resolve(
+                                ctx,
+                                project,
+                                &self.0.editor,
+                                packages::Options::default().with_runtime_package()?,
+                            )?);
+                        }
+                        if let Some(package) = resolved
+                            .iter()
+                            .flat_map(|snapshot| snapshot.packages.iter())
+                            .find(|package| package.logical_root == logical)
+                        {
+                            physical = package.path.clone();
+                        }
+                    }
                 }
                 let canonical = lexpath::eval_symlinks(&physical).map_err(|error| {
                     anyhow!("native package root missing from authored target: {logical}: {error}")

@@ -18,15 +18,7 @@ use anyhow::{Result, anyhow};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
-pub(crate) fn requires_new_graph(message: &str) -> bool {
-    [
-        "regenerate source graph",
-        "fresh managed graph",
-        "outside the prepared managed graph",
-    ]
-    .iter()
-    .any(|text| message.contains(text))
-}
+pub(crate) use crate::compiler::requires_new_graph;
 
 #[derive(Debug, Clone, Default)]
 pub struct ConfigurationSelection {
@@ -296,13 +288,18 @@ impl Service {
         if name != "session_control" {
             return outcome;
         }
-        let waiting = matches!(
-            jsondoc::parse(raw),
-            Ok(Json::Object(members))
-                if members.iter().rev().find(|member| member.key.eq_ignore_ascii_case("action"))
-                    .is_some_and(|action| action.value.as_str() == Some("wait_update"))
-        );
-        if !waiting {
+        let action = match jsondoc::parse(raw) {
+            Ok(Json::Object(members)) => members
+                .iter()
+                .rev()
+                .find(|member| member.key.eq_ignore_ascii_case("action"))
+                .and_then(|action| action.value.as_str().map(str::to_string))
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
+        // A status poll must not hide the rejection either: it reports that a
+        // new preparation is required and starts the same recovery.
+        if action != "wait_update" && action != "status" {
             return outcome;
         }
         let RuntimeValue::Controller(Reply::State(state)) = &outcome.value else {
@@ -343,7 +340,28 @@ impl Service {
                 ("requestId", identity.into()),
                 ("activate", true.into()),
             ])))?;
-            let preparation = self.handle(ctx, "project_prepare", &arguments)?;
+            let preparation = self.handle(ctx, "project_prepare", &arguments);
+            if action == "status" {
+                let mut reply = super::jobs::state_members(state)?;
+                reply.insert("preparationRequired".into(), true.into());
+                reply.insert(
+                    "preparationReason".into(),
+                    state.update_error.clone().into(),
+                );
+                // A failed recovery must not turn the status itself into an error.
+                match &preparation {
+                    Ok(preparation) => reply.insert(
+                        "preparation".into(),
+                        Any::Raw(String::from_utf8_lossy(reply_bytes(preparation)).into()),
+                    ),
+                    Err(error) => {
+                        reply.insert("preparationError".into(), super::error_text(error).into())
+                    }
+                };
+                reply.insert("configurationRevision".into(), revision.clone().into());
+                return map_reply(reply);
+            }
+            let preparation = preparation?;
             map_reply(obj([
                 ("status", "result_pending".into()),
                 ("phase", "preparing_configuration".into()),

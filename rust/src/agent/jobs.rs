@@ -2,8 +2,9 @@
 //! run as detached jobs. Player requests retain the controller's receipt protocol and
 //! are never replayed here.
 use super::{
-    Any, Job, Preparation, Service, actions::RuntimeOutcome, actions::session_input, context_error,
-    error_text, fail, join, map_reply, not_exist, obj, operation_id, reply_bytes, text, typed,
+    Any, AnyMap, Job, Preparation, Service, actions::RuntimeOutcome, actions::RuntimeValue,
+    actions::session_input, context_error, error_text, fail, join, map_reply, not_exist, obj,
+    operation_id, reply_bytes, text, typed,
 };
 use crate::{
     authoring::AuthoringError,
@@ -198,8 +199,12 @@ fn action_job_pending(
     id: &str,
     directory: &str,
     has_operation: bool,
+    progress: Option<AnyMap>,
 ) -> Result<HandlerValue> {
+    // An accepted job that waits for the project action lock has no stage yet.
+    let progress = progress.unwrap_or_else(|| obj([("stage", "queued".into())]));
     let mut result = obj([
+        ("progress", Any::Object(progress)),
         ("success", false.into()),
         ("status", "result_pending".into()),
         ("backend", "project_action_job".into()),
@@ -267,6 +272,15 @@ fn raw_members(raw: &[u8]) -> Result<Option<RawMembers>, String> {
                 .collect(),
         )),
         other => Err(jsondoc::Target::VALUE.mismatch(other.kind(), "object")),
+    }
+}
+
+/// The members of an encoded session state; number literals stay verbatim.
+pub(crate) fn state_members(state: &crate::agentcontrol::State) -> Result<AnyMap> {
+    let encoded = jsondoc::marshal(state).map_err(|e| anyhow!(e))?;
+    match crate::project::value::parse_json(&encoded, true)? {
+        (Any::Object(members), _) => Ok(members),
+        _ => Err(anyhow!("session state is not an object")),
     }
 }
 
@@ -360,7 +374,13 @@ impl Service {
                 return receipt.value();
             }
             if job.active {
-                return action_job_pending(action, &id, &directory, has_operation);
+                return action_job_pending(
+                    action,
+                    &id,
+                    &directory,
+                    has_operation,
+                    self.progress(&id),
+                );
             }
         }
         if jobs.jobs.len() >= 128 {
@@ -434,7 +454,7 @@ impl Service {
                 job.receipt = Some(receipt);
             }
         });
-        action_job_pending(action, &id, &directory, has_operation)
+        action_job_pending(action, &id, &directory, has_operation, None)
     }
 
     pub(crate) fn close_action_jobs(&self) {
@@ -527,6 +547,53 @@ impl Service {
         Ok(result)
     }
 
+    /// `status`, `wait` and `wait_update` while a preparation may be running.
+    /// Before the first Player exists the controller only knows `stopped`, so a
+    /// pending preparation answers with its stage instead of a stopped session.
+    fn session_with_preparation(
+        &self,
+        ctx: &Context,
+        name: &str,
+        raw: &[u8],
+        action: &str,
+    ) -> RuntimeOutcome {
+        let Some(controller) = &self.0.controller else {
+            return self.controller_handle(ctx, name, raw);
+        };
+        let Some(progress) = self.preparation_progress() else {
+            return self.controller_handle(ctx, name, raw);
+        };
+        let state = controller.status();
+        let reply = if action == "status" {
+            state_members(&state).map(|mut reply| {
+                reply.insert("preparation".into(), Any::Object(progress));
+                reply
+            })
+        } else if state.phase == "stopped" || state.phase == "failed" {
+            Ok(obj([
+                ("success", false.into()),
+                ("status", "result_pending".into()),
+                ("phase", "preparing".into()),
+                ("backend", "project_action_job".into()),
+                (
+                    "message",
+                    "preparation is still running and no Player has started; reissue the same session_control(start) until it completes, then wait"
+                        .into(),
+                ),
+                ("preparation", Any::Object(progress)),
+            ]))
+        } else {
+            return self.controller_handle(ctx, name, raw);
+        };
+        match reply.and_then(map_reply) {
+            Ok(value) => RuntimeOutcome {
+                value: RuntimeValue::Handler(value),
+                error: None,
+            },
+            Err(error) => RuntimeOutcome::failed(error),
+        }
+    }
+
     pub(crate) fn runtime_with_action_jobs(
         &self,
         ctx: &Context,
@@ -545,24 +612,33 @@ impl Service {
             return self.locked_handle(ctx, name, raw);
         }
         if input.action != "start" && input.action != "reset" {
-            return self.controller_handle(ctx, name, raw);
+            return self.session_with_preparation(ctx, name, raw, &input.action);
         }
         let selected = text(&input.arguments, "scene");
         let mut scene = String::new();
-        let configured = self.locked(ctx, || -> Option<RuntimeOutcome> {
-            let baseline = self.baseline();
+        // The first preparation holds the project action lock for as long as
+        // it runs. A reissued start must come back with its progress at once,
+        // so it does not queue behind that lock.
+        let first_preparation = self.baseline().is_empty() && self.preparation_progress().is_some();
+        let configured = if first_preparation {
             scene = self.scene();
-            if baseline.is_empty() {
-                return None;
-            }
-            if !selected.is_empty() && selected != scene {
-                return Some(RuntimeOutcome::failed(fail(
-                    "scene_requires_preparation",
-                    SCENE,
-                )));
-            }
-            Some(self.controller_handle(ctx, name, raw))
-        });
+            Ok(None)
+        } else {
+            self.locked(ctx, || -> Option<RuntimeOutcome> {
+                let baseline = self.baseline();
+                scene = self.scene();
+                if baseline.is_empty() {
+                    return None;
+                }
+                if !selected.is_empty() && selected != scene {
+                    return Some(RuntimeOutcome::failed(fail(
+                        "scene_requires_preparation",
+                        SCENE,
+                    )));
+                }
+                Some(self.controller_handle(ctx, name, raw))
+            })
+        };
         match configured {
             Err(error) => return RuntimeOutcome::failed(error),
             Ok(Some(outcome)) => return outcome,
@@ -579,11 +655,23 @@ impl Service {
             }
             id = jobs.auto_preparation_id.clone();
         }
-        let encoded = match super::marshal(&Any::Object(obj([
+        let mut preparation = obj([
             ("scene", scene.into()),
             ("requestId", id.into()),
             ("activate", true.into()),
-        ]))) {
+        ]);
+        // Optional preparation inputs travel with the start. Without them the
+        // preparation finds and reuses the newest valid host by itself.
+        for key in ["hostPlayer", "nativeCatalog", "engineProfile"] {
+            let value = text(&input.arguments, key);
+            if !value.is_empty() {
+                preparation.insert(key.into(), value.into());
+            }
+        }
+        if input.arguments.get("rebuildHost").is_some_and(Any::is_true) {
+            preparation.insert("rebuildHost".into(), true.into());
+        }
+        let encoded = match super::marshal(&Any::Object(preparation)) {
             Ok(encoded) => encoded,
             Err(error) => return RuntimeOutcome::failed(error),
         };

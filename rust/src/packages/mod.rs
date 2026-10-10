@@ -37,6 +37,30 @@ pub struct Options {
     pub max_packages: i64,
     /// Ignores a prior commit lock for explicitly requested updates.
     pub refresh_git: bool,
+    /// Tool-provided direct dependencies (`name` to a `file:` request) the
+    /// authored manifest does not declare. They resolve as if declared, so the
+    /// tool's runtime package never has to be written into the target manifest.
+    pub provided: BTreeMap<String, String>,
+}
+
+/// The tool's runtime bridge package.
+pub const RUNTIME_PACKAGE: &str = "com.unitymicroeditor.runtime";
+
+impl Options {
+    /// Provides the tool's runtime package from the installation directory.
+    /// The Player host is always built with it, while the target manifest
+    /// stays as authored.
+    pub fn with_runtime_package(mut self) -> anyhow::Result<Self> {
+        let tool = crate::util::micro_editor_root()?;
+        let root = crate::project::lexpath::eval_symlinks(&crate::sysutil::join(&[
+            &tool,
+            "Packages",
+            RUNTIME_PACKAGE,
+        ]))?;
+        self.provided
+            .insert(RUNTIME_PACKAGE.into(), format!("file:{root}"));
+        Ok(self)
+    }
 }
 
 /// Authored manifests, locks and registry documents may spell an unset field as `null`.

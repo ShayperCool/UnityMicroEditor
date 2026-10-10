@@ -447,3 +447,109 @@ fn receipts_have_fixed_layout() {
         assert!(jobs::make_action_job_receipt(outcome).1);
     }
 }
+
+#[test]
+fn pending_preparation_reports_its_stage_to_start_status_and_wait() {
+    let (_guard, project) = review_project();
+    let lifetime = ctx().with_cancel();
+    let controller = stopped_controller(&project, &lifetime);
+    let service = Service::new(Options {
+        project: project.clone(),
+        lifetime: Some(lifetime.clone()),
+        controller: Some(controller),
+        asynchronous: true,
+        scene: "Assets/Main.unity".into(),
+        ..Default::default()
+    });
+    // The arguments a start derives for its automatic preparation.
+    let raw = br#"{"activate":true,"requestId":"staged","scene":"Assets/Main.unity"}"#;
+    let (started, release) = (Flag::new(), Flag::new());
+    let action = {
+        let (started, release, service) = (started.clone(), release.clone(), service.clone());
+        run(move |ctx, action, _| {
+            // What `handle_sync` and the preparation do around their work,
+            // including the project action lock held for the whole run.
+            service.locked(ctx, || {
+                service.progress_begin(action, "staged");
+                service.stage("build_host", "building the host", "/stage/editor.log");
+                started.set();
+                select(&[Source::Flag(&release), Source::Context(ctx)], None);
+                service.progress_end();
+            })?;
+            map(json!({"baseline": "confirmed", "requestId": "staged"}))
+        })
+    };
+    let first = service
+        .enqueue_action(&ctx(), "project_prepare", raw, action.clone())
+        .unwrap();
+    assert_eq!(decoded(&first)["progress"]["stage"], "queued");
+    assert!(started.wait(Some(Duration::from_secs(3))));
+    let polled = decoded(
+        &service
+            .enqueue_action(&ctx(), "project_prepare", raw, action.clone())
+            .unwrap(),
+    );
+    assert_eq!(polled["status"], "result_pending");
+    let progress = &polled["progress"];
+    assert!(
+        progress["stage"] == "build_host"
+            && progress["stageIndex"] == 3
+            && progress["stageCount"] == 11
+            && progress["logPath"] == "/stage/editor.log"
+            && progress["elapsedSeconds"].is_number(),
+        "pending reply lacks the running stage and its log: {polled}"
+    );
+    // A reissued start reports the same progress at once; it does not queue
+    // behind the lock the preparation holds.
+    let brief = ctx().with_timeout(Duration::from_secs(2));
+    let reissued = service
+        .runtime_with_action_jobs(
+            &brief,
+            "session_control",
+            br#"{"action":"start","requestId":"staged"}"#,
+        )
+        .finish()
+        .expect("reissued start waited for the running preparation");
+    assert!(
+        pending(&reissued) && decoded(&reissued)["progress"]["stage"] == "build_host",
+        "reissued start lacks the running stage: {}",
+        decoded(&reissued)
+    );
+    // Before the first Player exists the controller only knows `stopped`.
+    for wait in ["wait", "wait_update"] {
+        let outcome = service.runtime_with_action_jobs(
+            &ctx(),
+            "session_control",
+            &bytes(&json!({"action": wait})),
+        );
+        let reply = decoded(&outcome.finish().expect("wait failed during preparation"));
+        assert!(
+            reply["status"] == "result_pending" && reply["preparation"]["stage"] == "build_host",
+            "{wait} reported a stopped session instead of the preparation: {reply}"
+        );
+    }
+    let status = decoded(
+        &service
+            .runtime_with_action_jobs(&ctx(), "session_control", br#"{"action":"status"}"#)
+            .finish()
+            .unwrap(),
+    );
+    assert!(
+        status["phase"] == "stopped" && status["preparation"]["logPath"] == "/stage/editor.log",
+        "status hides the running preparation: {status}"
+    );
+    release.set();
+    wait_job(&service, "project_prepare", raw, &action).unwrap();
+    let status = decoded(
+        &service
+            .runtime_with_action_jobs(&ctx(), "session_control", br#"{"action":"status"}"#)
+            .finish()
+            .unwrap(),
+    );
+    assert!(
+        status.get("preparation").is_none(),
+        "finished preparation still reported"
+    );
+    lifetime.cancel();
+    service.close();
+}

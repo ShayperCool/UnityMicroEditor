@@ -668,3 +668,34 @@ fn project_build_backend_arguments_default_to_release() {
         );
     }
 }
+
+#[test]
+fn target_editor_requires_a_declared_package_and_never_writes_the_manifest() {
+    let (_guard, project) = review_project();
+    let manifest = join(&[&project, "Packages/manifest.json"]);
+    let before = fs::read(&manifest).unwrap();
+    let missing = actions::require_declared_agent_package(&project);
+    assert_eq!(code(&missing), "runtime_package_missing");
+    let detail = typed(missing.as_ref().unwrap_err()).unwrap();
+    assert!(
+        detail.details.as_ref().unwrap()["dependency"]
+            .as_str()
+            .is_some_and(|dependency| dependency.starts_with("file:/")
+                && dependency.ends_with("/Packages/com.unitymicroeditor.runtime")),
+        "the failure does not say what to declare: {detail:?}"
+    );
+    assert_eq!(fs::read(&manifest).unwrap(), before);
+    assert!(
+        absent(&join(&[
+            &project,
+            "Library/UnityMicroEditor/package-install"
+        ])),
+        "a manifest backup implies an attempted installation"
+    );
+    // The project's own declaration, in any form, is accepted as authored.
+    write(
+        &manifest,
+        r#"{"dependencies":{"com.unitymicroeditor.runtime":"file:../../Tool/Packages/com.unitymicroeditor.runtime"}}"#,
+    );
+    actions::require_declared_agent_package(&project).unwrap();
+}

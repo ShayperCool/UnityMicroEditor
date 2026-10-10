@@ -58,6 +58,64 @@ struct Outcome {
     runtime_initializers: NilVec<RuntimeInitializer>,
 }
 
+const CODEGEN_ARTIFACTS: &str = "Library/Bee/artifacts/StandaloneLinux64_CodeGen";
+/// Where a host build keeps the unstripped CodeGen reference next to its data.
+pub const HOST_CODEGEN_DIRECTORY: &str = "UnityMicroEditorCodeGen";
+const NETCODE_RUNTIME: &str = "Unity.Netcode.Runtime.dll";
+
+/// The project roots whose `Library` may hold Unity's package and build
+/// caches: the target, the staging copy a host was built in, then every host
+/// stage of this project, newest first.
+fn library_roots(project: &str, player: &str) -> Vec<String> {
+    let mut roots = vec![project.to_string()];
+    // <stage>/Builds/UnityMicroEditor/<phase>/Project.x86_64
+    let mut stage = player.to_string();
+    for _ in 0..4 {
+        stage = sysutil::dir(&stage);
+    }
+    if !sys::absent(&join(&[
+        &stage,
+        "ProjectSettings/UnityMicroEditorStaging.json",
+    ])) {
+        roots.push(stage);
+    }
+    let mut stages: Vec<(std::time::SystemTime, String)> = sys::glob_lossy(&join(&[
+        project,
+        "Library/UnityMicroEditor/preparations/*/host-stage/project",
+    ]))
+    .into_iter()
+    .filter_map(|stage| Some((std::fs::metadata(&stage).ok()?.modified().ok()?, stage)))
+    .collect();
+    stages.sort_by(|a, b| b.cmp(a));
+    for (_, stage) in stages {
+        if !roots.contains(&stage) {
+            roots.push(stage);
+        }
+    }
+    roots
+}
+
+/// The runtime Player linker removes InternalsVisibleTo, so the processor
+/// build references the unstripped runtime of Unity's CodeGen step. A host
+/// carries its own copy; older hosts leave it in the Library that built them.
+fn unstripped_netcode_runtime(player: &str, roots: &[String]) -> Result<String> {
+    let mut candidates = vec![join(&[
+        &super::player_data(player),
+        HOST_CODEGEN_DIRECTORY,
+        NETCODE_RUNTIME,
+    ])];
+    for root in roots {
+        candidates.push(join(&[root, CODEGEN_ARTIFACTS, NETCODE_RUNTIME]));
+    }
+    match candidates.iter().find(|path| !sys::absent(path)) {
+        Some(found) => Ok(found.clone()),
+        None => bail!(
+            "unstripped {NETCODE_RUNTIME} is missing; a host build produces it under {CODEGEN_ARTIFACTS}. Searched:\n{}",
+            candidates.join("\n")
+        ),
+    }
+}
+
 impl Compiler {
     fn netcode_ready(
         &mut self,
@@ -93,17 +151,30 @@ impl Compiler {
             }
             return Ok(processor.clone());
         }
-        let packages = sys::glob_lossy(&join(&[
-            &self.project,
-            "Library/PackageCache/com.unity.netcode.gameobjects@*/Editor/CodeGen",
-        ]));
-        let cecil_packages = sys::glob_lossy(&join(&[
-            &self.project,
-            "Library/PackageCache/com.unity.nuget.mono-cecil@*",
-        ]));
-        if packages.len() != 1 || cecil_packages.len() != 1 {
-            bail!("Netcode requires one pinned package CodeGen and Mono.Cecil package");
+        // The target's own Library holds these only after its Editor resolved
+        // and built the project. The host was built in an owned staging copy,
+        // whose Library always has them.
+        let roots = library_roots(&self.project, &self.player);
+        let (mut packages, mut cecil_packages) = (Vec::new(), Vec::new());
+        for root in &roots {
+            packages = sys::glob_lossy(&join(&[
+                root,
+                "Library/PackageCache/com.unity.netcode.gameobjects@*/Editor/CodeGen",
+            ]));
+            cecil_packages = sys::glob_lossy(&join(&[
+                root,
+                "Library/PackageCache/com.unity.nuget.mono-cecil@*",
+            ]));
+            if packages.len() == 1 && cecil_packages.len() == 1 {
+                break;
+            }
         }
+        if packages.len() != 1 || cecil_packages.len() != 1 {
+            bail!(
+                "Netcode requires one pinned package CodeGen and Mono.Cecil package in the Library/PackageCache of the project or its host staging copy"
+            );
+        }
+        let unstripped_runtime = unstripped_netcode_runtime(&self.player, &roots)?;
         let tool_root = micro_editor_root()?;
         let source_root = join(&[&tool_root, "tools/NetcodePostProcessor"]);
         let mut inputs = NilMap::make();
@@ -153,11 +224,7 @@ impl Compiler {
                 // The runtime Player linker removes InternalsVisibleTo. The
                 // package CodeGen build uses its unstripped runtime reference;
                 // target ILPP still resolves the actual Player DLLs from request.
-                join(&[
-                    &self.project,
-                    "Library/Bee/artifacts/StandaloneLinux64_CodeGen",
-                    name,
-                ])
+                unstripped_runtime.clone()
             } else {
                 join(&[&managed, name])
             };

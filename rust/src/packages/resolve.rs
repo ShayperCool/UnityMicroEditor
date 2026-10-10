@@ -144,6 +144,18 @@ pub fn resolve(ctx: &Context, project: &str, editor: &str, options: Options) -> 
         }
         r.direct.insert(name.clone(), request.clone());
     }
+    // An authored declaration or embedded copy always wins over a provided one.
+    for (name, request) in r.options.provided.clone() {
+        if !valid_package_name(&name) || !request.starts_with("file:/") {
+            bail!("invalid provided dependency {name:?}");
+        }
+        if !r.direct.contains_key(&name) && !r.embedded.contains_key(&name) {
+            r.diagnostics.push(format!(
+                "{name}: provided by the tool, not declared in the manifest"
+            ));
+            r.direct.insert(name, request);
+        }
+    }
     for name in r.embedded.keys() {
         r.direct.insert(name.clone(), "embedded".into());
     }

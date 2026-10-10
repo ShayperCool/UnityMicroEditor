@@ -42,9 +42,11 @@ Stdio is the default. An agent's MCP configuration can use:
 ```
 
 Source tools work immediately. Without `--baseline`, `session_control` with
-`action: start` prepares the selected scene automatically. Preparation installs
-our local runtime package when native bootstrap is needed, preserving other
-manifest entries and keeping a backup. The package resolver reads manifest,
+`action: start` prepares the selected scene automatically. Preparation never
+writes `Packages/manifest.json`, the lock or any other authored file of the
+target: the runtime package is provided to our resolver from the installation
+directory and declared only in the staging copies that run an Editor. No Editor
+opens the target project during preparation. The package resolver reads manifest,
 lock, embedded/file/Git/registry dependencies. Our graph reads `.asmdef`, `.asmref`,
 source ownership, platform/define/version constraints and compiler options.
 The installed SDK compiles the result. A package-compatible native Mono host and
@@ -53,9 +55,21 @@ initial native bootstrap also captures the component-default catalog.
 Supported native dependencies are prepared in an isolated copy. Scene loading
 continues through our source loader; preparation does not bundle authored scenes.
 
+Preparation starts with checks that need no build: authored metadata identities
+(the issues `project_inspect` lists: a `.meta` without exactly one GUID,
+duplicate GUIDs, symlinks) and the presence of
+`ProjectSettings/ProjectSettings.asset`. They fail in the first second with
+`invalid_identity` or `project_settings_missing`. A source without `.meta` stops
+only a preparation that needs an Editor stage.
+
 Preparation completion and Player readiness are distinct. Reissue the same
 `session_control(start)` request while preparation is pending, then call
-`session_control(wait)` for actual readiness. Long project actions run as durable
+`session_control(wait)` for actual readiness. A pending reply carries
+`progress`: the current `stage`, its index among the stages, elapsed seconds
+and, for Editor stages, `logPath` of the staging Editor's log. While a
+preparation runs, `session_control(status)` adds the same object as
+`preparation`, and `wait`/`wait_update` answer `result_pending` with it instead
+of reporting a stopped session. The CLI prints the stages to stderr. Long project actions run as durable
 jobs: poll identical arguments and the same `requestId` or `operationId`.
 Disconnecting the MCP request does not cancel an accepted preparation or build.
 A confirmed job is read after server restart without repeating its backend work.
@@ -70,8 +84,15 @@ To prepare before connecting an agent:
 
 The result names the baseline, host, engine profile, package snapshot and native catalog. Existing validated
 baselines remain accepted through `mcp --baseline /absolute/.../current.json`.
-`--host-player` supplies an explicitly compatible host; omitting it builds one for
-the target's package profile. `--editor` selects the matching Unity installation;
+`--host-player` supplies an explicitly compatible host. Without it a preparation
+reuses the newest host an earlier request built for this project and Editor,
+together with its engine profile and, for the same scene, its native catalog;
+a new `requestId` alone never rebuilds the host. The result records this as
+`backends.hostSource: reused:<requestId>`. Only a project without such a host
+builds one. A reused host is verified against the current sources where it is
+used; when it no longer fits (changed packages or Player settings), the
+preparation fails with `host_reuse_failed`, and `rebuildHost: true` with a new
+`requestId` builds a new one. `--editor` selects the matching Unity installation;
 the default is `UNITY_EDITOR`, then the pinned installation under `$HOME/Unity`.
 `--engine-profile` selects a captured engine/host profile. Add `--no-editor` to
 `mcp` or `auto-prepare` to forbid main Editor bootstrap and build calls; missing
@@ -93,12 +114,31 @@ private inherited callbacks are refused.
 Owned outputs are under the explicit project's `Library/UnityMicroEditor` and
 `Builds/UnityMicroEditor`. Automatic host builds run in an owned staging copy:
 package build processors, including Addressables, can change generated Assets
-only there. `hostEvidence` links the immutable source snapshot, Editor receipt,
-package profile and verified host artifacts. The target's authored roots are
-checked on both success and failure. Explicit `project_build` invokes the target
-Editor's normal build pipeline and package build processors.
-Native staging can seed its import cache from an owned,
-stopped source Editor; that is a warm cache copy, not a cold import measurement.
+only there. The same staging Editor exports the public Player graph, whose paths
+are then mapped back to the target's authored roots and to the package roots our
+resolver verified. `hostEvidence` links the immutable source snapshot, Editor
+receipt, package profile and verified host artifacts. The target's authored
+roots are checked on both success and failure.
+
+Addressables content built by the host build stays with the host. When there is
+any, the preparation result lists it in `hostContent`:
+`addressablesStreamingAssets` (local groups, inside the host's
+`StreamingAssets/aa`, which the session's Player copy contains) and
+`addressablesRemoteBuild` (remote groups, the staging copy's
+`ServerData/StandaloneLinux64`). It is not published into the target's
+`ServerData`, and it is as old as the host: content edits do not rebuild it. A
+game that loads remote groups from a configurable location can be pointed at
+that directory through `gameArguments`.
+
+Explicit `project_build` invokes the target Editor's normal build pipeline and
+package build processors. It is the one action that runs an Editor in the target
+project, and it needs the runtime package there. The tool does not add it:
+without a declaration in the target's own `Packages/manifest.json` the action
+fails with `runtime_package_missing` and names the dependency to add.
+A staging copy seeds its import cache from the target's `Library` when no Editor
+has the target open, or after an Editor the tool owned there has stopped; that
+is a warm cache copy, not a cold import measurement. A target that is open in an
+interactive Editor is never copied, so its stages import cold.
 Existing native catalogs are not migrated or relabeled. Legacy project `Temp`
 outputs remain accepted, but Unity clears them on Editor restart. Do not move just
 `current.json` when its referenced artifacts still point into Temp. Parent
@@ -130,7 +170,7 @@ An attached interactive Editor is not owned or terminated by the tool.
 | `project_build` | **Real Editor build proxy**, with explicit scenes and a fresh owned Linux Mono output. |
 | `prefab_edit` | Source instantiate/create/variant/override/apply/revert/unpack, with revision-checked multi-file publication. |
 | `component_schema`, `component_add` | Cached native defaults and required companions; attachment uses our source writer and starts no Editor. |
-| `session_control` | Start/stop/status/reset/wait/wait_update. |
+| `session_control` | Start/stop/status/reset/wait/wait_update. `start`/`reset` accept `arguments`: `scene`, `gameArguments`, `contentScenes`, `contentPrefabs`, `rebuildHost`. |
 | `runtime_query` | Public status, hierarchy, inspection, logs, raycast and tool catalog. |
 | `runtime_command` | Simulation, input, screenshots and public project tool calls. |
 | `project_tools` | Refresh the live catalog and register `project.<name>` MCP tools. |
@@ -240,9 +280,13 @@ commit, call `wait_update` with `afterSequence`. A scene `updated` ACK, or confi
 `code-updated`/`content-updated` readiness, proves application rather than behavior.
 Read the current PID/revision, inspect values, check logs, and run an assertion.
 C# updates restart the Player and reset game state. Ordinary compile failures
-retain the last confirmed Player. A graph/configuration rejection queues fresh
-source preparation automatically; the old Player remains available while it
-compiles, and replacement occurs only after successful preparation.
+retain the last confirmed Player. A graph/configuration rejection, for example a
+new `.cs` in an assembly the prepared graph does not hold, cannot be applied to
+the running Player at all. The session state then has `preparationRequired:
+true` next to `updateError`, and both `wait_update` and `status` queue a fresh
+source preparation automatically (`status` keeps its normal shape and adds
+`preparationReason` and `preparation`). The old Player remains available while
+it compiles, and replacement occurs only after successful preparation.
 
 All source mutations require a stable `operationId`. Exact retry returns its
 original durable result; changed arguments with that ID conflict. Stale source or
@@ -286,6 +330,31 @@ ID authorizes a new execution. This is not a claim of transactional exactly-once
 execution across arbitrary crashes. Long project jobs use their own durable IDs;
 `result_pending` is not a completed or failed operation.
 
+## Game arguments and runtime content
+
+`session_control(start)` and `reset` pass launch options in `arguments`:
+
+```json
+{
+  "action": "start",
+  "arguments": {
+    "gameArguments": ["-content-url", "http://127.0.0.1:8080/StandaloneLinux64"],
+    "contentScenes": ["0123456789abcdef0123456789abcdef=Assets/Scenes/Level.unity"],
+    "contentPrefabs": ["Assets/Prefabs/Enemy.prefab"]
+  }
+}
+```
+
+`gameArguments` is the game's own command line, the same as `-- args` of the
+`run` command; `--unity-cli-*` names are refused. `contentScenes` and
+`contentPrefabs` are the runner's `--content-scene` and `--content-prefab`. A
+list that is given replaces the previous one and stays for later launches; the
+session state shows the current values as `launch`. A running Player keeps its
+command line: `start` with other values is refused, `reset` relaunches with them.
+This registers explicit scenes and prefabs only. There is no Addressables
+locator built from the project's Addressables settings and groups: a game that
+resolves Addressables keys needs content it can load itself.
+
 ## Simulation, input and observations
 
 `simulation_pause` gates game FixedUpdate/PreUpdate/Update/PreLateUpdate through
@@ -294,6 +363,11 @@ requests one Update, one fixed tick and one LateUpdate, checks actual counters,
 and pauses again before replying. This explicit fixed-tick contract extends the
 native Editor step behavior observed in the reference. Legacy `pause`/`resume`
 control scaled time only. `wait_frames` observes rendered native frames.
+`runtime_query(status).simulation` counts game Update, FixedUpdate and LateUpdate
+stages (`gameUpdateFrames`, `gameFixedTicks`, `gameLateFrames`) from the frame in
+`countersSinceFrame`, normally Player start. The counters are reinstalled when
+the game replaces the PlayerLoop; `countersInstalled: false` with `counterError`
+means they could not be.
 
 Keyboard/mouse actions queue events on owned virtual Input System devices and
 require the target's active Input System profile and matching host package.

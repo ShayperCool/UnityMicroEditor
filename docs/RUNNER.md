@@ -36,7 +36,7 @@ unity-micro-editor run \
 | `--content-prefab Assets/...prefab` | Register a prefab the game addresses at runtime. Repeatable. |
 | `--builtin-shader` | Verified snapshot of a retained built-in shader. Repeatable. |
 
-Arguments after `--` are passed to the game.
+Arguments after `--` are passed to the game. Through MCP the same options are the `gameArguments`, `contentScenes` and `contentPrefabs` of `session_control(start)`. A rejected update whose error needs a new source graph carries `preparationRequired: true` in its `update-rejected` event: the Player keeps its old code until the project is prepared again.
 
 Prefer an output under `Library/UnityMicroEditor`: Unity clears a project's `Temp` when its Editor restarts. One output directory belongs to one running session. A second run with the same output is refused until the first stops; the lock is released on exit or crash. Reusing an output reuses its compiler and native caches.
 

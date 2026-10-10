@@ -160,11 +160,40 @@ pub fn project_build_arguments(args: &AnyMap) -> Result<Vec<u8>> {
     ])))
 }
 
-/// Package installation is explicit project preparation:
-/// it keeps a durable backup, preserves unrelated JSON entries, and refuses a
-/// different installed package.
+/// Whether the project itself declares or embeds the runtime package. The
+/// target's manifest is authored source: it is read here and never written.
+pub(crate) fn require_declared_agent_package(project: &str) -> Result<()> {
+    const NAME: &str = crate::packages::RUNTIME_PACKAGE;
+    let embedded = join(&[project, "Packages", NAME, "package.json"]);
+    if super::regular(&embedded) {
+        return Ok(());
+    }
+    let manifest = read_agent_file(&join(&[project, "Packages/manifest.json"]), 1 << 20)?;
+    let declared = unmarshal_map(&manifest)?
+        .unwrap_or_default()
+        .get("dependencies")
+        .and_then(Any::as_object)
+        .is_some_and(|dependencies| dependencies.contains_key(NAME));
+    if declared {
+        return Ok(());
+    }
+    let package = micro_editor_root().map(|tool| join(&[&tool, "Packages", NAME]))?;
+    Err(fail_with(
+        "runtime_package_missing",
+        "this action runs in the target project's own Editor, which needs the runtime package; the tool does not edit Packages/manifest.json, so declare the package there yourself",
+        obj([
+            ("package", NAME.into()),
+            ("dependency", format!("file:{package}").into()),
+            ("manifest", "Packages/manifest.json".into()),
+        ]),
+    ))
+}
+
+/// Installs the runtime package into an owned staging clone. It preserves
+/// unrelated JSON entries and refuses a different installed package. The
+/// target project's manifest is never passed here.
 pub fn install_agent_package(project: &str) -> Result<()> {
-    const NAME: &str = "com.unitymicroeditor.runtime";
+    const NAME: &str = crate::packages::RUNTIME_PACKAGE;
     let tool = micro_editor_root()?;
     let package_root = lexpath::eval_symlinks(&join(&[&tool, "Packages", NAME]))?;
     let path = join(&[project, "Packages/manifest.json"]);
@@ -502,8 +531,9 @@ impl Service {
                 client
             }
         };
-        // Validate the target profile/executable before changing authored package input.
-        install_agent_package(&self.0.project)?;
+        // The target's own Editor reaches the bridge only through a package the
+        // project already declares. Preparation never writes that declaration.
+        require_declared_agent_package(&self.0.project)?;
         client.own_process_or_attach(ctx)?;
         Ok(client)
     }
@@ -540,6 +570,18 @@ impl Service {
             ));
         }
         self.locked(ctx, || -> Result<HandlerValue> {
+            let mut id = text(&args, "requestId");
+            if id.is_empty() {
+                id = text(&args, "operationId");
+            }
+            self.progress_begin(action, &id);
+            struct End<'a>(&'a Service);
+            impl Drop for End<'_> {
+                fn drop(&mut self) {
+                    self.0.progress_end();
+                }
+            }
+            let _end = End(self);
             match action {
                 "project_prepare" => {
                     let result = self.prepare(ctx, &args)?;

@@ -20,7 +20,8 @@ namespace UnityMicroEditor
         private bool previousAudioPause;
         private long updates, fixedTicks, lateUpdates, completedSteps;
         private long startUpdates, startFixedTicks, startLateUpdates;
-        private int startFrame;
+        private int startFrame, countersSinceFrame = -1;
+        private string counterError;
         internal bool Paused => paused;
         internal bool Stepping => stepping;
         internal long CompletedSteps => completedSteps;
@@ -65,13 +66,55 @@ namespace UnityMicroEditor
             return true;
         }
 
+        // The counters run from Player start, not from the first pause, and are
+        // put back when the game replaces the PlayerLoop. A gated pause removes
+        // the game stages together with their markers, so nothing is installed then.
+        internal void EnsureCounters()
+        {
+            if (paused || stepping) return;
+            try
+            {
+                PlayerLoopSystem loop = PlayerLoop.GetCurrentPlayerLoop();
+                bool changed = EnsureCounter(ref loop, typeof(UnityEngine.PlayerLoop.Update), typeof(UpdateMarker), () => updates++);
+                changed = EnsureCounter(ref loop, typeof(UnityEngine.PlayerLoop.FixedUpdate), typeof(FixedMarker), () => fixedTicks++) || changed;
+                changed = EnsureCounter(ref loop, typeof(UnityEngine.PlayerLoop.PreLateUpdate), typeof(LateMarker), () => lateUpdates++) || changed;
+                if (changed)
+                {
+                    PlayerLoop.SetPlayerLoop(loop);
+                    if (countersSinceFrame < 0) countersSinceFrame = Time.frameCount;
+                    if (installed) CaptureStages(loop);
+                }
+                counterError = null;
+            }
+            catch (Exception error) { counterError = error.Message; }
+        }
+
+        private static bool EnsureCounter(ref PlayerLoopSystem loop, Type stage, Type marker, PlayerLoopSystem.UpdateFunction callback)
+        {
+            if (FrameLoop.Contains(loop, marker)) return false;
+            if (!FrameLoop.AppendToStage(ref loop, stage, marker, callback)) throw new InvalidOperationException("The current PlayerLoop lacks required game stages.");
+            return true;
+        }
+
+        private void CaptureStages(PlayerLoopSystem loop)
+        {
+            var captured = new Dictionary<Type, PlayerLoopSystem>();
+            if (loop.subSystemList != null)
+                foreach (PlayerLoopSystem stage in loop.subSystemList)
+                    foreach (Type expected in stageTypes) if (stage.type == expected) captured[expected] = stage;
+            if (captured.Count != stageTypes.Length) throw new InvalidOperationException("The current PlayerLoop profile lacks the required simulation stages.");
+            stages.Clear(); foreach (var pair in captured) stages.Add(pair.Key, pair.Value);
+        }
+
         internal Dictionary<string, object> Status()
         {
+            EnsureCounters();
             var gated = new List<object>(); foreach (Type type in stageTypes) gated.Add(type.FullName);
             return new Dictionary<string, object> { ["paused"] = paused, ["stepping"] = stepping,
                 ["semantics"] = "gated_game_player_loop", ["stepSemantics"] = "one_update_one_fixed_tick_one_late_update",
                 ["bridgeAndRenderFramesContinue"] = true, ["nativeFrameCountAdvances"] = true,
                 ["gameUpdateFrames"] = updates, ["gameFixedTicks"] = fixedTicks, ["gameLateFrames"] = lateUpdates,
+                ["countersInstalled"] = countersSinceFrame >= 0, ["countersSinceFrame"] = countersSinceFrame, ["counterError"] = counterError,
                 ["completedSteps"] = completedSteps, ["gatedStages"] = gated,
                 ["fixedDeltaTime"] = Time.fixedDeltaTime, ["stepError"] = LastStepError,
                 ["audioListenerPaused"] = AudioListener.pause };
@@ -80,16 +123,10 @@ namespace UnityMicroEditor
         private void EnsureInstalled()
         {
             if (installed) return;
-            PlayerLoopSystem loop = PlayerLoop.GetCurrentPlayerLoop();
-            if (!FrameLoop.AppendToStage(ref loop, typeof(UnityEngine.PlayerLoop.Update), typeof(UpdateMarker), () => updates++)
-                || !FrameLoop.AppendToStage(ref loop, typeof(UnityEngine.PlayerLoop.FixedUpdate), typeof(FixedMarker), () => fixedTicks++)
-                || !FrameLoop.AppendToStage(ref loop, typeof(UnityEngine.PlayerLoop.PreLateUpdate), typeof(LateMarker), () => lateUpdates++))
-                throw new InvalidOperationException("The current PlayerLoop lacks required game stages.");
-            if (loop.subSystemList == null) throw new InvalidOperationException("The current PlayerLoop has no root stages.");
-            foreach (PlayerLoopSystem stage in loop.subSystemList)
-                foreach (Type expected in stageTypes) if (stage.type == expected) stages.Add(expected, stage);
-            if (stages.Count != stageTypes.Length) { stages.Clear(); throw new InvalidOperationException("The current PlayerLoop profile lacks the required simulation stages."); }
-            PlayerLoop.SetPlayerLoop(loop); installed = true;
+            EnsureCounters();
+            if (counterError != null) throw new InvalidOperationException(counterError);
+            CaptureStages(PlayerLoop.GetCurrentPlayerLoop());
+            installed = true;
         }
 
         private void SetEnabled(bool enabled)
@@ -108,7 +145,7 @@ namespace UnityMicroEditor
 
         public void Dispose()
         {
-            if (!installed) return;
+            if (!installed && countersSinceFrame < 0) return;
             if (paused)
             {
                 stepping = false; SetEnabled(true); Time.timeScale = previousTimeScale; Time.captureDeltaTime = previousCaptureDeltaTime;

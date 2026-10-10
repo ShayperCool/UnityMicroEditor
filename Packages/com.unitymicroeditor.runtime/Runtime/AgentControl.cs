@@ -247,6 +247,7 @@ namespace UnityMicroEditor
             Directory.CreateDirectory(this.directory);
             if ((File.GetAttributes(this.directory) & FileAttributes.ReparsePoint) != 0) throw new InvalidDataException("Control directory cannot be a symlink.");
             Application.logMessageReceivedThreaded += OnLog;
+            simulation.EnsureCounters();
         }
 
         internal void Poll()

@@ -91,9 +91,9 @@ The launcher sets `UNITY_MICRO_EDITOR_ROOT` to its own directory; runtime and co
 
 The output is `HostProject/Builds/Linux/UnityMicroEditorHost.x86_64` with `host-build.json` beside it. The script refuses to run while another Editor has `HostProject` open.
 
-One host serves projects whose engine and package requirements match it. A project using URP, Input System, Netcode or other packages needs a host built with them: package DLLs, native assembly registration, render pipeline resources and compiled shaders must match. `auto-prepare` builds such a host in an isolated copy of the target project. It accepts only hosts built this way, because it records a source profile next to the Player; the plain `build-host.sh` output cannot be passed to it as `--host-player`. Building a host is the one step that runs the full Editor, in batch mode.
+One host serves projects whose engine and package requirements match it. A project using URP, Input System, Netcode or other packages needs a host built with them: package DLLs, native assembly registration, render pipeline resources and compiled shaders must match. `auto-prepare` builds such a host in an isolated copy of the target project, once: later preparations find and reuse it, and `--rebuild-host` forces a new one. Preparation does not edit the target's `Packages/manifest.json` and runs no Editor in the target. It accepts only hosts built this way, because it records a source profile next to the Player; the plain `build-host.sh` output cannot be passed to it as `--host-player`. Building a host is the one step that runs the full Editor, in batch mode.
 
-To use the runtime in a game project directly, reference the package from the game's `Packages/manifest.json` with a path relative to that `Packages` directory:
+Preparation and sessions do not need the package in the game project. To use the runtime in a game project directly, or to run `project_build` in the project's own Editor, reference the package from the game's `Packages/manifest.json` yourself, with a path relative to that `Packages` directory:
 
 ```json
 "com.unitymicroeditor.runtime": "file:../../UnityMicroEditor/Packages/com.unitymicroeditor.runtime"

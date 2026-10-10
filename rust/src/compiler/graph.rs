@@ -99,7 +99,7 @@ impl Compiler {
                 )
                 .map_err(|error| {
                     anyhow!(
-                        "new runtime source requires authored MonoScript .meta: {source}: {error}"
+                        "new runtime source requires authored MonoScript .meta: {source}: {error}; the Player keeps its previous code until the script has a .meta with a GUID (script_create writes one, as does the Unity Editor)"
                     )
                 })?
                 .to_string_lossy()

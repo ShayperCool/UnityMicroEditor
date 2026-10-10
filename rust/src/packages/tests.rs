@@ -1385,3 +1385,51 @@ fn paths_are_joined_and_contained_lexically() {
         assert_eq!(safe_relative(path.as_bytes()), safe, "{path:?}");
     }
 }
+
+#[test]
+fn provided_dependency_resolves_without_a_manifest_declaration() {
+    let temp = Temp::new();
+    let root = project_fixture(&temp, json!({}));
+    let tool = temp.path("tool/Packages/com.tool.runtime");
+    package_fixture(&tool, "com.tool.runtime", "0.1.0", json!({}));
+    let before = fs::read(manifest_path(&root)).unwrap();
+    let provided = Options {
+        provided: BTreeMap::from([("com.tool.runtime".to_string(), format!("file:{tool}"))]),
+        ..offline()
+    };
+    let snapshot = resolve(&background(), &root, "", provided.clone()).unwrap();
+    let package = package_by_name(&snapshot, "com.tool.runtime");
+    assert_eq!(
+        (package.source.as_str(), package.path.as_str()),
+        ("local", fs::canonicalize(&tool).unwrap().to_str().unwrap())
+    );
+    assert_eq!(
+        fs::read(manifest_path(&root)).unwrap(),
+        before,
+        "resolver wrote the provided package into the authored manifest"
+    );
+    assert!(
+        fs::metadata(lock_path(&root)).is_err(),
+        "resolver wrote an authored lock"
+    );
+    snapshot.validate(&background()).unwrap();
+
+    // An authored declaration wins over the provided one.
+    let declared = temp.path("declared");
+    package_fixture(&declared, "com.tool.runtime", "0.2.0", json!({}));
+    json_file(
+        manifest_path(&root),
+        &json!({"dependencies": {"com.tool.runtime": format!("file:{declared}")}}),
+    );
+    let snapshot = resolve(&background(), &root, "", provided).unwrap();
+    assert_eq!(
+        package_by_name(&snapshot, "com.tool.runtime").version,
+        "0.2.0"
+    );
+
+    let invalid = Options {
+        provided: BTreeMap::from([("com.tool.runtime".to_string(), "1.0.0".to_string())]),
+        ..offline()
+    };
+    assert!(resolve(&background(), &root, "", invalid).is_err());
+}

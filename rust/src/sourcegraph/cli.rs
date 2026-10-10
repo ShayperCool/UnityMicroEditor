@@ -86,7 +86,8 @@ pub fn run_source_graph_cli(mode: &str, arguments: Vec<String>) -> Result<()> {
         packages::Options {
             offline: flags.get_bool("offline"),
             ..Default::default()
-        },
+        }
+        .with_runtime_package()?,
     )?;
     if mode == "engine-profile-capture" {
         if reference.is_empty() {

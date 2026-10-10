@@ -649,10 +649,15 @@ fn run_session(
             wake.wait(seen, Some(debounce));
         }
         let rejected = |error: &anyhow::Error| {
-            Event::new("update-rejected")
-                .with("error", &err_text(error))
-                .with("paths", &paths)
-                .emit();
+            let text = err_text(error);
+            let mut event = Event::new("update-rejected")
+                .with("error", &text)
+                .with("paths", &paths);
+            // The Player keeps its old code until the project is prepared again.
+            if compiler::requires_new_graph(&text) {
+                event = event.with("preparationRequired", &true);
+            }
+            event.emit();
         };
         session.invalidate(&paths);
         if let Err(error) = apply_builtin_shaders(&session, &opts.builtin_shaders) {
