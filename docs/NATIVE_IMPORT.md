@@ -68,6 +68,22 @@ An Editor artifact for a mesh with `m_IsReadable=0` can hold vertex and index da
 
 The loader calls the public `Physics.BakeMesh` with the authored `convex` and `cookingOptions` values, then `UploadMeshData(true)` restores the original unreadable state before user callbacks run. Bounding-box substitutes are not used.
 
+## Animation clips
+
+Unity has no importer output for a `.anim` file: the worker returns only the importer object, and the Editor derives the Player's clip data from the YAML during a build. The tool performs that derivation itself (`rust/src/playerbake/`), so a new or changed clip needs neither an Editor nor a worker. It is baked in about a millisecond and published as native content like an imported asset; a watched session applies it to the running Player.
+
+A legacy clip keeps its authored curves. Any other clip gets the muscle clip Mecanim evaluates: streamed cubic segments, the constant clip, value deltas and bindings. The result is compared byte for byte with objects built by Unity `6000.6.3f1`: the fixtures under `rust/tests/testdata/playerbake`, and any project's clips through `UNITY_PLAYERBAKE_CLIP_CORPUS`.
+
+The baker refuses what it does not reproduce exactly, and the session reports the clip instead of publishing an approximation:
+
+- humanoid (muscle) curves and root motion curves;
+- float curves on a script field or on a component other than an Animator parameter or `GameObject.m_IsActive`;
+- object reference curves, events with an object reference and an additive reference pose;
+- weighted tangents and negative infinite tangents;
+- a source larger than the 32 MiB text bound.
+
+A baked clip replaces the object that scripts and legacy `Animation` components reference. An `AnimatorController` built into the native catalog keeps pointing at the clip it was built with, so a clip played through an Animator still needs a refreshed catalog. Controllers are not baked yet.
+
 ## UI and fonts
 
 Unchanged UXML, USS and font assets are extracted from an existing Unity import cache rather than imported cold. See [UI_IMPORTS.md](UI_IMPORTS.md).
@@ -75,7 +91,7 @@ Unchanged UXML, USS and font assets are extracted from an existing Unity import 
 ## Limits
 
 - The wire protocol, LMDB schema and DataStore layout were derived for one Unity version and are not a stable public API. A worker version mismatch is refused, and another engine version needs its own verification.
-- There is no proven general support for animation, skinned meshes, complex model settings, arbitrary texture settings, other audio codecs, platform overrides, custom AssetPostprocessors or every dependency of an arbitrary project.
+- There is no proven general support for animation inside models, skinned meshes, complex model settings, arbitrary texture settings, other audio codecs, platform overrides, custom AssetPostprocessors or every dependency of an arbitrary project.
 - A shader can be imported, but the result has no platform GPU programs and cannot be delivered to a Player without a separate bake.
 - The store reader handles inline and concatenated storage, limits one file to 64 MiB and refuses other layouts. The LMDB reader targets the observed Linux x64 format.
 - A worker is started per import batch. A persistent native service is not used.
@@ -94,6 +110,7 @@ The coordinator lives in `rust/src/native/`, with the wire format, LMDB reader a
 | `rust/src/lmdb.rs` | Reading a stopped LMDB without a native library |
 | `rust/src/native/artifact.rs` | Extracting stored files and checking content keys |
 | `rust/src/native/environment.rs` | The import environment fingerprint |
+| `rust/src/native/baked.rs`, `rust/src/playerbake/` | Assets baked from authored YAML without a worker |
 
 `rust/src/runtimeartifact/` adapts imported serialized files for the Player.
 
