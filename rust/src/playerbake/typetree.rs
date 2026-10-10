@@ -127,6 +127,84 @@ impl TypeTree {
         Ok(out)
     }
 
+    /// Reads an object written with this tree back into a value. Scalars come
+    /// back as `U`, `I`, `F` or `Bool` by their declared type.
+    pub fn decode(&self, data: &[u8]) -> Result<Val> {
+        let mut at = 0;
+        let value = self.read(0, data, &mut at)?;
+        if at != data.len() {
+            bail!(
+                "object has {} bytes its type tree does not describe",
+                data.len() - at
+            );
+        }
+        Ok(value)
+    }
+
+    fn read(&self, index: usize, data: &[u8], at: &mut usize) -> Result<Val> {
+        let node = &self.nodes[index];
+        let mut take = |size: usize| -> Result<&[u8]> {
+            let Some(bytes) = data.get(*at..*at + size) else {
+                bail!("object ends inside {} {}", node.type_name, node.name);
+            };
+            *at += size;
+            Ok(bytes)
+        };
+        let children = self.children(index);
+        let value = if children.is_empty() {
+            match node.type_name.as_str() {
+                "bool" => Val::Bool(take(1)?[0] != 0),
+                "UInt8" => Val::U(take(1)?[0] as u64),
+                "SInt8" | "char" => Val::I(take(1)?[0] as i8 as i64),
+                "UInt16" | "unsigned short" => {
+                    Val::U(u16::from_le_bytes(take(2)?.try_into()?) as u64)
+                }
+                "SInt16" | "short" => Val::I(i16::from_le_bytes(take(2)?.try_into()?) as i64),
+                "unsigned int" => Val::U(u32::from_le_bytes(take(4)?.try_into()?) as u64),
+                "int" | "Type*" => Val::I(i32::from_le_bytes(take(4)?.try_into()?) as i64),
+                "UInt64" | "unsigned long long" | "FileSize" => {
+                    Val::U(u64::from_le_bytes(take(8)?.try_into()?))
+                }
+                "SInt64" | "long long" => Val::I(i64::from_le_bytes(take(8)?.try_into()?)),
+                "float" => Val::F(f32::from_le_bytes(take(4)?.try_into()?)),
+                other => bail!("unsupported scalar type {other}"),
+            }
+        } else if let Some((array, element)) = self.element(index) {
+            let count = u32::from_le_bytes(take(4)?.try_into()?) as usize;
+            let value = if node.type_name == "string" {
+                Val::Str(String::from_utf8_lossy(take(count)?).into_owned())
+            } else {
+                if count > data.len() {
+                    bail!("sequence length exceeds its object");
+                }
+                let mut items = Vec::with_capacity(count);
+                for _ in 0..count {
+                    items.push(self.read(element, data, at)?);
+                }
+                Val::Seq(items)
+            };
+            if self.nodes[array].align {
+                *at = (*at + 3) & !3;
+            }
+            value
+        } else if node.type_name == "OffsetPtr" && children.len() == 1 {
+            self.read(children[0], data, at)?
+        } else {
+            let mut fields = Vec::with_capacity(children.len());
+            for &child in &children {
+                fields.push((
+                    Cow::Owned(self.nodes[child].name.clone()),
+                    self.read(child, data, at)?,
+                ));
+            }
+            Val::Map(fields)
+        };
+        if node.align {
+            *at = (*at + 3) & !3;
+        }
+        Ok(value)
+    }
+
     fn write(&self, index: usize, value: &Val, out: &mut Vec<u8>) -> Result<()> {
         let node = &self.nodes[index];
         let fail = |what: &str| -> anyhow::Error {
@@ -254,6 +332,22 @@ pub enum Val {
 }
 
 impl Val {
+    /// A field of a structure value.
+    pub fn field(&self, name: &str) -> Option<&Val> {
+        match self {
+            Val::Map(fields) => fields.iter().find(|(key, _)| key == name).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+    pub fn field_mut(&mut self, name: &str) -> Option<&mut Val> {
+        match self {
+            Val::Map(fields) => fields
+                .iter_mut()
+                .find(|(key, _)| key == name)
+                .map(|(_, v)| v),
+            _ => None,
+        }
+    }
     pub fn map<const N: usize>(fields: [(&'static str, Val); N]) -> Val {
         Val::Map(
             fields

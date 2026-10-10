@@ -230,7 +230,7 @@ impl NativeProjectImporter {
         if profile == "png" && native_png_needs_warm(&self.opts.project, logical)? {
             return self.import_warm_ui(ctx, logical, &mut HashSet::new());
         }
-        if profile == "anim" {
+        if matches!(profile, "anim" | "controller") {
             return self.import_baked(logical);
         }
         if !cold_native_profile(logical) {

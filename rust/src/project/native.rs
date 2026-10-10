@@ -13,7 +13,7 @@ use super::{
 };
 use anyhow::{Result, anyhow, bail};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -30,6 +30,7 @@ pub(crate) fn native_content_class(type_name: &str) -> i32 {
         "UnityEngine.Material" => 21,
         "UnityEngine.Font" => 128,
         "UnityEngine.AnimationClip" => 74,
+        "UnityEngine.RuntimeAnimatorController" => 91,
         "UnityEngine.UIElements.StyleSheet" | "UnityEngine.UIElements.VisualTreeAsset" => 114,
         _ => 0,
     }
@@ -387,6 +388,7 @@ impl Inner {
         let shader = profile == ".shader";
         // Baked by this tool from the authored source; see `playerbake`.
         let clip = profile == ".anim";
+        let controller = profile == ".controller";
         for (logical, expected) in &r.config_source_sha256 {
             if !texture
                 || logical != "ProjectSettings/EditorSettings.asset"
@@ -404,7 +406,14 @@ impl Inner {
                 );
             }
         }
-        if profile != ".wav" && profile != ".fbx" && !texture && !ui && !shader && !clip {
+        if profile != ".wav"
+            && profile != ".fbx"
+            && !texture
+            && !ui
+            && !shader
+            && !clip
+            && !controller
+        {
             bail!("native replacement profile is unsupported: {path}");
         }
         let mut expected: BTreeMap<String, String> = BTreeMap::new();
@@ -482,7 +491,7 @@ impl Inner {
                 for value in r.content.objects.iter() {
                     expected.insert(value.file_id.clone(), value.type_name.clone());
                 }
-            } else if clip {
+            } else if clip || controller {
                 for value in r.content.objects.iter() {
                     expected.insert(value.file_id.clone(), value.type_name.clone());
                 }
@@ -555,6 +564,15 @@ impl Inner {
                 bail!(
                     "animation replacement must contain one AnimationClip without native dependencies"
                 );
+            }
+        } else if controller {
+            if objects.len() != 1
+                || objects[0].type_name != "UnityEngine.RuntimeAnimatorController"
+                || !r.model_graph.is_empty()
+                || !r.model_graph_sha256.is_empty()
+                || !r.content.resources.is_empty()
+            {
+                bail!("controller replacement must contain one RuntimeAnimatorController");
             }
         } else if ui {
             validate_native_ui_objects(&profile, r)?;
@@ -691,6 +709,16 @@ impl Inner {
         }
         self.native_overlays.insert(guid.clone(), owned);
         Ok(())
+    }
+
+    /// Project paths of the known native assets with the given extension.
+    pub(crate) fn native_asset_paths(&self, extension: &str) -> BTreeSet<String> {
+        self.assets
+            .values()
+            .chain(&self.catalog.assets)
+            .map(|asset| value::text(asset, "path").into_owned())
+            .filter(|path| lexpath::equal_fold(lexpath::ext(path), extension))
+            .collect()
     }
 
     pub(crate) fn publish_native_content(&mut self, over: &mut Map) -> Result<()> {
