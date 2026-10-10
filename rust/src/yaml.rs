@@ -29,6 +29,17 @@ pub struct Document {
 
 /// Unity IDs and native hex buffers are lexical strings, even when unquoted.
 pub fn parse_unity_yaml(content: &[u8]) -> Result<Vec<Document>> {
+    parse_documents(content, false)
+}
+
+/// Reads documents with every scalar kept as its source text, for consumers
+/// that convert by the target field's type: `-0`, a float's exact digits and
+/// a name that looks like a number all survive.
+pub fn parse_unity_yaml_lexical(content: &[u8]) -> Result<Vec<Document>> {
+    parse_documents(content, true)
+}
+
+fn parse_documents(content: &[u8], lexical: bool) -> Result<Vec<Document>> {
     ensure!(
         content.len() <= MAX_TEXT_BYTES,
         "unsupported binary or oversized Unity text asset"
@@ -53,7 +64,7 @@ pub fn parse_unity_yaml(content: &[u8]) -> Result<Vec<Document>> {
         let end = headers
             .get(i + 1)
             .map_or(text.len(), |h| h.get(0).unwrap().start());
-        let value = match parse_yaml_value(&text[start..end]) {
+        let value = match parse_yaml(&text[start..end], lexical) {
             Err(error) if error.is::<EmptyDocument>() => bail!("fileID {id} requires one object"),
             other => other.with_context(|| format!("fileID {id}"))?,
         };
@@ -89,6 +100,8 @@ enum Container {
 struct Receiver {
     stack: Vec<Container>,
     root: Option<Value>,
+    /// Keep every scalar as the text Unity wrote.
+    lexical: bool,
 }
 impl Receiver {
     fn insert(&mut self, value: Value) -> Result<()> {
@@ -144,7 +157,11 @@ impl Receiver {
                     Some(Container::Mapping(_, Some(key))) => key.as_str(),
                     _ => "",
                 };
-                let value = scalar(&text, key, style, tag)?;
+                let value = if self.lexical {
+                    Value::String(text)
+                } else {
+                    scalar(&text, key, style, tag)?
+                };
                 self.insert(value)?;
             }
             _ => {}
@@ -153,6 +170,10 @@ impl Receiver {
     }
 }
 pub fn parse_yaml_value(text: &str) -> Result<Value> {
+    parse_yaml(text, false)
+}
+
+fn parse_yaml(text: &str, lexical: bool) -> Result<Value> {
     // These code points are refused while reading the stream.
     ensure!(
         !text.chars().any(|c| !matches!(c, '\t' | '\n' | '\r' | ' '..='~' | '\u{85}' | '\u{a0}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..)),
@@ -164,7 +185,10 @@ pub fn parse_yaml_value(text: &str) -> Result<Value> {
         !text.contains(['\u{85}', '\u{2028}', '\u{2029}']),
         "yaml: unsupported Unicode line break"
     );
-    let mut receiver = Receiver::default();
+    let mut receiver = Receiver {
+        lexical,
+        ..Default::default()
+    };
     let mut parser = Parser::new_from_str(text);
     // The parser's load() recursively walks containers before the receiver can
     // return errors. Consume events directly and stop at the depth bound.

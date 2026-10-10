@@ -60,6 +60,10 @@ path = "rust/tests/regressions.rs"
 name = "mcp"
 path = "rust/tests/mcp.rs"
 
+[[test]]
+name = "playerbake"
+path = "rust/tests/playerbake.rs"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
