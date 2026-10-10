@@ -15,6 +15,7 @@ pub mod native;
 pub mod packages;
 pub mod parity;
 pub mod paths;
+pub mod playerbake;
 pub mod project;
 pub mod protocol;
 pub mod registry;
