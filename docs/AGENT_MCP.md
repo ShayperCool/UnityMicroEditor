@@ -340,7 +340,8 @@ execution across arbitrary crashes. Long project jobs use their own durable IDs;
   "arguments": {
     "gameArguments": ["-content-url", "http://127.0.0.1:8080/StandaloneLinux64"],
     "contentScenes": ["0123456789abcdef0123456789abcdef=Assets/Scenes/Level.unity"],
-    "contentPrefabs": ["Assets/Prefabs/Enemy.prefab"]
+    "contentPrefabs": ["Assets/Prefabs/Enemy.prefab"],
+    "addressables": true
   }
 }
 ```
@@ -351,9 +352,45 @@ execution across arbitrary crashes. Long project jobs use their own durable IDs;
 list that is given replaces the previous one and stays for later launches; the
 session state shows the current values as `launch`. A running Player keeps its
 command line: `start` with other values is refused, `reset` relaunches with them.
-This registers explicit scenes and prefabs only. There is no Addressables
-locator built from the project's Addressables settings and groups: a game that
-resolves Addressables keys needs content it can load itself.
+`addressables: false` turns off the source Addressables described below; it is
+on by default.
+
+### Addressables from sources
+
+A project that uses Addressables gets the counterpart of the Editor's "Use Asset
+Database" play mode. The runner reads the Addressables settings and groups and
+registers every addressable scene and prefab as session content, so
+`contentScenes` and `contentPrefabs` are not needed for them. In the Player a
+locator resolves their address, GUID (`AssetReference`) and labels to the
+authored source, and the raw loader provides the asset. The game calls
+`Addressables` as usual. Nothing is downloaded: `GetDownloadSizeAsync` reports 0
+for these keys, and no content build is involved. The watcher treats these
+scenes and prefabs like the session's other content.
+
+Limits:
+
+- Only scenes and prefabs are served from sources. Other addressable assets
+  (materials, textures, audio, ScriptableObjects) stay with the host's built
+  content, which is as old as the host; the runner lists them in an
+  `addressables-skipped` event.
+- An addressable scene is built into an empty scene of the host, because the
+  package's scene handle has to come from its own scene provider. The scene
+  therefore reports the host's name and path (`Bootstrap`), not the authored
+  ones, and has one extra root, `Raw scene imported assets`. Loading the same
+  location twice at once, and `LoadSceneMode.Single`, are not verified.
+- A prefab is requested as a `GameObject`; a component type or a sub-object key
+  (`key[sub]`) is not resolved from sources.
+- A scene or prefab the raw loader cannot prepare is dropped with an
+  `addressables-skipped` event and stays with the host's content.
+- The host needs built Addressables content for `Addressables.InitializeAsync`
+  to succeed, as any Player does. A project that builds Addressables with the
+  Player has it. Without it the source keys still resolve, but the game sees a
+  failed initialization.
+- The keys are read when the session starts. A change of the groups produces an
+  `addressables-changed` event and takes effect in the next session.
+- The bridge is compiled with this support when the host contains
+  `Unity.Addressables`. A host built before this support existed has to be
+  rebuilt (`rebuildHost: true`).
 
 ## Simulation, input and observations
 

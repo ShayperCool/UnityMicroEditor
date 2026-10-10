@@ -34,9 +34,12 @@ unity-micro-editor run \
 | `--prepared` | Launch from such a descriptor. Cannot be combined with source preparation or `--watch`. |
 | `--content-scene GUID=Assets/...unity` | Register an additional scene the game loads at runtime. Repeatable. |
 | `--content-prefab Assets/...prefab` | Register a prefab the game addresses at runtime. Repeatable. |
+| `--no-addressables` | Do not serve the project's Addressables keys from sources; leave them to the host's built content. |
 | `--builtin-shader` | Verified snapshot of a retained built-in shader. Repeatable. |
 
-Arguments after `--` are passed to the game. Through MCP the same options are the `gameArguments`, `contentScenes` and `contentPrefabs` of `session_control(start)`. A rejected update whose error needs a new source graph carries `preparationRequired: true` in its `update-rejected` event: the Player keeps its old code until the project is prepared again.
+The addressable scenes and prefabs of the project's Addressables groups are registered automatically and resolved from sources in the Player; see [AGENT_MCP.md](AGENT_MCP.md#addressables-from-sources) for what that covers.
+
+Arguments after `--` are passed to the game. Through MCP the same options are the `gameArguments`, `contentScenes`, `contentPrefabs` and `addressables` of `session_control(start)`. A rejected update whose error needs a new source graph carries `preparationRequired: true` in its `update-rejected` event: the Player keeps its old code until the project is prepared again.
 
 Prefer an output under `Library/UnityMicroEditor`: Unity clears a project's `Temp` when its Editor restarts. One output directory belongs to one running session. A second run with the same output is refused until the first stops; the lock is released on exit or crash. Reusing an output reuses its compiler and native caches.
 
@@ -68,7 +71,7 @@ An inconsistent or unsupported change produces `update-rejected`, and the last c
 
 ## Events and reports
 
-The runner prints one JSON event per line: `prepared`, `ready`, `updated`, `code-updated`, `content-updated`, `unchanged`, `native-discovery`, `native-imported`, `native-cache-hit`, `native-cache-rejected`, `native-adopted`, `native-warm-artifact` and `update-rejected`.
+The runner prints one JSON event per line: `prepared`, `ready`, `updated`, `code-updated`, `content-updated`, `unchanged`, `native-discovery`, `native-imported`, `native-cache-hit`, `native-cache-rejected`, `native-adopted`, `native-warm-artifact`, `addressables`, `addressables-skipped`, `addressables-changed` and `update-rejected`.
 
 `<output>/runs/<id>/` holds the Player log, the ready and final reports, and reload requests with their acknowledgements. The ready report records the actual GPU and PID. An acknowledgement carries the revision, the native load count and any errors, and refers to a completed frame.
 

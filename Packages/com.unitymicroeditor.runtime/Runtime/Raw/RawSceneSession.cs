@@ -62,7 +62,7 @@ namespace UnityMicroEditor.Raw
                 return current != null && current.TryGetPrefab(guid, out prefab);
             }
 
-            public Scene LoadAdditive(string manifestPath, string expectedManifestSha256)
+            public Scene LoadAdditive(string manifestPath, string expectedManifestSha256, Scene target = default)
             {
                 if (disposed) throw new ObjectDisposedException(nameof(LiveSession));
                 byte[] bytes = File.ReadAllBytes(manifestPath);
@@ -75,7 +75,7 @@ namespace UnityMicroEditor.Raw
                 using (var reader = new StreamReader(stream, Encoding.UTF8, true)) manifest = ParseManifest(reader.ReadToEnd());
                 identity.RequireCompatible(CaptureIdentity(manifest));
                 var context = new ImportContext(manifest, LoadScriptTypes(manifest), cache);
-                Scene loaded = context.Load(false, null, false);
+                Scene loaded = context.Load(false, null, false, target);
                 unloading.Remove(loaded);
                 additive.Add(loaded, context);
                 return loaded;

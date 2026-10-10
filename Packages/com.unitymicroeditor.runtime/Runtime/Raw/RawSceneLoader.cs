@@ -564,9 +564,12 @@ namespace UnityMicroEditor.Raw
             public ImportContext(RawSceneManifest manifest, Dictionary<string, Type> types, NativeAssetCache nativeCache = null)
             { this.manifest = manifest; this.types = types; this.nativeCache = nativeCache; activationOrder = ActivationOrder(manifest); currentRecords = manifest.objects; }
 
-            public Scene Load(bool runInitializers = true, Action commit = null, bool initializePreloads = true)
+            // A valid target is an empty scene some other owner loaded; the
+            // authored content is built into it and it keeps its own name.
+            public Scene Load(bool runInitializers = true, Action commit = null, bool initializePreloads = true, Scene target = default)
             {
                 Scene previous = SceneManager.GetActiveScene();
+                bool adopted = target.IsValid();
                 RawLifecycle.Scope lifecycle = manifest.lifecycleBarrierVersion == 1 ? RawLifecycle.Begin() : null;
                 RawLifecycle.ScriptableObjectScope scriptableLifecycle = RawLifecycle.BeginScriptableObjects();
                 try
@@ -574,10 +577,18 @@ namespace UnityMicroEditor.Raw
                     // CreateScene refuses an already loaded scene name. The
                     // authored name is restored through Scene's public setter
                     // before any source component or lifecycle callback exists.
-                    string creationName = SceneManager.GetSceneByName(manifest.sceneName).IsValid()
-                        ? "UnityPlay staging " + Guid.NewGuid().ToString("N") : manifest.sceneName;
-                    scene = SceneManager.CreateScene(creationName);
-                    scene.name = manifest.sceneName;
+                    if (adopted)
+                    {
+                        if (!target.isLoaded || target.rootCount != 0) throw new InvalidOperationException("An adopted scene must be loaded and empty.");
+                        scene = target;
+                    }
+                    else
+                    {
+                        string creationName = SceneManager.GetSceneByName(manifest.sceneName).IsValid()
+                            ? "UnityPlay staging " + Guid.NewGuid().ToString("N") : manifest.sceneName;
+                        scene = SceneManager.CreateScene(creationName);
+                        scene.name = manifest.sceneName;
+                    }
                     LoadAssets();
                     if (initializePreloads) LoadPreloadedAssets();
                     ConfigurePipeline();
@@ -627,6 +638,8 @@ namespace UnityMicroEditor.Raw
                     if (!SceneManager.SetActiveScene(scene)) throw new InvalidOperationException("Unity refused to activate the raw scene.");
                     foreach (var record in manifest.objects)
                         if (record.classId == 104) ConfigureRenderSettings(record);
+                    // The engine leaves the active scene alone on an additive load.
+                    if (adopted && previous.IsValid() && previous.isLoaded) SceneManager.SetActiveScene(previous);
                     if (!resourceLifetime.TryGetComponent<RawSceneResources>(out var resources))
                         throw new InvalidOperationException("Raw asset lifetime owner is missing.");
                     resources.Initialize(ownedAssets.ToArray(), nativeCache == null ? importedBundles.ToArray() : null, preloadedAssets, registeredPrefabTransforms.ToArray());
@@ -664,7 +677,7 @@ namespace UnityMicroEditor.Raw
                     if (lifecycle != null) lifecycle.Dispose();
                     scriptableLifecycle.Dispose();
                     if (previous.IsValid() && previous.isLoaded) SceneManager.SetActiveScene(previous);
-                    if (scene.IsValid() && scene.isLoaded) SceneManager.UnloadSceneAsync(scene);
+                    if (!adopted && scene.IsValid() && scene.isLoaded) SceneManager.UnloadSceneAsync(scene);
                     foreach (Object asset in ownedAssets) if (asset != null) Object.Destroy(asset);
                     if (nativeCache == null) foreach (AssetBundle bundle in importedBundles) if (bundle != null) bundle.Unload(true);
                     if (cleanupFailure != null)

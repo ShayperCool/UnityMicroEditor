@@ -604,6 +604,7 @@ SceneRoots:
             &none,
             cache,
             changed,
+            &mut String::new(),
         )
     };
     let before = prepare(&mut cache, &[]).unwrap();
@@ -666,6 +667,7 @@ fn route_snapshot(root: &str, manifests: &[&str]) -> String {
             schema_version: 1,
             project: root.into(),
             scenes: Some(scenes),
+            addressables: Vec::new(),
         },
     )
     .unwrap()
