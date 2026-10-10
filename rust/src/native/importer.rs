@@ -115,6 +115,26 @@ impl NativeProjectImporter {
             }
             current.insert(entry.guid.clone(), entry);
         }
+        // A baked controller whose clip has changed is baked again on demand
+        // rather than replayed against a clip that is no longer current.
+        loop {
+            let stale: Vec<String> = current
+                .values()
+                .filter(|entry| {
+                    lower_ext(&entry.source_path) == ".controller"
+                        && entry.content.dependencies.iter().any(|dependency| {
+                            !dependency.global && !current.contains_key(&dependency.guid)
+                        })
+                })
+                .map(|entry| entry.guid.clone())
+                .collect();
+            if stale.is_empty() {
+                break;
+            }
+            for guid in stale {
+                current.remove(&guid);
+            }
+        }
         let mut replay = Replay {
             current: &current,
             visiting: HashSet::new(),
