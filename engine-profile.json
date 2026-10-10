@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "profile": "unity-6000.6.3f1-linux-mono",
+  "unityVersion": "6000.6.3f1",
+  "unityRevision": "45d8eee7de74",
+  "platform": "linux",
+  "architecture": "amd64",
+  "scriptingBackend": "Mono",
+  "graphicsAPI": "OpenGLCore",
+  "dotnetSDK": "8.0.318",
+  "rustToolchain": "1.99.0",
+  "nativeProtocols": {
+    "sourceAssetDB": "Unity LMDB subset, 6000.6.3f1",
+    "assetImportWorker": "Unity worker TCP protocol, 6000.6.3f1",
+    "dataStore": "Unity.DataStore UDS, 6000.6.3f1",
+    "serializedFile": "version 22, 6000.6.3f1"
+  },
+  "mcpSDK": "rmcp 3.5.1",
+  "unityRedistributionIncluded": false,
+  "runtimePackageDependencies": {
+    "com.unity.render-pipelines.core": "17.6.0",
+    "com.unity.collections": "6.6.0"
+  }
+}

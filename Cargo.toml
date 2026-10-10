@@ -1,0 +1,66 @@
+[package]
+name = "unity-micro-editor"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+[lib]
+name = "unity_micro_editor"
+path = "rust/src/lib.rs"
+
+[[bin]]
+name = "unity-micro-editor"
+path = "rust/src/main.rs"
+
+[[test]]
+name = "formats"
+path = "rust/tests/formats.rs"
+
+[[test]]
+name = "graph"
+path = "rust/tests/graph.rs"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+regex = "1"
+rmcp = { version = "=3.5.1", default-features = false, features = ["server", "transport-io", "transport-streamable-http-server"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time"] }
+axum = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+subtle = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision", "raw_value"] }
+libc = "0.2"
+sha2 = "0.10"
+xxhash-rust = { version = "0.8", features = ["xxh32", "xxh3"] }
+yaml-rust2 = "0.13"
+tempfile = "3"
+png = { version = "0.18.1", default-features = false }
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip", "platform-verifier"] }
+flate2 = "1"
+tar = { version = "0.4", default-features = false }
+url = "2"
+sha1 = "0.10"
+
+[[test]]
+name = "authoring"
+path = "rust/tests/authoring.rs"
+
+[[test]]
+name = "runtimeartifact"
+path = "rust/tests/runtimeartifact.rs"
+
+[[test]]
+name = "regressions"
+path = "rust/tests/regressions.rs"
+
+[[test]]
+name = "mcp"
+path = "rust/tests/mcp.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

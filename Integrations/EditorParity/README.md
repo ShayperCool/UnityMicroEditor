@@ -2,7 +2,7 @@
 
 This harness runs a real Unity Editor as a reference and compares its readbacks with the Unity Micro Editor Player. It is used when changing source authoring, the compiler graph or the runtime bridge.
 
-It prepares an isolated Unity `6000.6.3f1` project from `Samples/RawProject` and installs the Coplay MCP package and server, version `10.2.0` (commit `30d22075093d1d35dfb0091c1c7550e9ad948577`). The sample's own assets are not touched, and the runtime package comes from this checkout. Coplay's server runs in its own Python environment, confined to the reference; the comparison clients are Go.
+It prepares an isolated Unity `6000.6.3f1` project from `Samples/RawProject` and installs the Coplay MCP package and server, version `10.2.0` (commit `30d22075093d1d35dfb0091c1c7550e9ad948577`). The sample's own assets are not touched, and the runtime package comes from this checkout. Coplay's server runs in its own Python environment, confined to the reference; the comparison clients are `parity-*` subcommands of `unity-micro-editor`.
 
 ## Start the reference
 
@@ -24,20 +24,20 @@ To stop the reference, terminate only the Editor and Coplay processes this setup
 
 ## Clients
 
-Run these from the repository root.
+Run these from the repository root. Each takes `-h` for its flags.
 
-`mcp-call` performs an MCP handshake and one request over Streamable HTTP, and exits nonzero on a JSON-RPC error, a tool `isError` or a nested `success=false`:
+`parity-mcp-call` performs an MCP handshake and one request over Streamable HTTP against a loopback endpoint (`-url`, by default the reference's), prints the reply and saves it to `-output` if given. It exits nonzero on a JSON-RPC error, a tool `isError` or a nested `success=false`:
 
 ```bash
-go run ./Integrations/EditorParity/cmd/mcp-call -method tools/list
-go run ./Integrations/EditorParity/cmd/mcp-call -method tools/call \
+./unity-micro-editor parity-mcp-call -method tools/list
+./unity-micro-editor parity-mcp-call -method tools/call \
   -params '{"name":"agent_parity_reference","arguments":{"action":"snapshot","output":"reference.json"}}'
 ```
 
-`compare` checks a Player hierarchy against an Editor snapshot:
+`parity-compare` checks a Player hierarchy against an Editor snapshot:
 
 ```bash
-go run ./Integrations/EditorParity/cmd/compare \
+./unity-micro-editor parity-compare \
   -reference /absolute/play-shared.json \
   -actual /absolute/player-hierarchy-response.json \
   -output /absolute/comparison.json
@@ -45,20 +45,20 @@ go run ./Integrations/EditorParity/cmd/compare \
 
 It compares object order, root sibling indices, component order and types, inactive states, serialized fields and lifecycle counts. Numbers use an absolute tolerance of `1e-5`, and a quaternion matches its negation. Source identities and the Editor-only `globalObjectId` and `prefabInstance` provenance are ignored, as is the loader's own resource owner object. Missing components and unresolved references are mismatches. Exit status `0` means equal, `1` a behavioral difference, `2` invalid or incomplete evidence. A paginated hierarchy must be complete before comparison.
 
-`compare-source` checks authored source against a public `SerializedObject` readback produced in a batch Editor by `SourceAuthoringReference.cs.txt`:
+`parity-compare-source` checks authored source against a public `SerializedObject` readback produced in a batch Editor by `SourceAuthoringReference.cs.txt`:
 
 ```bash
-go run ./Integrations/EditorParity/cmd/compare-source \
+./unity-micro-editor parity-compare-source \
   -source /absolute/final-hierarchy.json \
   -assets /absolute/asset-sources.json \
   -editor /absolute/editor-readback.json \
   -output /absolute/source-parity.json
 ```
 
-`compare-png` measures rendering separately from serialized state. Capture both sides at the same size first:
+`parity-compare-png` measures rendering separately from serialized state. Capture both sides at the same size first:
 
 ```bash
-go run ./Integrations/EditorParity/cmd/compare-png \
+./unity-micro-editor parity-compare-png \
   -reference /absolute/editor-960x540.png \
   -actual /absolute/player-960x540.png \
   -ignore-bottom 24 -output /absolute/render-comparison.json
@@ -66,13 +66,14 @@ go run ./Integrations/EditorParity/cmd/compare-png \
 
 The report always includes full-frame differences. `-ignore-bottom` adds a second metric that skips the development-build watermark rows.
 
-`advanced-check` drives a Player through attributed tools, simulation stepping, input and screenshots against the `AdvancedParity` scene, which `CreateAdvancedParity.cs.txt` and `AdvancedAgentProbe.cs` set up:
+`parity-advanced-check` drives a Player through attributed tools, simulation stepping, input and screenshots against the `AdvancedParity` scene, which `CreateAdvancedParity.cs.txt` and `AdvancedAgentProbe.cs` set up:
 
 ```bash
-go build -o /tmp/parity-mcp-call ./Integrations/EditorParity/cmd/mcp-call
-go run ./Integrations/EditorParity/cmd/advanced-check -client /tmp/parity-mcp-call \
+./unity-micro-editor parity-advanced-check \
   -url http://127.0.0.1:8093/mcp -output /absolute/new-evidence-directory
 ```
+
+Each tool call is made by a `parity-mcp-call` child process and its reply is saved in the evidence directory as `NNN-label.json`; `assertions.json` holds the verdicts. Exit status `0` means every assertion passed. `-client` substitutes another executable that takes the `parity-mcp-call` flags.
 
 ## Comparing correctly
 

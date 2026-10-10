@@ -1,7 +1,6 @@
 **/bin/
 **/obj/
 **/Temp/*
-!/Temp/go.mod
 **/Library/
 **/Builds/
 **/Logs/
@@ -27,3 +26,4 @@ HostProject/Assets/Bootstrap.unity*
 HostProject/Assets/Resources/
 HostProject/Assets/Resources.meta
 !**/*.csproj
+/target/

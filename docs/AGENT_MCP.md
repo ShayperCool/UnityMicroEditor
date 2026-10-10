@@ -17,7 +17,7 @@ the backend and preserve the Editor receipt and build report.
 ## Start with an explicit project and scene
 
 Install Unity `6000.6.3f1`, revision `45d8eee7de74`, with Linux x64 Mono support.
-Use Go 1.25 or later. The verified graphics path is NVIDIA OpenGL Core. Tool
+Build with the Rust toolchain pinned in `rust-toolchain.toml` (1.99.0, installed through rustup). The verified graphics path is NVIDIA OpenGL Core. Tool
 sources resolve from `UNITY_MICRO_EDITOR_ROOT` or the installation directory;
 target projects are never inferred from this repository's parent directories.
 
@@ -44,7 +44,7 @@ Stdio is the default. An agent's MCP configuration can use:
 Source tools work immediately. Without `--baseline`, `session_control` with
 `action: start` prepares the selected scene automatically. Preparation installs
 our local runtime package when native bootstrap is needed, preserving other
-manifest entries and keeping a backup. The Go package resolver reads manifest,
+manifest entries and keeping a backup. The package resolver reads manifest,
 lock, embedded/file/Git/registry dependencies. Our graph reads `.asmdef`, `.asmref`,
 source ownership, platform/define/version constraints and compiler options.
 The installed SDK compiles the result. A package-compatible native Mono host and
@@ -321,4 +321,4 @@ checkpoints for comparisons.
 
 ## Compare against the Editor
 
-[Integrations/EditorParity](../Integrations/EditorParity/README.md) sets up an isolated Unity Editor with the Coplay MCP server as a reference and provides Go clients that compare its readbacks with ours. Use it when changing authoring, the compiler graph or the runtime bridge. A saved source edit, a successful SDK compilation, a readiness acknowledgement and an observed gameplay assertion are separate results; check each one. The required Go and SDK checks are in [CONTRIBUTING.md](../CONTRIBUTING.md).
+[Integrations/EditorParity](../Integrations/EditorParity/README.md) sets up an isolated Unity Editor with the Coplay MCP server as a reference and provides `parity-*` subcommand clients that compare its readbacks with ours. Use it when changing authoring, the compiler graph or the runtime bridge. A saved source edit, a successful SDK compilation, a readiness acknowledgement and an observed gameplay assertion are separate results; check each one. The required Rust and SDK checks are in [CONTRIBUTING.md](../CONTRIBUTING.md).

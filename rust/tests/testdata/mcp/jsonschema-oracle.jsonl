@@ -1,0 +1,91 @@
+{"schema":{"type":"string"},"instance":1000000,"expected":{"validate":"validating root: type: 1e+06 has type \"integer\", want \"string\""}}
+{"schema":{"type":"string"},"instance":123456789012345678901234567890,"expected":{"validate":"validating root: type: 1.2345678901234568e+29 has type \"integer\", want \"string\""}}
+{"schema":{"type":"string"},"instance":100000000000000000000,"expected":{"validate":"validating root: type: 1e+20 has type \"integer\", want \"string\""}}
+{"schema":{"type":"string"},"instance":1e21,"expected":{"validate":"validating root: type: 1e+21 has type \"integer\", want \"string\""}}
+{"schema":{"type":"string"},"instance":0.00001,"expected":{"validate":"validating root: type: 1e-05 has type \"number\", want \"string\""}}
+{"schema":{"type":"string"},"instance":null,"expected":{"validate":"validating root: type: \u003cinvalid reflect.Value\u003e has type \"null\", want \"string\""}}
+{"schema":{"type":"string"},"instance":{"a":null,"b":[1,"x",true,{"c":1.5}]},"expected":{"validate":"validating root: type: map[a:\u003cnil\u003e b:[1 x true map[c:1.5]]] has type \"object\", want \"string\""}}
+{"schema":{"type":["string","null"]},"instance":5,"expected":{"validate":"validating root: type: 5 has type \"integer\", want one of \"string, null\""}}
+{"schema":{"enum":["a",1,null,[1,2]]},"instance":"b","expected":{"validate":"validating root: enum: b does not equal any of: [a 1 \u003cnil\u003e [1 2]]"}}
+{"schema":{"const":{"a":1}},"instance":"b","expected":{"validate":"validating root: const: b does not equal map[a:1]"}}
+{"schema":{"const":null},"instance":"b","expected":{"validate":"validating root: const: b does not equal \u003cnil\u003e"}}
+{"schema":{"multipleOf":0.3},"instance":1,"expected":{"validate":"validating root: multipleOf: 1/1 is not a multiple of 0.300000"}}
+{"schema":{"maximum":3},"instance":3.5,"expected":{"validate":"validating root: maximum: 7/2 is greater than 3.000000"}}
+{"schema":{"exclusiveMinimum":3},"instance":3,"expected":{"validate":"validating root: exclusiveMinimum: 3/1 is less than or equal to 3.000000"}}
+{"schema":{"exclusiveMaximum":3},"instance":1e30,"expected":{"validate":"validating root: exclusiveMaximum: 1000000000000000019884624838656/1 is greater than or equal to 3.000000"}}
+{"schema":{"minLength":3},"instance":"é","expected":{"validate":"validating root: minLength: \"é\" contains 1 Unicode code points, fewer than 3"}}
+{"schema":{"maxLength":1},"instance":"a\"b\n","expected":{"validate":"validating root: maxLength: \"a\\\"b\\n\" contains 4 Unicode code points, more than 1"}}
+{"schema":{"pattern":"^[a-z]+$"},"instance":"A1","expected":{"validate":"validating root: pattern: \"A1\" does not match regular expression \"^[a-z]+$\""}}
+{"schema":{"pattern":"("},"instance":"A1","approximate":true,"expected":{"resolve":"schema: \u003canonymous schema\u003e: pattern: error parsing regexp: missing closing ): `(`"}}
+{"schema":{"anyOf":[{"type":"string"},{"type":"integer"}]},"instance":1.5,"expected":{"validate":"validating root: anyOf: did not validate against any of [\u003canonymous schema\u003e \u003canonymous schema\u003e]:\nvalidating /anyOf/0: type: 1.5 has type \"number\", want \"string\"\nvalidating /anyOf/1: type: 1.5 has type \"number\", want \"integer\""}}
+{"schema":{"oneOf":[{"type":"string"},{"type":"integer"}]},"instance":1.5,"expected":{"validate":"validating root: oneOf: did not validate against any of [\u003canonymous schema\u003e \u003canonymous schema\u003e]"}}
+{"schema":{"oneOf":[{"$id":"http://x/a","type":"number"},{"$anchor":"zz","type":"integer"}]},"instance":1,"expected":{"validate":"validating root: oneOf: validated against both http://x/a and anchor zz"}}
+{"schema":{"not":{"type":"string"}},"instance":"s","expected":{"validate":"validating root: not: validated against \u003canonymous schema\u003e"}}
+{"schema":{"if":{"type":"string"},"then":{"minLength":3},"else":{"minimum":3}},"instance":1,"expected":{"validate":"validating root: validating /else: minimum: 1/1 is less than 3.000000"}}
+{"schema":{"items":{"type":"string"}},"instance":["a",1],"expected":{"validate":"validating root: validating /items: type: 1 has type \"integer\", want \"string\""}}
+{"schema":{"prefixItems":[{"type":"string"}],"items":false},"instance":["a",1],"expected":{"validate":"validating root: validating /items: not: validated against \u003canonymous schema\u003e"}}
+{"schema":{"contains":{"type":"string"}},"instance":[1,true,null],"expected":{"validate":"validating root: contains: [%!s(float64=1) %!s(bool=true) \u003cnil\u003e] does not have an item matching \u003canonymous schema\u003e"}}
+{"schema":{"contains":{"type":"string"},"minContains":2},"instance":["a",1],"expected":{"validate":"validating root: minContains: contains validated 1 items, less than 2"}}
+{"schema":{"contains":{"type":"string"},"maxContains":1},"instance":["a","b"],"expected":{"validate":"validating root: maxContains: contains validated 2 items, greater than 1"}}
+{"schema":{"minItems":2},"instance":[1],"expected":{"validate":"validating root: minItems: array length 1 is less than 2"}}
+{"schema":{"maxItems":1},"instance":[1,2],"expected":{"validate":"validating root: maxItems: array length 2 is greater than 1"}}
+{"schema":{"uniqueItems":true},"instance":[1,2,{"a":[1]},{"a":[1.0]}],"expected":{"validate":"validating root: uniqueItems: array items 3 and 2 are equal"}}
+{"schema":{"unevaluatedItems":false,"prefixItems":[{"type":"integer"}]},"instance":[1,2],"expected":{"validate":"validating root: validating /unevaluatedItems: not: validated against \u003canonymous schema\u003e"}}
+{"schema":{"additionalProperties":{"type":"string"}},"instance":{"a":1},"expected":{"validate":"validating root: validating /additionalProperties: type: 1 has type \"integer\", want \"string\""}}
+{"schema":{"patternProperties":{"^a":{"type":"string"}}},"instance":{"ab":1},"expected":{"validate":"validating root: validating /patternProperties/^a: type: 1 has type \"integer\", want \"string\""}}
+{"schema":{"propertyNames":{"maxLength":1}},"instance":{"ab":1},"expected":{"validate":"validating root: validating /propertyNames: maxLength: \"ab\" contains 2 Unicode code points, more than 1"}}
+{"schema":{"minProperties":2},"instance":{"ab":1},"expected":{"validate":"validating root: minProperties: object has 1 properties, less than 2"}}
+{"schema":{"maxProperties":0},"instance":{"ab":1},"expected":{"validate":"validating root: maxProperties: object has 1 properties, greater than 0"}}
+{"schema":{"dependentRequired":{"a":["b","c"]}},"instance":{"a":1},"expected":{"validate":"validating root: dependentRequired[\"a\"]: missing properties [\"b\" \"c\"]"}}
+{"schema":{"dependentSchemas":{"a":{"required":["b"]}}},"instance":{"a":1},"expected":{"validate":"validating root: validating /dependentSchemas/a: required: missing properties: [\"b\"]"}}
+{"schema":{"unevaluatedProperties":false,"properties":{"a":true}},"instance":{"a":1,"b":2},"expected":{"validate":"validating root: validating /unevaluatedProperties: not: validated against \u003canonymous schema\u003e"}}
+{"schema":{"$schema":"http://json-schema.org/draft-07/schema#","dependencies":{"a":["b"],"c":{"required":["d"]}}},"instance":{"a":1},"expected":{"validate":"validating root: dependentRequired[\"a\"]: missing properties [\"b\"]"}}
+{"schema":{"$schema":"http://json-schema.org/draft-07/schema#","items":[{"type":"string"}],"additionalItems":{"type":"integer"}},"instance":["a","b"],"expected":{"validate":"validating root: validating /additionalItems: type: b has type \"string\", want \"integer\""}}
+{"schema":{"$schema":"http://json-schema.org/draft-04/schema#"},"instance":1,"expected":{"validate":"cannot validate version http://json-schema.org/draft-04/schema#, supported versions: draft-07 and draft 2020-12"}}
+{"schema":{"$defs":{"a":{"type":"string"}},"properties":{"x":{"$ref":"#/$defs/a"}}},"instance":{"x":1},"expected":{"validate":"validating root: validating /properties/x: validating /$defs/a: type: 1 has type \"integer\", want \"string\""}}
+{"schema":{"$defs":{"a":{"type":"string"}},"properties":{"x":{"$ref":"#/$defs/b"}}},"instance":{"x":1},"expected":{"resolve":"JSON Pointer \"/$defs/b\": no key \"b\" in map"}}
+{"schema":{"$defs":{"a":{"$anchor":"foo","type":"string"}},"properties":{"x":{"$ref":"#foo"}}},"instance":{"x":1},"expected":{"validate":"validating root: validating /properties/x: validating /$defs/a: type: 1 has type \"integer\", want \"string\""}}
+{"schema":{"properties":{"x":{"$ref":"#nope"}}},"instance":{"x":1},"expected":{"resolve":"no anchor \"nope\" in \u003canonymous schema\u003e"}}
+{"schema":{"properties":{"x":{"$ref":"other.json"}}},"instance":{"x":1},"expected":{"resolve":"loading /other.json: cannot resolve remote schemas: no loader passed to Schema.Resolve"}}
+{"schema":{"$id":"rel.json"},"instance":1,"expected":{"resolve":"$id rel.json does not resolve to an absolute URI (base is \"/rel.json\")"}}
+{"schema":{"$id":"http://a.example/s.json#frag"},"instance":1,"expected":{"resolve":"$id http://a.example/s.json#frag must not have a fragment"}}
+{"schema":{"$id":"http://a.example/dir/s.json","properties":{"x":{"$ref":"t.json"}}},"instance":1,"expected":{"resolve":"loading http://a.example/dir/t.json: cannot resolve remote schemas: no loader passed to Schema.Resolve"}}
+{"schema":{"$id":"http://a.example/dir/s.json","properties":{"x":{"$ref":"#/properties/y"},"y":{"type":"boolean"}}},"instance":{"x":1},"expected":{"validate":"validating http://a.example/dir/s.json: validating /properties/x: validating /properties/y: type: 1 has type \"integer\", want \"boolean\""}}
+{"schema":{"type":5},"instance":1,"expected":{"unmarshal":"invalid value for \"type\": \"5\""}}
+{"schema":{"properties":5},"instance":1,"expected":{"unmarshal":"json: cannot unmarshal number into field schema.properties of type object"}}
+{"schema":{"minLength":1.5},"instance":1,"expected":{"unmarshal":"not an integer value"}}
+{"schema":{"minLength":"a"},"instance":1,"expected":{"unmarshal":"cannot be unmarshaled into an int"}}
+{"schema":{"required":"a"},"instance":1,"expected":{"unmarshal":"json: cannot unmarshal string into field schema.required of type array"}}
+{"schema":{"minimum":"a"},"instance":1,"expected":{"unmarshal":"json: cannot unmarshal string into field schema.minimum of type float64"}}
+{"schema":5,"instance":1,"expected":{"unmarshal":"json: cannot unmarshal number into value of type schema"}}
+{"schema":false,"instance":1,"expected":{"validate":"validating root: not: validated against \u003canonymous schema\u003e"}}
+{"schema":{"properties":{"a":false}},"instance":{"a":1},"expected":{"validate":"validating root: validating /properties/a: not: validated against \u003canonymous schema\u003e"}}
+{"schema":{"additionalProperties":false,"properties":{"a":true}},"instance":{"z":1,"b":2},"approximate":true,"expected":{"validate":"validating root: unexpected additional properties [\"z\" \"b\"]"}}
+{"schema":{"type":"object","properties":{"t":{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string","minLength":1},"fileId":{"type":"string"}},"oneOf":[{"required":["path"]},{"required":["fileId"]}]}}},"instance":{"t":{}},"expected":{"validate":"validating root: validating /properties/t: oneOf: did not validate against any of [\u003canonymous schema\u003e \u003canonymous schema\u003e]"}}
+{"schema":{"type":"integer"},"instance":1.0,"expected":{"validate":""}}
+{"schema":{"type":"number"},"instance":"1","expected":{"validate":"validating root: type: 1 has type \"string\", want \"number\""}}
+{"schema":{"type":"boolean"},"instance":{},"expected":{"validate":"validating root: type: map[] has type \"object\", want \"boolean\""}}
+{"schema":{"enum":[1.0]},"instance":1,"expected":{"validate":""}}
+{"schema":{"$vocabulary":{"x":true}},"instance":1,"expected":{"resolve":"schema: \u003canonymous schema\u003e: cannot validate a schema with $vocabulary"}}
+{"schema":{"patternProperties":{"(":{}}},"instance":1,"approximate":true,"expected":{"resolve":"schema: \u003canonymous schema\u003e: patternProperties[\"(\"]: error parsing regexp: missing closing ): `(`"}}
+{"schema":{"$ref":"#/properties/a/b"},"instance":1,"expected":{"resolve":"JSON Pointer \"/properties/a/b\": no key \"a\" in map"}}
+{"schema":{"$ref":"#/required"},"instance":1,"expected":{"resolve":"JSON Pointer \"/required\": does not refer to a schema, but to a array"}}
+{"schema":{"$ref":"#/allOf/3","allOf":[{}]},"instance":1,"expected":{"resolve":"JSON Pointer \"/allOf/3\": index 3 is out of bounds for array of length 1"}}
+{"schema":{"$dynamicRef":"#x","$defs":{"a":{"$dynamicAnchor":"x","type":"string"}}},"instance":1,"expected":{"validate":"validating root: validating /$defs/a: type: 1 has type \"integer\", want \"string\""}}
+{"schema":{"properties":{"a/b~c":{"type":"string"}}},"instance":{"a/b~c":1},"expected":{"validate":"validating root: validating /properties/a~1b~0c: type: 1 has type \"integer\", want \"string\""}}
+{"schema":{"allOf":[{"type":"string"}]},"instance":1e400,"expected":{"instance":"json: cannot unmarshal number 1e400 into value of type float64"}}
+{"schema":{"type":"object","properties":{"a":{"type":"string"}},"required":["a","b"]},"instance":{},"expected":{"validate":"validating root: required: missing properties: [\"a\" \"b\"]"}}
+{"schema":{"type":"array","items":{"type":"object","additionalProperties":false}},"instance":[{},{"x":1}],"expected":{"validate":"validating root: validating /items: unexpected additional properties [\"x\"]"}}
+{"schema":{"minimum":0.1},"instance":0.05,"expected":{"validate":"validating root: minimum: 3602879701896397/72057594037927936 is less than 0.100000"}}
+{"schema":{"maximum":-1.5},"instance":-0.5,"expected":{"validate":"validating root: maximum: -1/2 is greater than -1.500000"}}
+{"schema":{"type":"integer"},"instance":"1","expected":{"validate":"validating root: type: 1 has type \"string\", want \"integer\""}}
+{"schema":{"type":["integer","string"]},"instance":1.5,"expected":{"validate":"validating root: type: 1.5 has type \"number\", want one of \"integer, string\""}}
+{"schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","$defs":{"n":{"$id":"http://x.example/n","type":"number"}},"$ref":"http://x.example/n"},"instance":"s","expected":{"validate":"validating root: validating http://x.example/n: type: s has type \"string\", want \"number\""}}
+{"schema":{"properties":{"x":{"$ref":"#/properties/y"},"y":{"$ref":"#/properties/z"},"z":{"minLength":2}}},"instance":{"x":"a"},"expected":{"validate":"validating root: validating /properties/x: validating /properties/y: validating /properties/z: minLength: \"a\" contains 1 Unicode code points, fewer than 2"}}
+{"schema":true,"instance":{"anything":[1,2]},"expected":{"validate":""}}
+{"schema":{"then":{"type":"string"}},"instance":1,"expected":{"validate":""}}
+{"schema":{"if":true,"then":{"type":"string"}},"instance":1,"expected":{"validate":"validating root: validating /then: type: 1 has type \"integer\", want \"string\""}}
+{"schema":{"allOf":[{"properties":{"a":true}},{"properties":{"b":true}}],"unevaluatedProperties":false},"instance":{"a":1,"b":2,"c":3},"expected":{"validate":"validating root: validating /unevaluatedProperties: not: validated against \u003canonymous schema\u003e"}}
+{"schema":{"maxLength":2},"instance":"日本語","expected":{"validate":"validating root: maxLength: \"日本語\" contains 3 Unicode code points, more than 2"}}
+{"schema":{"const":1},"instance":1.0,"expected":{"validate":""}}
+{"schema":{"enum":[]},"instance":1,"expected":{"validate":"validating root: enum: 1 does not equal any of: []"}}

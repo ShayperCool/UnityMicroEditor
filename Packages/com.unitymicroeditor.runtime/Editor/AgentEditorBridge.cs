@@ -33,7 +33,7 @@ namespace UnityMicroEditor.Editor
 
         static AgentEditorBridge() { if (!AssetDatabase.IsAssetImportWorkerProcess()) EditorApplication.update += Poll; }
 
-        /// <summary>Starts a batch Editor owned by the Go client; never exits another Editor.</summary>
+        /// <summary>Starts a batch Editor owned by the bridge client; never exits another Editor.</summary>
         public static void RunBatch()
         {
             if (!Application.isBatchMode || Application.unityVersion != Profile)

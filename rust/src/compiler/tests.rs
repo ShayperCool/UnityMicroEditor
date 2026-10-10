@@ -1,0 +1,2855 @@
+//! Compiler tests. SDK tests are gated on environment variables and return early
+//! without them.
+use super::{
+    nilable::unmarshal,
+    sys::{self, compiler_command},
+    *,
+};
+use crate::{
+    cancel::Context,
+    sha256, sysutil,
+    util::{agent_immutable_json, atomic_json, file_hash, random_id, read_json_file, valid_sha256},
+};
+use serde_json::{json, value::RawValue};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::{self, Read},
+    os::unix::fs::{PermissionsExt, symlink},
+};
+use tempfile::TempDir;
+
+fn temp() -> (TempDir, String) {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().to_str().unwrap().to_string();
+    (directory, path)
+}
+fn write_graph_file(project: &str, relative: &str, contents: &str) -> String {
+    let filename = join(&[project, relative]);
+    sys::mkdir_all(&sysutil::dir(&filename)).unwrap();
+    sys::write(&filename, contents.as_bytes()).unwrap();
+    filename
+}
+fn strs(items: &[&str]) -> NilVec<String> {
+    NilVec::from(items)
+}
+fn hash(path: &str) -> String {
+    file_hash(path).unwrap()
+}
+fn manifest_json(text: &str) -> CompileManifest {
+    unmarshal(text.as_bytes()).unwrap()
+}
+fn raw(bytes: Vec<u8>) -> Box<RawValue> {
+    RawValue::from_string(String::from_utf8(bytes).unwrap()).unwrap()
+}
+fn sdk(variable: &str, reason: &str) -> Option<String> {
+    let value = std::env::var(variable)
+        .ok()
+        .filter(|value| !value.is_empty());
+    if value.is_none() {
+        eprintln!("skipped: {reason}");
+    }
+    value
+}
+fn background() -> Context {
+    Context::background()
+}
+
+#[test]
+fn compiler_configuration_drift_and_new_sources_are_rejected() {
+    let (_guard, project) = temp();
+    let source = write_graph_file(&project, "Assets/Runtime/Script.cs", "class Script {}");
+    let meta = write_graph_file(
+        &project,
+        "Assets/Runtime/Script.cs.meta",
+        "guid: b1d15452ab70b6a669e9b8e3c0b91251\n",
+    );
+    let compiler = Compiler {
+        project: project.clone(),
+        sources: NilMap::from([(source.clone(), "hash".to_string())]),
+        configuration: NilMap::from([(meta.clone(), hash(&meta))]),
+        manifest: CompileManifest {
+            compiler_inputs: NilMap::from([(source.clone(), "hash".to_string())]),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    compiler.check_configuration(&[source]).unwrap();
+    let added = write_graph_file(
+        &project,
+        "Assets/Runtime/NewScript.cs",
+        "class NewScript {}",
+    );
+    assert!(
+        compiler.check_configuration(&[]).is_err(),
+        "new runtime source was silently omitted from old DLL"
+    );
+    fs::remove_file(added).unwrap();
+    sys::write(&meta, b"guid: c1d15452ab70b6a669e9b8e3c0b91251\n").unwrap();
+    assert!(
+        compiler.check_configuration(&[]).is_err(),
+        "MonoScript GUID change accepted against stale binding graph"
+    );
+}
+
+#[test]
+fn compiler_rejects_changed_dll_and_importer_metadata_before_source_reuse() {
+    let (_project, project) = temp();
+    let (_sdk, sdk) = temp();
+    let plugin = write_graph_file(&project, "Assets/Plugins/Plugin.dll", "original plugin");
+    let meta = write_graph_file(
+        &project,
+        "Assets/Plugins/Plugin.dll.meta",
+        "original importer flags",
+    );
+    let external = write_graph_file(&sdk, "ImmutableHost.dll", "original SDK/host reference");
+    let mut inputs = NilMap::make();
+    for path in [&plugin, &meta, &external] {
+        inputs.insert(path, hash(path));
+    }
+    let mut compiler = Compiler {
+        project: project.clone(),
+        configuration: NilMap::make(),
+        manifest: CompileManifest {
+            compiler_inputs: inputs,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    compiler.collect_configuration_inputs();
+    compiler.check_configuration(&[]).unwrap();
+    for path in [&plugin, &meta, &external] {
+        let original = fs::read(path).unwrap();
+        sys::write(path, b"changed binary reference/import settings").unwrap();
+        match compiler.compile(&background(), Some(std::slice::from_ref(path))) {
+            Err(error) if error.to_string().contains("regenerate source graph") => {}
+            other => {
+                panic!("reused assemblies against modified baseline DLL input {path}: {other:?}")
+            }
+        }
+        sys::write(path, &original).unwrap();
+    }
+    assert!(
+        compiler
+            .compile(
+                &background(),
+                Some(&["Packages/com.example/NewPlugin.dll".to_string()])
+            )
+            .is_err(),
+        "untracked package DLL event silently reused the old managed graph"
+    );
+}
+
+#[test]
+fn compiler_rejects_missing_or_renamed_baseline_script_types() {
+    let manifest = manifest_json(
+        r#"{"scripts":[{"guid":"known-guid","path":"/project/Assets/AmbientSound.cs","assembly":"Game"},{"guid":"other-guid","path":"/project/Assets/Helpers.cs","assembly":"Other"}]}"#,
+    );
+    let compiler = Compiler {
+        manifest,
+        expected_types: NilMap::from([(
+            "Game",
+            NilMap::from([("Sample.CustomPrimary", "explicit-scene-guid".to_string())]),
+        )]),
+        ..Default::default()
+    };
+    let previous = strs(&[
+        "Sample.AmbientSound",
+        "Sample.CustomPrimary",
+        "Sample.PrivateHelper",
+    ]);
+    compiler
+        .validate_required_script_types(
+            "Game",
+            &previous,
+            &strs(&["Sample.AmbientSound", "Sample.CustomPrimary"]),
+        )
+        .expect("accepted body edit or unrelated private helper deletion was rejected");
+    for next in [
+        strs(&["Sample.RenamedAmbientSound", "Sample.CustomPrimary"]),
+        strs(&["OtherNamespace.AmbientSound", "Sample.CustomPrimary"]),
+        strs(&["Sample.AmbientSound"]),
+    ] {
+        assert!(
+            compiler
+                .validate_required_script_types("Game", &previous, &next)
+                .is_err(),
+            "published stale GUID/type bindings after removing or renaming required script: {next:?}"
+        );
+    }
+}
+
+#[test]
+fn compiler_collects_exact_scene_guid_type_bindings() {
+    let (_guard, project) = temp();
+    let manifest = join(&[&project, "scene.json"]);
+    atomic_json(
+        &manifest,
+        &json!({"projectRoot": project, "assets": [
+            {"kind": "script", "guid": "script-guid", "typeName": "Namespace.NonFilenameType"},
+            {"kind": "script", "guid": "host-guid", "typeName": "Unity.HostType"},
+        ]}),
+    )
+    .unwrap();
+    let baseline = join(&[&project, "current.json"]);
+    atomic_json(&baseline, &json!({"manifest": manifest})).unwrap();
+    let plan = manifest_json(
+        r#"{"scripts":[{"guid":"script-guid","assembly":"Game"},{"guid":"host-guid","assembly":"Unity.Host","hostProvided":true}]}"#,
+    );
+    let mut compiler = Compiler {
+        project,
+        manifest: plan,
+        current_dlls: NilMap::from([("Game", "Game.dll".to_string())]),
+        ..Default::default()
+    };
+    compiler.collect_expected_script_types(&baseline).unwrap();
+    assert!(
+        compiler
+            .validate_required_script_types("Game", &[], &strs(&["Namespace.DifferentType"]))
+            .is_err(),
+        "scene GUID binding was lost when class name differed from source filename"
+    );
+    compiler
+        .validate_required_script_types("Game", &[], &strs(&["Namespace.NonFilenameType"]))
+        .unwrap();
+}
+
+/// The scene manifest is decoded into the struct that already holds the wrapper
+/// document; fields the manifest omits keep the wrapper's values.
+#[test]
+fn compiler_binding_documents_merge() {
+    let (_guard, project) = temp();
+    let manifest = write_graph_file(
+        &project,
+        "scene.json",
+        r#"{"assets":[{"guid":"script-guid"},null,{"kind":"script","guid":"third","typeName":"Third"}]}"#,
+    );
+    let baseline = join(&[&project, "current.json"]);
+    atomic_json(
+        &baseline,
+        &json!({"manifest": manifest, "projectRoot": project, "assets": [
+            {"kind": "script", "typeName": "Namespace.Kept"},
+            {"kind": "script", "guid": "second", "typeName": "Second"},
+        ]}),
+    )
+    .unwrap();
+    let plan = manifest_json(
+        r#"{"scripts":[{"guid":"script-guid","assembly":"Game"},{"guid":"second","assembly":"Game"},{"guid":"third","assembly":"Game"}]}"#,
+    );
+    let mut compiler = Compiler {
+        project,
+        manifest: plan,
+        current_dlls: NilMap::from([("Game", "Game.dll".to_string())]),
+        ..Default::default()
+    };
+    compiler.collect_expected_script_types(&baseline).unwrap();
+    let expected: BTreeMap<String, String> = [
+        ("Namespace.Kept", "script-guid"),
+        ("Second", "second"),
+        ("Third", "third"),
+    ]
+    .into_iter()
+    .map(|(name, guid)| (name.to_string(), guid.to_string()))
+    .collect();
+    assert_eq!(*compiler.expected_types["Game"], expected);
+}
+
+fn valid_proof() -> LifecycleProof {
+    LifecycleProof {
+        schema_version: 1,
+        verified: true,
+        scriptable_object_barrier: true,
+        phases: strs(&["Awake", "OnEnable", "OnDisable", "OnDestroy"]),
+        ..Default::default()
+    }
+}
+fn initializer(assembly: &str, type_name: &str, method: &str, phase: i64) -> RuntimeInitializer {
+    RuntimeInitializer {
+        assembly: assembly.into(),
+        type_name: type_name.into(),
+        method_name: method.into(),
+        phase,
+    }
+}
+
+#[test]
+fn compiler_rejects_invalid_lifecycle_proof_and_cache_tampering() {
+    let mut proof = valid_proof();
+    proof.runtime_initializers = NilVec::from([initializer("Game", "Init", "Call", 2)]);
+    assert!(valid_lifecycle_proof(&proof, "Game"));
+    proof.runtime_initializers[0].assembly = "Other".into();
+    assert!(
+        !valid_lifecycle_proof(&proof, "Game"),
+        "foreign assembly initializer accepted"
+    );
+    let (_guard, directory) = temp();
+    let filename = write_graph_file(&directory, "Game.dll", "verified bytes");
+    let digest = hash(&filename);
+    assert!(verify_cache_files(
+        &directory,
+        &NilMap::from([("Game.dll", digest.clone())])
+    ));
+    assert!(
+        !verify_cache_files(&directory, &NilMap::from([("../Game.dll", digest.clone())])),
+        "cache key path traversal accepted"
+    );
+    sys::write(&filename, b"tampered bytes").unwrap();
+    assert!(
+        !verify_cache_files(&directory, &NilMap::from([("Game.dll", digest)])),
+        "tampered DLL was reused"
+    );
+}
+
+#[test]
+fn compiler_references_keep_mono_sdk_and_emitted_dependencies() {
+    let (_guard, managed) = temp();
+    for name in [
+        "mscorlib.dll",
+        "UnityMicroEditor.dll",
+        "Game.dll",
+        "Dependency.dll",
+    ] {
+        write_graph_file(&managed, name, name);
+    }
+    let compiler = Compiler {
+        base_references: strs(&["/sdk/mscorlib.dll"]),
+        engine_references: strs(&["/sdk/UnityEngine.CoreModule.dll"]),
+        current_dlls: NilMap::from([
+            ("Game", join(&[&managed, "Game.dll"])),
+            ("Dependency", join(&[&managed, "Dependency.dll"])),
+        ]),
+        configs: NilMap::from([(
+            "Game",
+            AssemblyConfig {
+                name: "Game".into(),
+                ..Default::default()
+            },
+        )]),
+        ..Default::default()
+    };
+    let refs = compiler
+        .references(
+            &CompileAssembly {
+                name: "Game".into(),
+                references: strs(&["Dependency"]),
+                ..Default::default()
+            },
+            &BTreeMap::from([("Dependency".to_string(), "/new/Dependency.dll".to_string())]),
+        )
+        .unwrap();
+    let text = refs.join("\n");
+    assert!(
+        text.contains("/sdk/mscorlib.dll")
+            && !text.contains(&join(&[&managed, "mscorlib.dll"]))
+            && text.contains("/new/Dependency.dll")
+            && !text.contains(&join(&[&managed, "Dependency.dll"]))
+            && !text.contains(&join(&[&managed, "Game.dll"])),
+        "references mixed stale/current game DLLs or Mono SDK: {text}"
+    );
+}
+
+fn assembly(name: &str, sources: &[&str], references: &[&str]) -> CompileAssembly {
+    CompileAssembly {
+        name: name.into(),
+        sources: strs(sources),
+        references: if references.is_empty() {
+            NilVec::nil()
+        } else {
+            strs(references)
+        },
+        ..Default::default()
+    }
+}
+fn string_map(items: &[(&str, &str)]) -> NilMap<String> {
+    let mut map = NilMap::make();
+    for (key, value) in items {
+        map.insert(*key, value.to_string());
+    }
+    map
+}
+
+#[test]
+fn compiler_changed_interface_rebuilds_dependent_graph() {
+    let assemblies = [
+        assembly("API", &["api.cs"], &[]),
+        assembly("Unrelated", &["unrelated.cs"], &[]),
+        assembly("Left", &["left.cs"], &["API"]),
+        assembly("Right", &["right.cs"], &["API"]),
+        assembly("Game", &["game.cs"], &["Left", "Right"]),
+    ];
+    let same = [
+        ("unrelated.cs", "same"),
+        ("left.cs", "same"),
+        ("right.cs", "same"),
+        ("game.cs", "same"),
+    ];
+    let mut previous = string_map(&same);
+    previous.insert("api.cs", "old API".to_string());
+    let mut current = string_map(&same);
+    current.insert("api.cs", "new API".to_string());
+    let dirty = dirty_assemblies(&assemblies, &previous, &current);
+    let expected: BTreeSet<String> = ["API", "Left", "Right", "Game"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    assert_eq!(
+        dirty, expected,
+        "changed interface did not invalidate the complete dependent graph"
+    );
+}
+
+#[test]
+fn compiler_body_only_change_keeps_dependent_assemblies() {
+    let api = assembly("API", &["api.cs"], &[]);
+    let left = assembly("Left", &["left.cs"], &["API"]);
+    let game = assembly("Game", &["game.cs"], &["Left"]);
+    let dirty = source_dirty_assemblies(
+        &[api.clone(), left.clone(), game.clone()],
+        &string_map(&[("api.cs", "old"), ("left.cs", "same"), ("game.cs", "same")]),
+        &string_map(&[("api.cs", "new"), ("left.cs", "same"), ("game.cs", "same")]),
+    );
+    let changed = |items: &[(&str, bool)]| -> BTreeMap<String, bool> {
+        items
+            .iter()
+            .map(|(name, flag)| (name.to_string(), *flag))
+            .collect()
+    };
+    assert!(
+        dirty.len() == 1
+            && assembly_needs_compile(&api, &dirty, &BTreeMap::new())
+            && !assembly_needs_compile(&left, &dirty, &changed(&[("API", false)])),
+        "body-only source edit rebuilt an unchanged dependent declaration graph"
+    );
+    assert!(
+        assembly_needs_compile(&left, &dirty, &changed(&[("API", true)])),
+        "changed dependency declarations did not rebuild their consumer"
+    );
+    assert!(
+        !assembly_needs_compile(&game, &dirty, &changed(&[("API", true), ("Left", false)])),
+        "unchanged intermediate API caused an unnecessary transitive rebuild"
+    );
+    assert!(
+        assembly_needs_compile(&game, &dirty, &changed(&[("Left", true)])),
+        "changed intermediate API did not propagate to its consumer"
+    );
+}
+
+#[test]
+fn compiler_declaration_fingerprint_sdk() {
+    let Some(editor) = sdk(
+        "UME_DECLARATION_SDK",
+        "set UME_DECLARATION_SDK to matching Unity Editor executable; uses its C# SDK only",
+    ) else {
+        return;
+    };
+    let (_project, project) = temp();
+    let data = join(&[&sysutil::dir(&editor), "Data"]);
+    let compilers = sys::glob_lossy(&join(&[&data, "DotNetSdk/sdk/*/Roslyn/bincore/csc.dll"]));
+    assert_eq!(
+        compilers.len(),
+        1,
+        "expected one exact SDK compiler: {compilers:?}"
+    );
+    let (_root, root) = temp();
+    let mut compiler = Compiler {
+        project,
+        cache: join(&[&root, "compiler-cache"]),
+        dotnet: join(&[&data, "DotNetSdk/dotnet"]),
+        csc: compilers[0].clone(),
+        ..Default::default()
+    };
+    let ctx = background();
+    let helper = compiler.prepare_lifecycle_helper(&ctx).unwrap();
+    let (dotnet, csc) = (compiler.dotnet.clone(), compiler.csc.clone());
+    let compile = |name: &str, source: &str| -> String {
+        let folder = join(&[&root, name]);
+        sys::mkdir(&folder).unwrap();
+        let filename = join(&[&folder, "Shape.cs"]);
+        sys::write(&filename, source.as_bytes()).unwrap();
+        let dll = join(&[&folder, "Shape.dll"]);
+        compiler_command(
+            &ctx,
+            &folder,
+            &dotnet,
+            &[
+                &csc,
+                "-nologo",
+                "-target:library",
+                "-nostdlib+",
+                "-deterministic+",
+                "-debug:portable",
+                "-optimize-",
+                &format!("-out:{dll}"),
+                &format!(
+                    "-reference:{}",
+                    join(&[
+                        &data,
+                        "MonoBleedingEdge/lib/mono/unityaot-linux/mscorlib.dll"
+                    ])
+                ),
+                &filename,
+            ],
+        )
+        .unwrap();
+        dll
+    };
+    const SOURCE: &str = r#"using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+[assembly: InternalsVisibleTo("FriendOne")]
+[StructLayout(LayoutKind.Sequential, Pack=4)]
+[Obsolete("original")]
+public class Shape<T> where T : class {
+ public const int Value = 1;
+ internal int Field;
+ private string Hidden() { return "before"; }
+ public int Compute(int optional = 4) { return 41; }
+}"#;
+    let baseline = compile("baseline", SOURCE);
+    let body = compile(
+        "body",
+        &SOURCE.replacen("return 41;", "return 42;", 1).replacen(
+            "return \"before\";",
+            "return \"after with a longer user-string literal\";",
+            1,
+        ),
+    );
+    let changed = compiler.declarations_changed(&ctx, &helper, &baseline, &body);
+    assert!(
+        matches!(changed, Ok(false)),
+        "real IL/user-string/MVID changes were mistaken for declaration changes: {changed:?}"
+    );
+    assert_ne!(
+        hash(&baseline),
+        hash(&body),
+        "SDK body fixture did not produce different real DLL bytes"
+    );
+    compiler.expected_types = NilMap::from([(
+        "Shape",
+        NilMap::from([("Shape`1", "script-guid".to_string())]),
+    )]);
+    compiler
+        .validate_compiled_script_types(&ctx, &helper, "Shape", &baseline, &body)
+        .expect("actual body-only compiled DLL rejected against its baseline script TypeDef");
+    let renamed = compile(
+        "renamed-type",
+        &SOURCE.replacen("class Shape<T>", "class RenamedShape<T>", 1),
+    );
+    assert!(
+        compiler
+            .validate_compiled_script_types(&ctx, &helper, "Shape", &baseline, &renamed)
+            .is_err(),
+        "real SDK-compiled class rename did not reject stale MonoScript bindings"
+    );
+    for (name, from, to) in [
+        ("constant", "Value = 1", "Value = 2"),
+        (
+            "attribute",
+            "Obsolete(\"original\")",
+            "Obsolete(\"changed\")",
+        ),
+        ("layout", "Pack=4", "Pack=8"),
+        ("generic-constraint", "where T : class", "where T : struct"),
+        ("friend-assembly", "FriendOne", "FriendTwo"),
+        (
+            "internal-field",
+            "internal int Field",
+            "internal long Field",
+        ),
+        ("default-parameter", "optional = 4", "optional = 5"),
+        ("signature", "public int Compute", "public long Compute"),
+    ] {
+        let dll = compile(name, &SOURCE.replacen(from, to, 1));
+        let changed = compiler.declarations_changed(&ctx, &helper, &baseline, &dll);
+        assert!(
+            matches!(changed, Ok(true)),
+            "changed {name} did not invalidate the declaration fingerprint: {changed:?}"
+        );
+    }
+    let bad = write_graph_file(&root, "malformed.dll", "not a managed PE");
+    assert!(
+        compiler
+            .declarations_changed(&ctx, &helper, &baseline, &bad)
+            .is_err(),
+        "unknown metadata did not retain conservative dependency rebuild"
+    );
+}
+
+#[test]
+fn compiler_scene_and_native_changes_do_not_scan_managed_inputs() {
+    // Deliberately invalid tracked configuration would fail a full scan.
+    // Existing scene/native edits bypass it through watcher classification.
+    let (_guard, project) = temp();
+    let mut compiler = Compiler {
+        project,
+        configuration: NilMap::from([("/missing/config.cs.meta", "hash".to_string())]),
+        ..Default::default()
+    };
+    let paths = |items: &[&str]| -> Vec<String> { items.iter().map(|s| s.to_string()).collect() };
+    for changed in [
+        paths(&["Assets/Scenes/SampleScene.unity"]),
+        paths(&["Assets/floor.fbx", "Assets/floor.fbx.meta"]),
+        paths(&["Assets/audio.wav"]),
+        paths(&["Assets/Texture.png", "Assets/Texture.png.meta"]),
+    ] {
+        assert!(
+            matches!(compiler.compile(&background(), Some(&changed)), Ok(None)),
+            "non-code edit invoked compiler scans: {changed:?}"
+        );
+    }
+    for changed in [
+        "Assets/Script.cs",
+        "Assets/Script.cs.meta",
+        "Assets/Game.asmdef",
+        "ProjectSettings/ProjectSettings.asset",
+        "Packages/manifest.json",
+        "Assets/NewDirectory",
+    ] {
+        assert!(
+            compiler.compiler_changes(&paths(&[changed])),
+            "source/config/topology edit skipped stale-code validation: {changed}"
+        );
+    }
+}
+
+#[test]
+fn compiler_sdk_integration_without_editor() {
+    let (Ok(baseline), Ok(player)) = (
+        std::env::var("UME_COMPILER_BASELINE"),
+        std::env::var("UME_COMPILER_PLAYER"),
+    ) else {
+        eprintln!(
+            "skipped: optional SDK-only integration; set UME_COMPILER_BASELINE and UME_COMPILER_PLAYER"
+        );
+        return;
+    };
+    let ctx = background();
+    let (manifest, _) = compiler_manifest(&baseline).unwrap();
+    let cache = join(&[
+        &manifest.project,
+        "Temp/UnityPlay/compiler-proof",
+        &random_id(),
+    ]);
+    let mut compiler = Compiler::new(
+        &manifest.project,
+        &baseline,
+        &player,
+        &manifest.unity,
+        &cache,
+    )
+    .unwrap();
+    let initial = compiler.compile(&ctx, None).unwrap();
+    for assembly in &compiler.manifest.assemblies {
+        assert!(
+            !needs_netcode(assembly)
+                || (initial.is_some() && compiler.netcode_processed.on(&assembly.name)),
+            "plain Roslyn network baseline was reused without NGO postprocessing: {initial:?}"
+        );
+    }
+    assert!(
+        matches!(compiler.compile(&ctx, None), Ok(None)),
+        "processed unchanged baseline should reuse verified source DLLs"
+    );
+    if let Some(initial) = &initial {
+        let mut restarted = Compiler::new(
+            &manifest.project,
+            &baseline,
+            &player,
+            &manifest.unity,
+            &cache,
+        )
+        .unwrap();
+        let reused = restarted.compile(&ctx, None).unwrap().unwrap();
+        assert!(
+            reused.cache_reused
+                && reused.player == initial.player
+                && reused.compiled_assemblies.is_empty()
+                && reused.runtime_initializers.len() == initial.runtime_initializers.len(),
+            "fresh process repeated SDK compilation instead of reusing verified complete graph: {reused:?}"
+        );
+        for assembly in &manifest.assemblies {
+            assert!(
+                !needs_netcode(assembly) || restarted.netcode_processed.on(&assembly.name),
+                "cached NGO postprocessing proof did not restore networking state"
+            );
+        }
+    }
+    // Simulate a stale source checksum in the compiler state, without
+    // changing author-owned project sources or launching any Player.
+    let leaf = compiler.manifest.assemblies.last().unwrap().clone();
+    compiler
+        .sources
+        .insert(&leaf.sources[0], "stale source checksum".to_string());
+    let update = compiler.compile(&ctx, None).unwrap().unwrap();
+    assert!(
+        update.player != player
+            && update.compiled_assemblies.to_vec() == [leaf.name.clone()]
+            && update.assemblies.len() == compiler.manifest.assemblies.len(),
+        "stale source did not create a complete immutable Player revision: {update:?}"
+    );
+    fs::metadata(&update.player).unwrap();
+    // Validate the real scene's GUID/full-name binding map against DLL TypeDefs,
+    // without loading any assembly or starting another Unity process.
+    let helper = compiler.prepare_lifecycle_helper(&ctx).unwrap();
+    for (assembly, names) in &compiler.expected_types {
+        if names.is_empty() {
+            continue;
+        }
+        let previous = join(&[&player_managed(&player), &format!("{assembly}.dll")]);
+        compiler
+            .validate_compiled_script_types(
+                &ctx,
+                &helper,
+                assembly,
+                &previous,
+                compiler.current_dlls.at(assembly),
+            )
+            .expect("actual scene baseline script bindings did not match emitted DLL");
+    }
+    assert!(
+        matches!(compiler.compile(&ctx, None), Ok(None)),
+        "unchanged code should reuse compiled revision"
+    );
+}
+
+#[test]
+fn compiler_warm_profile_sdk() {
+    let (Ok(baseline), Ok(player), Ok(cache)) = (
+        std::env::var("UME_COMPILER_BASELINE"),
+        std::env::var("UME_COMPILER_PLAYER"),
+        std::env::var("UME_COMPILER_PROFILE_CACHE"),
+    ) else {
+        eprintln!(
+            "skipped: set compiler baseline/player/profile cache for SDK-only startup timings"
+        );
+        return;
+    };
+    let ctx = background();
+    let (manifest, _) = compiler_manifest(&baseline).unwrap();
+    let mut previous_player = String::new();
+    for run in 0..2 {
+        let mut compiler = Compiler::new(
+            &manifest.project,
+            &baseline,
+            &player,
+            &manifest.unity,
+            &cache,
+        )
+        .unwrap();
+        let update = compiler
+            .compile(&ctx, None)
+            .unwrap()
+            .expect("expected processed game graph for old raw baseline");
+        compiler.script_type_names(&ctx).unwrap();
+        assert!(
+            run == 0
+                || (update.cache_reused
+                    && update.player == previous_player
+                    && update.compiled_assemblies.is_empty()),
+            "unchanged SDK startup failed whole graph cache: {update:?}"
+        );
+        previous_player = update.player;
+    }
+}
+
+struct Locator {
+    _guard: TempDir,
+    project: String,
+    wrapper: String,
+    scene: String,
+    plan: CompileManifest,
+    config: AssemblyConfig,
+}
+fn wrapper_json(plan: &CompileManifest, manifest: &str) -> serde_json::Value {
+    json!({"compiler": plan, "manifest": manifest})
+}
+fn compiler_locator_fixture() -> Locator {
+    let (guard, project) = temp();
+    let source = write_graph_file(&project, "Assets/Known.cs", "public class Known {}");
+    let dll = write_graph_file(
+        &project,
+        "Library/UnityMicroEditor/preparations/one/.compiler-preparation/Player/Player_Data/Managed/Assembly-CSharp.dll",
+        "accepted unchanged DLL",
+    );
+    let digest = hash(&dll);
+    let assembly = CompileAssembly {
+        name: "Assembly-CSharp".into(),
+        path: dll.clone(),
+        sha256: digest.clone(),
+        sources: NilVec::from([source]),
+        assembly_input_hash: "a".repeat(64),
+        ..Default::default()
+    };
+    let plan = CompileManifest {
+        schema: 1,
+        project: project.clone(),
+        unity: UNITY_VERSION.into(),
+        assemblies: NilVec::from([assembly.clone()]),
+        compiler_inputs: NilMap::from([(dll, digest)]),
+        ..Default::default()
+    };
+    let config = AssemblyConfig {
+        name: assembly.name.clone(),
+        sources: assembly.sources.clone(),
+        defines: strs(&["UNITY_STANDALONE_LINUX"]),
+        ..Default::default()
+    };
+    let canonical = canonical_configuration(&config).unwrap();
+    let source_directory = join(&[
+        &project,
+        "Library/UnityMicroEditor/preparations/one/.source-preparation",
+    ]);
+    let descriptor = join(&[
+        &source_directory,
+        "compiler-cache/baseline-assemblies",
+        &assembly.assembly_input_hash,
+        "compile.json",
+    ]);
+    #[derive(serde::Serialize)]
+    struct Descriptor<'a> {
+        #[serde(rename = "assemblyConfiguration")]
+        assembly_configuration: Box<RawValue>,
+        #[serde(rename = "compilerInputs")]
+        compiler_inputs: BTreeMap<&'a str, String>,
+        assemblies: [&'a CompileAssembly; 1],
+    }
+    agent_immutable_json(
+        &descriptor,
+        &Descriptor {
+            compiler_inputs: BTreeMap::from([("assemblyConfiguration", sha256(&canonical))]),
+            assembly_configuration: raw(canonical),
+            assemblies: [&assembly],
+        },
+    )
+    .unwrap();
+    let scene = join(&[&source_directory, "source/revisions/current/scene.json"]);
+    agent_immutable_json(
+        &scene,
+        &json!({"schemaVersion": 1, "supported": true, "projectRoot": project}),
+    )
+    .unwrap();
+    let wrapper = join(&[
+        &project,
+        "Library/UnityMicroEditor/preparations/one/current.json",
+    ]);
+    atomic_json(&wrapper, &wrapper_json(&plan, &scene)).unwrap();
+    Locator {
+        _guard: guard,
+        project,
+        wrapper,
+        scene,
+        plan,
+        config,
+    }
+}
+
+#[test]
+fn compiler_locates_unchanged_dll_configuration_from_explicit_owned_source_manifest() {
+    let fixture = compiler_locator_fixture();
+    assert!(
+        read_assembly_configuration(&fixture.wrapper, &fixture.plan.assemblies[0], None).is_err(),
+        "fixture does not reproduce a descriptor outside baseline/DLL ancestors"
+    );
+    let (accepted, locator) = compiler_manifest(&fixture.wrapper).unwrap();
+    assert_eq!(
+        locator, fixture.scene,
+        "exact owned scene locator was discarded"
+    );
+    let (actual, _) = read_assembly_configuration(&locator, &accepted.assemblies[0], None).unwrap();
+    assert_eq!(
+        actual, fixture.config,
+        "unchanged accepted DLL lost its sibling source configuration"
+    );
+}
+
+#[test]
+fn compiler_rejects_foreign_or_symlink_scene_configuration_locators() {
+    for name in [
+        "foreign cache",
+        "noncache",
+        "symlink",
+        "wrong project",
+        "unsupported scene",
+    ] {
+        let fixture = compiler_locator_fixture();
+        let (_other, other) = temp();
+        let mut locator = fixture.scene.clone();
+        match name {
+            "foreign cache" => {
+                locator = write_graph_file(&other, "Library/UnityMicroEditor/scene.json", "{}");
+            }
+            "noncache" => locator = write_graph_file(&fixture.project, "Assets/scene.json", "{}"),
+            "symlink" => {
+                locator = join(&[&sysutil::dir(&fixture.scene), "alias.json"]);
+                symlink(&fixture.scene, &locator).unwrap();
+            }
+            "wrong project" => atomic_json(
+                &fixture.scene,
+                &json!({"schemaVersion": 1, "supported": true, "projectRoot": other}),
+            )
+            .unwrap(),
+            _ => atomic_json(
+                &fixture.scene,
+                &json!({"schemaVersion": 1, "supported": false, "projectRoot": fixture.project}),
+            )
+            .unwrap(),
+        }
+        atomic_json(&fixture.wrapper, &wrapper_json(&fixture.plan, &locator)).unwrap();
+        assert!(
+            compiler_manifest(&fixture.wrapper).is_err(),
+            "unowned or invalid locator redirected compiler configuration discovery: {name}"
+        );
+    }
+}
+
+#[test]
+fn compiler_preparation_project_version_uses_exact_lines() {
+    let version = format!("m_EditorVersion: {UNITY_VERSION}");
+    for (name, text, valid) in [
+        ("lf", format!("{version}\n"), true),
+        ("crlf", format!("{version}\r\n"), true),
+        ("no-final-newline", version.clone(), true),
+        ("wrong", "m_EditorVersion: 6000.6.4f1\n".to_string(), false),
+        ("suffix", format!("{version}-suffix\n"), false),
+        ("duplicate", format!("{version}\n{version}\n"), false),
+    ] {
+        let (_guard, project) = temp();
+        write_graph_file(&project, "ProjectSettings/ProjectVersion.txt", &text);
+        let error = prepare_compiler_graph(
+            &background(),
+            &project,
+            "unused-editor",
+            "unused-player",
+            &join(&[&project, "missing-graph.json"]),
+            &join(&[&project, "Temp/compiler.json"]),
+        )
+        .unwrap_err();
+        assert!(
+            if valid {
+                sys::is_not_exist(&error)
+            } else {
+                error.to_string().contains("verified Unity")
+            },
+            "project version preflight {name} validity={valid} err={error}"
+        );
+        assert!(
+            sys::absent(&join(&[&project, "Temp"])),
+            "compiler preflight failure mutated the output directory"
+        );
+    }
+}
+
+#[test]
+fn compiler_native_bases_require_verified_direct_package_dependency() {
+    let (_guard, project) = temp();
+    let managed = join(&[&project, "Managed"]);
+    let host = write_graph_file(
+        &project,
+        "Managed/Package.Runtime.dll",
+        "verified native DLL fixture",
+    );
+    let named = |name: &str| AssemblyConfig {
+        name: name.into(),
+        ..Default::default()
+    };
+    let mut compiler = Compiler {
+        manifest: CompileManifest {
+            compiler_inputs: NilMap::from([(host.clone(), hash(&host))]),
+            scripts: NilVec::from([CompileScript {
+                assembly: "Package.Runtime".into(),
+                host_provided: true,
+                ..Default::default()
+            }]),
+            ..Default::default()
+        },
+        configs: NilMap::from([
+            (
+                "Game",
+                AssemblyConfig {
+                    dependencies: strs(&["Package.Runtime"]),
+                    ..named("Game")
+                },
+            ),
+            ("Other", named("Other")),
+        ]),
+        configuration_hashes: NilMap::make(),
+        ..Default::default()
+    };
+    compiler.approve_prepared_native_bases(&managed).unwrap();
+    assert!(
+        compiler.configs["Game"].native_base.to_vec() == ["Package.Runtime"]
+            && compiler.configs["Other"].native_base.is_empty(),
+        "verified native bases were not limited to direct dependencies: {:?}",
+        compiler.configs
+    );
+    compiler.configs.insert(
+        "Other",
+        AssemblyConfig {
+            native_base: strs(&["Package.Runtime"]),
+            ..named("Other")
+        },
+    );
+    assert!(
+        compiler.approve_prepared_native_bases(&managed).is_err(),
+        "native base outside explicit assembly dependencies was approved"
+    );
+    compiler.configs.insert("Other", named("Other"));
+    sys::write(&host, b"changed native DLL").unwrap();
+    assert!(
+        compiler.approve_prepared_native_bases(&managed).is_err(),
+        "native base with changed deployment digest was approved"
+    );
+}
+
+#[test]
+fn compiler_native_only_manifest_requires_explicit_proof() {
+    let inputs = || NilMap::from([("input", "digest".to_string())]);
+    let script = |assembly: &str, host_provided: bool| {
+        NilVec::from([CompileScript {
+            assembly: assembly.into(),
+            host_provided,
+            ..Default::default()
+        }])
+    };
+    let native = || CompileManifest {
+        schema: 1,
+        native_only: true,
+        native_slots_sha: "a".repeat(64),
+        compiler_inputs: inputs(),
+        ..Default::default()
+    };
+    for (name, manifest, valid) in [
+        (
+            "empty-unverified",
+            CompileManifest {
+                schema: 1,
+                compiler_inputs: inputs(),
+                ..Default::default()
+            },
+            false,
+        ),
+        (
+            "missing-slots",
+            CompileManifest {
+                native_slots_sha: String::new(),
+                ..native()
+            },
+            false,
+        ),
+        (
+            "gameplay-script",
+            CompileManifest {
+                scripts: script("Game", false),
+                ..native()
+            },
+            false,
+        ),
+        (
+            "contradictory-game-assembly",
+            CompileManifest {
+                assemblies: NilVec::from([assembly("Game", &[], &[])]),
+                ..native()
+            },
+            false,
+        ),
+        (
+            "native-only",
+            CompileManifest {
+                scripts: script("Package.Runtime", true),
+                ..native()
+            },
+            true,
+        ),
+    ] {
+        let (_guard, directory) = temp();
+        let filename = join(&[&directory, "compile.json"]);
+        atomic_json(&filename, &manifest).unwrap();
+        let outcome = compiler_manifest(&filename);
+        assert_eq!(outcome.is_ok(), valid, "{name}: {:?}", outcome.err());
+    }
+}
+
+#[test]
+fn compiler_native_managed_proof_checks_active_copy() {
+    let (_guard, project) = temp();
+    let original = write_graph_file(
+        &project,
+        "baseline/Host_Data/Managed/Package.Runtime.dll",
+        "native package",
+    );
+    let active = write_graph_file(
+        &project,
+        "active/Host_Data/Managed/Package.Runtime.dll",
+        "native package",
+    );
+    let compiler = Compiler {
+        manifest: CompileManifest {
+            compiler_inputs: NilMap::from([
+                (original.clone(), hash(&original)),
+                (
+                    join(&[&project, "baseline/Host_Data/Managed/UnityMicroEditor.dll"]),
+                    "bridge SDK refresh permitted".to_string(),
+                ),
+                (
+                    join(&[&project, "baseline/Host_Data/Managed/Game.dll"]),
+                    "game proof checked separately".to_string(),
+                ),
+            ]),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let managed = sysutil::dir(&active);
+    let game = BTreeSet::from(["Game".to_string()]);
+    compiler
+        .verify_staged_native_managed_inputs(&managed, &game)
+        .unwrap();
+    sys::write(&active, b"changed active copy").unwrap();
+    assert!(
+        compiler
+            .verify_staged_native_managed_inputs(&managed, &game)
+            .is_err(),
+        "changed active package DLL was concealed by an intact original baseline cache"
+    );
+    fs::remove_file(&active).unwrap();
+    symlink(&original, &active).unwrap();
+    let error = compiler
+        .verify_staged_native_managed_inputs(&managed, &game)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("symlink"),
+        "native package symlink accepted: {error}"
+    );
+}
+
+fn source_extension_fixture() -> (TempDir, Compiler) {
+    let (guard, project) = temp();
+    let source = write_graph_file(&project, "Assets/Game/Known.cs", "class Known {}");
+    let meta = write_graph_file(
+        &project,
+        "Assets/Game/Known.cs.meta",
+        "guid: 10000000000000000000000000000001\nMonoImporter:\n  executionOrder: 0\n",
+    );
+    let definition = write_graph_file(&project, "Assets/Game/Game.asmdef", r#"{"name":"Game"}"#);
+    let definition_meta = write_graph_file(
+        &project,
+        "Assets/Game/Game.asmdef.meta",
+        "guid: 20000000000000000000000000000001\n",
+    );
+    let mut inputs = NilMap::make();
+    for path in [&source, &meta, &definition, &definition_meta] {
+        inputs.insert(path, hash(path));
+    }
+    let mut compiler = Compiler {
+        project,
+        sources: NilMap::from([(source.clone(), inputs.at(&source).to_string())]),
+        configuration: NilMap::from([(meta.clone(), inputs.at(&meta).to_string())]),
+        configs: NilMap::from([(
+            "Game",
+            AssemblyConfig {
+                name: "Game".into(),
+                sources: NilVec::from([source.clone()]),
+                ..Default::default()
+            },
+        )]),
+        current_dlls: NilMap::from([("Game", "Game.dll".to_string())]),
+        manifest: CompileManifest {
+            compiler_inputs: inputs,
+            assemblies: NilVec::from([CompileAssembly {
+                name: "Game".into(),
+                sources: NilVec::from([source.clone()]),
+                ..Default::default()
+            }]),
+            scripts: NilVec::from([CompileScript {
+                guid: "10000000000000000000000000000001".into(),
+                path: source,
+                assembly: "Game".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    compiler.collect_configuration_inputs();
+    (guard, compiler)
+}
+
+#[test]
+fn source_graph_extends_known_assembly_without_changing_accepted_state() {
+    let (_guard, compiler) = source_extension_fixture();
+    let added = write_graph_file(
+        &compiler.project,
+        "Assets/Game/New/Nested.cs",
+        "namespace A { class Nested {} }",
+    );
+    let meta = write_graph_file(
+        &compiler.project,
+        "Assets/Game/New/Nested.cs.meta",
+        "guid: 10000000000000000000000000000002\nMonoImporter:\n  executionOrder: 11\n",
+    );
+    write_graph_file(
+        &compiler.project,
+        "Assets/Game/New.meta",
+        "guid: 30000000000000000000000000000001\nfolderAsset: yes\n",
+    );
+    let before = crate::util::marshal(&compiler.manifest).unwrap();
+    let candidate = compiler
+        .source_graph_candidate(&[added.clone(), meta.clone()])
+        .unwrap();
+    assert!(
+        candidate
+            .graph_source_assemblies()
+            .get(&added)
+            .map(String::as_str)
+            == Some("Game")
+            && candidate.manifest.scripts.len() == 2
+            && !candidate.configuration.at(&meta).is_empty()
+            && candidate.configs["Game"].sources.len() == 2,
+        "new authored source/GUID was not added to the exact existing assembly: {:?}",
+        candidate.manifest
+    );
+    let after = crate::util::marshal(&compiler.manifest).unwrap();
+    assert!(
+        before == after
+            && compiler.configuration.at(&meta).is_empty()
+            && compiler.configs["Game"].sources.len() == 1,
+        "candidate discovery mutated accepted compiler graph"
+    );
+    candidate.check_configuration(&[]).unwrap();
+    write_graph_file(
+        &compiler.project,
+        "Assets/Game/AppearedDuringCompile.cs",
+        "class AppearedDuringCompile {}",
+    );
+    assert!(
+        candidate.check_configuration(&[]).is_err(),
+        "source appearing after snapshot could be omitted from a published Player"
+    );
+}
+
+#[test]
+fn source_graph_uses_guid_assembly_reference_and_default_scopes() {
+    let (_guard, mut compiler) = source_extension_fixture();
+    let project = compiler.project.clone();
+    let reference = write_graph_file(
+        &project,
+        "Assets/Shared/Shared.asmref",
+        r#"{"reference":"GUID:20000000000000000000000000000001"}"#,
+    );
+    let meta = write_graph_file(
+        &project,
+        "Assets/Shared/Shared.asmref.meta",
+        "guid: 20000000000000000000000000000002\n",
+    );
+    for path in [&reference, &meta] {
+        compiler.configuration.insert(path, hash(path));
+        compiler.manifest.compiler_inputs.insert(path, hash(path));
+    }
+    let added = write_graph_file(&project, "Assets/Shared/Added.cs", "class Added {}");
+    write_graph_file(
+        &project,
+        "Assets/Shared/Added.cs.meta",
+        "guid: 10000000000000000000000000000002\n",
+    );
+    let candidate = compiler.source_graph_candidate(&[]).unwrap();
+    assert_eq!(
+        candidate
+            .graph_source_assemblies()
+            .get(&added)
+            .map(String::as_str),
+        Some("Game"),
+        "GUID asmref did not resolve the nearest exact prepared assembly"
+    );
+    for (name, dll) in [
+        ("Assembly-CSharp", "default.dll"),
+        ("Assembly-CSharp-firstpass", "firstpass.dll"),
+    ] {
+        compiler.configs.insert(
+            name,
+            AssemblyConfig {
+                name: name.into(),
+                ..Default::default()
+            },
+        );
+        compiler.current_dlls.insert(name, dll.to_string());
+    }
+    let roots = compiler.assembly_source_roots().unwrap();
+    for (path, expected) in [
+        ("Assets/Other/Default.cs", "Assembly-CSharp"),
+        ("Assets/Plugins/Plugin.cs", "Assembly-CSharp-firstpass"),
+        ("Assets/Game/Sub/Game.cs", "Game"),
+    ] {
+        let actual = compiler.source_assembly(&join(&[&project, path]), &roots);
+        assert_eq!(actual.unwrap(), expected, "source scope {path}");
+    }
+}
+
+#[test]
+fn source_graph_rejects_unsupported_or_conflicting_additions() {
+    for kind in [
+        "missing-meta",
+        "duplicate-script-guid",
+        "duplicate-asset-guid",
+        "new-asmdef",
+        "changed-asmdef",
+        "missing-slot",
+        "symlink",
+        "package-source",
+    ] {
+        let (_guard, mut compiler) = source_extension_fixture();
+        let project = compiler.project.clone();
+        let source = write_graph_file(&project, "Assets/Game/Added.cs", "class Added {}");
+        write_graph_file(
+            &project,
+            "Assets/Game/Added.cs.meta",
+            "guid: 10000000000000000000000000000002\n",
+        );
+        let mut changed = vec![source.clone()];
+        match kind {
+            "missing-meta" => fs::remove_file(format!("{source}.meta")).unwrap(),
+            "duplicate-script-guid" => {
+                write_graph_file(
+                    &project,
+                    "Assets/Game/Added.cs.meta",
+                    "guid: 10000000000000000000000000000001\n",
+                );
+            }
+            "duplicate-asset-guid" => {
+                write_graph_file(
+                    &project,
+                    "Assets/Scene.unity.meta",
+                    "guid: 10000000000000000000000000000002\n",
+                );
+            }
+            "new-asmdef" => {
+                write_graph_file(&project, "Assets/Game/Sub/New.asmdef", r#"{"name":"New"}"#);
+            }
+            "changed-asmdef" => {
+                write_graph_file(&project, "Assets/Game/Game.asmdef", r#"{"name":"Changed"}"#);
+            }
+            "missing-slot" => {
+                compiler.current_dlls.remove("Game");
+            }
+            "symlink" => {
+                fs::remove_file(&source).unwrap();
+                symlink(join(&[&project, "Assets/Game/Known.cs"]), &source).unwrap();
+            }
+            _ => changed.push("Packages/com.example/Added.cs".into()),
+        }
+        assert!(
+            compiler.source_graph_candidate(&changed).is_err(),
+            "unsupported {kind} produced a graph"
+        );
+    }
+}
+
+#[test]
+fn compiler_assembly_slot_extension_preserves_host_flags() {
+    let (_guard, directory) = temp();
+    let filename = write_graph_file(
+        &directory,
+        "ScriptingAssemblies.json",
+        r#"{"names":["UnityEngine.dll","Bridge.dll"],"types":[2,16],"hostFlag":{"preserve":true}}"#,
+    );
+    register_compiler_assembly_slots(
+        &filename,
+        &[assembly("Game", &[], &[]), assembly("Bridge", &[], &[])],
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(&filename).unwrap(),
+        "{\"hostFlag\":{\"preserve\":true},\"names\":[\"UnityEngine.dll\",\"Bridge.dll\",\"Game.dll\"],\"types\":[2,16,16]}\n",
+        "host native assembly flags were overwritten"
+    );
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct DeclarationProof {
+    player: BTreeMap<String, Vec<String>>,
+    editor: BTreeMap<String, Vec<String>>,
+}
+
+#[test]
+fn compiler_player_source_declarations_sdk() {
+    let Some(editor) = sdk(
+        "UME_LIFECYCLE_SDK",
+        "set the pinned Unity SDK for actual C# Player preprocessing proof",
+    ) else {
+        return;
+    };
+    let (_guard, cache) = temp();
+    let mut compiler = Compiler {
+        editor,
+        cache: cache.clone(),
+        ..Default::default()
+    };
+    compiler.initialize_sdk().unwrap();
+    let ctx = background();
+    let helper = compiler.prepare_lifecycle_helper(&ctx).unwrap();
+    let source = write_graph_file(
+        &cache,
+        "Conditional.cs",
+        "namespace Package.@event;\n#if UNITY_EDITOR\ninternal class DownloadableSample {}\n#elif DEVELOPMENT_BUILD && FEATURE\ninternal class RuntimeDebug {}\n#else\ninternal class ReleaseRuntime {}\n#endif\ninternal class Owner<T> { internal class Inner {} }\n",
+    );
+    let request = join(&[&cache, "declarations.json"]);
+    atomic_json(
+        &request,
+        &json!([{"assemblyName": "Package.Runtime", "defines": ["DEVELOPMENT_BUILD", "FEATURE"],
+            "editorDefines": ["UNITY_EDITOR"], "sources": [{"path": source, "originalPath": source}]}]),
+    )
+    .unwrap();
+    let output = compiler_command(
+        &ctx,
+        &cache,
+        &compiler.dotnet,
+        &[&helper, "--source-type-declarations", &request],
+    )
+    .unwrap();
+    let proof: BTreeMap<String, DeclarationProof> = serde_json::from_slice(&output).unwrap();
+    let proof = &proof["Package.Runtime"];
+    assert_eq!(
+        proof.player[&source],
+        [
+            "Package.event.Owner`1",
+            "Package.event.Owner`1+Inner",
+            "Package.event.RuntimeDebug"
+        ],
+        "Player preprocessing/nested/file-scoped namespace proof incorrect"
+    );
+    assert_eq!(
+        proof.editor[&source],
+        [
+            "Package.event.DownloadableSample",
+            "Package.event.Owner`1",
+            "Package.event.Owner`1+Inner"
+        ],
+        "Editor conditional declaration proof incorrect"
+    );
+}
+
+#[test]
+fn compiler_new_mono_behaviour_and_restart_sdk() {
+    let Some(editor) = sdk(
+        "UME_LIFECYCLE_SDK",
+        "set UME_LIFECYCLE_SDK to the matching Unity executable; SDK only, no Editor or Player starts",
+    ) else {
+        return;
+    };
+    let (_guard, project) = temp();
+    write_graph_file(
+        &project,
+        "ProjectSettings/ProjectVersion.txt",
+        &format!("m_EditorVersion: {UNITY_VERSION}\n"),
+    );
+    write_graph_file(&project, "Packages/manifest.json", r#"{"dependencies":{}}"#);
+    let mut sdk_paths = Compiler {
+        editor: editor.clone(),
+        ..Default::default()
+    };
+    sdk_paths.initialize_sdk().unwrap();
+    let ctx = background();
+    let compile = |dll: &str, source: &str, extra: &[&str]| {
+        let filename = write_graph_file(
+            &project,
+            &format!("Temp/initial/{}.cs", sysutil::base(dll)),
+            source,
+        );
+        sys::mkdir_all(&sysutil::dir(dll)).unwrap();
+        let mut references: Vec<String> = sdk_paths.base_references.to_vec();
+        references.extend(sdk_paths.engine_references.iter().cloned());
+        references.extend(extra.iter().map(|path| path.to_string()));
+        let mut arguments = vec![
+            sdk_paths.csc.clone(),
+            "-nologo".into(),
+            "-target:library".into(),
+            "-nostdlib+".into(),
+            "-debug:portable".into(),
+            format!("-out:{dll}"),
+        ];
+        for reference in &deduplicate_references(&references) {
+            arguments.push(format!("-reference:{reference}"));
+        }
+        arguments.push(filename);
+        let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        compiler_command(&ctx, &project, &sdk_paths.dotnet, &arguments).unwrap();
+    };
+    let player = write_graph_file(
+        &project,
+        "Temp/native-host/Host.x86_64",
+        "SDK fixture executable, not launched",
+    );
+    fs::set_permissions(&player, fs::Permissions::from_mode(0o700)).unwrap();
+    let managed = join(&[&sysutil::dir(&player), "Host_Data/Managed"]);
+    let bridge = join(&[&managed, "UnityMicroEditor.dll"]);
+    let bridge_text = r#"using System; using UnityEngine; namespace UnityMicroEditor.Raw {
+[AttributeUsage(AttributeTargets.Assembly)] public sealed class RawLifecycleInstrumentedAttribute : Attribute { public RawLifecycleInstrumentedAttribute(int version) {} }
+[AttributeUsage(AttributeTargets.Assembly)] public sealed class RawScriptableObjectInstrumentedAttribute : Attribute { public RawScriptableObjectInstrumentedAttribute(int version) {} }
+public static class RawLifecycle {
+ public enum Phase { Awake, OnEnable, OnDisable, OnDestroy }
+ public static bool ShouldCollect(MonoBehaviour target, Phase phase) => false;
+ public static bool ShouldCollect(ScriptableObject target, Phase phase) => false;
+ public static void Enqueue(MonoBehaviour target, Phase phase, Action callback, int order) {}
+ public static void Enqueue(ScriptableObject target, Phase phase, Action callback, int order) {}
+}}"#;
+    compile(&bridge, bridge_text, &[]);
+    let package_text = r#"namespace Package.First { public class Known : UnityEngine.MonoBehaviour {} }
+namespace Package.Second { [UnityEngine.DefaultExecutionOrder(-5000)] public class Known : UnityEngine.MonoBehaviour {
+ protected virtual void Awake() { } protected virtual void OnDestroy() { }
+} }"#;
+    let package_directory = "Library/PackageCache/com.test.runtime@fixture";
+    let package_root = join(&[&project, package_directory]);
+    let known_package = format!("{package_directory}/Known.cs");
+    let package_source = write_graph_file(&project, &known_package, package_text);
+    let package_meta = write_graph_file(
+        &project,
+        &format!("{known_package}.meta"),
+        "guid: 10000000000000000000000000000005\n",
+    );
+    let editor_only_text =
+        "namespace Package { internal class DownloadableSample : UnityEngine.ScriptableObject {} }";
+    let editor_only_source = write_graph_file(
+        &project,
+        &format!("{package_directory}/DownloadableSample.cs"),
+        &format!("#if UNITY_EDITOR\n{editor_only_text}\n#endif\n"),
+    );
+    let editor_only_meta = write_graph_file(
+        &project,
+        &format!("{package_directory}/DownloadableSample.cs.meta"),
+        "guid: 10000000000000000000000000000006\n",
+    );
+    let package_host = join(&[&managed, "Package.Runtime.dll"]);
+    let package_editor = join(&[&project, "Library/ScriptAssemblies/Package.Runtime.dll"]);
+    compile(&package_host, package_text, &[]);
+    compile(
+        &package_editor,
+        &format!("{package_text}{editor_only_text}"),
+        &[],
+    );
+    write_graph_file(
+        &project,
+        "Temp/native-host/Host_Data/ScriptingAssemblies.json",
+        r#"{"names":["UnityMicroEditor.dll","Package.Runtime.dll"],"types":[16,16],"fixtureFlag":true}"#,
+    );
+    let known_text =
+        "namespace Baseline { public class Known : Package.Second.Known { public int seed = 3; } }";
+    let known = write_graph_file(&project, "Assets/Known.cs", known_text);
+    write_graph_file(
+        &project,
+        "Assets/Known.cs.meta",
+        "guid: 10000000000000000000000000000001\nMonoImporter:\n  executionOrder: 0\n",
+    );
+    let consumer_text = "public class Consumer { public Baseline.Known target; }";
+    let consumer = write_graph_file(&project, "Assets/Consumer/Consumer.cs", consumer_text);
+    write_graph_file(
+        &project,
+        "Assets/Consumer/Consumer.cs.meta",
+        "guid: 10000000000000000000000000000002\n",
+    );
+    write_graph_file(
+        &project,
+        "Assets/Consumer/Consumer.asmdef",
+        r#"{"name":"Consumer","references":["Assembly-CSharp"]}"#,
+    );
+    write_graph_file(
+        &project,
+        "Assets/Consumer/Consumer.asmdef.meta",
+        "guid: 20000000000000000000000000000001\n",
+    );
+    let known_dll = join(&[&project, "Library/ScriptAssemblies/Assembly-CSharp.dll"]);
+    let consumer_dll = join(&[&project, "Library/ScriptAssemblies/Consumer.dll"]);
+    compile(&known_dll, known_text, &[&bridge, &package_host]);
+    compile(
+        &consumer_dll,
+        consumer_text,
+        &[&known_dll, &bridge, &package_host],
+    );
+    let graph_assembly =
+        |name: &str, source: &str, path: &str, references: &[&str]| CompilerGraphAssembly {
+            config: AssemblyConfig {
+                name: name.into(),
+                sources: NilVec::from([source.to_string()]),
+                defines: strs(&["UNITY_6000_6"]),
+                ..Default::default()
+            },
+            path: path.into(),
+            references: strs(references),
+            ..Default::default()
+        };
+    let script =
+        |guid: &str, path: &str, assembly: &str, type_name: &str, host: bool| CompileScript {
+            guid: guid.into(),
+            path: path.into(),
+            assembly: assembly.into(),
+            type_name: type_name.into(),
+            host_provided: host,
+        };
+    let mut graph = CompilerGraphExport {
+        schema_version: 1,
+        project: project.clone(),
+        unity: editor.clone(),
+        assemblies: NilVec::from([
+            graph_assembly("Consumer", &consumer, &consumer_dll, &["Assembly-CSharp"]),
+            graph_assembly(
+                "Assembly-CSharp",
+                &known,
+                &known_dll,
+                &["UnityMicroEditor", "Package.Runtime"],
+            ),
+        ]),
+        scripts: NilVec::from([
+            script(
+                "10000000000000000000000000000001",
+                &known,
+                "Assembly-CSharp",
+                "Baseline.Known",
+                false,
+            ),
+            script(
+                "10000000000000000000000000000002",
+                &consumer,
+                "Consumer",
+                "Consumer",
+                false,
+            ),
+            script(
+                "10000000000000000000000000000006",
+                &editor_only_source,
+                "Package.Runtime",
+                "Package.DownloadableSample",
+                true,
+            ),
+            script(
+                "10000000000000000000000000000005",
+                &package_source,
+                "Package.Runtime",
+                "Package.Second.Known",
+                true,
+            ),
+        ]),
+        source_roots: NilVec::from([CompilerSourceRoot {
+            path: "Packages/com.test.runtime".into(),
+            source: package_root,
+        }]),
+        compiler_inputs: NilMap::make(),
+        ..Default::default()
+    };
+    for path in [
+        &package_source,
+        &package_meta,
+        &editor_only_source,
+        &editor_only_meta,
+    ] {
+        graph.compiler_inputs.insert(path, hash(path));
+    }
+    graph.host_assemblies = NilVec::from([CompilerHostAssembly {
+        name: "Package.Runtime".into(),
+        path: package_editor.clone(),
+        sha256: hash(&package_editor),
+        sources: NilVec::from([package_source.clone(), editor_only_source.clone()]),
+        defines: strs(&["UNITY_6000_6", "DEVELOPMENT_BUILD"]),
+        editor_defines: strs(&["UNITY_EDITOR", "UNITY_EDITOR_LINUX"]),
+        ..Default::default()
+    }]);
+    let graph_file = join(&[&project, "Temp/export.json"]);
+    let mut baseline = join(&[&project, "Temp/prepared/compile.json"]);
+    atomic_json(&graph_file, &graph).unwrap();
+    // A public Editor export can reference a newer bridge than the prepared
+    // native host. Never conceal this deployment drift with the Editor DLL.
+    let editor_bridge = join(&[&project, "Library/ScriptAssemblies/UnityMicroEditor.dll"]);
+    let api = "namespace UnityMicroEditor { public static class AgentRuntimeCommands { public static int Register() => 2; public sealed class Token {} } internal class EditorDetail { public class Hidden {} } }";
+    compile(&editor_bridge, &format!("{bridge_text}{api}"), &[]);
+    let old_bridge_hash = hash(&bridge);
+    let prepare = |baseline: &str| {
+        prepare_compiler_graph(&ctx, &project, &editor, &player, &graph_file, baseline)
+    };
+    let error = prepare(&baseline).unwrap_err().to_string();
+    assert!(
+        error.contains("native host runtime bridge is stale")
+            && error.contains("AgentRuntimeCommands"),
+        "stale Player API was not rejected before instrumentation: {error}"
+    );
+    assert!(
+        sys::absent(&baseline),
+        "stale runtime API published a successful compiler baseline"
+    );
+    assert_eq!(
+        hash(&bridge),
+        old_bridge_hash,
+        "stale host was overwritten with the Editor bridge"
+    );
+    // Matching public types allow different implementation details and bodies.
+    compile(
+        &bridge,
+        &format!(
+            "{bridge_text}namespace UnityMicroEditor {{ public static class AgentRuntimeCommands {{ public static int Register() => 1; public sealed class Token {{}} }} }}"
+        ),
+        &[],
+    );
+    let missing_runtime =
+        "namespace Package { public class EditorOnlyMissing : UnityEngine.MonoBehaviour {} }";
+    let last = graph.scripts.len() - 1;
+    let republish = |graph: &mut CompilerGraphExport, type_name: Option<&str>| {
+        graph
+            .compiler_inputs
+            .insert(&package_source, hash(&package_source));
+        graph.host_assemblies[0].sha256 = hash(&package_editor);
+        if let Some(type_name) = type_name {
+            graph.scripts[last].type_name = type_name.into();
+        }
+        atomic_json(&graph_file, graph).unwrap();
+    };
+    write_graph_file(
+        &project,
+        &known_package,
+        &format!("{package_text}{missing_runtime}"),
+    );
+    compile(
+        &package_editor,
+        &format!("{package_text}{editor_only_text}{missing_runtime}"),
+        &[],
+    );
+    republish(&mut graph, Some("Package.EditorOnlyMissing"));
+    let error = prepare(&baseline).unwrap_err().to_string();
+    assert!(
+        error.contains("lacks exported MonoScript type Package.EditorOnlyMissing"),
+        "missing native package type was accepted or concealed with Editor DLL: {error}"
+    );
+    // A verified native package does not make its private lifecycle messages
+    // callable. Never bypass this boundary with reflection or a lost callback.
+    let private_package = package_text.replace("protected virtual void", "private void");
+    write_graph_file(&project, &known_package, &private_package);
+    compile(&package_host, &private_package, &[]);
+    compile(
+        &package_editor,
+        &format!("{private_package}{editor_only_text}"),
+        &[],
+    );
+    republish(&mut graph, Some("Package.Second.Known"));
+    let error = prepare(&baseline).unwrap_err().to_string();
+    assert!(
+        error.contains("inaccessible; a public/protected bridge is required"),
+        "private native callback was accepted or silently dropped: {error}"
+    );
+    write_graph_file(&project, &known_package, package_text);
+    compile(&package_host, package_text, &[]);
+    compile(
+        &package_editor,
+        &format!("{package_text}{editor_only_text}"),
+        &[],
+    );
+    republish(&mut graph, None);
+    let prepared = prepare(&baseline).unwrap();
+    assert_eq!(
+        prepared.compiler.assemblies[0].name, "Assembly-CSharp",
+        "exported dependency graph was not ordered"
+    );
+    assert!(
+        !prepared.compiler.scripts.iter().any(|script| {
+            script.path == editor_only_source || script.type_name == "Package.DownloadableSample"
+        }),
+        "inactive UNITY_EDITOR-only package ScriptableObject survived Player preprocessing"
+    );
+    assert!(
+        !prepared
+            .compiler
+            .compiler_inputs
+            .at(&editor_only_source)
+            .is_empty()
+            && !prepared
+                .compiler
+                .compiler_inputs
+                .at(&editor_only_meta)
+                .is_empty(),
+        "inactive Editor script lost its configuration drift fingerprints"
+    );
+    baseline = join(&[&project, "Temp/scene-prepared/current.json"]);
+    sys::mkdir_all(&sysutil::dir(&baseline)).unwrap();
+    atomic_json(&baseline, &prepared).unwrap();
+    let cache = join(&[&project, "Temp/revisions"]);
+    let mut accepted =
+        Compiler::new(&project, &baseline, &prepared.player, &editor, &cache).unwrap();
+    assert_eq!(
+        accepted.configs["Assembly-CSharp"].native_base.to_vec(),
+        ["Package.Runtime"],
+        "restart lost the verified native package base allowlist"
+    );
+    for phase in ["Awake", "OnDestroy"] {
+        assert!(
+            accepted.proofs["Assembly-CSharp"]
+                .methods
+                .iter()
+                .any(|callback| {
+                    callback.type_name == "Baseline.Known"
+                        && callback.phase == phase
+                        && callback.synthetic
+                        && callback.order == -5000
+                }),
+            "protected inherited native {phase} lacks delayed source-owned wrapper proof"
+        );
+    }
+    let types = accepted.script_type_names(&ctx).unwrap();
+    assert_eq!(
+        types.at("10000000000000000000000000000005"),
+        "Package.Second.Known",
+        "public package GUID/type descriptor lost with ambiguous filename: {types:?}"
+    );
+    assert!(
+        matches!(accepted.compile(&ctx, None), Ok(None)),
+        "fresh prepared graph recompiled"
+    );
+    let new_guid = "10000000000000000000000000000003";
+    let added_text = r#"namespace AgentAdded { public class Known : UnityEngine.MonoBehaviour { public int revision = 7; public string label = "agent"; void Awake() { revision++; } } }"#;
+    let added = write_graph_file(&project, "Assets/NewNamespace/Known.cs", added_text);
+    write_graph_file(
+        &project,
+        "Assets/NewNamespace/Known.cs.meta",
+        &format!("guid: {new_guid}\nMonoImporter:\n  executionOrder: 12\n"),
+    );
+    let update = accepted
+        .compile(&ctx, Some(&[added.clone(), format!("{added}.meta")]))
+        .unwrap()
+        .expect("new API did not rebuild assembly and consumer");
+    assert!(
+        update.compiled_assemblies.to_vec() == ["Assembly-CSharp", "Consumer"]
+            && update.source_hashes.len() == 3,
+        "new API did not rebuild assembly and consumer: {update:?}"
+    );
+    let types = accepted.script_type_names(&ctx).unwrap();
+    assert!(
+        types.at(new_guid) == "AgentAdded.Known"
+            && types.at("10000000000000000000000000000001") == "Baseline.Known",
+        "exact per-source GUID/type binding lost with same class filename in two namespaces: {types:?}"
+    );
+    let proof = accepted.proofs["Assembly-CSharp"].clone();
+    assert!(
+        proof.methods.iter().any(|callback| {
+            callback.source == added
+                && callback.type_name == "AgentAdded.Known"
+                && callback.phase == "Awake"
+                && callback.order == 12
+        }),
+        "new authored MonoBehaviour lacks lifecycle/execution-order proof: {proof:?}"
+    );
+    // Publishing a new baseline must carry the accepted DLL SHA, expanded
+    // source set, GUID/type binding and proof rather than the initial plan.
+    let rebased = accepted.prepared_manifest(&ctx).unwrap();
+    let rebased_file = join(&[&project, "Temp/rebased/current.json"]);
+    sys::mkdir_all(&sysutil::dir(&rebased_file)).unwrap();
+    atomic_json(
+        &rebased_file,
+        &CompilerPreparationResult {
+            schema_version: 1,
+            player: update.player.clone(),
+            compiler: rebased,
+        },
+    )
+    .unwrap();
+    let mut rebased_compiler = Compiler::new(
+        &project,
+        &rebased_file,
+        &update.player,
+        &editor,
+        &join(&[&project, "Temp/rebased-revisions"]),
+    )
+    .expect("published accepted compiler baseline cannot restart");
+    assert!(
+        matches!(rebased_compiler.compile(&ctx, None), Ok(None)),
+        "published accepted sources unexpectedly recompiled"
+    );
+    assert_eq!(
+        rebased_compiler
+            .script_type_names(&ctx)
+            .unwrap()
+            .at(new_guid),
+        "AgentAdded.Known",
+        "published compiler baseline lost added GUID/type"
+    );
+    let accepted_dll = accepted.current_dlls.at("Assembly-CSharp").to_string();
+    let untampered = fs::read(&accepted_dll).unwrap();
+    let mut tampered = untampered.clone();
+    tampered.push(0);
+    sys::write(&accepted_dll, &tampered).unwrap();
+    assert!(
+        accepted
+            .prepared_manifest(&ctx)
+            .is_err_and(|error| error.to_string().contains("accepted DLL changed")),
+        "changed accepted DLL was silently rebound into a prepared baseline"
+    );
+    sys::write(&accepted_dll, &untampered).unwrap();
+    let mut restarted =
+        Compiler::new(&project, &baseline, &prepared.player, &editor, &cache).unwrap();
+    let reused = restarted
+        .compile(&ctx, None)
+        .unwrap()
+        .expect("restart lost verified extended source graph");
+    assert!(
+        reused.cache_reused
+            && reused.player == update.player
+            && reused.compiled_assemblies.is_empty(),
+        "restart lost verified extended source graph: {reused:?}"
+    );
+    assert_eq!(
+        restarted.script_type_names(&ctx).unwrap().at(new_guid),
+        "AgentAdded.Known",
+        "restart lost added script GUID"
+    );
+    let (old_player, old_scripts) = (restarted.player.clone(), restarted.manifest.scripts.len());
+    let broken = write_graph_file(
+        &project,
+        "Assets/Broken.cs",
+        "public class Broken { invalid C sharp }",
+    );
+    write_graph_file(
+        &project,
+        "Assets/Broken.cs.meta",
+        "guid: 10000000000000000000000000000004\n",
+    );
+    assert!(
+        restarted
+            .compile(&ctx, Some(std::slice::from_ref(&broken)))
+            .is_err(),
+        "broken new C# published"
+    );
+    assert!(
+        restarted.player == old_player
+            && restarted.manifest.scripts.len() == old_scripts
+            && !restarted.graph_source_assemblies().contains_key(&broken),
+        "failed extension replaced accepted Player or source graph"
+    );
+    fs::remove_file(&broken).unwrap();
+    fs::remove_file(format!("{broken}.meta")).unwrap();
+    write_graph_file(
+        &project,
+        "Assets/NewNamespace/Known.cs",
+        &added_text.replacen("AgentAdded", "RenamedNamespace", 1),
+    );
+    assert!(
+        restarted
+            .compile(&ctx, Some(std::slice::from_ref(&added)))
+            .is_err_and(|error| error.to_string().contains("removed or renamed")),
+        "accepted new script lost serialized type identity"
+    );
+    assert_eq!(
+        restarted.player, old_player,
+        "renamed serialized type replaced accepted Player"
+    );
+
+    // native-only-fresh-and-restart
+    fs::rename(
+        join(&[&project, "Assets"]),
+        join(&[&project, "Temp/SavedGameAssets"]),
+    )
+    .unwrap();
+    sys::mkdir(&join(&[&project, "Assets"])).unwrap();
+    graph.assemblies = NilVec::nil();
+    let mut native_scripts = NilVec::nil();
+    native_scripts.append(
+        graph
+            .scripts
+            .iter()
+            .filter(|script| script.host_provided)
+            .cloned(),
+    );
+    graph.scripts = native_scripts;
+    atomic_json(&graph_file, &graph).unwrap();
+    let native_baseline = join(&[&project, "Temp/native-prepared/compile.json"]);
+    let native_prepared = prepare(&native_baseline).unwrap();
+    assert!(
+        native_prepared.compiler.native_only
+            && native_prepared.compiler.assemblies.is_empty()
+            && valid_sha256(&native_prepared.compiler.native_slots_sha),
+        "empty game graph lost verified native-only provenance: {:?}",
+        native_prepared.compiler
+    );
+    let native_cache = join(&[&project, "Temp/native-revisions"]);
+    let mut native_compiler = Compiler::new(
+        &project,
+        &native_baseline,
+        &native_prepared.player,
+        &editor,
+        &native_cache,
+    )
+    .unwrap();
+    assert!(
+        matches!(native_compiler.compile(&ctx, None), Ok(None)),
+        "fresh native-only graph recompiled"
+    );
+    assert_eq!(
+        native_compiler
+            .script_type_names(&ctx)
+            .unwrap()
+            .at("10000000000000000000000000000005"),
+        "Package.Second.Known",
+        "native-only package GUID/type identity lost"
+    );
+    native_compiler.manifest.scripts = NilVec::nil();
+    assert!(
+        native_compiler
+            .script_type_names(&ctx)
+            .is_ok_and(|types| types.is_empty()),
+        "empty native-only type inventory failed"
+    );
+    let first = write_graph_file(
+        &project,
+        "Assets/First.cs",
+        "public class First : UnityEngine.MonoBehaviour {}",
+    );
+    write_graph_file(
+        &project,
+        "Assets/First.cs.meta",
+        "guid: 10000000000000000000000000000007\n",
+    );
+    assert!(
+        native_compiler
+            .compile(&ctx, Some(std::slice::from_ref(&first)))
+            .is_err(),
+        "first gameplay script silently created an unprepared native assembly slot"
+    );
+    fs::remove_file(&first).unwrap();
+    fs::remove_file(format!("{first}.meta")).unwrap();
+    let slots = join(&[
+        &sysutil::dir(&native_prepared.player),
+        "Host_Data/ScriptingAssemblies.json",
+    ]);
+    sys::write(
+        &slots,
+        br#"{"names":["UnityMicroEditor.dll"],"types":[16]}"#,
+    )
+    .unwrap();
+    assert!(
+        Compiler::new(
+            &project,
+            &native_baseline,
+            &native_prepared.player,
+            &editor,
+            &native_cache
+        )
+        .is_err_and(|error| error
+            .to_string()
+            .contains("native-only host registrations differ")),
+        "native-only registration drift accepted at restart"
+    );
+}
+
+#[test]
+fn metadata_guid_index_streams_large_model_settings() {
+    let guid = "A1000000000000000000000000000001";
+    // The colliding text starts at a reader-fragment boundary inside one
+    // importer line. Neither this nor an indented real PPtr is an asset GUID.
+    let prefix = "  curve: ";
+    let long_line = format!(
+        "{prefix}{}guid: b1000000000000000000000000000001{}",
+        "x".repeat(METADATA_GUID_BUFFER_SIZE - prefix.len()),
+        "y".repeat(2 * 1024 * 1024)
+    );
+    let data = format!(
+        "fileFormatVersion: 2\r\nguid: {guid}\r\nModelImporter:\r\n{long_line}\r\n  lastHumanDescriptionAvatarSource: {{fileID: 9000000, guid: c1000000000000000000000000000001, type: 3}}\r\n"
+    );
+    let (_guard, project) = temp();
+    let filename = write_graph_file(&project, "Assets/Model.fbx.meta", &data);
+    let before = fs::metadata(&filename).unwrap().modified().unwrap();
+    let identity = MetadataGuidIndex::new().read(&filename).unwrap();
+    assert_eq!(
+        identity,
+        MetadataGuidIdentity {
+            guid: guid.to_lowercase(),
+            sha256: sha256(data.as_bytes()),
+            bytes: data.len() as i64,
+        },
+        "incorrect complete-file identity"
+    );
+    assert!(
+        fs::read(&filename).unwrap() == data.as_bytes()
+            && fs::metadata(&filename).unwrap().modified().unwrap() == before,
+        "GUID indexing changed authored importer metadata"
+    );
+}
+
+#[test]
+fn metadata_guid_index_rejects_unsafe_identities_and_files() {
+    for kind in [
+        "duplicate-late",
+        "malformed",
+        "missing",
+        "zero",
+        "long-guid",
+        "oversize",
+        "symlink",
+        "parent-symlink",
+        "directory",
+    ] {
+        let (_guard, project) = temp();
+        let model = "Assets/Model.fbx.meta";
+        let mut filename = write_graph_file(
+            &project,
+            model,
+            "guid: a1000000000000000000000000000001\nModelImporter:\n",
+        );
+        match kind {
+            "duplicate-late" => {
+                write_graph_file(
+                    &project,
+                    model,
+                    &format!(
+                        "guid: a1000000000000000000000000000001\n  settings: {}\nguid: a1000000000000000000000000000002\n",
+                        "x".repeat(2 * 1024 * 1024)
+                    ),
+                );
+            }
+            "malformed" => {
+                write_graph_file(&project, model, "guid: invalid\n");
+            }
+            "missing" => {
+                write_graph_file(
+                    &project,
+                    model,
+                    "ModelImporter:\n  reference: {guid: a1000000000000000000000000000001}\n",
+                );
+            }
+            "zero" => {
+                write_graph_file(&project, model, "guid: 00000000000000000000000000000000\n");
+            }
+            "long-guid" => {
+                write_graph_file(
+                    &project,
+                    model,
+                    &format!("guid: {}\n", "a".repeat(METADATA_GUID_BUFFER_SIZE)),
+                );
+            }
+            "oversize" => fs::OpenOptions::new()
+                .write(true)
+                .open(&filename)
+                .unwrap()
+                .set_len(METADATA_GUID_MAXIMUM as u64 + 1)
+                .unwrap(),
+            "symlink" => {
+                filename = join(&[&project, "Assets/Alias.fbx.meta"]);
+                symlink(join(&[&project, model]), &filename).unwrap();
+            }
+            "parent-symlink" => {
+                symlink(join(&[&project, "Assets"]), join(&[&project, "Alias"])).unwrap();
+                filename = join(&[&project, "Alias/Model.fbx.meta"]);
+            }
+            _ => {
+                filename = join(&[&project, "Assets/Folder.meta"]);
+                sys::mkdir(&filename).unwrap();
+            }
+        }
+        assert!(
+            MetadataGuidIndex::new().read(&filename).is_err(),
+            "unsafe {kind} accepted"
+        );
+    }
+}
+
+struct BrokenReader;
+impl Read for BrokenReader {
+    fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+        Err(io::ErrorKind::UnexpectedEof.into())
+    }
+}
+
+#[test]
+fn metadata_guid_index_checks_complete_input_and_can_reuse_buffer() {
+    let mut index = MetadataGuidIndex::new();
+    assert!(
+        index
+            .scan(io::Cursor::new("guid: a1000000000000000000000000000001\n").chain(BrokenReader))
+            .is_err(),
+        "read failure after a valid GUID was accepted"
+    );
+    for guid in [
+        "a1000000000000000000000000000001",
+        "b1000000000000000000000000000002",
+    ] {
+        let identity = index
+            .scan(io::Cursor::new(format!("guid: {guid}")))
+            .unwrap();
+        assert_eq!(identity.guid, guid, "reused scanner retained earlier GUID");
+    }
+    let oversize =
+        io::Cursor::new("guid: a1000000000000000000000000000001\nModelImporter:\n  value: ")
+            .chain(io::repeat(0).take(METADATA_GUID_MAXIMUM as u64));
+    assert!(
+        index.scan(oversize).is_err(),
+        "streaming source exceeded its hard byte bound"
+    );
+}
+
+#[test]
+fn source_graph_addition_with_large_metadata_checks_project_wide_guid_collisions() {
+    for collision in [false, true] {
+        let (_guard, compiler) = source_extension_fixture();
+        let source = write_graph_file(&compiler.project, "Assets/Game/Added.cs", "class Added {}");
+        let guid = "10000000000000000000000000000002";
+        write_graph_file(
+            &compiler.project,
+            "Assets/Game/Added.cs.meta",
+            &format!("guid: {guid}\n"),
+        );
+        let asset_guid = if collision {
+            guid
+        } else {
+            "30000000000000000000000000000001"
+        };
+        write_graph_file(
+            &compiler.project,
+            "Assets/Model.fbx.meta",
+            &format!(
+                "fileFormatVersion: 2\r\nguid: {asset_guid}\r\nModelImporter:\r\n  extraUserProperties: {}\r\n  nestedReference: {{guid: {guid}}}\r\n",
+                "x".repeat(2 * 1024 * 1024)
+            ),
+        );
+        let accepted: CompileManifest =
+            unmarshal(&crate::util::marshal(&compiler.manifest).unwrap()).unwrap();
+        let candidate = compiler.source_graph_candidate(&[source]);
+        if collision {
+            assert!(
+                candidate
+                    .is_err_and(|error| error.to_string().contains("collides with asset metadata")),
+                "missed large model GUID collision"
+            );
+        } else {
+            assert!(
+                candidate.is_ok_and(|candidate| candidate.manifest.scripts.len() == 2),
+                "valid large model prevented new MonoScript discovery"
+            );
+        }
+        assert_eq!(
+            accepted, compiler.manifest,
+            "candidate scan changed the accepted compiler graph"
+        );
+    }
+}
+
+#[test]
+fn metadata_guid_actual_model_read_only() {
+    let Some(filename) = sdk(
+        "UME_METADATA_PARITY_FILE",
+        "set UME_METADATA_PARITY_FILE for actual large Unity model metadata",
+    ) else {
+        return;
+    };
+    let identity = MetadataGuidIndex::new().read(&filename).unwrap();
+    assert!(
+        identity.bytes > 1024 * 1024,
+        "actual fixture does not exercise former 1 MiB metadata limit"
+    );
+    assert_eq!(
+        hash(&filename),
+        identity.sha256,
+        "actual metadata complete-file SHA differs"
+    );
+}
+
+#[test]
+fn metadata_guid_actual_project_index_read_only() {
+    let Some(project) = sdk(
+        "UME_METADATA_PARITY_PROJECT",
+        "set UME_METADATA_PARITY_PROJECT for actual project-wide GUID indexing",
+    ) else {
+        return;
+    };
+    let mut index = MetadataGuidIndex::new();
+    let (mut count, mut large) = (0, 0);
+    sys::walk_dir(&join(&[&project, "Assets"]), &mut |entry| {
+        if entry.is_dir() || !entry.path.ends_with(".meta") {
+            return Ok(sys::Walk::Continue);
+        }
+        let identity = index.read(entry.path)?;
+        count += 1;
+        if identity.bytes > 1024 * 1024 {
+            large += 1;
+        }
+        Ok(sys::Walk::Continue)
+    })
+    .unwrap();
+    assert!(
+        count != 0 && large != 0,
+        "actual project does not exercise large asset metadata"
+    );
+}
+
+fn code_revision_fixture() -> (TempDir, Compiler, NilMap<String>) {
+    let (guard, root) = temp();
+    let write = |path: &str, value: &str, mode: u32| -> String {
+        let filename = write_graph_file(&root, path, value);
+        fs::set_permissions(&filename, fs::Permissions::from_mode(mode)).unwrap();
+        filename
+    };
+    let player = write("staged/Host.x86_64", "native executable", 0o700);
+    let dll = write("staged/Host_Data/Managed/Game.dll", "baseline game", 0o600);
+    write("staged/Host_Data/Managed/Host.dll", "managed bridge", 0o600);
+    write("staged/UnityPlayer.so", "native Unity", 0o600);
+    let source = write("Assets/Game.cs", "class Game {}", 0o600);
+    let helper = write(
+        "compiler/lifecycle/test/LifecycleCompiler.dll",
+        "verified lifecycle helper",
+        0o600,
+    );
+    atomic_json(
+        &join(&[&sysutil::dir(&helper), "files.json"]),
+        &NilMap::from([("LifecycleCompiler.dll", hash(&helper))]),
+    )
+    .unwrap();
+    let csc = write("sdk/csc.dll", "Roslyn", 0o600);
+    write("sdk/Microsoft.CodeAnalysis.dll", "Roslyn dependency", 0o600);
+    let dotnet = write("sdk/dotnet", "SDK executable", 0o600);
+    let generator = write("generators/Unity.SourceGenerators.dll", "generator", 0o600);
+    write("generators/Dependency.dll", "generator dependency", 0o600);
+    let mut proof = valid_proof();
+    proof.runtime_initializers = NilVec::from([initializer("Game", "Game", "Init", 2)]);
+    let sources = NilMap::from([(source.clone(), hash(&source))]);
+    let compiler = Compiler {
+        project: root.clone(),
+        cache: join(&[&root, "compiler"]),
+        player: player.clone(),
+        baseline_player: player,
+        helper,
+        csc,
+        dotnet,
+        generators: NilVec::from([generator]),
+        current_dlls: NilMap::from([("Game", dll.clone())]),
+        manifest: CompileManifest {
+            schema: 1,
+            project: root,
+            assemblies: NilVec::from([CompileAssembly {
+                name: "Game".into(),
+                sha256: hash(&dll),
+                sources: NilVec::from([source]),
+                lifecycle_barrier: proof.clone(),
+                ..Default::default()
+            }]),
+            compiler_inputs: sources.clone(),
+            ..Default::default()
+        },
+        proofs: NilMap::from([("Game", proof)]),
+        sources: sources.clone(),
+        configuration: NilMap::make(),
+        configuration_hashes: NilMap::from([("Game", "configuration".to_string())]),
+        ..Default::default()
+    };
+    (guard, compiler, sources)
+}
+fn save_code_revision_fixture(
+    compiler: &Compiler,
+    sources: &NilMap<String>,
+    key: &str,
+) -> CompileUpdate {
+    let folder = join(&[&compiler.cache, ".code-revision-test", "Player"]);
+    sys::mkdir_all(&sysutil::dir(&folder)).unwrap();
+    compiler_command(
+        &background(),
+        "",
+        "cp",
+        &["-a", &sysutil::dir(&compiler.player), &folder],
+    )
+    .unwrap();
+    let player = join(&[&folder, &sysutil::base(&compiler.player)]);
+    let dll = join(&[&folder, "Host_Data/Managed/Game.dll"]);
+    sys::write(&dll, b"verified recompiled game").unwrap();
+    let update = CompileUpdate {
+        player,
+        source_hashes: sources.clone(),
+        assemblies: NilVec::from([dll]),
+        ..Default::default()
+    };
+    compiler
+        .save_code_revision(key, &update, &compiler.proofs)
+        .unwrap();
+    update
+}
+
+#[test]
+fn code_revision_restores_verified_player_and_lifecycle_state() {
+    let (_guard, mut compiler, sources) = code_revision_fixture();
+    let key = compiler.code_revision_key(&background(), &sources).unwrap();
+    let original = save_code_revision_fixture(&compiler, &sources, &key);
+    let restored = compiler
+        .restore_code_revision(&key, &sources)
+        .expect("verified complete revision was not reused");
+    assert!(
+        restored.cache_reused
+            && restored.player == original.player
+            && restored.compiled_assemblies.is_empty()
+            && restored.assemblies == original.assemblies
+            && restored.runtime_initializers == compiler.proofs["Game"].runtime_initializers,
+        "verified complete revision was not reused: {restored:?}"
+    );
+    let proofs = compiler.proofs.clone();
+    compiler.use_code_revision(&restored, proofs);
+    assert!(
+        compiler.startup_complete
+            && compiler.player == original.player
+            && compiler.current_dlls.at("Game") == original.assemblies[0],
+        "cached graph was not installed as current compilation state"
+    );
+}
+
+#[test]
+fn code_revision_identity_tracks_sources_bridge_native_sdk_and_generators() {
+    let (_guard, mut compiler, sources) = code_revision_fixture();
+    let ctx = background();
+    let key = compiler.code_revision_key(&ctx, &sources).unwrap();
+    let mut changed_sources = NilMap::make();
+    for path in sources.keys() {
+        changed_sources.insert(path, sha256(b"changed source"));
+    }
+    assert_ne!(
+        compiler.code_revision_key(&ctx, &changed_sources).unwrap(),
+        key,
+        "changed source was not included in code revision identity"
+    );
+    let staged = sysutil::dir(&compiler.player);
+    for path in [
+        join(&[&staged, "Host_Data/Managed/Host.dll"]),
+        join(&[&staged, "UnityPlayer.so"]),
+        join(&[&sysutil::dir(&compiler.csc), "Microsoft.CodeAnalysis.dll"]),
+        join(&[&sysutil::dir(&compiler.generators[0]), "Dependency.dll"]),
+    ] {
+        let original = fs::read(&path).unwrap();
+        sys::write(&path, b"changed dependency").unwrap();
+        assert_ne!(
+            compiler.code_revision_key(&ctx, &sources).unwrap(),
+            key,
+            "changed dependency did not invalidate startup revision: {path}"
+        );
+        sys::write(&path, &original).unwrap();
+    }
+    assert_eq!(compiler.code_revision_key(&ctx, &sources).unwrap(), key);
+    compiler
+        .configuration_hashes
+        .insert("Game", "changed assembly configuration".to_string());
+    assert_ne!(
+        compiler.code_revision_key(&ctx, &sources).unwrap(),
+        key,
+        "changed assembly configuration did not invalidate revision"
+    );
+}
+
+#[test]
+fn code_revision_rejects_corrupt_dll_added_files_and_invalid_proof() {
+    for kind in ["dll", "native", "added-dll", "proof", "escape", "symlink"] {
+        let (_guard, mut compiler, sources) = code_revision_fixture();
+        let key = compiler.code_revision_key(&background(), &sources).unwrap();
+        let update = save_code_revision_fixture(&compiler, &sources, &key);
+        let path = compiler.code_revision_path(&key);
+        let mut entry: CodeRevision = read_json_file(&path).unwrap();
+        match kind {
+            "dll" => sys::write(&update.assemblies[0], b"corrupted output").unwrap(),
+            "native" => sys::write(
+                &join(&[&sysutil::dir(&update.player), "UnityPlayer.so"]),
+                b"corrupted output",
+            )
+            .unwrap(),
+            "added-dll" => sys::write(
+                &join(&[&sysutil::dir(&update.assemblies[0]), "Unexpected.dll"]),
+                b"unverified assembly",
+            )
+            .unwrap(),
+            "proof" => {
+                let mut proof = entry.proofs["Game"].clone();
+                proof.verified = false;
+                entry.proofs.insert("Game", proof);
+            }
+            "escape" => entry.player = "../staged/Host.x86_64".into(),
+            _ => {
+                fs::remove_file(&update.assemblies[0]).unwrap();
+                symlink(compiler.current_dlls.at("Game"), &update.assemblies[0]).unwrap();
+            }
+        }
+        atomic_json(&path, &entry).unwrap();
+        assert!(
+            compiler.restore_code_revision(&key, &sources).is_none(),
+            "corrupt cached {kind} selected a Player"
+        );
+    }
+}
+
+#[test]
+fn code_revision_tracks_pinned_netcode_payload() {
+    let (_guard, mut compiler, sources) = code_revision_fixture();
+    let ctx = background();
+    let helper = write_graph_file(
+        &compiler.cache,
+        "fake-netcode/Unity.Netcode.Editor.CodeGen.dll",
+        "processed NGO helper",
+    );
+    compiler.netcode = Some(NetcodeProcessor {
+        helper: helper.clone(),
+        files: NilMap::from([(sysutil::base(&helper), hash(&helper))]),
+        key: "verified-netcode-payload".into(),
+        ..Default::default()
+    });
+    compiler.manifest.assemblies[0].references = strs(&["Unity.Netcode.Runtime"]);
+    let key = compiler.code_revision_key(&ctx, &sources).unwrap();
+    compiler.netcode.as_mut().unwrap().key = "new-verified-netcode-payload".into();
+    assert_ne!(
+        compiler.code_revision_key(&ctx, &sources).unwrap(),
+        key,
+        "changed NGO processed-output fingerprint did not invalidate graph"
+    );
+    sys::write(&helper, b"tampered NGO payload").unwrap();
+    assert!(
+        compiler
+            .code_revision_key(&ctx, &sources)
+            .is_err_and(|error| error.to_string().contains("dependency changed")),
+        "corrupt postprocessor allowed revision reuse"
+    );
+}
+
+#[test]
+fn script_type_inventory_reuse_requires_exact_dll_and_bindings() {
+    let (_guard, mut compiler, _) = code_revision_fixture();
+    compiler.manifest.scripts =
+        manifest_json(r#"{"scripts":[{"guid":"script-guid","path":"Game.cs","assembly":"Game"}]}"#)
+            .scripts;
+    let assemblies = BTreeMap::from([(
+        "Game".to_string(),
+        compiler.current_dlls.at("Game").to_string(),
+    )]);
+    let helper = compiler.helper.clone();
+    let key = compiler
+        .script_type_cache_key(&helper, &assemblies)
+        .unwrap();
+    let expected = NilMap::from([("script-guid", "Namespace.Game".to_string())]);
+    compiler.save_script_type_cache(&key, &expected).unwrap();
+    // The fixture's fake dotnet executable cannot run. Reuse must satisfy
+    // script_type_names entirely from verified metadata produced previously.
+    assert_eq!(
+        compiler.script_type_names(&background()).unwrap(),
+        expected,
+        "unchanged defining DLL inventory was not reused"
+    );
+    compiler.manifest.scripts[0].guid = "changed-guid".into();
+    assert_ne!(
+        compiler
+            .script_type_cache_key(&helper, &assemblies)
+            .unwrap(),
+        key,
+        "changed GUID binding reused stale type inventory"
+    );
+    compiler.manifest.scripts[0].guid = "script-guid".into();
+    compiler.expected_types = NilMap::from([(
+        "Game",
+        NilMap::from([("Namespace.Other", "script-guid".to_string())]),
+    )]);
+    assert_ne!(
+        compiler
+            .script_type_cache_key(&helper, &assemblies)
+            .unwrap(),
+        key,
+        "changed required type binding reused inventory"
+    );
+    compiler.expected_types = NilMap::nil();
+    assert_eq!(
+        compiler
+            .script_type_cache_key(&helper, &assemblies)
+            .unwrap(),
+        key
+    );
+    sys::write(compiler.current_dlls.at("Game"), b"changed real DLL output").unwrap();
+    assert_ne!(
+        compiler
+            .script_type_cache_key(&helper, &assemblies)
+            .unwrap(),
+        key,
+        "changed compiled DLL reused old type inventory"
+    );
+}
+
+#[test]
+fn script_type_inventory_rejects_corruption_foreign_guid_and_symlink() {
+    for kind in ["corrupt", "foreign-guid", "symlink"] {
+        let (_guard, mut compiler, _) = code_revision_fixture();
+        compiler.manifest.scripts =
+            manifest_json(r#"{"scripts":[{"guid":"known-guid","assembly":"Game"}]}"#).scripts;
+        let key = "test-key";
+        let mut types = NilMap::from([("known-guid", "Namespace.Game".to_string())]);
+        if kind == "foreign-guid" {
+            types.insert("foreign-guid", "Namespace.Other".to_string());
+        }
+        compiler.save_script_type_cache(key, &types).unwrap();
+        if kind != "foreign-guid" {
+            assert!(
+                compiler.read_script_type_cache(key).is_some(),
+                "valid inventory rejected"
+            );
+        }
+        let path = join(&[&compiler.cache, "script-types", key, "types.json"]);
+        match kind {
+            "corrupt" => sys::write(&path, br#"{"known-guid":"Namespace.Corrupt"}"#).unwrap(),
+            "symlink" => {
+                let outside = join(&[&compiler.project, "unowned.json"]);
+                fs::rename(&path, &outside).unwrap();
+                symlink(&outside, &path).unwrap();
+            }
+            _ => {}
+        }
+        assert!(
+            compiler.read_script_type_cache(key).is_none(),
+            "corrupt cached {kind} was reused"
+        );
+    }
+}
+
+#[test]
+fn netcode_postprocessor_sdk() {
+    let Some(editor) = sdk(
+        "UME_NETCODE_SDK",
+        "set UME_NETCODE_SDK to Unity executable; only its SDK/package ILPP is used",
+    ) else {
+        return;
+    };
+    let Some(project) = sdk(
+        "UNITY_MICRO_EDITOR_TEST_PROJECT",
+        "set UNITY_MICRO_EDITOR_TEST_PROJECT to the prepared game project for this integration check",
+    ) else {
+        return;
+    };
+    let project = crate::project::lexpath::abs(&project).unwrap();
+    let data = join(&[&sysutil::dir(&editor), "Data"]);
+    let csc = sys::glob_lossy(&join(&[&data, "DotNetSdk/sdk/*/Roslyn/bincore/csc.dll"]));
+    assert_eq!(csc.len(), 1, "expected one pinned SDK");
+    let (_guard, root) = temp();
+    let ctx = background();
+    let mut compiler = Compiler {
+        project: project.clone(),
+        editor,
+        cache: join(&[&root, "compiler"]),
+        player: join(&[&project, "Builds/CLIPlayHybridHost/UnityPlayHost.x86_64"]),
+        dotnet: join(&[&data, "DotNetSdk/dotnet"]),
+        csc: csc[0].clone(),
+        configs: NilMap::from([(
+            "NetcodeFixture",
+            AssemblyConfig {
+                name: "NetcodeFixture".into(),
+                defines: strs(&["UNITY_STANDALONE_LINUX"]),
+                ..Default::default()
+            },
+        )]),
+        ..Default::default()
+    };
+    let processor = compiler.prepare_netcode_processor(&ctx).unwrap();
+    let bcl = join(&[&data, "MonoBleedingEdge/lib/mono/unityaot-linux"]);
+    let mut references = sys::glob_lossy(&join(&[&bcl, "*.dll"]));
+    references.extend(sys::glob_lossy(&join(&[&bcl, "Facades/*.dll"])));
+    references.extend(sys::glob_lossy(&join(&[
+        &project,
+        "Builds/CLIPlayHybridHost/UnityPlayHost_Data/Managed/*.dll",
+    ])));
+    let refs = deduplicate_references(&references);
+    let source = write_graph_file(
+        &root,
+        "NetcodeFixture.cs",
+        "using Unity.Netcode;\npublic sealed class NetcodeFixture : NetworkBehaviour {\n public readonly NetworkVariable<int> Counter = new NetworkVariable<int>();\n [Rpc(SendTo.Server)] public void UseRpc(int amount, RpcParams rpc = default) { Counter.Value += amount; }\n}",
+    );
+    let dll = join(&[&root, "NetcodeFixture.dll"]);
+    let mut arguments = vec![
+        compiler.csc.clone(),
+        "-nologo".into(),
+        "-target:library".into(),
+        "-nostdlib+".into(),
+        "-debug:portable".into(),
+        format!("-out:{dll}"),
+    ];
+    arguments.extend(
+        refs.iter()
+            .map(|reference| format!("-reference:{reference}")),
+    );
+    arguments.push(source);
+    let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+    compiler_command(&ctx, &root, &compiler.dotnet, &arguments).unwrap();
+    let (processed, next_proof) = compiler
+        .postprocess_netcode(
+            &ctx,
+            &root,
+            &dll,
+            &assembly("NetcodeFixture", &[], &["Unity.Netcode.Runtime"]),
+            &refs,
+            valid_proof(),
+        )
+        .unwrap();
+    let result: serde_json::Value = read_json_file(&join(&[&root, "netcode-proof.json"])).unwrap();
+    let rpc = &result["rpcs"][0];
+    let calls = |name: &str| rpc[name].as_array().map_or(0, Vec::len);
+    assert!(
+        result["rpcCount"] == 1
+            && result["rpcs"].as_array().map_or(0, Vec::len) == 1
+            && rpc["Method"] == "UseRpc"
+            && rpc["Handler"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("__rpc_handler_"))
+            && calls("SendCalls") >= 2
+            && calls("WriteCalls") != 0
+            && calls("ReadCalls") != 0,
+        "RPC send/receive payload code was not generated: {result}"
+    );
+    assert!(
+        valid_lifecycle_proof(&next_proof, "NetcodeFixture")
+            && next_proof.runtime_initializers.len() == 1
+            && next_proof.runtime_initializers[0].method_name
+                == "__UnityPlay_RuntimeInitialize_Netcode",
+        "generated NetworkVariable serializers have no public initialization bridge: {next_proof:?}"
+    );
+    assert_ne!(
+        hash(&dll),
+        hash(&processed),
+        "ILPP returned the original plain Roslyn assembly"
+    );
+    assert_eq!(
+        compiler.prepare_netcode_processor(&ctx).unwrap().helper,
+        processor.helper,
+        "verified SDK helper cache was not reused"
+    );
+    let input = write_graph_file(&root, "PinnedProcessorInput", "original");
+    compiler
+        .netcode
+        .as_mut()
+        .unwrap()
+        .inputs
+        .insert(&input, hash(&input));
+    sys::write(&input, b"modified").unwrap();
+    assert!(
+        compiler.prepare_netcode_processor(&ctx).is_err(),
+        "postprocessor dependency drift silently reused compiled network code"
+    );
+}
+
+#[test]
+fn source_initializer_overlay_retains_native_engine_rows_once() {
+    let (_guard, project) = temp();
+    let path = write_graph_file(
+        &project,
+        "Temp/RuntimeInitializeOnLoads.json",
+        r#"{"root":[{"assemblyName":"Game","methodName":"Initialize"},{"assemblyName":"Unity.InputSystem","methodName":"RuntimeInitialize"}],"extra":{"profile":1}}"#,
+    );
+    remove_source_native_initializers(&path, &[assembly("Game", &[], &[])]).unwrap();
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "{\"extra\":{\"profile\":1},\"root\":[{\"assemblyName\":\"Unity.InputSystem\",\"methodName\":\"RuntimeInitialize\"}]}\n",
+        "native ownership table was clobbered"
+    );
+    remove_source_native_initializers(&join(&[&project, "Temp/absent.json"]), &[]).unwrap();
+}
+
+#[test]
+fn values_keep_null_and_empty_apart() {
+    #[derive(serde::Serialize, serde::Deserialize, Default, PartialEq, Debug)]
+    #[serde(default)]
+    struct Document {
+        list: NilVec<String>,
+        map: NilMap<String>,
+    }
+    let nil: Document = unmarshal(br#"{"list":null}"#).unwrap();
+    assert_eq!(
+        crate::util::marshal(&nil).unwrap(),
+        br#"{"list":null,"map":null}"#
+    );
+    let empty: Document = unmarshal(br#"{"list":[],"map":{}}"#).unwrap();
+    assert_eq!(
+        crate::util::marshal(&empty).unwrap(),
+        br#"{"list":[],"map":{}}"#
+    );
+    assert_ne!(nil, empty);
+    let mut appended = NilVec::<String>::nil();
+    appended.append(Vec::new());
+    assert!(
+        appended.is_nil(),
+        "append of nothing must keep a nil slice nil"
+    );
+    assert_eq!(float_layout(0.25).to_string(), "0.25");
+    assert_eq!(float_layout(3.0).to_string(), "3");
+    assert_eq!(float_layout(0.0000001234).to_string(), "1.234e-7");
+    assert_eq!(float_layout(1e21).to_string(), "1e+21");
+}
+
+#[test]
+fn glob_and_match() {
+    for (pattern, name, expected) in [
+        ("*.dll", "a.dll", true),
+        ("*.dll", "a.dlls", false),
+        ("UnityEngine*.dll", "UnityEngine.CoreModule.dll", true),
+        ("a?c", "abc", true),
+        ("a[b-d]c", "acc", true),
+        ("a[^b-d]c", "acc", false),
+        ("a\\*c", "a*c", true),
+        ("*", "a/b", false),
+        ("com.unity.x@*", "com.unity.x@1.2.3", true),
+    ] {
+        assert_eq!(
+            sys::path_match(pattern, name).unwrap(),
+            expected,
+            "{pattern} {name}"
+        );
+    }
+    assert!(sys::path_match("a[", "a").is_err());
+    let (_guard, root) = temp();
+    for path in [
+        "sdk/9.0/Roslyn/csc.dll",
+        "sdk/8.0/Roslyn/csc.dll",
+        "sdk/readme.txt",
+    ] {
+        write_graph_file(&root, path, "x");
+    }
+    assert_eq!(
+        sys::glob(&join(&[&root, "sdk/*/Roslyn/csc.dll"])).unwrap(),
+        [
+            join(&[&root, "sdk/8.0/Roslyn/csc.dll"]),
+            join(&[&root, "sdk/9.0/Roslyn/csc.dll"])
+        ]
+    );
+    assert!(
+        sys::glob(&join(&[&root, "absent/*.dll"]))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn compiler_command_reports_failures_and_cancellation() {
+    let ctx = background();
+    assert_eq!(
+        compiler_command(&ctx, "", "sh", &["-c", "printf out; printf err >&2"]).unwrap(),
+        b"outerr"
+    );
+    let error = compiler_command(&ctx, "", "sh", &["-c", "echo no; exit 3"]).unwrap_err();
+    assert_eq!(error.message, "sh: exit status 3\nno\n");
+    assert_eq!(error.output, b"no\n");
+    let error = compiler_command(&ctx, "", "/nonexistent/tool", &[]).unwrap_err();
+    assert_eq!(
+        error.message,
+        "tool: fork/exec /nonexistent/tool: no such file or directory\n"
+    );
+    let error = compiler_command(&ctx, "", "no-such-compiler-tool", &[]).unwrap_err();
+    assert_eq!(
+        error.message,
+        "no-such-compiler-tool: exec: \"no-such-compiler-tool\": executable file not found in $PATH\n"
+    );
+    let (_guard, directory) = temp();
+    assert_eq!(
+        compiler_command(
+            &ctx,
+            &directory,
+            "sh",
+            &["-c", "printf %s \"$PWD:$DOTNET_NOLOGO\""]
+        )
+        .unwrap(),
+        format!("{directory}:1").as_bytes()
+    );
+    let cancelled = ctx.with_cancel();
+    cancelled.cancel();
+    assert_eq!(
+        compiler_command(&cancelled, "", "sh", &["-c", "true"])
+            .unwrap_err()
+            .message,
+        "sh: canceled\n"
+    );
+    // The whole process group dies with the context, grandchildren included.
+    let timed = ctx.with_timeout(std::time::Duration::from_millis(200));
+    let started = std::time::Instant::now();
+    let error = compiler_command(&timed, "", "sh", &["-c", "sleep 30 & sleep 30"]).unwrap_err();
+    assert_eq!(error.message, "sh: signal: killed\n");
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
