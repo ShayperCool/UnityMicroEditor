@@ -1026,7 +1026,7 @@ fn runtime_tools() -> Vec<StaticTool> {
                         "arguments",
                         map(
                             ANY,
-                            "start/reset: scene, gameArguments[], contentScenes[], contentPrefabs[], rebuildHost",
+                            "start/reset: scene, gameArguments[], contentScenes[], contentPrefabs[], addressables, rebuildHost",
                         ),
                         false,
                     ),

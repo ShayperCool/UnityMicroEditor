@@ -106,14 +106,18 @@ pub struct Launch {
     pub content_scenes: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub content_prefabs: Vec<String>,
+    /// `false` leaves the project's Addressables keys to the host's built content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addressables: Option<bool>,
 }
 impl Launch {
     fn is_empty(&self) -> bool {
         self.game_arguments.is_empty()
             && self.content_scenes.is_empty()
             && self.content_prefabs.is_empty()
+            && self.addressables.is_none()
     }
-    /// Reads `gameArguments`, `contentScenes` and `contentPrefabs` from the
+    /// Reads `gameArguments`, `contentScenes`, `contentPrefabs` and `addressables` from the
     /// `arguments` of a start/reset. A list that is given replaces the
     /// previous one; `None` when the request names none of them.
     fn from_arguments(previous: &Launch, raw: Option<&Vec<u8>>) -> Result<Option<Launch>> {
@@ -128,6 +132,15 @@ impl Launch {
         let mut launch = previous.clone();
         let mut given = false;
         for member in &members {
+            if member.key == "addressables" {
+                launch.addressables = match &member.value {
+                    Json::Null => None,
+                    Json::Bool(enabled) => Some(*enabled),
+                    _ => return Err(Error::new("addressables must be a boolean")),
+                };
+                given = true;
+                continue;
+            }
             let target = match member.key.as_str() {
                 "gameArguments" => &mut launch.game_arguments,
                 "contentScenes" => &mut launch.content_scenes,
@@ -477,6 +490,9 @@ impl Controller {
             for value in values {
                 command.args([flag, value]);
             }
+        }
+        if inner.launch.addressables == Some(false) {
+            command.arg("--no-addressables");
         }
         if !inner.launch.game_arguments.is_empty() {
             command.arg("--").args(&inner.launch.game_arguments);

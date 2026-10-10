@@ -1,7 +1,9 @@
 //! Game arguments and the immutable additive content routes.
 use super::{
-    BaselineBuild, LaunchOptions, apply_compiled_bindings, assemblies_of,
-    json::{First, members, read_document, set_list},
+    BaselineBuild, LaunchOptions,
+    addressables::AddressableRoute,
+    apply_compiled_bindings, assemblies_of,
+    json::{First, members, read_document, set_list, set_strings},
     mkdir_all,
     noop::scene_runtime_equal,
     os_error, read_file, text_error, wrap,
@@ -47,6 +49,9 @@ pub struct RawContentRoutes {
     pub schema_version: i64,
     pub project: String,
     pub scenes: Option<Vec<RawSceneRoute>>,
+    /// Addressable keys served from sources; scenes among them have a route.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub addressables: Vec<AddressableRoute>,
 }
 impl RawContentRoutes {
     /// Reads and decodes a route snapshot file.
@@ -61,7 +66,7 @@ impl RawContentRoutes {
         };
         jsondoc::decode_struct(
             root,
-            &["schemaVersion", "project", "scenes"],
+            &["schemaVersion", "project", "scenes", "addressables"],
             |index, member| match index {
                 0 => jsondoc::set_int(
                     &mut routes.schema_version,
@@ -69,13 +74,25 @@ impl RawContentRoutes {
                     at("schemaVersion"),
                 ),
                 1 => jsondoc::set_string(&mut routes.project, &member.value, at("project")),
-                _ => set_list(
+                2 => set_list(
                     &mut routes.scenes,
                     &member.value,
                     at("scenes"),
                     "array",
                     scene_route,
                 ),
+                _ => {
+                    let mut list = None;
+                    let result = set_list(
+                        &mut list,
+                        &member.value,
+                        at("addressables"),
+                        "array",
+                        addressable_route,
+                    );
+                    routes.addressables = list.unwrap_or_default();
+                    result
+                }
             },
         )
         .map_err(text_error)?;
@@ -103,6 +120,39 @@ fn scene_route(route: &mut RawSceneRoute, value: &Json) -> Result<(), String> {
             0 => jsondoc::set_string(&mut route.guid, &member.value, at("scenes.guid")),
             1 => jsondoc::set_string(&mut route.manifest, &member.value, at("scenes.manifest")),
             _ => jsondoc::set_string(&mut route.sha256, &member.value, at("scenes.sha256")),
+        },
+    ));
+    first.finish()
+}
+
+fn addressable_route(route: &mut AddressableRoute, value: &Json) -> Result<(), String> {
+    let at = |field| Target {
+        strukt: "addressableRoute",
+        field,
+    };
+    let fields = members(
+        value,
+        Target {
+            strukt: "rawContentRoutes",
+            field: "addressables",
+        },
+        "addressableRoute",
+    )?;
+    let mut first = First::default();
+    first.note(jsondoc::decode_struct(
+        fields,
+        &["guid", "address", "labels", "path", "scene"],
+        |index, member| match index {
+            0 => jsondoc::set_string(&mut route.guid, &member.value, at("guid")),
+            1 => jsondoc::set_string(&mut route.address, &member.value, at("address")),
+            2 => {
+                let mut labels = None;
+                let result = set_strings(&mut labels, &member.value, at("labels"));
+                route.labels = labels.unwrap_or_default();
+                result
+            }
+            3 => jsondoc::set_string(&mut route.path, &member.value, at("path")),
+            _ => jsondoc::set_bool(&mut route.scene, &member.value, at("scene")),
         },
     ));
     first.finish()
@@ -153,6 +203,7 @@ pub type ContentImporters = BTreeMap<String, ContentImporter>;
 
 /// Prepares every declared content scene and publishes their route snapshot.
 /// `initializers` is the baseline's list of objects (`Value::Null` when absent).
+/// On an error, `failed` is the GUID of the scene that could not be prepared.
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_content_routes(
     ctx: &Context,
@@ -163,12 +214,16 @@ pub fn prepare_content_routes(
     script_types: &BTreeMap<String, String>,
     importers: &mut ContentImporters,
     changed_paths: &[String],
+    failed: &mut String,
 ) -> Result<String> {
     let mut routes = RawContentRoutes {
         schema_version: 1,
         project: opts.project.clone(),
-        scenes: None,
+        // The Player requires a scene list, even an empty one.
+        scenes: (!opts.addressables.is_empty()).then(Vec::new),
+        addressables: opts.addressables.clone(),
     };
+    failed.clear();
     let mut seen = BTreeSet::new();
     let assemblies = player_assembly_paths(&baseline.player, &baseline.manifest)?;
     for declaration in &opts.content_scenes {
@@ -176,6 +231,7 @@ pub fn prepare_content_routes(
         if !seen.insert(guid.clone()) {
             bail!("duplicate content scene GUID {guid}");
         }
+        failed.clone_from(&guid);
         let metadata = read_file(&format!("{}.meta", sysutil::join(&[&opts.project, &scene])))?;
         if registry::meta_guid(&metadata).ok().as_deref() != Some(guid.as_str()) {
             bail!("content scene GUID disagrees with authored metadata: {scene}");
@@ -233,6 +289,7 @@ pub fn prepare_content_routes(
                 sha256: hash,
             });
     }
+    failed.clear();
     publish_content_routes(&opts.output, &routes)
 }
 
@@ -305,7 +362,10 @@ pub fn content_routes_runtime_equal(previous: &str, next: &str) -> Result<bool> 
         a.scenes.as_deref().unwrap_or(&[]),
         b.scenes.as_deref().unwrap_or(&[]),
     );
-    if a.project != b.project || old_scenes.len() != new_scenes.len() {
+    if a.project != b.project
+        || a.addressables != b.addressables
+        || old_scenes.len() != new_scenes.len()
+    {
         return Ok(false);
     }
     let old: BTreeMap<&str, &RawSceneRoute> = old_scenes

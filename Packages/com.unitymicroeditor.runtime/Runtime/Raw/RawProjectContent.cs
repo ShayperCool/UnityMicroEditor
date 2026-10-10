@@ -14,6 +14,7 @@ namespace UnityMicroEditor.Raw
             public int schemaVersion;
             public string project;
             public Route[] scenes;
+            public Address[] addressables;
         }
         [Serializable] private sealed class Route
         {
@@ -22,7 +23,19 @@ namespace UnityMicroEditor.Raw
             public string sha256;
         }
 
+        /// <summary>An Addressables key the session serves from an authored source.</summary>
+        [Serializable] internal sealed class Address
+        {
+            public string guid;
+            public string address;
+            public string[] labels;
+            public string path;
+            public bool scene;
+        }
+
         private static RawSceneLoader.LiveSession session;
+        // Scenes another owner loaded and unloads; their content is ours.
+        private static readonly HashSet<Scene> adopted = new HashSet<Scene>();
         private static readonly Dictionary<string, Route> routes = new Dictionary<string, Route>(StringComparer.Ordinal);
         private static readonly Dictionary<string, Scene> loaded = new Dictionary<string, Scene>(StringComparer.Ordinal);
 
@@ -40,9 +53,31 @@ namespace UnityMicroEditor.Raw
                     || validated.ContainsKey(route.guid)) throw new InvalidDataException("Invalid or duplicate raw content scene route.");
                 validated.Add(route.guid, route);
             }
-            routes.Clear(); loaded.Clear();
+            foreach (Address address in value.addressables ?? Array.Empty<Address>())
+                if (address == null || !Hex(address.guid, 32) || string.IsNullOrEmpty(address.address) || string.IsNullOrEmpty(address.path)
+                    || address.scene && !validated.ContainsKey(address.guid)) throw new InvalidDataException("Invalid addressable content route.");
+            routes.Clear(); loaded.Clear(); adopted.Clear();
             foreach (var entry in validated) routes.Add(entry.Key, entry.Value);
             session = owner;
+            SceneManager.sceneUnloaded += ReleaseAdopted;
+#if UNITY_MICRO_EDITOR_ADDRESSABLES
+            try { RawAddressables.Install(value.addressables ?? Array.Empty<Address>()); }
+            catch { Release(owner); throw; }
+#endif
+        }
+
+        /// <summary>Builds a registered scene into an empty scene its caller loaded.</summary>
+        internal static void LoadSceneInto(string guid, Scene target)
+        {
+            if (session == null || !routes.TryGetValue(guid ?? "", out Route route))
+                throw new InvalidOperationException("Scene is not a registered raw content scene: " + guid);
+            session.LoadAdditive(route.manifest, route.sha256, target);
+            adopted.Add(target);
+        }
+
+        private static void ReleaseAdopted(Scene scene)
+        {
+            if (session != null && adopted.Remove(scene)) session.UnloadAdditive(scene);
         }
 
         public static bool TryLoadScene(string guid, out Scene scene)
@@ -80,12 +115,16 @@ namespace UnityMicroEditor.Raw
         internal static void Release(RawSceneLoader.LiveSession owner)
         {
             if (session != owner) return;
-            session = null; routes.Clear(); loaded.Clear();
+#if UNITY_MICRO_EDITOR_ADDRESSABLES
+            RawAddressables.Uninstall();
+#endif
+            SceneManager.sceneUnloaded -= ReleaseAdopted;
+            session = null; routes.Clear(); loaded.Clear(); adopted.Clear();
         }
 
         internal static void ForgetLoadedScenes(RawSceneLoader.LiveSession owner)
         {
-            if (session == owner) loaded.Clear();
+            if (session == owner) { loaded.Clear(); adopted.Clear(); }
         }
 
         private static bool Hex(string value, int length)

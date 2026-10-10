@@ -1,6 +1,7 @@
 //! The `run` command. It stages the prepared host, compiles the project's
 //! scripts, prepares the scene, owns one Player process and, with `--watch`,
 //! turns source changes into live patches, reloads or Player restarts.
+mod addressables;
 mod json;
 mod noop;
 mod patch;
@@ -14,6 +15,7 @@ mod oracle_tests;
 #[cfg(test)]
 mod tests;
 
+pub use addressables::AddressableRoute;
 pub use noop::{normalize_scene_dependencies, scene_runtime_equal};
 pub use patch::{
     SCENE_ROOTS_CLASS, decode_patch_json, make_scene_patch, patch_integer, patch_reference,
@@ -53,7 +55,7 @@ use anyhow::{Result, anyhow, bail};
 use serde::Serialize;
 use serde_json::value::RawValue;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Condvar, Mutex},
     thread::JoinHandle,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -70,6 +72,11 @@ pub struct LaunchOptions {
     pub prepared: String,
     pub content_scenes: Vec<String>,
     pub content_prefabs: Vec<String>,
+    /// Addressable scenes and prefabs served from sources, and the content
+    /// declarations that exist only because of them.
+    pub addressables: Vec<AddressableRoute>,
+    pub addressable_content: Vec<String>,
+    pub no_addressables: bool,
     pub builtin_shaders: Vec<String>,
     pub game_arguments: Vec<String>,
     pub watch: bool,
@@ -82,6 +89,10 @@ pub struct LaunchOptions {
     pub fps: i64,
 }
 impl LaunchOptions {
+    /// Whether the Player gets a content route snapshot.
+    pub fn has_content_routes(&self) -> bool {
+        !self.content_scenes.is_empty() || !self.addressables.is_empty()
+    }
     /// The part the native importer reads.
     pub fn native(&self) -> NativeOptions {
         NativeOptions {
@@ -388,6 +399,11 @@ pub fn run_cli(args: &[String]) -> Result<()> {
         string_list,
         "runtime-addressed Assets/...prefab; repeat for additional prefabs",
     );
+    flags.bool(
+        "no-addressables",
+        false,
+        "leave the project's Addressables keys to the host's built content",
+    );
     flags.list(
         "builtin-shader",
         string_list,
@@ -426,6 +442,9 @@ pub fn run_cli(args: &[String]) -> Result<()> {
         prepared: flags.get_string("prepared"),
         content_scenes: flags.get_list("content-scene"),
         content_prefabs: flags.get_list("content-prefab"),
+        addressables: Vec::new(),
+        addressable_content: Vec::new(),
+        no_addressables: flags.get_bool("no-addressables"),
         builtin_shaders: flags.get_list("builtin-shader"),
         game_arguments: game_args,
         watch: flags.get_bool("watch"),
@@ -493,6 +512,100 @@ pub fn run_cli(args: &[String]) -> Result<()> {
     result
 }
 
+/// Adds the project's addressable scenes and prefabs to the content the
+/// session prepares. Returns the settings and group assets they came from.
+fn adopt_addressables(opts: &mut LaunchOptions) -> Vec<String> {
+    if opts.no_addressables {
+        return Vec::new();
+    }
+    let found = match addressables::discover(&opts.project) {
+        Ok(found) => found,
+        Err(error) => {
+            Event::new("addressables-skipped")
+                .with("error", &err_text(&error))
+                .emit();
+            return Vec::new();
+        }
+    };
+    let mut scenes: BTreeSet<String> = opts
+        .content_scenes
+        .iter()
+        .filter_map(|declaration| parse_content_scene(declaration).ok())
+        .map(|(guid, _)| guid)
+        .collect();
+    for entry in &found.entries {
+        if entry.scene {
+            if scenes.insert(entry.guid.clone()) {
+                opts.content_scenes
+                    .push(format!("{}={}", entry.guid, entry.path));
+                opts.addressable_content.push(entry.guid.clone());
+            }
+        } else if !opts.content_prefabs.contains(&entry.path) {
+            opts.content_prefabs.push(entry.path.clone());
+            opts.addressable_content.push(entry.path.clone());
+        }
+    }
+    opts.addressables = found.entries;
+    if !found.unsupported.is_empty() {
+        Event::new("addressables-skipped")
+            .with("paths", &found.unsupported)
+            .with(
+                "error",
+                "only scenes and prefabs are served from sources; these stay with the host's built content",
+            )
+            .emit();
+    }
+    found.sources
+}
+
+/// Gives up the prefabs that were added for Addressables after they failed to
+/// prepare. False when there is none, so the error is the caller's.
+fn drop_addressable_prefabs(opts: &mut LaunchOptions, error: &anyhow::Error) -> bool {
+    let dropped: Vec<String> = opts
+        .addressable_content
+        .iter()
+        .filter(|path| opts.content_prefabs.contains(path))
+        .cloned()
+        .collect();
+    if dropped.is_empty() {
+        return false;
+    }
+    opts.content_prefabs.retain(|path| !dropped.contains(path));
+    opts.addressable_content
+        .retain(|path| !dropped.contains(path));
+    opts.addressables
+        .retain(|entry| entry.scene || !dropped.contains(&entry.path));
+    Event::new("addressables-skipped")
+        .with("paths", &dropped)
+        .with("error", &err_text(error))
+        .emit();
+    true
+}
+
+/// Gives up one scene that was added for Addressables after it failed to prepare.
+fn drop_addressable_scene(opts: &mut LaunchOptions, guid: &str, error: &anyhow::Error) -> bool {
+    let Some(index) = opts.addressable_content.iter().position(|g| g == guid) else {
+        return false;
+    };
+    opts.addressable_content.remove(index);
+    opts.content_scenes
+        .retain(|declaration| declaration.split('=').next() != Some(guid));
+    let mut paths = Vec::new();
+    opts.addressables.retain(|entry| {
+        if entry.guid != guid {
+            return true;
+        }
+        paths.push(entry.path.clone());
+        false
+    });
+    paths.dedup();
+    Event::new("addressables-skipped")
+        .with("paths", &paths)
+        .with("error", &err_text(error))
+        .emit();
+    true
+}
+
 fn run_session(
     ctx: &Context,
     opts: &mut LaunchOptions,
@@ -520,30 +633,40 @@ fn run_session(
         baseline.player = compiled.player.clone();
     }
     let mut script_types = compiler.script_type_names(ctx)?;
-    let session = Arc::new(Session::new(project::Options {
-        project: project.clone(),
-        manifest: baseline.manifest.clone(),
-        native_catalog: baseline.native_import.catalog.clone(),
-        scene: opts.scene.clone(),
-        extra_assets: opts.content_prefabs.clone(),
-        script_types: (*script_types).clone(),
-    })?);
+    let addressable_sources = adopt_addressables(opts);
     let assemblies = compiler::player_assembly_paths(&baseline.player, &baseline.manifest)?;
     let initializers = json::read_runtime_initializers(&baseline.manifest)?;
-    session.set_managed_bindings(
-        assemblies_of(&assemblies),
-        &BTreeMap::new(),
-        Some(initializers.clone()),
-    );
-    if let Some(compiled) = &initial_compile {
-        apply_compiled_bindings(&session, compiled, &script_types);
-    }
-    apply_builtin_shaders(&session, &opts.builtin_shaders)?;
-    let mut native_importer = NativeProjectImporter::new(opts.native(), session.clone())?;
-    let mut prepared = native_importer.prepare(ctx)?;
+    let (session, mut native_importer, mut prepared) = loop {
+        let session = Arc::new(Session::new(project::Options {
+            project: project.clone(),
+            manifest: baseline.manifest.clone(),
+            native_catalog: baseline.native_import.catalog.clone(),
+            scene: opts.scene.clone(),
+            extra_assets: opts.content_prefabs.clone(),
+            script_types: (*script_types).clone(),
+        })?);
+        session.set_managed_bindings(
+            assemblies_of(&assemblies),
+            &BTreeMap::new(),
+            Some(initializers.clone()),
+        );
+        if let Some(compiled) = &initial_compile {
+            apply_compiled_bindings(&session, compiled, &script_types);
+        }
+        apply_builtin_shaders(&session, &opts.builtin_shaders)?;
+        let mut native_importer = NativeProjectImporter::new(opts.native(), session.clone())?;
+        match native_importer.prepare(ctx) {
+            Ok(prepared) => break (session, native_importer, prepared),
+            // An addressable prefab the raw loader cannot prepare must not
+            // stop a session that runs without it.
+            Err(error) if ctx.error().is_none() && drop_addressable_prefabs(opts, &error) => {}
+            Err(error) => return Err(error),
+        }
+    };
     let mut content_importers = ContentImporters::new();
-    if !opts.content_scenes.is_empty() {
-        opts.raw_routes = prepare_content_routes(
+    let mut failed_scene = String::new();
+    while opts.has_content_routes() {
+        match prepare_content_routes(
             ctx,
             opts,
             baseline,
@@ -552,7 +675,29 @@ fn run_session(
             &script_types,
             &mut content_importers,
             &[],
-        )?;
+            &mut failed_scene,
+        ) {
+            Ok(routes) => {
+                opts.raw_routes = routes;
+                break;
+            }
+            Err(error)
+                if ctx.error().is_none() && drop_addressable_scene(opts, &failed_scene, &error) => {
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    if !opts.addressables.is_empty() {
+        Event::new("addressables")
+            .with(
+                "scenes",
+                &opts.addressables.iter().filter(|e| e.scene).count(),
+            )
+            .with(
+                "prefabs",
+                &opts.addressables.iter().filter(|e| !e.scene).count(),
+            )
+            .emit();
     }
     if opts.prepare_only {
         Event::new("prepared")
@@ -700,8 +845,22 @@ fn run_session(
             Some(pending) => pending.player.clone(),
             None => player!().path.clone(),
         };
+        if paths.iter().any(|path| {
+            addressable_sources
+                .iter()
+                .any(|source| path.ends_with(source))
+        }) {
+            // The served keys are fixed when the session starts.
+            Event::new("addressables-changed")
+                .with("paths", &paths)
+                .with(
+                    "message",
+                    "Addressables groups changed; restart the session to serve the new entries",
+                )
+                .emit();
+        }
         let mut next_routes = opts.raw_routes.clone();
-        if !opts.content_scenes.is_empty() {
+        if opts.has_content_routes() {
             let mut next_baseline = baseline.clone();
             next_baseline.player = next_player.clone();
             next_routes = match prepare_content_routes(
@@ -713,6 +872,7 @@ fn run_session(
                 &script_types,
                 &mut content_importers,
                 &paths,
+                &mut failed_scene,
             ) {
                 Ok(routes) => routes,
                 Err(error) => {

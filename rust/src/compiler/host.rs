@@ -69,7 +69,12 @@ pub fn stage_host(
         Ok(Walk::Continue)
     })?;
     sources.sort();
-    let mut input = format!("unity-play-managed-bridge-v2\0{editor}\0").into_bytes();
+    // The bridge serves Addressables keys only where the host has the package.
+    let addressables = ["Unity.Addressables.dll", "Unity.ResourceManager.dll"]
+        .iter()
+        .all(|name| !sys::absent(&join(&[&managed, name])));
+    let mut input =
+        format!("unity-play-managed-bridge-v2\0{editor}\0{addressables}\0").into_bytes();
     let mut snapshots = Vec::new();
     for path in &sources {
         let contents = sys::read(path)?;
@@ -122,6 +127,9 @@ pub fn stage_host(
         ]
         .map(String::from)
         .to_vec();
+        if addressables {
+            arguments.push("-define:UNITY_MICRO_EDITOR_ADDRESSABLES".into());
+        }
         arguments.push(format!("-out:{dll}"));
         let mut seen = BTreeSet::new();
         for pattern in [

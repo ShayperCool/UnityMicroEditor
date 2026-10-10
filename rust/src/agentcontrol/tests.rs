@@ -1307,7 +1307,8 @@ fn start_arguments_reach_the_runner_and_reset_replaces_them() {
     let scene = "0123456789abcdef0123456789abcdef=Assets/Extra.unity";
     let start = json!({"action": "start", "arguments": {
         "gameArguments": ["-content-url", "http://127.0.0.1:9/content"],
-        "contentScenes": [scene], "contentPrefabs": ["Assets/Extra.prefab"]}});
+        "contentScenes": [scene], "contentPrefabs": ["Assets/Extra.prefab"],
+        "addressables": false}});
     c.handle(&ctx, "session_control", &jsondoc::encode(&start))
         .unwrap();
     let ready = c.wait(&ctx, 0, true).unwrap();
@@ -1335,6 +1336,12 @@ fn start_arguments_reach_the_runner_and_reset_replaces_them() {
         flag(&args[..separator], "--content-prefab").as_deref(),
         Some("Assets/Extra.prefab")
     );
+    assert!(
+        args[..separator]
+            .iter()
+            .any(|arg| arg == "--no-addressables"),
+        "addressables: false did not reach the runner"
+    );
 
     // A running Player keeps its command line: other arguments need a reset.
     let other = json!({"action": "start", "arguments": {"gameArguments": ["-other"]}});
@@ -1358,11 +1365,18 @@ fn start_arguments_reach_the_runner_and_reset_replaces_them() {
         Some(scene),
         "a reset that names only game arguments dropped the content scenes"
     );
+    assert!(
+        args[..separator]
+            .iter()
+            .any(|arg| arg == "--no-addressables"),
+        "a reset that names only game arguments dropped the Addressables choice"
+    );
     c.stop(&ctx).unwrap();
     for invalid in [
         json!({"gameArguments": ["--unity-cli-frames", "1"]}),
         json!({"gameArguments": "-flag"}),
         json!({"contentScenes": ["--watch"]}),
+        json!({"addressables": "off"}),
     ] {
         let start = json!({"action": "start", "arguments": invalid});
         assert!(
