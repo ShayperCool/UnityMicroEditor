@@ -104,8 +104,8 @@ namespace UnityMicroEditor.Raw
                 main.ringBufferMode = (ParticleSystemRingBufferMode)Int(map, "ringBufferMode");
                 main.ringBufferLoopRange = Vec2(Value(map, "ringBufferLoopRange", null), new Vector2(0, 1));
                 main.emitterVelocityMode = (ParticleSystemEmitterVelocityMode)Int(map, "emitterVelocityMode", 1);
-                int space = Int(map, "moveWithTransform", 1);
-                main.simulationSpace = space == 1 ? ParticleSystemSimulationSpace.Local : space == 0 ? ParticleSystemSimulationSpace.World : ParticleSystemSimulationSpace.Custom;
+                // Despite its name the field holds ParticleSystemSimulationSpace as is: 0 Local, 1 World, 2 Custom.
+                main.simulationSpace = (ParticleSystemSimulationSpace)Int(map, "moveWithTransform");
                 main.customSimulationSpace = Resolve(Reference(Value(map, "moveWithCustomTransform", null))) as Transform;
                 main.scalingMode = (ParticleSystemScalingMode)Int(map, "scalingMode", 1);
                 main.startDelay = ParticleCurve(Value(map, "startDelay", null));
