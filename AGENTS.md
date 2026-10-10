@@ -7,3 +7,4 @@
 - Use public Unity/package APIs for runtime access. Do not reach into foreign private members. Validate imported identities and dependencies before publishing content.
 - Keep caches, builds, reports, and SDK binaries out of Git. Run the relevant cargo and SDK checks from `CONTRIBUTING.md` before committing.
 - Document limitations explicitly when a path depends on prepared game content or retained shader output.
+- When working commit your progress using conventional commits, and push it to github
