@@ -14,7 +14,7 @@ use crate::{
     cancel::Context,
     project::{
         List, NativeContentDependency, NativeContentFile, NativeContentObject,
-        NativeContentResource, NativeModelGraphObject, NativeReplacement,
+        NativeContentResource, NativeModelGraphObject, NativeReplacement, NeedsImportError,
     },
     registry::meta_guid,
     runtimeartifact, sha256, sysutil,
@@ -75,7 +75,25 @@ pub(crate) const GLOBAL_GUIDS: [&str; 2] = [
 impl NativeProjectImporter {
     pub(crate) fn refresh_pending_native(&mut self, ctx: &Context) -> Result<()> {
         let started = Instant::now();
-        let discovered = self.session.pending_native_import_sources()?;
+        // The walk stops at a changed source too large to read as a whole. A
+        // clip is baked from it, after which the walk goes on.
+        let mut baked = HashSet::new();
+        let discovered = loop {
+            let error = match self.session.pending_native_import_sources() {
+                Ok(discovered) => break discovered,
+                Err(error) => error,
+            };
+            let source = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<NeedsImportError>())
+                .map(|needed| needed.path.strip_suffix(".meta").unwrap_or(&needed.path))
+                .filter(|source| lower_ext(source) == ".anim")
+                .map(str::to_string);
+            match source {
+                Some(source) if baked.insert(source.clone()) => self.import_asset(ctx, &source)?,
+                _ => return Err(error),
+            }
+        };
         // A model that only controllers refer to: bake those controllers
         // again, which bakes its clips; one that cannot be baked is reported.
         for (guid, path) in self.session.changed_clip_models() {
