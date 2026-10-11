@@ -3,6 +3,6 @@
  "namespace": "",
  "assembly": "Assembly-CSharp",
  "baseKind": "StateMachineBehaviour",
- "unsupported": "field next nests serialized types up to the engine's depth limit",
+ "unsupported": "more serialized fields than the reader bounds",
  "fields": []
 }

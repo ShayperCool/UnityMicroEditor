@@ -134,9 +134,12 @@ internal sealed record LayoutRequest(string[] Assemblies, LayoutScript[] Scripts
 // guesses a field in or out.
 internal static class BehaviourLayouts
 {
-    // The engine cuts a type off once this many serialized types enclose it.
-    // What it keeps of such a type is not reproduced here.
+    // The engine cuts a type off once this many serialized types enclose it:
+    // of such a type it keeps the fields that are numbers or strings.
     private const int DepthLimit = 10;
+    // A class that nests itself through several fields grows by that factor
+    // at every level down to the limit, and its type tree with it.
+    private const int FieldLimit = 4096;
     // The metadata bits of [NonSerialized] and [Serializable], whose names the framework marks obsolete.
     private const FieldAttributes NotSerialized = (FieldAttributes)0x0080;
     private const TypeAttributes Serializable = (TypeAttributes)0x2000;
@@ -707,6 +710,7 @@ internal static class BehaviourLayouts
     {
         private readonly Universe universe;
         private readonly Construction construction;
+        private int count;
         public Reader(Universe universe) { this.universe = universe; construction = new Construction(universe); }
 
         // The serialized fields a class declares itself, in declaration order.
@@ -744,6 +748,8 @@ internal static class BehaviourLayouts
                     }
                 }
                 if ((field.Attributes & FieldAttributes.FieldAccessMask) != FieldAttributes.Public && !attributed) continue;
+                bool cut = depth > DepthLimit;
+                if (cut && buffer is not null) throw new Unsupported($"fixed buffer {name} at the engine's depth limit");
                 Dictionary<string, object>? kind;
                 Sig? declared = null;
                 if (buffer is { } fixedBuffer)
@@ -762,7 +768,8 @@ internal static class BehaviourLayouts
                 {
                     var sig = Substitute(universe.Decode(type.Module, field), arguments);
                     declared = sig;
-                    kind = Classify(sig, depth, attributed, type, false, name);
+                    // Past the limit not even an enum is stored.
+                    kind = cut && sig is not PrimitiveSig ? null : Classify(sig, depth, attributed, type, false, name);
                 }
                 if (kind is null) continue;
                 if (!names.Add(name)) throw new Unsupported($"two serialized fields are named {name}");
@@ -783,6 +790,7 @@ internal static class BehaviourLayouts
                 }
                 entry["type"] = kind;
                 fields.Add(entry);
+                if (++count > FieldLimit) throw new Unsupported("more serialized fields than the reader bounds");
             }
         }
 
@@ -884,7 +892,6 @@ internal static class BehaviourLayouts
                 if (arguments.Length != 0) throw new Unsupported($"field {field} holds its own generic type");
                 return null;
             }
-            if (depth >= DepthLimit) throw new Unsupported($"field {field} nests serialized types up to the engine's depth limit");
             var fields = new List<object>();
             Chain(type, arguments, depth + 1, fields, false);
             return new() { ["kind"] = "struct", ["name"] = type.Name, ["fields"] = fields };

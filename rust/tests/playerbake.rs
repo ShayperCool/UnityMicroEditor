@@ -953,19 +953,21 @@ fn compare_behaviour_objects(root: &Path) -> (usize, Vec<(String, String)>) {
 /// `M01_Embedded` take their masks from the controller's own file. The
 /// documents of `F08_KnownMissing` to `F10_KnownBase` lack fields of their
 /// classes, down to all of them, and hold fields their classes do not have.
+/// The classes of `C01_Cut` nest serialized types past the engine's depth
+/// limit, where it keeps the numbers and strings of a type and nothing else.
 #[test]
 fn behaviours_match_the_engine_build() {
     let (matched, refused) = compare_behaviours(&fixture("behaviours"));
-    assert_eq!(matched, 29);
-    // Two hold a class that nests itself up to the engine's depth limit;
-    // the documents of the third lack fields that their classes construct
-    // in ways the reader does not follow.
+    assert_eq!(matched, 30);
+    // Two hold a class with managed references; the documents of the third
+    // lack fields that their classes construct in ways the reader does not
+    // follow.
     let reasons: Vec<(&str, bool, bool)> = refused
         .iter()
         .map(|(name, reason)| {
             (
                 name.as_str(),
-                reason.contains("depth limit"),
+                reason.contains("managed reference"),
                 reason.contains("what its class constructs it with is not known"),
             )
         })
@@ -992,20 +994,18 @@ fn behaviours_match_the_engine_build() {
 #[test]
 fn behaviour_objects_match_the_engine_build() {
     let (matched, refused) = compare_behaviour_objects(&fixture("behaviours"));
-    assert_eq!(matched, 151);
+    assert_eq!(matched, 157);
     // The documents of `D01_Stripped` and `F02_Missing` lack fields their
     // classes serialize. Twelve of them are filled in with what the
     // constructors set; six lack a field set in a way the reader does not
-    // follow, such as an array with elements. Two classes cannot be laid
-    // out at all: one nests itself up to the engine's depth limit, the
-    // other holds managed references.
+    // follow, such as an array with elements. One class cannot be laid out
+    // at all: it holds managed references.
     let reasons = [
         "what its class constructs it with is not known",
-        "depth limit",
         "managed reference",
     ];
     let count = |reason: &str| refused.iter().filter(|(_, r)| r.contains(reason)).count();
-    assert_eq!(reasons.map(count), [6, 2, 2], "{refused:#?}");
+    assert_eq!(reasons.map(count), [6, 2], "{refused:#?}");
 }
 
 #[test]

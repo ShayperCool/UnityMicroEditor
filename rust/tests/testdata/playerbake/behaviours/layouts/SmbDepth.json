@@ -3,6 +3,241 @@
  "namespace": "",
  "assembly": "Assembly-CSharp",
  "baseKind": "StateMachineBehaviour",
- "unsupported": "field kids nests serialized types up to the engine's depth limit",
- "fields": []
+ "bases": [
+  "UnityEngine.StateMachineBehaviour",
+  "UnityEngine.ScriptableObject",
+  "UnityEngine.Object"
+ ],
+ "overridesStateMachineCallbacks": false,
+ "fields": [
+  {
+   "name": "chain",
+   "type": {
+    "kind": "struct",
+    "name": "Chain",
+    "fields": [
+     {
+      "name": "v",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "tree",
+   "type": {
+    "kind": "struct",
+    "name": "Tree",
+    "fields": [
+     {
+      "name": "v",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     },
+     {
+      "name": "kids",
+      "type": {
+       "kind": "array",
+       "element": {
+        "kind": "struct",
+        "name": "Tree",
+        "fields": [
+         {
+          "name": "v",
+          "type": {
+           "kind": "primitive",
+           "name": "int"
+          }
+         },
+         {
+          "name": "kids",
+          "type": {
+           "kind": "array",
+           "element": {
+            "kind": "struct",
+            "name": "Tree",
+            "fields": [
+             {
+              "name": "v",
+              "type": {
+               "kind": "primitive",
+               "name": "int"
+              }
+             },
+             {
+              "name": "kids",
+              "type": {
+               "kind": "array",
+               "element": {
+                "kind": "struct",
+                "name": "Tree",
+                "fields": [
+                 {
+                  "name": "v",
+                  "type": {
+                   "kind": "primitive",
+                   "name": "int"
+                  }
+                 },
+                 {
+                  "name": "kids",
+                  "type": {
+                   "kind": "array",
+                   "element": {
+                    "kind": "struct",
+                    "name": "Tree",
+                    "fields": [
+                     {
+                      "name": "v",
+                      "type": {
+                       "kind": "primitive",
+                       "name": "int"
+                      }
+                     },
+                     {
+                      "name": "kids",
+                      "type": {
+                       "kind": "array",
+                       "element": {
+                        "kind": "struct",
+                        "name": "Tree",
+                        "fields": [
+                         {
+                          "name": "v",
+                          "type": {
+                           "kind": "primitive",
+                           "name": "int"
+                          }
+                         },
+                         {
+                          "name": "kids",
+                          "type": {
+                           "kind": "array",
+                           "element": {
+                            "kind": "struct",
+                            "name": "Tree",
+                            "fields": [
+                             {
+                              "name": "v",
+                              "type": {
+                               "kind": "primitive",
+                               "name": "int"
+                              }
+                             },
+                             {
+                              "name": "kids",
+                              "type": {
+                               "kind": "array",
+                               "element": {
+                                "kind": "struct",
+                                "name": "Tree",
+                                "fields": [
+                                 {
+                                  "name": "v",
+                                  "type": {
+                                   "kind": "primitive",
+                                   "name": "int"
+                                  }
+                                 },
+                                 {
+                                  "name": "kids",
+                                  "type": {
+                                   "kind": "array",
+                                   "element": {
+                                    "kind": "struct",
+                                    "name": "Tree",
+                                    "fields": [
+                                     {
+                                      "name": "v",
+                                      "type": {
+                                       "kind": "primitive",
+                                       "name": "int"
+                                      }
+                                     },
+                                     {
+                                      "name": "kids",
+                                      "type": {
+                                       "kind": "array",
+                                       "element": {
+                                        "kind": "struct",
+                                        "name": "Tree",
+                                        "fields": [
+                                         {
+                                          "name": "v",
+                                          "type": {
+                                           "kind": "primitive",
+                                           "name": "int"
+                                          }
+                                         },
+                                         {
+                                          "name": "kids",
+                                          "type": {
+                                           "kind": "array",
+                                           "element": {
+                                            "kind": "struct",
+                                            "name": "Tree",
+                                            "fields": [
+                                             {
+                                              "name": "v",
+                                              "type": {
+                                               "kind": "primitive",
+                                               "name": "int"
+                                              }
+                                             }
+                                            ]
+                                           }
+                                          }
+                                         }
+                                        ]
+                                       }
+                                      }
+                                     }
+                                    ]
+                                   }
+                                  }
+                                 }
+                                ]
+                               }
+                              }
+                             }
+                            ]
+                           }
+                          }
+                         }
+                        ]
+                       }
+                      }
+                     }
+                    ]
+                   }
+                  }
+                 }
+                ]
+               }
+              }
+             }
+            ]
+           }
+          }
+         }
+        ]
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "tail",
+   "type": {
+    "kind": "primitive",
+    "name": "byte"
+   }
+  }
+ ]
 }

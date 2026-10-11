@@ -3,6 +3,222 @@
  "namespace": "",
  "assembly": "Assembly-CSharp",
  "baseKind": "StateMachineBehaviour",
- "unsupported": "field next nests serialized types up to the engine's depth limit",
- "fields": []
+ "bases": [
+  "UnityEngine.StateMachineBehaviour",
+  "UnityEngine.ScriptableObject",
+  "UnityEngine.Object"
+ ],
+ "overridesStateMachineCallbacks": false,
+ "fields": [
+  {
+   "name": "e",
+   "type": {
+    "kind": "struct",
+    "name": "E0",
+    "fields": [
+     {
+      "name": "v",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     },
+     {
+      "name": "next",
+      "type": {
+       "kind": "struct",
+       "name": "E1",
+       "fields": [
+        {
+         "name": "v",
+         "type": {
+          "kind": "primitive",
+          "name": "int"
+         }
+        },
+        {
+         "name": "next",
+         "type": {
+          "kind": "struct",
+          "name": "E2",
+          "fields": [
+           {
+            "name": "v",
+            "type": {
+             "kind": "primitive",
+             "name": "int"
+            }
+           },
+           {
+            "name": "next",
+            "type": {
+             "kind": "struct",
+             "name": "E3",
+             "fields": [
+              {
+               "name": "v",
+               "type": {
+                "kind": "primitive",
+                "name": "int"
+               }
+              },
+              {
+               "name": "next",
+               "type": {
+                "kind": "struct",
+                "name": "E4",
+                "fields": [
+                 {
+                  "name": "v",
+                  "type": {
+                   "kind": "primitive",
+                   "name": "int"
+                  }
+                 },
+                 {
+                  "name": "next",
+                  "type": {
+                   "kind": "struct",
+                   "name": "E5",
+                   "fields": [
+                    {
+                     "name": "v",
+                     "type": {
+                      "kind": "primitive",
+                      "name": "int"
+                     }
+                    },
+                    {
+                     "name": "next",
+                     "type": {
+                      "kind": "struct",
+                      "name": "E6",
+                      "fields": [
+                       {
+                        "name": "v",
+                        "type": {
+                         "kind": "primitive",
+                         "name": "int"
+                        }
+                       },
+                       {
+                        "name": "next",
+                        "type": {
+                         "kind": "struct",
+                         "name": "E7",
+                         "fields": [
+                          {
+                           "name": "v",
+                           "type": {
+                            "kind": "primitive",
+                            "name": "int"
+                           }
+                          },
+                          {
+                           "name": "next",
+                           "type": {
+                            "kind": "struct",
+                            "name": "E8",
+                            "fields": [
+                             {
+                              "name": "v",
+                              "type": {
+                               "kind": "primitive",
+                               "name": "int"
+                              }
+                             },
+                             {
+                              "name": "next",
+                              "type": {
+                               "kind": "struct",
+                               "name": "E9",
+                               "fields": [
+                                {
+                                 "name": "v",
+                                 "type": {
+                                  "kind": "primitive",
+                                  "name": "int"
+                                 }
+                                },
+                                {
+                                 "name": "next",
+                                 "type": {
+                                  "kind": "struct",
+                                  "name": "E10",
+                                  "fields": [
+                                   {
+                                    "name": "v",
+                                    "type": {
+                                     "kind": "primitive",
+                                     "name": "int"
+                                    }
+                                   },
+                                   {
+                                    "name": "b",
+                                    "type": {
+                                     "kind": "primitive",
+                                     "name": "bool"
+                                    }
+                                   },
+                                   {
+                                    "name": "s",
+                                    "type": {
+                                     "kind": "string"
+                                    }
+                                   },
+                                   {
+                                    "name": "f",
+                                    "type": {
+                                     "kind": "primitive",
+                                     "name": "float"
+                                    }
+                                   },
+                                   {
+                                    "name": "c",
+                                    "type": {
+                                     "kind": "primitive",
+                                     "name": "char"
+                                    }
+                                   }
+                                  ]
+                                 }
+                                }
+                               ]
+                              }
+                             }
+                            ]
+                           }
+                          }
+                         ]
+                        }
+                       }
+                      ]
+                     }
+                    }
+                   ]
+                  }
+                 }
+                ]
+               }
+              }
+             ]
+            }
+           }
+          ]
+         }
+        }
+       ]
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "tail",
+   "type": {
+    "kind": "primitive",
+    "name": "byte"
+   }
+  }
+ ]
 }
