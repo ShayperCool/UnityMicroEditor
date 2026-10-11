@@ -7,6 +7,7 @@
 //! metadata as a `ScriptLayout`; the tree, its type table entry and the object
 //! bytes are derived here.
 use super::{
+    crc32,
     serialized::External,
     source::get,
     typetree::{TypeTree, Val, common_string},
@@ -362,6 +363,67 @@ fn unity_node(kind: &str, name: &str) -> Result<Node> {
             let names: Vec<String> = (0..27).map(|index| format!("sh[{index:2}]")).collect();
             let names: Vec<&str> = names.iter().map(String::as_str).collect();
             Node::floats("SphericalHarmonicsL2", name, 0, &names)
+        }
+        "GUID" => Node::scalars(
+            "GUID",
+            name,
+            0,
+            "unsigned int",
+            0,
+            &["data[0]", "data[1]", "data[2]", "data[3]"],
+        ),
+        // A node of the type of a string that holds one.
+        "PropertyName" => Node::group("string", name, 0, vec![Node::string("id", ALIGN)]),
+        "GUIStyle" => {
+            let pointer = |class: &str, name: &str| {
+                Node::pointer(&format!("PPtr<{class}>"), name, 0, DONT_ANIMATE | HIDE)
+            };
+            let flag = |name: &str, meta: u32| Node::leaf("bool", name, 1, meta);
+            let int = |name: &str| Node::leaf("int", name, 4, 0);
+            let float = |name: &str| Node::leaf("float", name, 4, 0);
+            let mut children = vec![Node::string("m_Name", ALIGN)];
+            for state in [
+                "m_Normal",
+                "m_Hover",
+                "m_Active",
+                "m_Focused",
+                "m_OnNormal",
+                "m_OnHover",
+                "m_OnActive",
+                "m_OnFocused",
+            ] {
+                children.push(Node::group(
+                    "GUIStyleState",
+                    state,
+                    0,
+                    vec![
+                        pointer("Texture2D", "m_Background"),
+                        color("m_TextColor", FLOW),
+                    ],
+                ));
+            }
+            for offset in ["m_Border", "m_Margin", "m_Padding", "m_Overflow"] {
+                children.push(unity_node("RectOffset", offset)?);
+            }
+            children.extend([
+                pointer("Font", "m_Font"),
+                int("m_FontSize"),
+                int("m_FontStyle"),
+                int("m_Alignment"),
+                flag("m_WordWrap", 0),
+                flag("m_RichText", ALIGN),
+                int("m_TextClipping"),
+                int("m_ImagePosition"),
+                Node::floats("Vector2f", "m_ContentOffset", FLOW, &["x", "y"]),
+                float("m_ContentSpacing"),
+                float("m_FixedWidth"),
+                float("m_FixedHeight"),
+                flag("m_ImageIsTopAligned", 0),
+                flag("m_StretchWidth", 0),
+                flag("m_StretchHeight", 0),
+                flag("m_IsSDF", ALIGN),
+            ]);
+            Node::group("GUIStyle", name, 0, children)
         }
         // `LazyLoadReference<T>` of any `T`.
         "LazyLoadReference" => Node::pointer(
@@ -1010,11 +1072,13 @@ fn authored_version(node: &Node) -> u16 {
     }
 }
 
-/// What the engine makes of an engine struct no text sets. Two of them are
-/// classes, of which it constructs an object: a curve without keys and a
-/// gradient from white to white.
-fn engine_default(node: &Node) -> Val {
-    match node.type_name.as_str() {
+/// What the engine makes of an engine struct no text sets, where that is
+/// known. Two of them are classes, of which it constructs an object: a curve
+/// without keys and a gradient from white to white.
+fn engine_default(node: &Node) -> Option<Val> {
+    Some(match node.type_name.as_str() {
+        // A class as well, whose new object was not compared.
+        "GUIStyle" => return None,
         "AnimationCurve" => Val::map([
             ("m_PreInfinity", Val::I(2)),
             ("m_PostInfinity", Val::I(2)),
@@ -1033,7 +1097,7 @@ fn engine_default(node: &Node) -> Val {
             ])
         }
         _ => Val::Zero,
-    }
+    })
 }
 
 impl Encoder<'_> {
@@ -1110,7 +1174,15 @@ impl Encoder<'_> {
                 }
                 Val::Map(values)
             }
-            FieldType::Unity { .. } => engine_default(node),
+            FieldType::Unity { .. } => match engine_default(node) {
+                Some(made) => made,
+                None => {
+                    return Err(unsupported(format!(
+                        "behaviour field {path} is not in the authored document, and what the engine makes of a new {} is not known",
+                        node.type_name
+                    )));
+                }
+            },
         })
     }
 
@@ -1269,6 +1341,36 @@ impl Encoder<'_> {
         path: &str,
         known: bool,
     ) -> Result<Val> {
+        // Two structs are one scalar in text: a name, and an ID as the 32
+        // hex digits of its four words, each from its lowest digit up. A
+        // build keeps the hash of a name, as a signed number in digits.
+        match (node.type_name.as_str(), node.children.len()) {
+            ("string", 1) => {
+                let hash = crc32(&string(value, path)?) as i32;
+                return Ok(Val::map([("id", Val::Str(hash.to_string()))]));
+            }
+            ("GUID", _) => {
+                let digits = scalar_text(value, path)?;
+                let mut words = [0u64; 4];
+                for (index, digit) in digits.chars().enumerate() {
+                    let (Some(digit), true) = (digit.to_digit(16), digits.len() == 32) else {
+                        return Err(mismatch(path, "text that is not an ID"));
+                    };
+                    words[index / 8] |= (digit as u64) << (4 * (index % 8));
+                }
+                if digits.len() != 32 {
+                    return Err(mismatch(path, "text that is not an ID"));
+                }
+                return Ok(Val::Map(
+                    node.children
+                        .iter()
+                        .zip(words)
+                        .map(|(child, word)| (Cow::Owned(child.name.clone()), Val::U(word)))
+                        .collect(),
+                ));
+            }
+            _ => {}
+        }
         let Value::Object(mapping) = value else {
             return Err(mismatch(path, "a value"));
         };
@@ -1314,8 +1416,12 @@ impl Encoder<'_> {
                 // a rectangle and a curve.
                 let compared =
                     expected <= 1 || matches!(node.type_name.as_str(), "Rectf" | "AnimationCurve");
-                if known && compared && child.version <= 1 {
-                    let made = match engine_default(node) {
+                if known
+                    && compared
+                    && child.version <= 1
+                    && let Some(made) = engine_default(node)
+                {
+                    let made = match made {
                         Val::Map(parts) => parts
                             .into_iter()
                             .find(|(name, _)| *name == child.name)
@@ -1329,8 +1435,23 @@ impl Encoder<'_> {
                     "behaviour field {path} is not in the authored document"
                 )));
             };
-            let value = if child.children.is_empty() {
+            let value = if child.type_name == "bool" {
+                // What the engine reads out of other text was not compared.
+                match scalar_text(authored, &path)? {
+                    "0" => Val::Bool(false),
+                    "1" => Val::Bool(true),
+                    _ => return Err(mismatch(&path, "text that is not a switch")),
+                }
+            } else if child.children.is_empty() {
                 scalar(&child.type_name, authored, &path)?
+            } else if child.type_name == "string" {
+                Val::Str(string(authored, &path)?)
+            } else if let Some(class) = child
+                .type_name
+                .strip_prefix("PPtr<")
+                .and_then(|class| class.strip_suffix('>'))
+            {
+                self.pointer(class, "UnityEngine", authored, &path)?
             } else if child.children[0].array {
                 let items = match authored {
                     Value::Array(items) => items.as_slice(),
