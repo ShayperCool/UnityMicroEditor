@@ -103,16 +103,31 @@ An `.overrideController` is baked as well: its Player form holds the same refere
 
 A controller or override controller may play clips stored inside a model. The worker imports the model, which takes a few seconds, and leaves its clips in the Editor's form; they are baked like authored clips and published as content derived from the model, under a GUID no source owns. A model that only controllers refer to is not imported as a whole, so a skinned or otherwise unsupported model can still supply clips. When such a model changes, the controllers that refer to it are baked again.
 
+State machine behaviours stay objects in a Player. The baked file carries each behaviour under its authored file ID, published beside the controller as an object of its class, a `MonoScript` object for every class and the class's type tree, which the engine otherwise derives from the loaded class; the controller lists the behaviours and records which of them every state and state machine runs (`rust/src/playerbake/managed.rs`). The fields a class serializes are read from the compiled assemblies by the SDK helper (`--behaviour-layouts` of `tools/LifecycleCompiler`), which follows the engine's rules: public or `[SerializeField]` fields that are not static, constant, read-only or `[NonSerialized]`, base class fields first, `[Serializable]` classes and structs inline, arrays and lists, enums, fixed buffers, object references, the engine's own structs such as `Vector3`, `AnimationCurve` and `Gradient`, and a `[SerializeField]` dictionary. A behaviour on a state machine that overrides `OnStateMachineEnter` or `OnStateMachineExit` turns off multithreaded evaluation of the controller, as in a build.
+
+The comparison set is 47 controllers built by the Editor with 29 behaviour classes the reader lays out. 40 controllers are baked and match field by field; the others hold something from the list below. Apart from the controllers, every behaviour document is encoded on its own with its object references resolved as in the reference build: 175 objects equal the engine's byte for byte, as does the type table entry of every class. `rust/tests/testdata/playerbake/behaviours` holds a part of that set; `UNITY_PLAYERBAKE_BEHAVIOUR_CORPUS` compares a directory of the same form. The three hashes of a script type entry (script identity, layout, type tree) are written as a build writes them, although a Player loading a ContentFile was seen to check none of them.
+
+Two findings of that comparison changed the controller baker for every controller. Paths of states start at the name of the layer's root state machine, written with its dots, not at the layer's name; the Editor keeps the two equal, a hand-edited file may not. The exit of a nested state machine that no transition leaves leads to the default state of the machine around it.
+
 Refused, never approximated:
 
-- state machine behaviours;
+- a behaviour whose document lacks a field its class serializes: the engine would keep what the class's constructor and field initializers set, which metadata does not tell;
+- a behaviour field that refers to an object other than an animation clip, such as a ScriptableObject, a prefab or a material; a clip reference is baked and published like the clips the controller plays;
+- a class with a `[SerializeReference]` field; a class whose serialized types nest more than ten deep, where the engine cuts them off, which includes every type that holds a list of itself; an engine type outside the compared set, a dictionary below the top level of the class, a fixed buffer of a type other than `int`, `byte`, `float`, `bool`, `char`, `short`, `long` or `double`, and a method that hides `OnStateMachineEnter` or `OnStateMachineExit` without overriding it;
+- a field authored in an older serialized version of an engine struct, or as a value of another shape than its class declares;
+- a behaviour whose script the session does not know, is not a source file of the project, or is a nested class;
+- a controller whose text holds a `#` after a blank or at the start of a line. The Editor writes a value such as `Attack #2` without quotes and reads it back whole; the YAML reader used here takes the rest for a comment. Controllers are refused for it; other sources are read with the same reader and are not checked;
+- two states or state machines of one layer that share a path and both have behaviours; a nested state machine without exit transitions inside one without a default state;
 - any clip the clip baker refuses;
 - an avatar mask stored inside the controller.
+
+A controller text the reader rejects fails outright rather than being refused: the Editor writes the closing quote of a string that ends in a line break at the start of a line, and a hand-edited file may repeat a key, of which the engine reads the first.
 
 Limits of the path as a whole:
 
 - A controller built into the native catalog keeps pointing at the clips it was built with. A changed clip reaches an Animator only when its controller can be baked; otherwise the session reports `native-bake-refused` and the Animator keeps the catalog's clip. The same holds for an override controller built into the catalog.
 - A changed avatar mask does not bake the controllers that use it again; edit or touch the controller.
+- A controller is baked with the behaviour classes of the script assemblies current at that moment. When a compile changes the fields of a behaviour class, the session bakes the controllers it published with that class again, and a controller with behaviours baked by an earlier session is baked anew instead of being replayed. A controller held by the native catalog or baked into a baseline is not: the Player reads its behaviours as it reads any content built before a script changed, by field name.
 - `auto-prepare` uses the same path when it publishes its baseline: a scene that refers to a clip or controller the native catalog lacks, or holds in an older form, is prepared without an Editor, and the baked files stay with the baseline. A source the baker refuses still needs a refreshed catalog.
 
 ## UI and fonts
