@@ -226,6 +226,10 @@ pub(crate) struct Inner {
     pub index_dirty: bool,
     pub explicit_sources: HashMap<String, String>,
     pub native_overlays: BTreeMap<String, NativeReplacement>,
+    /// Content derived from part of a source, such as the baked clips of a
+    /// model, published under a GUID that no source owns.
+    pub derived_native: BTreeMap<String, super::NativeContentFile>,
+    pub changed_clip_models: Vec<String>,
     pub extra_assets: Vec<String>,
     pub ignored_diagnostics: Vec<PrefabOverrideDiagnostic>,
 }
@@ -333,6 +337,8 @@ impl Inner {
             index_dirty: true,
             explicit_sources: HashMap::new(),
             native_overlays: BTreeMap::new(),
+            derived_native: BTreeMap::new(),
+            changed_clip_models: Vec::new(),
             extra_assets: Vec::new(),
             ignored_diagnostics: Vec::new(),
         }

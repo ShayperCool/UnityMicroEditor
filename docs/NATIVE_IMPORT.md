@@ -94,10 +94,12 @@ Covered: layers with blending, weights, avatar masks and synced layers with thei
 
 An `.overrideController` is baked as well: its Player form holds the same references as the source, so it is published with the baked controller and clips it names, and baked again when one of them changes.
 
+A controller or override controller may play clips stored inside a model. The worker imports the model, which takes a few seconds, and leaves its clips in the Editor's form; they are baked like authored clips and published as content derived from the model, under a GUID no source owns. A model that only controllers refer to is not imported as a whole, so a skinned or otherwise unsupported model can still supply clips. When such a model changes, the controllers that refer to it are baked again.
+
 Refused, never approximated:
 
 - state machine behaviours;
-- a clip stored inside a model, in a controller or as an override, and any clip the clip baker refuses;
+- any clip the clip baker refuses;
 - an avatar mask stored inside the controller.
 
 Limits of the path as a whole:
