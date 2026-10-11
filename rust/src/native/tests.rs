@@ -1158,6 +1158,7 @@ fn native_adoption_rejects_wrong_worker_environment_before_publishing() {
         script_assemblies: BTreeMap::new(),
         behaviour_layouts: BTreeMap::new(),
         model_clips: BTreeMap::new(),
+        additive_references: BTreeMap::new(),
     };
     let environment = read_worker_environment(&opts.project).unwrap();
     for name in [

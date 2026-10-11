@@ -47,6 +47,9 @@ pub struct NativeProjectImporter {
     pub(crate) behaviour_layouts: BTreeMap<String, ScriptLayout>,
     /// The baked clips of models, by model GUID.
     pub(crate) model_clips: BTreeMap<String, super::baked::ModelClipSet>,
+    /// The GUID each known clip takes its additive reference pose from, by
+    /// the clip's path; empty for a clip with none.
+    pub(crate) additive_references: BTreeMap<String, String>,
 }
 
 struct Replay<'a> {
@@ -73,6 +76,7 @@ impl NativeProjectImporter {
             script_assemblies: BTreeMap::new(),
             behaviour_layouts: BTreeMap::new(),
             model_clips: BTreeMap::new(),
+            additive_references: BTreeMap::new(),
         };
         let index = sysutil::join(&[&importer.opts.output, "native/index.json"]);
         let entries: Option<Vec<NativeReplacement>> = match read_json(&index) {
