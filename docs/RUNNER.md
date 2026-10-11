@@ -53,7 +53,7 @@ The runner asks for OpenGL Core with VSync off. Its readiness check rejects a mi
 | New empty GameObject with a Transform, child or root | The patch adds the object and updates the hierarchy in the same Player. |
 | Other supported scene, prefab and raw asset changes | The loader rebuilds the scene in the same Player. Scene state resets; loaded assemblies and the native cache remain. |
 | Shader (`.shader`), a file it includes, a material's keywords | The worker parses the shader, `UnityShaderCompiler` compiles its programs and the runner publishes the Player's object; the shaders that fall back on it or use its passes follow. The scene is rebuilt in the same Player. [NATIVE_IMPORT.md](NATIVE_IMPORT.md#shaders) lists what is refused. |
-| Supported model, audio, texture or text asset | Unity's AssetImportWorker imports the file in an owned context. The runner adapts the result and loads it into the same Player, then the scene is rebuilt. |
+| Supported model, audio, video, texture, text or input actions asset | Unity's AssetImportWorker imports the file in an owned context. The runner adapts the result and loads it into the same Player, then the scene is rebuilt. |
 | C# method body | The SDK recompiles the changed assembly and the runner restarts the Player. Process and scene state reset. |
 | C# API change | Dependent assemblies can be recompiled as well. The Player restarts. |
 
@@ -64,7 +64,7 @@ An inconsistent or unsupported change produces `update-rejected`, and the last c
 ## Limits
 
 - A baseline is required. The runner does not turn an arbitrary folder with `Assets` into a running Player on its own.
-- Native overlays cover the source formats and importer settings listed in [NATIVE_IMPORT.md](NATIVE_IMPORT.md). Audio is verified for preloaded DecompressOnLoad and CompressedInMemory clips with synchronous loading. Streaming, not preloaded and background-loaded audio and unsupported import profiles are rejected.
+- Native overlays cover the source formats and importer settings listed in [NATIVE_IMPORT.md](NATIVE_IMPORT.md). Audio covers DecompressOnLoad, CompressedInMemory and Streaming clips, preloaded or not, with or without background loading. Video is VP8 in a `.webm` file, the one form the engine reads on Linux. Unsupported import profiles are rejected.
 - An FBX update is accepted when object IDs, hierarchy, component and reference order and authored scalar values are unchanged. Mesh geometry may change. Skinned and Animator layouts that were not verified are refused.
 - Changes to project settings, `.asmdef` or package configuration, GUIDs or types need a fresh preparation.
 - C# edits restart the Player. Wider scene reloads and native updates rebuild the game graph.

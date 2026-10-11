@@ -1,6 +1,6 @@
 # Native import
 
-Heavy content (models, audio, textures, text assets) is imported by Unity's own AssetImportWorker, driven by this tool's coordinator. The main Editor process, its GUI and a pre-imported `Library` are not needed for a worker run. Scenes and authored prefabs do not go through this path; the runtime loader reads them from source.
+Heavy content (models, audio, video, textures, text assets, input actions) is imported by Unity's own AssetImportWorker, driven by this tool's coordinator. The main Editor process, its GUI and a pre-imported `Library` are not needed for a worker run. Scenes and authored prefabs do not go through this path; the runtime loader reads them from source.
 
 Only Unity `6000.6.3f1` on Linux x64 is supported. The coordinator starts `Unity` in AssetImportWorker mode and a separate `Unity.DataStore` from the installed engine. The importers themselves stay inside Unity's executable.
 
@@ -40,14 +40,14 @@ unity-micro-editor native-environment --project /absolute/project
 
 ## During a run
 
-Before expanding a scene, the runner walks the GUID references of the selected scene, its runtime prefabs and their authored dependencies. New or changed models (FBX), audio files, textures and text assets are imported in batches of 32 assets per worker; the sections below list the source formats and the importer settings each covers. An unchanged baseline, catalog or cache entry is skipped, as is a PNG or JPEG in the supported raw profile.
+Before expanding a scene, the runner walks the GUID references of the selected scene, its runtime prefabs and their authored dependencies. New or changed models (FBX, OBJ, COLLADA), audio files, VP8 video, textures, text assets and `.inputactions` files are imported in batches of up to 32 assets per worker; the sections below list the source formats and the importer settings each covers. An unchanged baseline, catalog or cache entry is skipped, as is a PNG or JPEG in the supported raw profile.
 
 Each cache entry records an `environmentSha256`. The fingerprint covers the pinned protocol revision, the Unity path, the exact SHA-256 of `ProjectSettings.asset`, the parsed settings and the wire environment. An index with no fingerprint, or a different one, is skipped and its assets are imported again. Changing this environment while a runner is live requires restarting the runner.
 
 ## How an import works
 
 1. The coordinator creates an isolated context with its own `Assets`, `ProjectSettings`, `Packages`, `Library` and `Logs`, and copies the exact source and `.meta` bytes into it.
-2. The coordinator writes a minimal `SourceAssetDB` directly: GUIDs, paths, importer settings and XXH3-128 file hashes taken from the sources. Nothing is copied from an Editor.
+2. The coordinator writes a minimal `SourceAssetDB` directly: GUIDs, paths, importer settings and XXH3-128 file hashes taken from the sources. Nothing is copied from an Editor, except for the two kinds of import that need a piece of one: [models that make their own material](#obj-and-collada-models) and [scripted importers](#scripted-importers). Those run in batches of their own, so what an asset is imported with does not depend on what changed along with it.
 3. It starts a DataStore with a unique namespace, accepts the worker's local TCP connection, and sends `Initialize`, `Prepare` and `ImportRequest`.
 4. Requests use the primary importer ID `-1`, so the native pipeline picks the importer and reads its settings from `.meta`. Explicit importer IDs run an extra importer with default settings and are rejected by content validation.
 5. The worker is stopped through the protocol, then the DataStore. It reads only the stopped store, following `ImportResponse.ArtifactBlobs[1]` → `ArtifactMetaInfo.Files[].Hash` → the stored file.
@@ -70,9 +70,43 @@ A `.meta` that holds a GUID but no `TextureImporter` block is refused. The engin
 
 ## Audio
 
-AudioImporter sources share one route: `.wav`, `.ogg`, `.mp3`, `.aif`, `.aiff` and `.flac`. The check is on the imported AudioClip, not on the source format. Accepted: load type DecompressOnLoad or CompressedInMemory with PCM, Vorbis or ADPCM data, `preloadAudioData: 1`, `loadInBackground: 0`, 16 bits, one sub-sound, not ambisonic and not a tracker module. Each source format was loaded in a Player as DecompressOnLoad and as CompressedInMemory Vorbis, and WAV with all six combinations: a decompressed clip was read back with `AudioClip.GetData`, a compressed one was played and heard at the mixer output.
+AudioImporter sources share one route: `.wav`, `.ogg`, `.mp3`, `.aif`, `.aiff` and `.flac`. The check is on the imported AudioClip, not on the source format. Accepted: load type DecompressOnLoad, CompressedInMemory or Streaming with PCM, Vorbis or ADPCM data, preloaded or not, loaded on the main thread or in the background, 16 bits, one sub-sound, not ambisonic and not a tracker module. Each source format was loaded in a Player as DecompressOnLoad and as CompressedInMemory Vorbis, and WAV with all six combinations: a decompressed clip was read back with `AudioClip.GetData`, a compressed one was played and heard at the mixer output.
 
-Refused: Streaming, a clip that is not preloaded, and background loading. The Player's loader requires a loaded, preloaded clip of those two load types before it publishes the object, so these need a change of the runtime bridge, not of the importer path. Note that the `.meta` the pinned Editor writes for a new audio file has `preloadAudioData: 0`; such a file is refused until that setting is on.
+The clip's data stays in the artifact's resource file, which the runner mounts under `VirtualArtifacts/Primary/<guid>.resource` in the run directory and next to the ContentFile; the clip names that path whatever its load type. A Streaming clip reads from the mounted file while it plays, a clip that is not preloaded when the game loads or plays it, and a background-loaded clip from a loading thread. The Player's loader therefore accepts a clip in the state its settings give it: only a preloaded, synchronous DecompressOnLoad or CompressedInMemory clip has to be loaded when it is published, and a clip whose load failed is refused. Played and heard in a Player as new Vorbis assets: Streaming (preloaded or not, with and without background loading), DecompressOnLoad not preloaded with and without background loading (the `.meta` the pinned Editor writes for a new audio file has `preloadAudioData: 0`), and preloaded background loading for DecompressOnLoad and CompressedInMemory.
+
+A resource is replaced by renaming a new file over the mounted path, so a clip that is streaming keeps reading the revision it opened.
+
+## OBJ and COLLADA models
+
+`.obj` and `.dae` go the way of FBX: the same static profile (GameObject, Transform, MeshFilter, MeshRenderer, Mesh, Material), the same graph checks.
+
+A model without a material of its own gets one from the importer, which looks up the `Standard` shader by name. A worker fills its table of shaders by name with the built-in shaders when it starts, then replaces it with the `mem://Library/ScriptMapper` record of its source database; with no such record the table ends up empty, the lookup fails, and the importer copies the built-in default material instead, under another name and local ID (`Default-Material`, `3297912226980038121`) than the Editor's (`defaultMat`, `-3033667219593020291`; the ID is XXH64 of `Type:Material->` + name + `0`). The coordinator therefore writes that record for these two formats, with the bytes of `Library/ScriptMapper` from an Editor run of the project: the staging clone a preparation with a host build leaves in `Library/UnityMicroEditor/stage/project`, or else the project's own `Library`. Without either the import is refused. With the record the worker's artifacts for `.obj` and `.dae` are byte-identical to the Editor's. FBX imports are left as they were.
+
+Both were loaded in a Player as new assets: hierarchy, mesh and, for `.obj`, the generated material under the Editor's local ID. That material refers to the built-in `Standard` shader; it renders only in a host that holds that shader, and shows the error shader otherwise.
+
+`.blend` is not imported: the importer starts Blender to convert the file, and without Blender on `PATH` it leaves an asset with an import log and no model.
+
+## Video
+
+On Linux the engine reads VP8 video in a WebM container and nothing else, in the Editor, in a worker and in a Player: an H.264 `.mp4`, `.mov` or `.m4v` and a VP9 `.webm` import as a `DefaultAsset` with the log `Can't create LinuxVideoMedia, format 0 not supported` or `Unsupported video codec 'VP9'`, and a Theora `.ogv` as a clip without frames. No system library is involved; the codecs are compiled into the engine. So `.webm` is the one video extension that is imported, and an artifact without a VP8 `VideoClip` with frames is refused.
+
+A worker's artifact for a VP8 `.webm` is byte-identical to the Editor's, with and without transcoding. Transcoded, the clip's frames lie in the artifact's resource file, which is mounted like an audio resource. Not transcoded (the default), the clip names no resource: its frames are the source file, which a build copies. The adapter then names the mounted resource in the clip and publishes a copy of the imported source revision as that resource. Both forms, with and without a Vorbis track, were loaded in a Player as new assets, prepared by a `VideoPlayer` and played to a texture.
+
+## Scripted importers
+
+A `.inputactions` file is imported by the Input System package's own `InputActionImporter`, run in the standalone worker. The worker's artifact is byte-identical to the Editor's, so every object has the local ID the Editor gives it.
+
+The worker has no compiler; what it needs comes from an Editor compilation of the project, the staging clone of a preparation with a host build (`Library/UnityMicroEditor/stage/project`) or else the project's own `Library`:
+
+- `Library/Bee/*E-inputdata.json` is the Editor's record of that compilation. It lists every assembly with its sources, the assemblies it refers to and the directory of every package.
+- The importer's assembly is the one compiled from the script the asset's `.meta` names, and it is loaded together with the assemblies it refers to, from `Library/ScriptAssemblies`. Only immutable packages (`Library/PackageCache/<name>@<hash>`) qualify. An assembly that uses a precompiled assembly of a package or the project is refused, because the worker finds those only through an asset database; the check is whether the compiled code names that assembly.
+- The scripts and assembly definitions those assemblies were compiled from are copied into the context where the Editor compiled them, and registered as script compilation assets. An assembly records each script by its path relative to the project; the worker gives an imported object its `MonoScript` only when it can map that path to a registered asset, and it reads where a package lies from the database's root folders only when the database states a refresh version.
+
+The adapter then turns the artifact into a ContentFile. An object of a script class points at its script asset by GUID, which a Player does not have; the file gets one `MonoScript` object per class, named after the class identifier the Editor wrote into each object, and the objects point at it. Their data, local IDs and type trees stay as imported, and the importer object is dropped. An object that refers to another asset is refused.
+
+Proven in a Player as a new asset: the `InputActionAsset` (map and actions found by name, enabled) and an `InputActionReference` sub-object resolving its action. Other scripted importers are not enabled; the route is general but each needs its own verification.
+
+The cache key of such an import covers the compilation record, so another compilation imports again.
 
 ## Text assets
 
@@ -340,8 +374,10 @@ Unchanged UXML, USS and font assets are extracted from an existing Unity import 
 ## Limits
 
 - The wire protocol, LMDB schema and DataStore layout were derived for one Unity version and are not a stable public API. A worker version mismatch is refused, and another engine version needs its own verification.
-- There is no proven general support for animation inside models, skinned meshes, complex model settings, arbitrary texture settings, streamed audio, platform overrides, custom AssetPostprocessors or every dependency of an arbitrary project.
-- Models other than FBX (`.obj`, `.dae`, `.blend`), video clips, `.inputactions` and other ScriptedImporter assets, sprite atlases and compute shaders are not imported; a scene that refers to a new one needs a catalog built by the Editor. A standalone worker has no script assemblies, so it runs no ScriptedImporter.
+- There is no proven general support for animation inside models, skinned meshes, complex model settings, arbitrary texture settings, platform overrides, custom AssetPostprocessors or every dependency of an arbitrary project.
+- `.blend` models, video other than VP8 `.webm`, ScriptedImporter assets other than `.inputactions`, sprite atlases and compute shaders are not imported; a scene that refers to a new one needs a catalog built by the Editor.
+- `.obj`, `.dae` and `.inputactions` need files of an Editor run of the project (the shader name table, the script assemblies); a project that was only ever prepared with a reused host and never opened in an Editor has none, and such an import is refused with that reason.
+- A model's generated material uses the built-in `Standard` shader and depends on the host holding it.
 - A shader is delivered only in the cases listed under [Shaders](#shaders); a shader of a project with a scriptable render pipeline and a compute shader still need a catalog built by the Editor.
 - The store reader handles inline and concatenated storage, limits one file to 64 MiB and refuses other layouts. The LMDB reader targets the observed Linux x64 format.
 - A worker is started per import batch. A persistent native service is not used.
@@ -360,6 +396,8 @@ The coordinator lives in `rust/src/native/`, with the wire format, LMDB reader a
 | `rust/src/lmdb.rs` | Reading a stopped LMDB without a native library |
 | `rust/src/native/artifact.rs` | Extracting stored files and checking content keys |
 | `rust/src/native/environment.rs` | The import environment fingerprint |
+| `rust/src/native/scripted.rs` | What an import takes from an Editor run: compiled importers and the shader name table |
+| `rust/src/runtimeartifact/scripted.rs`, `video.rs` | The Player form of a scripted importer's objects and of a video clip |
 | `rust/src/native/baked.rs`, `rust/src/playerbake/` | Assets baked from authored YAML without a worker |
 | `rust/src/playerbake/shader.rs`, `shader/`, `rust/src/native/shader_compiler.rs` | Shaders: variants, program tables, the client of `UnityShaderCompiler` |
 

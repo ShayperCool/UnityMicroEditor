@@ -8,7 +8,7 @@ It runs on Linux with one pinned Unity version. Coverage of Editor features is p
 
 - **Scenes and prefabs.** The tool reads `.unity`, `.prefab`, `.meta`, ScriptableObjects and their dependencies. A C# loader inside the Player builds the scene graph through Unity APIs, restores fields and references, and releases lifecycle callbacks once the graph is ready. Scenes are not baked into AssetBundles.
 - **Code.** The tool resolves packages and derives the Player assembly graph from `.asmdef`/`.asmref` files. Roslyn from the Unity installation's SDK compiles the assemblies.
-- **Heavy content.** Models, audio, textures and text assets go through Unity's own AssetImportWorker. The coordinator writes a compatible `SourceAssetDB`, verifies the worker's artifacts, and publishes a runtime content cache. A `.shader` of a built-in pipeline project is parsed by the worker and compiled with the engine's own `UnityShaderCompiler`. Some unchanged native content and other compiled shaders come from previously verified Unity output.
+- **Heavy content.** Models, audio, video, textures, text assets and input actions go through Unity's own AssetImportWorker. The coordinator writes a compatible `SourceAssetDB`, verifies the worker's artifacts, and publishes a runtime content cache. A `.shader` of a built-in pipeline project is parsed by the worker and compiled with the engine's own `UnityShaderCompiler`. Some unchanged native content and other compiled shaders come from previously verified Unity output.
 - **Host.** A Mono Player built once per engine and package profile runs all of the above.
 
 ## Requirements
@@ -102,7 +102,7 @@ Preparation and sessions do not need the package in the game project. To use the
 ## Limits
 
 - Small GameObject and Transform edits patch the running Player. Wider scene and prefab edits rebuild the scene. C# changes recompile the affected assemblies and restart the Player.
-- Fresh import works for FBX models, the audio, texture and text source formats and the importer settings listed in [docs/NATIVE_IMPORT.md](docs/NATIVE_IMPORT.md). Streamed or not preloaded audio is refused. Some UI, font and texture paths (BC7, explicit formats, sprites, cubemaps) need exact artifacts from an existing Unity import. `.inputactions`, video and non-FBX models are not imported. Shaders are compiled independently only for the built-in render pipeline, within the limits listed there; general animation import is not done.
+- Fresh import works for FBX, OBJ and COLLADA models, VP8 `.webm` video, `.inputactions`, and the audio, texture and text source formats and importer settings listed in [docs/NATIVE_IMPORT.md](docs/NATIVE_IMPORT.md). Some UI, font and texture paths (BC7, explicit formats, sprites, cubemaps) need exact artifacts from an existing Unity import. Video in any other codec or container is not imported on Linux, by this tool or by the Editor, and `.blend` needs Blender. Shaders are compiled independently only for the built-in render pipeline, within the limits listed there; general animation import is not done.
 - `build-project` and the MCP `project_build` tool proxy to the real Editor; they are not an independent build pipeline.
 - Editor windows, custom inspectors and EditMode test execution are out of scope.
 
