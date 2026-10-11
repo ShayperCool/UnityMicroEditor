@@ -1,0 +1,96 @@
+{
+ "className": "SmbDict",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "overridesStateMachineCallbacks": false,
+ "fields": [
+  {
+   "name": "d",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "struct",
+     "name": "SerializedKeyValue`2",
+     "fields": [
+      {
+       "name": "key",
+       "type": {
+        "kind": "string"
+       }
+      },
+      {
+       "name": "value",
+       "type": {
+        "kind": "primitive",
+        "name": "int"
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "d2",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "struct",
+     "name": "SerializedKeyValue`2",
+     "fields": [
+      {
+       "name": "key",
+       "type": {
+        "kind": "primitive",
+        "name": "int"
+       }
+      },
+      {
+       "name": "value",
+       "type": {
+        "kind": "struct",
+        "name": "Inner",
+        "fields": [
+         {
+          "name": "a",
+          "type": {
+           "kind": "primitive",
+           "name": "int"
+          }
+         },
+         {
+          "name": "name",
+          "type": {
+           "kind": "string"
+          }
+         },
+         {
+          "name": "pos",
+          "type": {
+           "kind": "unity",
+           "name": "Vector3"
+          }
+         },
+         {
+          "name": "on",
+          "type": {
+           "kind": "primitive",
+           "name": "bool"
+          }
+         }
+        ]
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "tail",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  }
+ ]
+}

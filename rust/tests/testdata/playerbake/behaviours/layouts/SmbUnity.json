@@ -1,0 +1,142 @@
+{
+ "className": "SmbUnity",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "overridesStateMachineCallbacks": false,
+ "fields": [
+  {
+   "name": "v2",
+   "type": {
+    "kind": "unity",
+    "name": "Vector2"
+   }
+  },
+  {
+   "name": "v3",
+   "type": {
+    "kind": "unity",
+    "name": "Vector3"
+   }
+  },
+  {
+   "name": "v4",
+   "type": {
+    "kind": "unity",
+    "name": "Vector4"
+   }
+  },
+  {
+   "name": "q",
+   "type": {
+    "kind": "unity",
+    "name": "Quaternion"
+   }
+  },
+  {
+   "name": "col",
+   "type": {
+    "kind": "unity",
+    "name": "Color"
+   }
+  },
+  {
+   "name": "c32",
+   "type": {
+    "kind": "unity",
+    "name": "Color32"
+   }
+  },
+  {
+   "name": "rect",
+   "type": {
+    "kind": "unity",
+    "name": "Rect"
+   }
+  },
+  {
+   "name": "bounds",
+   "type": {
+    "kind": "unity",
+    "name": "Bounds"
+   }
+  },
+  {
+   "name": "mask",
+   "type": {
+    "kind": "unity",
+    "name": "LayerMask"
+   }
+  },
+  {
+   "name": "curve",
+   "type": {
+    "kind": "unity",
+    "name": "AnimationCurve"
+   }
+  },
+  {
+   "name": "grad",
+   "type": {
+    "kind": "unity",
+    "name": "Gradient"
+   }
+  },
+  {
+   "name": "v2i",
+   "type": {
+    "kind": "unity",
+    "name": "Vector2Int"
+   }
+  },
+  {
+   "name": "v3i",
+   "type": {
+    "kind": "unity",
+    "name": "Vector3Int"
+   }
+  },
+  {
+   "name": "ri",
+   "type": {
+    "kind": "unity",
+    "name": "RectInt"
+   }
+  },
+  {
+   "name": "bi",
+   "type": {
+    "kind": "unity",
+    "name": "BoundsInt"
+   }
+  },
+  {
+   "name": "m",
+   "type": {
+    "kind": "unity",
+    "name": "Matrix4x4"
+   }
+  },
+  {
+   "name": "h",
+   "type": {
+    "kind": "unity",
+    "name": "Hash128"
+   }
+  },
+  {
+   "name": "ro",
+   "type": {
+    "kind": "unity",
+    "name": "RectOffset"
+   }
+  },
+  {
+   "name": "tail",
+   "type": {
+    "kind": "primitive",
+    "name": "byte"
+   }
+  }
+ ]
+}

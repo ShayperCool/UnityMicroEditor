@@ -1,0 +1,8 @@
+{
+ "className": "SmbCbMachineInherited",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "overridesStateMachineCallbacks": true,
+ "fields": []
+}

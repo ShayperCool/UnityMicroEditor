@@ -1,0 +1,8 @@
+{
+ "className": "SmbDepth",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "unsupported": "field kids nests serialized types up to the engine's depth limit",
+ "fields": []
+}

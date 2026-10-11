@@ -1,0 +1,444 @@
+{
+ "className": "SmbDefaults",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "overridesStateMachineCallbacks": false,
+ "fields": [
+  {
+   "name": "dfInt",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "dfFloat",
+   "type": {
+    "kind": "primitive",
+    "name": "float"
+   }
+  },
+  {
+   "name": "dfStr",
+   "type": {
+    "kind": "string"
+   }
+  },
+  {
+   "name": "dfArr",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "primitive",
+     "name": "int"
+    }
+   }
+  },
+  {
+   "name": "dfCurve",
+   "type": {
+    "kind": "unity",
+    "name": "AnimationCurve"
+   }
+  },
+  {
+   "name": "dfInner",
+   "type": {
+    "kind": "struct",
+    "name": "Inner",
+    "fields": [
+     {
+      "name": "a",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     },
+     {
+      "name": "name",
+      "type": {
+       "kind": "string"
+      }
+     },
+     {
+      "name": "pos",
+      "type": {
+       "kind": "unity",
+       "name": "Vector3"
+      }
+     },
+     {
+      "name": "on",
+      "type": {
+       "kind": "primitive",
+       "name": "bool"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "dfOuter",
+   "type": {
+    "kind": "struct",
+    "name": "Outer",
+    "fields": [
+     {
+      "name": "inner",
+      "type": {
+       "kind": "struct",
+       "name": "Inner",
+       "fields": [
+        {
+         "name": "a",
+         "type": {
+          "kind": "primitive",
+          "name": "int"
+         }
+        },
+        {
+         "name": "name",
+         "type": {
+          "kind": "string"
+         }
+        },
+        {
+         "name": "pos",
+         "type": {
+          "kind": "unity",
+          "name": "Vector3"
+         }
+        },
+        {
+         "name": "on",
+         "type": {
+          "kind": "primitive",
+          "name": "bool"
+         }
+        }
+       ]
+      }
+     },
+     {
+      "name": "w",
+      "type": {
+       "kind": "primitive",
+       "name": "float"
+      }
+     },
+     {
+      "name": "inners",
+      "type": {
+       "kind": "array",
+       "element": {
+        "kind": "struct",
+        "name": "Inner",
+        "fields": [
+         {
+          "name": "a",
+          "type": {
+           "kind": "primitive",
+           "name": "int"
+          }
+         },
+         {
+          "name": "name",
+          "type": {
+           "kind": "string"
+          }
+         },
+         {
+          "name": "pos",
+          "type": {
+           "kind": "unity",
+           "name": "Vector3"
+          }
+         },
+         {
+          "name": "on",
+          "type": {
+           "kind": "primitive",
+           "name": "bool"
+          }
+         }
+        ]
+       }
+      }
+     },
+     {
+      "name": "tags",
+      "type": {
+       "kind": "array",
+       "element": {
+        "kind": "string"
+       }
+      }
+     },
+     {
+      "name": "tail",
+      "type": {
+       "kind": "primitive",
+       "name": "bool"
+      }
+     },
+     {
+      "name": "hiddenByte",
+      "type": {
+       "kind": "primitive",
+       "name": "byte"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "dfOuterInit",
+   "type": {
+    "kind": "struct",
+    "name": "Outer",
+    "fields": [
+     {
+      "name": "inner",
+      "type": {
+       "kind": "struct",
+       "name": "Inner",
+       "fields": [
+        {
+         "name": "a",
+         "type": {
+          "kind": "primitive",
+          "name": "int"
+         }
+        },
+        {
+         "name": "name",
+         "type": {
+          "kind": "string"
+         }
+        },
+        {
+         "name": "pos",
+         "type": {
+          "kind": "unity",
+          "name": "Vector3"
+         }
+        },
+        {
+         "name": "on",
+         "type": {
+          "kind": "primitive",
+          "name": "bool"
+         }
+        }
+       ]
+      }
+     },
+     {
+      "name": "w",
+      "type": {
+       "kind": "primitive",
+       "name": "float"
+      }
+     },
+     {
+      "name": "inners",
+      "type": {
+       "kind": "array",
+       "element": {
+        "kind": "struct",
+        "name": "Inner",
+        "fields": [
+         {
+          "name": "a",
+          "type": {
+           "kind": "primitive",
+           "name": "int"
+          }
+         },
+         {
+          "name": "name",
+          "type": {
+           "kind": "string"
+          }
+         },
+         {
+          "name": "pos",
+          "type": {
+           "kind": "unity",
+           "name": "Vector3"
+          }
+         },
+         {
+          "name": "on",
+          "type": {
+           "kind": "primitive",
+           "name": "bool"
+          }
+         }
+        ]
+       }
+      }
+     },
+     {
+      "name": "tags",
+      "type": {
+       "kind": "array",
+       "element": {
+        "kind": "string"
+       }
+      }
+     },
+     {
+      "name": "tail",
+      "type": {
+       "kind": "primitive",
+       "name": "bool"
+      }
+     },
+     {
+      "name": "hiddenByte",
+      "type": {
+       "kind": "primitive",
+       "name": "byte"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "dfCol",
+   "type": {
+    "kind": "unity",
+    "name": "Color"
+   }
+  },
+  {
+   "name": "dfOn",
+   "type": {
+    "kind": "primitive",
+    "name": "bool"
+   }
+  },
+  {
+   "name": "dfGrad",
+   "type": {
+    "kind": "unity",
+    "name": "Gradient"
+   }
+  },
+  {
+   "name": "dfEnum",
+   "type": {
+    "kind": "enum",
+    "underlying": "int"
+   }
+  },
+  {
+   "name": "dfNames",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "string"
+    }
+   }
+  },
+  {
+   "name": "dfNullStr",
+   "type": {
+    "kind": "string"
+   }
+  },
+  {
+   "name": "dfNullCurve",
+   "type": {
+    "kind": "unity",
+    "name": "AnimationCurve"
+   }
+  },
+  {
+   "name": "dfVec",
+   "type": {
+    "kind": "unity",
+    "name": "Vector3"
+   }
+  },
+  {
+   "name": "dfQuat",
+   "type": {
+    "kind": "unity",
+    "name": "Quaternion"
+   }
+  },
+  {
+   "name": "dfMask",
+   "type": {
+    "kind": "unity",
+    "name": "LayerMask"
+   }
+  },
+  {
+   "name": "dfC32",
+   "type": {
+    "kind": "unity",
+    "name": "Color32"
+   }
+  },
+  {
+   "name": "dfRenamed",
+   "formerNames": [
+    "dfOldName"
+   ],
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "dfDouble",
+   "type": {
+    "kind": "primitive",
+    "name": "double"
+   }
+  },
+  {
+   "name": "dfChar",
+   "type": {
+    "kind": "primitive",
+    "name": "char"
+   }
+  },
+  {
+   "name": "dfLong",
+   "type": {
+    "kind": "primitive",
+    "name": "long"
+   }
+  },
+  {
+   "name": "dfClip",
+   "type": {
+    "kind": "object",
+    "className": "AnimationClip",
+    "namespace": "UnityEngine"
+   }
+  },
+  {
+   "name": "dfNullArr",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "primitive",
+     "name": "int"
+    }
+   }
+  },
+  {
+   "name": "dfTail",
+   "type": {
+    "kind": "primitive",
+    "name": "byte"
+   }
+  }
+ ]
+}

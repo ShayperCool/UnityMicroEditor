@@ -28,6 +28,31 @@ pub struct ScriptIdentity {
     pub local_id: i64,
 }
 
+impl ScriptIdentity {
+    /// The `MonoScript` object that names the class for the Player.
+    /// `properties_hash` is the hash of the class's layout, if it is known.
+    pub(super) fn object(&self, properties_hash: [u8; 16]) -> Result<Object<'static>> {
+        let hash = properties_hash
+            .iter()
+            .enumerate()
+            .map(|(index, byte)| (format!("bytes[{index}]").into(), Val::U(*byte as u64)))
+            .collect();
+        Ok(Object {
+            local_id: self.local_id,
+            tree: script_tree()?,
+            data: script_tree()?.encode(&Val::map([
+                ("m_Name", Val::str(&self.class_name)),
+                ("m_ExecutionOrder", Val::I(self.execution_order)),
+                ("m_PropertiesHash", Val::Map(hash)),
+                ("m_ClassName", Val::str(&self.class_name)),
+                ("m_Namespace", Val::str(&self.namespace)),
+                ("m_AssemblyName", Val::str(&self.assembly)),
+            ]))?,
+            script: None,
+        })
+    }
+}
+
 /// Resolves the scripts a clip binds curves or events to, and the clip an
 /// additive reference pose is taken from.
 pub trait ClipSources {
@@ -1044,22 +1069,15 @@ pub fn bake_clip(yaml: &[u8], sources: &dyn ClipSources) -> Result<Baked> {
         if script.local_id == local_id {
             bail!("script object identity collides with its clip");
         }
-        objects.push(Object {
-            local_id: script.local_id,
-            tree: script_tree()?,
-            data: script_tree()?.encode(&Val::map([
-                ("m_Name", Val::str(&script.class_name)),
-                ("m_ExecutionOrder", Val::I(script.execution_order)),
-                ("m_ClassName", Val::str(&script.class_name)),
-                ("m_Namespace", Val::str(&script.namespace)),
-                ("m_AssemblyName", Val::str(&script.assembly)),
-            ]))?,
-        });
+        // A clip is bound to a script by name alone, so the hash of the
+        // class's layout stays empty.
+        objects.push(script.object([0; 16])?);
     }
     objects.push(Object {
         local_id,
         tree: clip_tree()?,
         data,
+        script: None,
     });
     let file = serialized::write(&objects, &[])?;
     Ok(Baked {
@@ -1082,6 +1100,7 @@ fn authored(value: &Val) -> Value {
         Val::I(number) => Value::String(number.to_string()),
         Val::U(number) => Value::String(number.to_string()),
         // The shortest text that reads back as the same single.
+        Val::D(number) => Value::String(number.to_string()),
         Val::F(number) => Value::String(if number.is_infinite() {
             if *number > 0.0 {
                 "Infinity"
@@ -1161,6 +1180,7 @@ pub fn bake_model_clips(artifact: &[u8]) -> Result<ModelClips> {
                     local_id: object.local_id,
                     tree: clip_tree()?,
                     data,
+                    script: None,
                 });
             }
             Err(error) if error.is::<super::Unsupported>() => {

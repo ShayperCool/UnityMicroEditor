@@ -1,0 +1,8 @@
+{
+ "className": "SmbCbMachineExit",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "overridesStateMachineCallbacks": true,
+ "fields": []
+}

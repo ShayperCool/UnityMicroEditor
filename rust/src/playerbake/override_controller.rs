@@ -90,6 +90,7 @@ pub fn bake_override(yaml: &[u8]) -> Result<Baked> {
             local_id,
             tree: override_tree()?,
             data,
+            script: None,
         }],
         &externals,
     )?;

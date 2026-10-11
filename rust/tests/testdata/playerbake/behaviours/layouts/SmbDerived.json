@@ -1,0 +1,74 @@
+{
+ "className": "SmbDerived",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "overridesStateMachineCallbacks": false,
+ "fields": [
+  {
+   "name": "a1",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "a2",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "aStr",
+   "type": {
+    "kind": "string"
+   }
+  },
+  {
+   "name": "aProtSer",
+   "type": {
+    "kind": "primitive",
+    "name": "bool"
+   }
+  },
+  {
+   "name": "generic",
+   "type": {
+    "kind": "primitive",
+    "name": "float"
+   }
+  },
+  {
+   "name": "b1",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "bArr",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "primitive",
+     "name": "float"
+    }
+   }
+  },
+  {
+   "name": "d1",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "d2",
+   "type": {
+    "kind": "primitive",
+    "name": "byte"
+   }
+  }
+ ]
+}

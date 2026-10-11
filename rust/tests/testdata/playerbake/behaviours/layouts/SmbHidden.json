@@ -1,0 +1,276 @@
+{
+ "className": "SmbHidden",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "overridesStateMachineCallbacks": false,
+ "fields": [
+  {
+   "name": "hStruct",
+   "hidden": true,
+   "type": {
+    "kind": "struct",
+    "name": "Inner",
+    "fields": [
+     {
+      "name": "a",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     },
+     {
+      "name": "name",
+      "type": {
+       "kind": "string"
+      }
+     },
+     {
+      "name": "pos",
+      "type": {
+       "kind": "unity",
+       "name": "Vector3"
+      }
+     },
+     {
+      "name": "on",
+      "type": {
+       "kind": "primitive",
+       "name": "bool"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "hArr",
+   "hidden": true,
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "primitive",
+     "name": "int"
+    }
+   }
+  },
+  {
+   "name": "hStr",
+   "hidden": true,
+   "type": {
+    "kind": "string"
+   }
+  },
+  {
+   "name": "hBool",
+   "hidden": true,
+   "type": {
+    "kind": "primitive",
+    "name": "bool"
+   }
+  },
+  {
+   "name": "hEnum",
+   "hidden": true,
+   "type": {
+    "kind": "enum",
+    "underlying": "byte"
+   }
+  },
+  {
+   "name": "hCurve",
+   "hidden": true,
+   "type": {
+    "kind": "unity",
+    "name": "AnimationCurve"
+   }
+  },
+  {
+   "name": "hClip",
+   "hidden": true,
+   "type": {
+    "kind": "object",
+    "className": "AnimationClip",
+    "namespace": "UnityEngine"
+   }
+  },
+  {
+   "name": "hList",
+   "hidden": true,
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "struct",
+     "name": "Inner",
+     "fields": [
+      {
+       "name": "a",
+       "type": {
+        "kind": "primitive",
+        "name": "int"
+       }
+      },
+      {
+       "name": "name",
+       "type": {
+        "kind": "string"
+       }
+      },
+      {
+       "name": "pos",
+       "type": {
+        "kind": "unity",
+        "name": "Vector3"
+       }
+      },
+      {
+       "name": "on",
+       "type": {
+        "kind": "primitive",
+        "name": "bool"
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "hVec",
+   "hidden": true,
+   "type": {
+    "kind": "unity",
+    "name": "Vector3"
+   }
+  },
+  {
+   "name": "hChar",
+   "hidden": true,
+   "type": {
+    "kind": "primitive",
+    "name": "char"
+   }
+  },
+  {
+   "name": "hClips",
+   "hidden": true,
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "object",
+     "className": "AnimationClip",
+     "namespace": "UnityEngine"
+    }
+   }
+  },
+  {
+   "name": "hStrs",
+   "hidden": true,
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "string"
+    }
+   }
+  },
+  {
+   "name": "hC32",
+   "hidden": true,
+   "type": {
+    "kind": "unity",
+    "name": "Color32"
+   }
+  },
+  {
+   "name": "hPriv",
+   "hidden": true,
+   "type": {
+    "kind": "primitive",
+    "name": "byte"
+   }
+  },
+  {
+   "name": "ranged",
+   "type": {
+    "kind": "primitive",
+    "name": "float"
+   }
+  },
+  {
+   "name": "tipped",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "headed",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "multi",
+   "type": {
+    "kind": "string"
+   }
+  },
+  {
+   "name": "area",
+   "type": {
+    "kind": "string"
+   }
+  },
+  {
+   "name": "hdr",
+   "type": {
+    "kind": "unity",
+    "name": "Color"
+   }
+  },
+  {
+   "name": "min",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "delayed",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "nonReorder",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "primitive",
+     "name": "int"
+    }
+   }
+  },
+  {
+   "name": "gradUsage",
+   "type": {
+    "kind": "unity",
+    "name": "Gradient"
+   }
+  },
+  {
+   "name": "spaced",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "ctx",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  }
+ ]
+}

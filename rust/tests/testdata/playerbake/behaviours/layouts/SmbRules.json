@@ -1,0 +1,184 @@
+{
+ "className": "SmbRules",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "overridesStateMachineCallbacks": false,
+ "fields": [
+  {
+   "name": "pub",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "priv",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "<AutoProp>k__BackingField",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "protSer",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "internSer",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "renamed",
+   "formerNames": [
+    "oldName"
+   ],
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "hidden",
+   "hidden": true,
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "vol",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "concrete",
+   "type": {
+    "kind": "struct",
+    "name": "ConcreteThing",
+    "fields": [
+     {
+      "name": "x",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     },
+     {
+      "name": "y",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "derived",
+   "type": {
+    "kind": "struct",
+    "name": "DerivedData",
+    "fields": [
+     {
+      "name": "bd",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     },
+     {
+      "name": "bp",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     },
+     {
+      "name": "dd",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "derivedOfPlain",
+   "type": {
+    "kind": "struct",
+    "name": "DerivedOfPlain",
+    "fields": [
+     {
+      "name": "plainBaseField",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     },
+     {
+      "name": "own",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "sealedData",
+   "type": {
+    "kind": "struct",
+    "name": "SealedData",
+    "fields": [
+     {
+      "name": "sd",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "privStr",
+   "type": {
+    "kind": "string"
+   }
+  },
+  {
+   "name": "privArr",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "primitive",
+     "name": "int"
+    }
+   }
+  },
+  {
+   "name": "last",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  }
+ ]
+}

@@ -1,0 +1,8 @@
+{
+ "className": "SmbEmpty",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "overridesStateMachineCallbacks": false,
+ "fields": []
+}

@@ -1,0 +1,8 @@
+{
+ "className": "SmbCbMachineEnter",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "overridesStateMachineCallbacks": true,
+ "fields": []
+}

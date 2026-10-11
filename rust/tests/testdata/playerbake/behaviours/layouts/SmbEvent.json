@@ -1,0 +1,318 @@
+{
+ "className": "SmbEvent",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "overridesStateMachineCallbacks": false,
+ "fields": [
+  {
+   "name": "evt",
+   "type": {
+    "kind": "struct",
+    "name": "UnityEvent",
+    "fields": [
+     {
+      "name": "m_PersistentCalls",
+      "formerNames": [
+       "m_PersistentListeners"
+      ],
+      "type": {
+       "kind": "struct",
+       "name": "PersistentCallGroup",
+       "fields": [
+        {
+         "name": "m_Calls",
+         "formerNames": [
+          "m_Listeners"
+         ],
+         "type": {
+          "kind": "array",
+          "element": {
+           "kind": "struct",
+           "name": "PersistentCall",
+           "fields": [
+            {
+             "name": "m_Target",
+             "formerNames": [
+              "instance"
+             ],
+             "type": {
+              "kind": "object",
+              "className": "Object",
+              "namespace": "UnityEngine"
+             }
+            },
+            {
+             "name": "m_TargetAssemblyTypeName",
+             "type": {
+              "kind": "string"
+             }
+            },
+            {
+             "name": "m_MethodName",
+             "formerNames": [
+              "methodName"
+             ],
+             "type": {
+              "kind": "string"
+             }
+            },
+            {
+             "name": "m_Mode",
+             "formerNames": [
+              "mode"
+             ],
+             "type": {
+              "kind": "enum",
+              "underlying": "int"
+             }
+            },
+            {
+             "name": "m_Arguments",
+             "formerNames": [
+              "arguments"
+             ],
+             "type": {
+              "kind": "struct",
+              "name": "ArgumentCache",
+              "fields": [
+               {
+                "name": "m_ObjectArgument",
+                "formerNames": [
+                 "objectArgument"
+                ],
+                "type": {
+                 "kind": "object",
+                 "className": "Object",
+                 "namespace": "UnityEngine"
+                }
+               },
+               {
+                "name": "m_ObjectArgumentAssemblyTypeName",
+                "formerNames": [
+                 "objectArgumentAssemblyTypeName"
+                ],
+                "type": {
+                 "kind": "string"
+                }
+               },
+               {
+                "name": "m_IntArgument",
+                "formerNames": [
+                 "intArgument"
+                ],
+                "type": {
+                 "kind": "primitive",
+                 "name": "int"
+                }
+               },
+               {
+                "name": "m_FloatArgument",
+                "formerNames": [
+                 "floatArgument"
+                ],
+                "type": {
+                 "kind": "primitive",
+                 "name": "float"
+                }
+               },
+               {
+                "name": "m_StringArgument",
+                "formerNames": [
+                 "stringArgument"
+                ],
+                "type": {
+                 "kind": "string"
+                }
+               },
+               {
+                "name": "m_BoolArgument",
+                "type": {
+                 "kind": "primitive",
+                 "name": "bool"
+                }
+               }
+              ]
+             }
+            },
+            {
+             "name": "m_CallState",
+             "formerNames": [
+              "m_Enabled",
+              "enabled"
+             ],
+             "type": {
+              "kind": "enum",
+              "underlying": "int"
+             }
+            }
+           ]
+          }
+         }
+        }
+       ]
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "evtInt",
+   "type": {
+    "kind": "struct",
+    "name": "UnityEvent`1",
+    "fields": [
+     {
+      "name": "m_PersistentCalls",
+      "formerNames": [
+       "m_PersistentListeners"
+      ],
+      "type": {
+       "kind": "struct",
+       "name": "PersistentCallGroup",
+       "fields": [
+        {
+         "name": "m_Calls",
+         "formerNames": [
+          "m_Listeners"
+         ],
+         "type": {
+          "kind": "array",
+          "element": {
+           "kind": "struct",
+           "name": "PersistentCall",
+           "fields": [
+            {
+             "name": "m_Target",
+             "formerNames": [
+              "instance"
+             ],
+             "type": {
+              "kind": "object",
+              "className": "Object",
+              "namespace": "UnityEngine"
+             }
+            },
+            {
+             "name": "m_TargetAssemblyTypeName",
+             "type": {
+              "kind": "string"
+             }
+            },
+            {
+             "name": "m_MethodName",
+             "formerNames": [
+              "methodName"
+             ],
+             "type": {
+              "kind": "string"
+             }
+            },
+            {
+             "name": "m_Mode",
+             "formerNames": [
+              "mode"
+             ],
+             "type": {
+              "kind": "enum",
+              "underlying": "int"
+             }
+            },
+            {
+             "name": "m_Arguments",
+             "formerNames": [
+              "arguments"
+             ],
+             "type": {
+              "kind": "struct",
+              "name": "ArgumentCache",
+              "fields": [
+               {
+                "name": "m_ObjectArgument",
+                "formerNames": [
+                 "objectArgument"
+                ],
+                "type": {
+                 "kind": "object",
+                 "className": "Object",
+                 "namespace": "UnityEngine"
+                }
+               },
+               {
+                "name": "m_ObjectArgumentAssemblyTypeName",
+                "formerNames": [
+                 "objectArgumentAssemblyTypeName"
+                ],
+                "type": {
+                 "kind": "string"
+                }
+               },
+               {
+                "name": "m_IntArgument",
+                "formerNames": [
+                 "intArgument"
+                ],
+                "type": {
+                 "kind": "primitive",
+                 "name": "int"
+                }
+               },
+               {
+                "name": "m_FloatArgument",
+                "formerNames": [
+                 "floatArgument"
+                ],
+                "type": {
+                 "kind": "primitive",
+                 "name": "float"
+                }
+               },
+               {
+                "name": "m_StringArgument",
+                "formerNames": [
+                 "stringArgument"
+                ],
+                "type": {
+                 "kind": "string"
+                }
+               },
+               {
+                "name": "m_BoolArgument",
+                "type": {
+                 "kind": "primitive",
+                 "name": "bool"
+                }
+               }
+              ]
+             }
+            },
+            {
+             "name": "m_CallState",
+             "formerNames": [
+              "m_Enabled",
+              "enabled"
+             ],
+             "type": {
+              "kind": "enum",
+              "underlying": "int"
+             }
+            }
+           ]
+          }
+         }
+        }
+       ]
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "tail",
+   "type": {
+    "kind": "primitive",
+    "name": "byte"
+   }
+  }
+ ]
+}
