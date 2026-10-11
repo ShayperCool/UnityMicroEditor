@@ -3,7 +3,7 @@ use super::{
     store::*,
     yamlcodec::{self, Kind, Node, Style, internal},
 };
-use crate::yaml::{Document, parse_unity_yaml};
+use crate::yaml::{Document, parse_unity_yaml_with_comments};
 use regex::Regex;
 use serde_json::{Map, Number, Value, json};
 use std::{
@@ -448,7 +448,8 @@ impl TextAsset {
         }
     }
     pub fn parse(content: &str) -> Result<Self> {
-        let parsed = parse_unity_yaml(content.as_bytes()).map_err(|e| invalid(format!("{e:#}")))?;
+        let parsed = parse_unity_yaml_with_comments(content.as_bytes())
+            .map_err(|e| invalid(format!("{e:#}")))?;
         let headers: Vec<_> = HEADER.find_iter(content).collect();
         if headers.len() != parsed.len() {
             return Err(invalid("document spans are inconsistent"));

@@ -56,9 +56,11 @@ the original manifest and catalog unchanged. Resource mounting belongs to the
 caller. Previously accepted files are checked again before each publication.
 
 Unity writes a plain value such as `Enemy #1` without quotes and reads it back
-whole. The reader keeps it the same way: a `#` after a blank does not start a
-comment inside a value. A line holding only a comment stays one, and a `#` in a
-plain value folded over several lines is rejected.
+whole; checked against `6000.6.3f1`, which also keeps `#lead` and `a  # b`. The
+reader does the same. A comment remains what follows a number, a quoted value
+or a flow value, and a line holding nothing else. A `#` in a plain value folded
+over several lines is rejected. The authoring editor still locates values by
+the YAML rule, so it reads such a name only up to the `#`.
 
 The standalone preparation command is useful for inspecting a revision:
 

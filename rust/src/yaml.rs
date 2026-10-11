@@ -29,23 +29,35 @@ pub struct Document {
 
 /// Unity IDs and native hex buffers are lexical strings, even when unquoted.
 pub fn parse_unity_yaml(content: &[u8]) -> Result<Vec<Document>> {
-    parse_documents(content, false, MAX_TEXT_BYTES)
+    parse_documents(content, false, MAX_TEXT_BYTES, true)
+}
+
+/// Reads a `#` after a blank as the start of a comment, as YAML does and
+/// Unity does not. The authoring editor locates values in the source text by
+/// that rule and has to see the same values here.
+pub fn parse_unity_yaml_with_comments(content: &[u8]) -> Result<Vec<Document>> {
+    parse_documents(content, false, MAX_TEXT_BYTES, false)
 }
 
 /// Reads documents with every scalar kept as its source text, for consumers
 /// that convert by the target field's type: `-0`, a float's exact digits and
 /// a name that looks like a number all survive.
 pub fn parse_unity_yaml_lexical(content: &[u8]) -> Result<Vec<Document>> {
-    parse_documents(content, true, MAX_TEXT_BYTES)
+    parse_documents(content, true, MAX_TEXT_BYTES, true)
 }
 
 /// Like `parse_unity_yaml_lexical`, for a kind of source whose authored size
 /// legitimately exceeds the ordinary text bound, such as a dense animation.
 pub fn parse_unity_yaml_lexical_within(content: &[u8], limit: usize) -> Result<Vec<Document>> {
-    parse_documents(content, true, limit)
+    parse_documents(content, true, limit, true)
 }
 
-fn parse_documents(content: &[u8], lexical: bool, limit: usize) -> Result<Vec<Document>> {
+fn parse_documents(
+    content: &[u8],
+    lexical: bool,
+    limit: usize,
+    hash_marks: bool,
+) -> Result<Vec<Document>> {
     ensure!(
         content.len() <= limit,
         "unsupported binary or oversized Unity text asset"
@@ -70,7 +82,11 @@ fn parse_documents(content: &[u8], lexical: bool, limit: usize) -> Result<Vec<Do
         let end = headers
             .get(i + 1)
             .map_or(text.len(), |h| h.get(0).unwrap().start());
-        let body = keep_hash_marks(&text[start..end]).with_context(|| format!("fileID {id}"))?;
+        let body = if hash_marks {
+            keep_hash_marks(&text[start..end]).with_context(|| format!("fileID {id}"))?
+        } else {
+            Cow::Borrowed(&text[start..end])
+        };
         let value = match parse_yaml(&body, lexical) {
             Err(error) if error.is::<EmptyDocument>() => bail!("fileID {id} requires one object"),
             other => other.with_context(|| format!("fileID {id}"))?,
@@ -96,8 +112,9 @@ fn parse_documents(content: &[u8], lexical: bool, limit: usize) -> Result<Vec<Do
 
 /// Unity writes a plain value such as `Attack #2` without quotes and reads it
 /// back whole, where YAML starts a comment at the `#`. Such a value is quoted
-/// here, so the parser keeps it. Unity writes no comments of its own; a line
-/// that only holds a comment stays one.
+/// here, so the parser keeps it. Unity reads a number up to the first blank, so
+/// what follows a number stays a comment, as does a line holding nothing else
+/// and what follows a quoted or flow value.
 fn keep_hash_marks(text: &str) -> Result<Cow<'_, str>> {
     if !text.contains(" #") && !text.contains("\t#") {
         return Ok(Cow::Borrowed(text));
@@ -158,15 +175,14 @@ fn keep_hash_marks(text: &str) -> Result<Cow<'_, str>> {
             Some('{' | '[' | '|' | '>' | '&' | '*' | '!') => {}
             Some(_) => {
                 plain = Some(column);
-                if marked(rest) {
+                let number = rest.split([' ', '\t']).next().unwrap_or_default();
+                if (marked(rest) || rest.starts_with('#')) && number.parse::<f64>().is_err() {
                     let value = rest.trim_end_matches([' ', '\t']);
                     result.push_str(&content[..content.len() - rest.len()]);
                     result.push('\'');
                     result.push_str(&value.replace('\'', "''"));
                     result.push('\'');
                     result.push_str(ending);
-                    // Quoted now, so a continuation line would be misread.
-                    plain = Some(column);
                     continue;
                 }
             }

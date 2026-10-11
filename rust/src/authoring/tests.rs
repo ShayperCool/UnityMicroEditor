@@ -30,8 +30,8 @@ GameObject:
   serializedVersion: 6
   m_Component:
   - component: {fileID: 101}
-  m_Layer: 0
-  m_Name: Original # keep my comment
+  m_Layer: 0 # keep my comment
+  m_Name: Original
   m_TagString: Untagged
   m_IsActive: 1
   unknownFuture: {value: 00123, label: 'a, b', target: {fileID: 0}}
@@ -497,11 +497,7 @@ fn unicode_flow_leaf_and_plain_comma_string() {
             .content
             .contains("label: \"New\", other: \"Edited\"")
     );
-    let text = SCENE.replacen(
-        "m_Name: Original # keep my comment",
-        "m_Name: Original, name # keep my comment",
-        1,
-    );
+    let text = SCENE.replacen("m_Name: Original", "m_Name: Original, name", 1);
     let (_temp, store, source) = fixture(&text);
     edit(
         &store,
@@ -1213,7 +1209,7 @@ fn native_defaults_source_cas_replay_undo_and_exact_values() {
             && current
                 .content
                 .contains("exactCounter: 9223372036854775807")
-            && current.content.contains("Original # keep my comment")
+            && current.content.contains("m_Layer: 0 # keep my comment")
             && current.content.contains("m_IsTrigger: 1")
     );
     let parsed = TextAsset::parse(&current.content).unwrap();
