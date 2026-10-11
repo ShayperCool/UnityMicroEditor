@@ -655,6 +655,7 @@ fn run_session(
         }
         apply_builtin_shaders(&session, &opts.builtin_shaders)?;
         let mut native_importer = NativeProjectImporter::new(opts.native(), session.clone())?;
+        native_importer.script_assemblies = compiler.script_assemblies();
         match native_importer.prepare(ctx) {
             Ok(prepared) => break (session, native_importer, prepared),
             // An addressable prefab the raw loader cannot prepare must not

@@ -1,5 +1,5 @@
-//! The reusable Mono host built by the Editor in an
-//! owned clone of the target project.
+//! The reusable Mono host built by the Editor in the
+//! owned staging copy of the target project.
 use super::{
     Any, AnyMap, Service, UNITY_VERSION, actions::request, error_text, fail, join, not_exist, nz,
     obj, operation_id, read_json, regular, staging::SourceSnapshot, staging::phase_id, text,
@@ -40,9 +40,11 @@ struct HostPreparation {
     evidence: Any,
 }
 
-/// Automatic host construction runs only in an owned
-/// clone. Unity build preprocessors can author files (for example
-/// Addressables link.xml); none of those changes are published to the target.
+/// Automatic host construction runs only in the owned staging copy, which
+/// every preparation of the project shares: a rebuild starts from the import,
+/// script and Player build caches of the build before it. Unity build
+/// preprocessors can author files (for example Addressables link.xml); none
+/// of those changes are published to the target.
 /// The caller holds the project action lock and reacquires its target Editor
 /// client after this call.
 pub(crate) fn prepare_agent_host(
@@ -63,7 +65,7 @@ pub(crate) fn prepare_agent_host(
         id,
         "host-stage",
     ]);
-    let stage = join(&[&directory, "project"]);
+    let stage = super::staging::shared_stage(project);
     if !is_owned_cache_path(project, &stage) {
         return Err(anyhow!("host stage is outside owned project caches"));
     }
@@ -155,7 +157,7 @@ fn build_host(
                 || cached.project != project
                 || cached.editor != editor
                 || cached.request_id != id
-                || cached.stage != stage
+                || (cached.stage != stage && cached.stage != join(&[directory, "project"]))
                 || cached.snapshot_sha != snapshot_sha
                 || *cached.evidence.field("backend") != Any::from("unity_editor")
                 || !cached.evidence.field("sourceSnapshotVerified").is_true()
@@ -164,8 +166,9 @@ fn build_host(
                     "cached host result lacks exact source/stage/Editor provenance"
                 ));
             }
+            // A host from before the shared stage stays in its own clone.
             let artifacts =
-                snapshot_host_artifacts(ctx, project, stage, &host_phase, &cached.player)?;
+                snapshot_host_artifacts(ctx, project, &cached.stage, &host_phase, &cached.player)?;
             if artifacts != cached.artifacts {
                 return Err(anyhow!(
                     "cached staged host artifacts differ from their confirmed result"
@@ -181,10 +184,10 @@ fn build_host(
         Err(_) => {}
     }
 
-    let (cloned, clone_snapshot) = super::clone_staging(ctx, project, directory)?;
-    if cloned != stage || snapshot.files != clone_snapshot.files {
+    let (synced, stage_snapshot) = super::sync_staging(ctx, project)?;
+    if synced != stage || snapshot.files != stage_snapshot.files {
         return Err(anyhow!(
-            "host clone no longer matches its immutable authored source snapshot"
+            "host stage no longer matches its immutable authored source snapshot"
         ));
     }
     let (warm, owned_warm) = super::native::seed_stage_library(ctx, service, stage)?;
@@ -193,7 +196,7 @@ fn build_host(
     let _close = Close(client.clone());
     service.stage(
         "build_host",
-        "building the reusable Mono host Player in an owned staging copy",
+        "building the reusable Mono host Player in the owned staging copy",
         &join(&[client.mailbox(), "editor.log"]),
     );
     request(
@@ -358,10 +361,10 @@ fn export_stage_graph(client: &Client, ctx: &Context, id: &str, path: &str) -> R
     agent_immutable_json(path, &unmarshal_any(&graph)?)
 }
 
-/// The public Player graph exported by an Editor that runs in the owned stage
-/// below `directory`, as that Editor reported it: its paths still name the
-/// stage. A host build leaves this file next to its stage; a supplied host
-/// gets a stage for the export alone.
+/// The public Player graph exported by an Editor that runs in the owned
+/// stage, as that Editor reported it: its paths still name the stage. A host
+/// build leaves this file in `directory`; a supplied host has the stage
+/// brought up to date for the export alone.
 pub(crate) fn stage_graph(
     ctx: &Context,
     service: &Service,
@@ -369,16 +372,23 @@ pub(crate) fn stage_graph(
     directory: &str,
 ) -> Result<(String, String)> {
     let path = join(&[directory, STAGE_GRAPH]);
-    let (stage, _) = super::clone_staging(ctx, &service.0.project, directory)?;
     if regular(&path) {
+        // A graph from before the shared stage names its own clone.
+        let legacy = join(&[directory, "project"]);
+        let stage = if sysutil::lstat(&legacy).is_ok_and(|info| info.is_dir()) {
+            legacy
+        } else {
+            super::staging::shared_stage(&service.0.project)
+        };
         return Ok((stage, path));
     }
+    let (stage, _) = super::sync_staging(ctx, &service.0.project)?;
     super::native::seed_stage_library(ctx, service, &stage)?;
     let client = stage_editor(ctx, service, &stage)?;
     let _close = Close(client.clone());
     service.stage(
         "export_engine_graph",
-        "exporting the public Player assembly graph from an owned staging copy",
+        "exporting the public Player assembly graph from the owned staging copy",
         &join(&[client.mailbox(), "editor.log"]),
     );
     request(
@@ -488,7 +498,9 @@ pub(crate) fn retarget_stage_graph(
 /// The Addressables output of the host build, by kind. Build processors run
 /// in the staging copy, so remote groups land in that copy's `ServerData` and
 /// local groups in the host's StreamingAssets, never in the target project.
-/// The content is as old as the host: it is not rebuilt when assets change.
+/// The content is not rebuilt when assets change. Local groups are as old as
+/// their host; the staging copy is shared, so its `ServerData` holds the
+/// remote groups of the latest host build.
 pub(crate) fn host_content(host: &str) -> BTreeMap<String, String> {
     let mut found = BTreeMap::new();
     let has_files = |directory: &str| {

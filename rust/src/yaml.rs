@@ -29,19 +29,25 @@ pub struct Document {
 
 /// Unity IDs and native hex buffers are lexical strings, even when unquoted.
 pub fn parse_unity_yaml(content: &[u8]) -> Result<Vec<Document>> {
-    parse_documents(content, false)
+    parse_documents(content, false, MAX_TEXT_BYTES)
 }
 
 /// Reads documents with every scalar kept as its source text, for consumers
 /// that convert by the target field's type: `-0`, a float's exact digits and
 /// a name that looks like a number all survive.
 pub fn parse_unity_yaml_lexical(content: &[u8]) -> Result<Vec<Document>> {
-    parse_documents(content, true)
+    parse_documents(content, true, MAX_TEXT_BYTES)
 }
 
-fn parse_documents(content: &[u8], lexical: bool) -> Result<Vec<Document>> {
+/// Like `parse_unity_yaml_lexical`, for a kind of source whose authored size
+/// legitimately exceeds the ordinary text bound, such as a dense animation.
+pub fn parse_unity_yaml_lexical_within(content: &[u8], limit: usize) -> Result<Vec<Document>> {
+    parse_documents(content, true, limit)
+}
+
+fn parse_documents(content: &[u8], lexical: bool, limit: usize) -> Result<Vec<Document>> {
     ensure!(
-        content.len() <= MAX_TEXT_BYTES,
+        content.len() <= limit,
         "unsupported binary or oversized Unity text asset"
     );
     let Ok(text) = std::str::from_utf8(content) else {

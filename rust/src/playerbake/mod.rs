@@ -10,7 +10,10 @@ mod serialized;
 mod source;
 mod typetree;
 
-pub use clip::{bake_clip, bake_clip_object};
+pub use clip::{
+    ClipSources, MAX_SOURCE_BYTES, NoScripts, ScriptIdentity, bake_clip, bake_clip_object,
+    script_local_id,
+};
 pub use controller::{
     ClipFacts, ControllerSources, Mask, bake_controller, bake_controller_object, read_clip_facts,
     read_mask,
@@ -31,6 +34,17 @@ pub fn clip_tree() -> Result<&'static TypeTree> {
     CLIP_TREE
         .as_ref()
         .map_err(|error| anyhow::anyhow!("pinned AnimationClip type tree: {error}"))
+}
+
+static SCRIPT_TREE: LazyLock<Result<TypeTree, String>> = LazyLock::new(|| {
+    TypeTree::parse(include_bytes!("engine/type-115.bin")).map_err(|error| error.to_string())
+});
+
+/// The Player layout of `MonoScript` in the pinned engine.
+pub fn script_tree() -> Result<&'static TypeTree> {
+    SCRIPT_TREE
+        .as_ref()
+        .map_err(|error| anyhow::anyhow!("pinned MonoScript type tree: {error}"))
 }
 
 static CONTROLLER_TREE: LazyLock<Result<TypeTree, String>> = LazyLock::new(|| {

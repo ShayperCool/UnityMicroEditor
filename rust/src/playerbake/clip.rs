@@ -6,7 +6,7 @@
 //! clip when the whole binding never changes. The derivation below follows
 //! the pinned engine's output bit for bit on the profiles it accepts.
 use super::{
-    Baked, clip_tree, crc32,
+    Baked, clip_tree, crc32, script_tree,
     serialized::{self, Object},
     source::{flag, float, get, int, list, null_reference, object, text},
     typetree::Val,
@@ -15,9 +15,72 @@ use super::{
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value};
 
+/// A script a clip refers to: the class its `MonoScript` object names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptIdentity {
+    pub class_name: String,
+    pub namespace: String,
+    pub assembly: String,
+    pub execution_order: i64,
+    /// The local file ID the baked file gives the `MonoScript` object.
+    pub local_id: i64,
+}
+
+/// Resolves the scripts a clip binds curves or events to.
+pub trait ClipSources {
+    fn script(&self, guid: &str) -> Result<ScriptIdentity>;
+}
+
+/// For clips that may not refer to scripts.
+pub struct NoScripts;
+impl ClipSources for NoScripts {
+    fn script(&self, guid: &str) -> Result<ScriptIdentity> {
+        Err(unsupported(format!("reference to script {guid}")))
+    }
+}
+
+/// A local file ID for a script's `MonoScript` object, stable per script.
+pub fn script_local_id(guid: &str) -> i64 {
+    let digest = crate::sha256(format!("playerbake-monoscript\0{guid}").as_bytes());
+    // 60 bits keep it positive and away from Unity's small fixed IDs.
+    i64::from_str_radix(&digest[..15], 16).unwrap_or(1) | (1 << 40)
+}
+
+/// Collects the scripts a clip refers to and hands out pointers to them.
+struct Scripts<'a> {
+    sources: &'a dyn ClipSources,
+    used: Vec<(String, ScriptIdentity)>,
+}
+
+impl Scripts<'_> {
+    /// The pointer for an authored object reference that has to be a script.
+    fn pointer(&mut self, value: &Value, what: &str) -> Result<Val> {
+        if null_reference(value)? {
+            return Ok(Val::Zero);
+        }
+        let map = object(value, what)?;
+        let guid = text(get(map, "guid"))?.to_ascii_lowercase();
+        // Every script asset holds its MonoScript at this file ID.
+        if text(get(map, "fileID"))? != "11500000" || guid.is_empty() {
+            return Err(unsupported(format!("{what} that is not a script")));
+        }
+        let identity = match self.used.iter().find(|(known, _)| *known == guid) {
+            Some((_, identity)) => identity.clone(),
+            None => {
+                let identity = self.sources.script(&guid)?;
+                self.used.push((guid, identity.clone()));
+                identity
+            }
+        };
+        Ok(Val::map([("m_PathID", Val::I(identity.local_id))]))
+    }
+}
+
 /// The muscle clip's size in memory with no curves, as the engine reports it.
 const MUSCLE_CLIP_BASE_SIZE: u64 = 2528;
 const HUMAN_CURVE_COUNT: usize = 200;
+/// Baked motion capture is authored as text of tens of megabytes.
+pub const MAX_SOURCE_BYTES: usize = 256 << 20;
 
 #[derive(Debug, Clone, Copy)]
 struct Key {
@@ -38,6 +101,7 @@ struct Binding {
     attribute: u32,
     type_id: i64,
     custom_type: u8,
+    script: Val,
     curves: Vec<Curve>,
 }
 
@@ -186,8 +250,15 @@ fn humanoid_attribute(name: &str) -> bool {
 }
 
 /// The engine's binding of a float curve: attribute hash and custom type.
-fn float_binding(class_id: i64, attribute: &str) -> Result<(u32, u8)> {
+fn float_binding(class_id: i64, attribute: &str, scripted: bool) -> Result<(u32, u8)> {
+    if scripted != (class_id == 114) {
+        return Err(unsupported(format!(
+            "float curve {attribute} of class {class_id} with an unexpected script reference"
+        )));
+    }
     match (class_id, attribute) {
+        // A field of a script: the hash of its property path.
+        (114, name) => Ok((crc32(name), 0)),
         (95, name) if !humanoid_attribute(name) => Ok((crc32(name), 0)),
         (95, name) => Err(unsupported(format!("humanoid curve {name}"))),
         (1, "m_IsActive") => Ok((crc32(attribute), 0)),
@@ -362,15 +433,17 @@ fn settings(fields: &Map<String, Value>) -> Result<Settings> {
     })
 }
 
-fn events(fields: &Map<String, Value>) -> Result<Val> {
+fn events(fields: &Map<String, Value>, scripts: &mut Scripts<'_>) -> Result<Val> {
     let what = "m_Events";
     let mut result = Vec::new();
     for item in list(get(fields, what), what)? {
         let event = object(item, what)?;
-        if !null_reference(get(event, "objectReferenceParameter"))? {
-            return Err(unsupported("animation event with an object reference"));
-        }
+        let parameter = scripts.pointer(
+            get(event, "objectReferenceParameter"),
+            "animation event object reference",
+        )?;
         result.push(Val::map([
+            ("objectReferenceParameter", parameter),
             ("time", Val::F(float(get(event, "time"), what)?)),
             ("functionName", Val::Str(text(get(event, "functionName"))?)),
             ("data", Val::Str(text(get(event, "data"))?)),
@@ -408,8 +481,29 @@ fn bounds(fields: &Map<String, Value>) -> Result<Val> {
     ]))
 }
 
-/// The serialized `AnimationClip` object of an authored `.anim` document.
-pub fn bake_clip_object(fields: &Map<String, Value>) -> Result<Vec<u8>> {
+/// The serialized `AnimationClip` object of an authored `.anim` document and
+/// the scripts it points to, each of which needs a `MonoScript` object with
+/// its local ID in the same file.
+pub fn bake_clip_object(
+    fields: &Map<String, Value>,
+    sources: &dyn ClipSources,
+) -> Result<(Vec<u8>, Vec<ScriptIdentity>)> {
+    let mut scripts = Scripts {
+        sources,
+        used: Vec::new(),
+    };
+    let data = clip_object(fields, &mut scripts)?;
+    Ok((
+        data,
+        scripts
+            .used
+            .into_iter()
+            .map(|(_, identity)| identity)
+            .collect(),
+    ))
+}
+
+fn clip_object(fields: &Map<String, Value>, scripts: &mut Scripts<'_>) -> Result<Vec<u8>> {
     let what = "animation clip";
     let legacy = flag(get(fields, "m_Legacy"), what)?;
     if !list(get(fields, "m_CompressedRotationCurves"), what)?.is_empty() {
@@ -448,6 +542,7 @@ pub fn bake_clip_object(fields: &Map<String, Value>) -> Result<Vec<u8>> {
                 attribute,
                 type_id: 4,
                 custom_type,
+                script: Val::Zero,
                 curves,
             });
             serialized.push(Val::map([("curve", curve), ("path", Val::Str(path))]));
@@ -464,18 +559,15 @@ pub fn bake_clip_object(fields: &Map<String, Value>) -> Result<Vec<u8>> {
         if curves[0].keys.is_empty() {
             return Err(unsupported("m_FloatCurves has a curve without keys"));
         }
-        if !null_reference(get(entry, "script"))? {
-            return Err(unsupported(format!(
-                "float curve {attribute} is bound to a script"
-            )));
-        }
+        let script = scripts.pointer(get(entry, "script"), "float curve script")?;
         if !legacy {
-            let (hash, custom_type) = float_binding(class_id, &attribute)?;
+            let (hash, custom_type) = float_binding(class_id, &attribute, script != Val::Zero)?;
             bindings.push(Binding {
                 path: crc32(&path),
                 attribute: hash,
                 type_id: class_id,
                 custom_type,
+                script: script.clone(),
                 curves,
             });
         }
@@ -484,6 +576,7 @@ pub fn bake_clip_object(fields: &Map<String, Value>) -> Result<Vec<u8>> {
             ("attribute", Val::Str(attribute)),
             ("path", Val::Str(path)),
             ("classID", Val::I(class_id)),
+            ("script", script),
             ("flags", Val::I(int(get(entry, "flags"), "m_FloatCurves")?)),
         ]));
     }
@@ -506,7 +599,7 @@ pub fn bake_clip_object(fields: &Map<String, Value>) -> Result<Vec<u8>> {
         ),
         ("m_WrapMode", Val::I(int(get(fields, "m_WrapMode"), what)?)),
         ("m_Bounds", bounds(fields)?),
-        ("m_Events", events(fields)?),
+        ("m_Events", events(fields, scripts)?),
     ];
     let sample_rate = float(get(fields, "m_SampleRate"), what)?;
     let human_pose = || {
@@ -628,6 +721,7 @@ pub fn bake_clip_object(fields: &Map<String, Value>) -> Result<Vec<u8>> {
             Val::map([
                 ("path", Val::U(binding.path as u64)),
                 ("attribute", Val::U(binding.attribute as u64)),
+                ("script", binding.script.clone()),
                 ("typeID", Val::I(binding.type_id)),
                 ("customType", Val::U(binding.custom_type as u64)),
             ])
@@ -649,9 +743,14 @@ fn named(fields: Vec<(&'static str, Val)>) -> Vec<(std::borrow::Cow<'static, str
         .collect()
 }
 
-/// Bakes an authored `.anim` source into a ContentFile.
-pub fn bake_clip(yaml: &[u8]) -> Result<Baked> {
-    let documents = crate::yaml::parse_unity_yaml_lexical(yaml)?;
+/// Bakes an authored `.anim` source into a ContentFile. Scripts the clip
+/// points to are written into the same file as `MonoScript` objects, which
+/// the Player ties to the loaded class by name.
+pub fn bake_clip(yaml: &[u8], sources: &dyn ClipSources) -> Result<Baked> {
+    if yaml.len() > MAX_SOURCE_BYTES {
+        return Err(unsupported("animation source larger than the baker reads"));
+    }
+    let documents = crate::yaml::parse_unity_yaml_lexical_within(yaml, MAX_SOURCE_BYTES)?;
     let [document] = documents.as_slice() else {
         return Err(unsupported("animation source with several objects"));
     };
@@ -659,15 +758,30 @@ pub fn bake_clip(yaml: &[u8]) -> Result<Baked> {
         bail!("animation source does not hold an AnimationClip");
     }
     let local_id: i64 = document.file_id.parse().context("animation clip file ID")?;
-    let data = bake_clip_object(&document.data)?;
-    let file = serialized::write(
-        &[Object {
-            local_id,
-            tree: clip_tree()?,
-            data,
-        }],
-        &[],
-    )?;
+    let (data, scripts) = bake_clip_object(&document.data, sources)?;
+    let mut objects = Vec::new();
+    for script in &scripts {
+        if script.local_id == local_id {
+            bail!("script object identity collides with its clip");
+        }
+        objects.push(Object {
+            local_id: script.local_id,
+            tree: script_tree()?,
+            data: script_tree()?.encode(&Val::map([
+                ("m_Name", Val::str(&script.class_name)),
+                ("m_ExecutionOrder", Val::I(script.execution_order)),
+                ("m_ClassName", Val::str(&script.class_name)),
+                ("m_Namespace", Val::str(&script.namespace)),
+                ("m_AssemblyName", Val::str(&script.assembly)),
+            ]))?,
+        });
+    }
+    objects.push(Object {
+        local_id,
+        tree: clip_tree()?,
+        data,
+    });
+    let file = serialized::write(&objects, &[])?;
     Ok(Baked {
         file,
         objects: vec![(

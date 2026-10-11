@@ -16,10 +16,26 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// The script of the fixtures, with the local ID the engine gave its
+/// `MonoScript` object in the reference bundle.
+struct FixtureScripts;
+impl playerbake::ClipSources for FixtureScripts {
+    fn script(&self, guid: &str) -> anyhow::Result<playerbake::ScriptIdentity> {
+        assert_eq!(guid, "a01ac09a24c8493b862564ce94c80366");
+        Ok(playerbake::ScriptIdentity {
+            class_name: "ProbeBehaviour".into(),
+            namespace: "Probe.Space".into(),
+            assembly: "Assembly-CSharp".into(),
+            execution_order: 0,
+            local_id: -7906036524527734719,
+        })
+    }
+}
+
 fn bake(name: &str) -> anyhow::Result<Vec<u8>> {
     let source = fs::read(fixture(&format!("{name}.anim"))).unwrap();
     let documents = parse_unity_yaml_lexical(&source).unwrap();
-    playerbake::bake_clip_object(&documents[0].data)
+    Ok(playerbake::bake_clip_object(&documents[0].data, &FixtureScripts)?.0)
 }
 
 fn assert_matches_engine(name: &str) {
@@ -57,7 +73,7 @@ fn clips_match_the_engine_build() {
         .filter(|name| !REFUSED.contains(&name.as_str()))
         .collect();
     names.sort();
-    assert!(names.len() >= 28, "fixtures are missing: {names:?}");
+    assert!(names.len() >= 30, "fixtures are missing: {names:?}");
     for name in names {
         assert_matches_engine(&name);
     }
@@ -74,7 +90,7 @@ fn unreproduced_features_are_refused() {
 #[test]
 fn baked_file_is_a_content_file_with_the_authored_identity() {
     let source = fs::read(fixture("PosSlopes.anim")).unwrap();
-    let baked = playerbake::bake_clip(&source).unwrap();
+    let baked = playerbake::bake_clip(&source, &playerbake::NoScripts).unwrap();
     assert_eq!(
         baked.objects,
         [(
@@ -89,6 +105,20 @@ fn baked_file_is_a_content_file_with_the_authored_identity() {
         u64::from_be_bytes(baked.file[24..32].try_into().unwrap()),
         baked.file.len() as u64
     );
+}
+
+/// Accepts any script, for counting what a corpus without scripts would bake.
+struct AnyScript;
+impl playerbake::ClipSources for AnyScript {
+    fn script(&self, guid: &str) -> anyhow::Result<playerbake::ScriptIdentity> {
+        Ok(playerbake::ScriptIdentity {
+            class_name: "Unknown".into(),
+            namespace: String::new(),
+            assembly: "Assembly-CSharp".into(),
+            execution_order: 0,
+            local_id: playerbake::script_local_id(guid),
+        })
+    }
 }
 
 /// Compares every `<name>.anim` / `<name>.clip.bin` pair of a directory built
@@ -116,13 +146,27 @@ fn clip_corpus_matches_the_engine_build() {
         sources.sort();
         for source in sources {
             let expected = fs::read(source.with_extension("clip.bin")).unwrap();
-            let Ok(documents) = parse_unity_yaml_lexical(&fs::read(&source).unwrap()) else {
+            let Ok(documents) = unity_micro_editor::yaml::parse_unity_yaml_lexical_within(
+                &fs::read(&source).unwrap(),
+                playerbake::MAX_SOURCE_BYTES,
+            ) else {
                 *refused
                     .entry("source exceeds the text bound".into())
                     .or_default() += 1;
                 continue;
             };
-            match playerbake::bake_clip_object(&documents[0].data) {
+            // A corpus is built without its project's scripts, so a clip that
+            // refers to one cannot be compared; it is only counted.
+            let baked = match playerbake::bake_clip_object(&documents[0].data, &AnyScript) {
+                Ok((_, scripts)) if !scripts.is_empty() => {
+                    *refused
+                        .entry("baked with scripts, not compared".into())
+                        .or_default() += 1;
+                    continue;
+                }
+                other => other.map(|(data, _)| data),
+            };
+            match baked {
                 Ok(actual) if actual == expected => matched += 1,
                 Ok(actual) => {
                     if let Ok(directory) = std::env::var("UNITY_PLAYERBAKE_DUMP") {
@@ -458,4 +502,16 @@ fn override_controller_matches_the_engine_build() {
     assert_eq!(actual, expected);
     // The controller, then four distinct clips.
     assert_eq!(externals.len(), 5);
+}
+
+#[test]
+fn clip_with_scripts_carries_their_objects() {
+    let source = fs::read(fixture("S_ScriptCurves.anim")).unwrap();
+    let baked = playerbake::bake_clip(&source, &FixtureScripts).unwrap();
+    // Only the clip is published; the MonoScript object travels with it.
+    assert_eq!(baked.objects.len(), 1);
+    let name = b"Probe.Space";
+    assert!(baked.file.windows(name.len()).any(|window| window == name));
+    let refused = playerbake::bake_clip(&source, &playerbake::NoScripts).unwrap_err();
+    assert!(refused.is::<Unsupported>());
 }
