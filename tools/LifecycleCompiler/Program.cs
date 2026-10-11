@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Buffers.Binary;
+using System.Collections.Immutable;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
@@ -8,6 +9,9 @@ using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using FieldAttributes = System.Reflection.FieldAttributes;
+using MethodAttributes = System.Reflection.MethodAttributes;
+using TypeAttributes = System.Reflection.TypeAttributes;
 
 internal sealed record SourceInput(string Path, string OriginalPath, string OutputPath);
 internal sealed record Request(string AssemblyName, string[] References, string[] Defines,
@@ -120,6 +124,547 @@ internal static class DeclarationHash
     }
 }
 
+internal sealed record LayoutScript(string Guid, string Assembly, string Type);
+internal sealed record LayoutRequest(string[] Assemblies, LayoutScript[] Scripts);
+
+// Reads, from assembly metadata alone, which fields of a StateMachineBehaviour
+// class the engine serializes, in the engine's order. Whatever the reader
+// cannot decide the way the engine does makes the class unsupported; it never
+// guesses a field in or out.
+internal static class BehaviourLayouts
+{
+    // The engine cuts a type off once this many serialized types enclose it.
+    // What it keeps of such a type is not reproduced here.
+    private const int DepthLimit = 10;
+    // The metadata bits of [NonSerialized] and [Serializable], whose names the framework marks obsolete.
+    private const FieldAttributes NotSerialized = (FieldAttributes)0x0080;
+    private const TypeAttributes Serializable = (TypeAttributes)0x2000;
+
+    private sealed class Unsupported : Exception
+    {
+        public Unsupported(string reason) : base(reason) { }
+    }
+
+    private sealed class Module
+    {
+        public string Name = "";
+        public MetadataReader Reader = null!;
+        public readonly Dictionary<(string, string), TypeDefinitionHandle> Types = new();
+        public readonly Dictionary<(string, string), string> Forwarded = new();
+        public bool Engine => Name == "UnityEngine" || Name.StartsWith("UnityEngine.", StringComparison.Ordinal);
+    }
+
+    private readonly record struct TypeId(Module Module, TypeDefinitionHandle Handle)
+    {
+        public TypeDefinition Definition => Module.Reader.GetTypeDefinition(Handle);
+        public string Name => Module.Reader.GetString(Definition.Name);
+        public bool Nested => !Definition.GetDeclaringType().IsNil;
+        public string Namespace
+        {
+            get
+            {
+                var definition = Definition;
+                while (!definition.GetDeclaringType().IsNil) definition = Module.Reader.GetTypeDefinition(definition.GetDeclaringType());
+                return Module.Reader.GetString(definition.Namespace);
+            }
+        }
+    }
+
+    private abstract record Sig;
+    private sealed record PrimitiveSig(PrimitiveTypeCode Code) : Sig;
+    // A class or struct: its full name, and its definition if an assembly of the request holds it.
+    private sealed record NamedSig(string FullName, TypeId? Type) : Sig;
+    private sealed record InstanceSig(NamedSig Generic, ImmutableArray<Sig> Arguments) : Sig;
+    private sealed record ArraySig(Sig Element, bool Vector) : Sig;
+    private sealed record ParameterSig(int Index) : Sig;
+    private sealed record OtherSig : Sig;
+
+    private sealed class Universe : ISignatureTypeProvider<Sig, object?>
+    {
+        private readonly Dictionary<string, Module> modules = new(StringComparer.Ordinal);
+        // A metadata reader points into the memory of its file's reader.
+        private readonly List<PEReader> files = new();
+        // Signatures are decoded for one module at a time.
+        private Module current = null!;
+
+        public Universe(string[] paths)
+        {
+            foreach (var path in paths)
+            {
+                using var stream = File.OpenRead(path);
+                if (stream.Length > 1024L * 1024 * 1024) throw new InvalidOperationException("Layout input exceeds the DLL bound");
+                PEReader pe;
+                // A native library beside the managed ones is not an input.
+                try { pe = new PEReader(stream, PEStreamOptions.PrefetchMetadata); }
+                catch (BadImageFormatException) { continue; }
+                if (!pe.HasMetadata) continue;
+                files.Add(pe);
+                var reader = pe.GetMetadataReader();
+                if (!reader.IsAssembly) continue;
+                var module = new Module { Name = reader.GetString(reader.GetAssemblyDefinition().Name), Reader = reader };
+                // The first file of a name wins, as the caller lists the project's own assemblies first.
+                if (!modules.TryAdd(module.Name, module)) continue;
+                foreach (var handle in reader.TypeDefinitions)
+                {
+                    var definition = reader.GetTypeDefinition(handle);
+                    if (definition.GetDeclaringType().IsNil)
+                        module.Types.TryAdd((reader.GetString(definition.Namespace), reader.GetString(definition.Name)), handle);
+                }
+                foreach (var handle in reader.ExportedTypes)
+                {
+                    var exported = reader.GetExportedType(handle);
+                    if (exported.IsForwarder && exported.Implementation.Kind == HandleKind.AssemblyReference)
+                        module.Forwarded.TryAdd((reader.GetString(exported.Namespace), reader.GetString(exported.Name)),
+                            reader.GetString(reader.GetAssemblyReference((AssemblyReferenceHandle)exported.Implementation).Name));
+                }
+            }
+        }
+
+        public Module? Find(string assembly) => modules.GetValueOrDefault(assembly);
+
+        public TypeId? Find(string assembly, string ns, string name)
+        {
+            for (int hop = 0; hop < 8 && modules.TryGetValue(assembly, out var module); hop++)
+            {
+                if (module.Types.TryGetValue((ns, name), out var handle)) return new TypeId(module, handle);
+                if (!module.Forwarded.TryGetValue((ns, name), out var next)) return null;
+                assembly = next;
+            }
+            return null;
+        }
+
+        // The definition a type reference of a module leads to and its full name.
+        public NamedSig Named(Module module, EntityHandle handle)
+        {
+            var reader = module.Reader;
+            if (handle.Kind == HandleKind.TypeDefinition)
+            {
+                var type = new TypeId(module, (TypeDefinitionHandle)handle);
+                return new NamedSig(FullName(type), type);
+            }
+            if (handle.Kind != HandleKind.TypeReference) return new NamedSig("", null);
+            var reference = reader.GetTypeReference((TypeReferenceHandle)handle);
+            string name = reader.GetString(reference.Name), ns = reader.GetString(reference.Namespace);
+            switch (reference.ResolutionScope.Kind)
+            {
+                case HandleKind.AssemblyReference:
+                    string assembly = reader.GetString(reader.GetAssemblyReference((AssemblyReferenceHandle)reference.ResolutionScope).Name);
+                    return new NamedSig(ns.Length == 0 ? name : ns + "." + name, Find(assembly, ns, name));
+                case HandleKind.ModuleDefinition:
+                    return new NamedSig(ns.Length == 0 ? name : ns + "." + name, Find(module.Name, ns, name));
+                case HandleKind.TypeReference:
+                    var outer = Named(module, (EntityHandle)reference.ResolutionScope);
+                    TypeId? nested = null;
+                    if (outer.Type is { } parent)
+                        foreach (var candidate in parent.Definition.GetNestedTypes())
+                            if (parent.Module.Reader.GetString(parent.Module.Reader.GetTypeDefinition(candidate).Name) == name)
+                                nested = new TypeId(parent.Module, candidate);
+                    return new NamedSig(outer.FullName + "+" + name, nested);
+                default:
+                    return new NamedSig(ns.Length == 0 ? name : ns + "." + name, null);
+            }
+        }
+
+        public static string FullName(TypeId type)
+        {
+            var definition = type.Definition;
+            string name = type.Name;
+            if (!definition.GetDeclaringType().IsNil)
+                return FullName(new TypeId(type.Module, definition.GetDeclaringType())) + "+" + name;
+            string ns = type.Module.Reader.GetString(definition.Namespace);
+            return ns.Length == 0 ? name : ns + "." + name;
+        }
+
+        // A type as a signature of `module` names it: a field's type or a base type.
+        public Sig Decode(Module module, EntityHandle handle)
+        {
+            current = module;
+            return handle.Kind == HandleKind.TypeSpecification
+                ? module.Reader.GetTypeSpecification((TypeSpecificationHandle)handle).DecodeSignature(this, null)
+                : Named(module, handle);
+        }
+
+        public Sig Decode(Module module, FieldDefinition field)
+        {
+            current = module;
+            return field.DecodeSignature(this, null);
+        }
+
+        public Sig GetPrimitiveType(PrimitiveTypeCode typeCode) => new PrimitiveSig(typeCode);
+        public Sig GetTypeFromDefinition(MetadataReader reader, TypeDefinitionHandle handle, byte rawTypeKind) => Named(current, handle);
+        public Sig GetTypeFromReference(MetadataReader reader, TypeReferenceHandle handle, byte rawTypeKind) => Named(current, handle);
+        public Sig GetTypeFromSpecification(MetadataReader reader, object? genericContext, TypeSpecificationHandle handle, byte rawTypeKind) =>
+            reader.GetTypeSpecification(handle).DecodeSignature(this, genericContext);
+        public Sig GetSZArrayType(Sig elementType) => new ArraySig(elementType, true);
+        public Sig GetArrayType(Sig elementType, ArrayShape shape) => new ArraySig(elementType, false);
+        public Sig GetGenericInstantiation(Sig genericType, ImmutableArray<Sig> typeArguments) =>
+            genericType is NamedSig named ? new InstanceSig(named, typeArguments) : new OtherSig();
+        public Sig GetGenericTypeParameter(object? genericContext, int index) => new ParameterSig(index);
+        public Sig GetGenericMethodParameter(object? genericContext, int index) => new OtherSig();
+        public Sig GetByReferenceType(Sig elementType) => new OtherSig();
+        public Sig GetPointerType(Sig elementType) => new OtherSig();
+        public Sig GetPinnedType(Sig elementType) => new OtherSig();
+        public Sig GetFunctionPointerType(MethodSignature<Sig> signature) => new OtherSig();
+        // `volatile` is a required modifier; it does not change what is stored.
+        public Sig GetModifiedType(Sig modifier, Sig unmodifiedType, bool isRequired) => unmodifiedType;
+    }
+
+    private static readonly Dictionary<string, string> EngineStructs = new(StringComparer.Ordinal)
+    {
+        ["UnityEngine.Vector2"] = "Vector2", ["UnityEngine.Vector3"] = "Vector3", ["UnityEngine.Vector4"] = "Vector4",
+        ["UnityEngine.Quaternion"] = "Quaternion", ["UnityEngine.Color"] = "Color", ["UnityEngine.Color32"] = "Color32",
+        ["UnityEngine.Rect"] = "Rect", ["UnityEngine.Bounds"] = "Bounds", ["UnityEngine.LayerMask"] = "LayerMask",
+        ["UnityEngine.AnimationCurve"] = "AnimationCurve", ["UnityEngine.Gradient"] = "Gradient",
+        ["UnityEngine.Vector2Int"] = "Vector2Int", ["UnityEngine.Vector3Int"] = "Vector3Int", ["UnityEngine.RectInt"] = "RectInt",
+        ["UnityEngine.BoundsInt"] = "BoundsInt", ["UnityEngine.Matrix4x4"] = "Matrix4x4", ["UnityEngine.Hash128"] = "Hash128",
+        ["UnityEngine.RectOffset"] = "RectOffset", ["UnityEngine.RenderingLayerMask"] = "RenderingLayerMask",
+        ["UnityEngine.Rendering.SphericalHarmonicsL2"] = "SphericalHarmonicsL2", ["UnityEngine.LazyLoadReference`1"] = "LazyLoadReference",
+    };
+
+    // Engine structs a build was seen to leave out of a script's data.
+    private static readonly HashSet<string> EngineStructsNotSerialized = new(StringComparer.Ordinal)
+    {
+        "UnityEngine.RangeInt", "UnityEngine.Ray", "UnityEngine.Plane", "UnityEngine.Keyframe", "UnityEngine.GradientColorKey",
+    };
+
+    private static string? Keyword(PrimitiveTypeCode code) => code switch
+    {
+        PrimitiveTypeCode.Boolean => "bool", PrimitiveTypeCode.Byte => "byte", PrimitiveTypeCode.SByte => "sbyte",
+        PrimitiveTypeCode.Int16 => "short", PrimitiveTypeCode.UInt16 => "ushort", PrimitiveTypeCode.Int32 => "int",
+        PrimitiveTypeCode.UInt32 => "uint", PrimitiveTypeCode.Int64 => "long", PrimitiveTypeCode.UInt64 => "ulong",
+        PrimitiveTypeCode.Single => "float", PrimitiveTypeCode.Double => "double", PrimitiveTypeCode.Char => "char",
+        _ => null,
+    };
+
+    private static Sig Substitute(Sig sig, ImmutableArray<Sig> arguments) => sig switch
+    {
+        ParameterSig parameter => parameter.Index < arguments.Length ? arguments[parameter.Index] : new OtherSig(),
+        ArraySig array => new ArraySig(Substitute(array.Element, arguments), array.Vector),
+        InstanceSig instance => new InstanceSig(instance.Generic, instance.Arguments.Select(argument => Substitute(argument, arguments)).ToImmutableArray()),
+        _ => sig,
+    };
+
+    private static IEnumerable<(string Name, CustomAttribute Attribute)> Attributes(Module module, CustomAttributeHandleCollection handles)
+    {
+        var reader = module.Reader;
+        foreach (var handle in handles)
+        {
+            var attribute = reader.GetCustomAttribute(handle);
+            EntityHandle type = attribute.Constructor.Kind == HandleKind.MemberReference
+                ? reader.GetMemberReference((MemberReferenceHandle)attribute.Constructor).Parent
+                : reader.GetMethodDefinition((MethodDefinitionHandle)attribute.Constructor).GetDeclaringType();
+            string name = "";
+            if (type.Kind == HandleKind.TypeReference)
+            {
+                var reference = reader.GetTypeReference((TypeReferenceHandle)type);
+                name = reader.GetString(reference.Namespace) + "." + reader.GetString(reference.Name);
+            }
+            else if (type.Kind == HandleKind.TypeDefinition)
+            {
+                var definition = reader.GetTypeDefinition((TypeDefinitionHandle)type);
+                name = reader.GetString(definition.Namespace) + "." + reader.GetString(definition.Name);
+            }
+            yield return (name, attribute);
+        }
+    }
+
+    // The base type of a class with the class's own type arguments applied.
+    // The definition is absent for the roots of the base library.
+    private static (TypeId? Type, ImmutableArray<Sig> Arguments, string FullName)? Base(Universe universe, TypeId type, ImmutableArray<Sig> arguments)
+    {
+        var handle = type.Definition.BaseType;
+        if (handle.IsNil) return null;
+        var sig = Substitute(universe.Decode(type.Module, handle), arguments);
+        var (named, baseArguments) = sig switch
+        {
+            NamedSig plain => (plain, ImmutableArray<Sig>.Empty),
+            InstanceSig instance => (instance.Generic, instance.Arguments),
+            _ => throw new Unsupported("a base type that is not a class"),
+        };
+        if (named.FullName is "System.Object" or "System.ValueType" or "System.Enum" or "System.MulticastDelegate" or "System.Delegate")
+            return (null, baseArguments, named.FullName);
+        if (named.Type is not { } resolved) throw new Unsupported($"type {named.FullName} is in none of the given assemblies");
+        return (resolved, baseArguments, named.FullName);
+    }
+
+    private static bool DerivesFrom(Universe universe, TypeId type, string ns, string name)
+    {
+        TypeId current = type;
+        for (int depth = 0; depth < 64; depth++)
+        {
+            if (current.Module.Engine && !current.Nested && current.Name == name && current.Namespace == ns) return true;
+            if (Base(universe, current, ImmutableArray<Sig>.Empty) is not { Type: { } parent }) return false;
+            current = parent;
+        }
+        throw new Unsupported("a class hierarchy deeper than the reader follows");
+    }
+
+    private sealed class Reader
+    {
+        private readonly Universe universe;
+        public Reader(Universe universe) { this.universe = universe; }
+
+        // The serialized fields a class declares itself, in declaration order.
+        public void Fields(TypeId type, ImmutableArray<Sig> arguments, int depth, List<object> fields, HashSet<string> names)
+        {
+            var reader = type.Module.Reader;
+            foreach (var handle in type.Definition.GetFields())
+            {
+                var field = reader.GetFieldDefinition(handle);
+                const FieldAttributes never = FieldAttributes.Static | FieldAttributes.Literal | FieldAttributes.InitOnly | NotSerialized;
+                if ((field.Attributes & never) != 0) continue;
+                string name = reader.GetString(field.Name);
+                bool attributed = false, hidden = false;
+                var former = new List<string>();
+                (string Element, int Length)? buffer = null;
+                foreach (var (attribute, value) in Attributes(type.Module, field.GetCustomAttributes()))
+                {
+                    if (attribute == "UnityEngine.SerializeField") attributed = true;
+                    else if (attribute == "UnityEngine.HideInInspector") hidden = true;
+                    else if (attribute == "UnityEngine.SerializeReference")
+                        throw new Unsupported($"field {name} is a managed reference");
+                    else if (attribute == "UnityEngine.Serialization.FormerlySerializedAsAttribute")
+                    {
+                        var blob = reader.GetBlobReader(value.Value);
+                        if (blob.ReadUInt16() != 1 || blob.ReadSerializedString() is not { } old)
+                            throw new Unsupported($"field {name} has a former name the reader cannot decode");
+                        former.Add(old);
+                    }
+                    else if (attribute == "System.Runtime.CompilerServices.FixedBufferAttribute")
+                    {
+                        var blob = reader.GetBlobReader(value.Value);
+                        if (blob.ReadUInt16() != 1 || blob.ReadSerializedString() is not { } element)
+                            throw new Unsupported($"fixed buffer {name} the reader cannot decode");
+                        buffer = (element.Split(',')[0].Trim(), blob.ReadInt32());
+                    }
+                }
+                if ((field.Attributes & FieldAttributes.FieldAccessMask) != FieldAttributes.Public && !attributed) continue;
+                Dictionary<string, object>? kind;
+                if (buffer is { } fixedBuffer)
+                {
+                    // The element types a build was compared with.
+                    string? keyword = fixedBuffer.Element switch
+                    {
+                        "System.Int32" => "int", "System.Byte" => "byte", "System.Single" => "float", "System.Boolean" => "bool",
+                        "System.Char" => "char", "System.Int16" => "short", "System.Int64" => "long", "System.Double" => "double",
+                        _ => null,
+                    };
+                    if (keyword is null || fixedBuffer.Length <= 0) throw new Unsupported($"fixed buffer {name} of {fixedBuffer.Element}");
+                    kind = new() { ["kind"] = "fixedBuffer", ["element"] = Primitive(keyword), ["length"] = fixedBuffer.Length };
+                }
+                else
+                {
+                    var sig = Substitute(universe.Decode(type.Module, field), arguments);
+                    kind = Classify(sig, depth, attributed, type, false, name);
+                }
+                if (kind is null) continue;
+                if (!names.Add(name)) throw new Unsupported($"two serialized fields are named {name}");
+                var entry = new Dictionary<string, object> { ["name"] = name };
+                if (hidden) entry["hidden"] = true;
+                if (former.Count != 0) entry["formerNames"] = former;
+                entry["type"] = kind;
+                fields.Add(entry);
+            }
+        }
+
+        private static Dictionary<string, object> Primitive(string keyword) => new() { ["kind"] = "primitive", ["name"] = keyword };
+
+        // How the engine stores a field of this type; null if it does not store it.
+        private Dictionary<string, object>? Classify(Sig sig, int depth, bool attributed, TypeId declaring, bool element, string field)
+        {
+            switch (sig)
+            {
+                case PrimitiveSig primitive:
+                    if (Keyword(primitive.Code) is { } keyword) return Primitive(keyword);
+                    return primitive.Code == PrimitiveTypeCode.String ? new() { ["kind"] = "string" } : null;
+                case ArraySig array:
+                    // An array of several dimensions is not stored.
+                    return array.Vector ? Collection(array.Element, depth, declaring, element, field) : null;
+                case InstanceSig { Generic.FullName: "System.Collections.Generic.List`1" } list when list.Arguments.Length == 1:
+                    return Collection(list.Arguments[0], depth, declaring, element, field);
+                case InstanceSig { Generic.FullName: "System.Collections.Generic.Dictionary`2" } dictionary when dictionary.Arguments.Length == 2:
+                    // Only a dictionary marked with [SerializeField] is stored: as an array of its pairs.
+                    if (!attributed) return null;
+                    if (element || depth != 0) throw new Unsupported($"field {field} is a dictionary below the top level of the class");
+                    var pair = new List<object>();
+                    foreach (var (name, argument) in new[] { ("key", dictionary.Arguments[0]), ("value", dictionary.Arguments[1]) })
+                    {
+                        var part = Classify(argument, depth + 1, false, declaring, true, field)
+                            ?? throw new Unsupported($"field {field} is a dictionary of a type that is not serialized");
+                        pair.Add(new Dictionary<string, object> { ["name"] = name, ["type"] = part });
+                    }
+                    return new()
+                    {
+                        ["kind"] = "array",
+                        ["element"] = new Dictionary<string, object> { ["kind"] = "struct", ["name"] = "SerializedKeyValue`2", ["fields"] = pair },
+                    };
+                case NamedSig named:
+                    return Named(named, ImmutableArray<Sig>.Empty, depth, declaring, element, field);
+                case InstanceSig instance:
+                    return Named(instance.Generic, instance.Arguments, depth, declaring, element, field);
+                default:
+                    return null;
+            }
+        }
+
+        private Dictionary<string, object>? Collection(Sig item, int depth, TypeId declaring, bool element, string field)
+        {
+            // A collection of collections is not stored.
+            if (element) return null;
+            var kind = Classify(item, depth, false, declaring, true, field);
+            return kind is null ? null : new() { ["kind"] = "array", ["element"] = kind };
+        }
+
+        private Dictionary<string, object>? Named(NamedSig named, ImmutableArray<Sig> arguments, int depth, TypeId declaring, bool element, string field)
+        {
+            // Even a type the engine does not store has to be known: an enum
+            // cannot be told from another struct without its definition.
+            if (named.Type is not { } type)
+                throw new Unsupported($"type {named.FullName} of field {field} is in none of the given assemblies");
+            var definition = type.Definition;
+            string root = Base(universe, type, arguments)?.FullName ?? "";
+            if (root == "System.Enum")
+            {
+                foreach (var handle in definition.GetFields())
+                {
+                    var value = type.Module.Reader.GetFieldDefinition(handle);
+                    if ((value.Attributes & FieldAttributes.Static) != 0) continue;
+                    if (universe.Decode(type.Module, value) is not PrimitiveSig underlying || Keyword(underlying.Code) is not { } keyword)
+                        break;
+                    // The engine stores no enum of a 64-bit type.
+                    if (keyword is "long" or "ulong") return null;
+                    if (keyword is "byte" or "sbyte" or "short" or "ushort" or "int" or "uint")
+                        return new() { ["kind"] = "enum", ["underlying"] = keyword };
+                    break;
+                }
+                throw new Unsupported($"enum {named.FullName} has an underlying type the reader does not know");
+            }
+            // Nothing else of the base library is stored.
+            if (named.FullName.StartsWith("System.", StringComparison.Ordinal)) return null;
+            if ((definition.Attributes & TypeAttributes.Interface) != 0) return null;
+            if (root is "System.MulticastDelegate" or "System.Delegate") return null;
+            if (DerivesFrom(universe, type, "UnityEngine", "Object"))
+            {
+                if (arguments.Length != 0 || type.Nested) throw new Unsupported($"field {field} refers to a generic or nested engine object class");
+                return new() { ["kind"] = "object", ["className"] = type.Name, ["namespace"] = type.Namespace };
+            }
+            if (type.Module.Engine)
+            {
+                if (EngineStructs.TryGetValue(named.FullName, out var known)) return new() { ["kind"] = "unity", ["name"] = known };
+                if (EngineStructsNotSerialized.Contains(named.FullName)) return null;
+                // An engine type may be stored by native code in a form its C# fields do not show.
+                if (!PlainEngineType(named.FullName)) throw new Unsupported($"engine type {named.FullName} of field {field}");
+            }
+            if ((definition.Attributes & TypeAttributes.Abstract) != 0) return null;
+            if ((definition.Attributes & Serializable) == 0) return null;
+            if (Attributes(type.Module, definition.GetCustomAttributes()).Any(attribute => attribute.Name == "System.Runtime.CompilerServices.CompilerGeneratedAttribute"))
+                return null;
+            // A class does not store a field of its own type; a collection of it is stored.
+            if (!element && type == declaring)
+            {
+                if (arguments.Length != 0) throw new Unsupported($"field {field} holds its own generic type");
+                return null;
+            }
+            if (depth >= DepthLimit) throw new Unsupported($"field {field} nests serialized types up to the engine's depth limit");
+            var fields = new List<object>();
+            Chain(type, arguments, depth + 1, fields, false);
+            return new() { ["kind"] = "struct", ["name"] = type.Name, ["fields"] = fields };
+        }
+
+        private static bool PlainEngineType(string name) =>
+            name == "UnityEngine.Pose" || name.StartsWith("UnityEngine.Events.", StringComparison.Ordinal);
+
+        // The fields of a class and of the classes it derives from, the most basic class first.
+        // Returns whether a class of the chain overrides a state machine callback.
+        public bool Chain(TypeId type, ImmutableArray<Sig> arguments, int depth, List<object> fields, bool behaviour)
+        {
+            var chain = new List<(TypeId Type, ImmutableArray<Sig> Arguments)>();
+            var current = (Type: type, Arguments: arguments);
+            while (true)
+            {
+                if (chain.Count > 64) throw new Unsupported("a class hierarchy deeper than the reader follows");
+                if (behaviour && current.Type.Module.Engine) break;
+                chain.Add(current);
+                if (Base(universe, current.Type, current.Arguments) is not { } parent) break;
+                if (parent.Type is not { } next)
+                {
+                    if (parent.FullName is "System.Object" or "System.ValueType") break;
+                    throw new Unsupported($"type {Universe.FullName(type)} derives from {parent.FullName}");
+                }
+                if (!behaviour && next.Module.Engine && !PlainEngineType(parent.FullName))
+                    throw new Unsupported($"type {Universe.FullName(type)} derives from engine type {parent.FullName}");
+                if (parent.FullName.StartsWith("System.", StringComparison.Ordinal))
+                    throw new Unsupported($"type {Universe.FullName(type)} derives from {parent.FullName}");
+                current = (next, parent.Arguments);
+            }
+            chain.Reverse();
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            bool callbacks = false;
+            foreach (var (member, memberArguments) in chain)
+            {
+                Fields(member, memberArguments, depth, fields, names);
+                if (!behaviour) continue;
+                var reader = member.Module.Reader;
+                foreach (var handle in member.Definition.GetMethods())
+                {
+                    var method = reader.GetMethodDefinition(handle);
+                    if (reader.GetString(method.Name) is not ("OnStateMachineEnter" or "OnStateMachineExit")) continue;
+                    const MethodAttributes slot = MethodAttributes.Virtual | MethodAttributes.NewSlot;
+                    if ((method.Attributes & slot) != MethodAttributes.Virtual)
+                        throw new Unsupported($"method {reader.GetString(method.Name)} hides the engine's callback instead of overriding it");
+                    callbacks = true;
+                }
+            }
+            return callbacks;
+        }
+    }
+
+    internal static Dictionary<string, object> Read(string requestPath)
+    {
+        var request = JsonSerializer.Deserialize<LayoutRequest>(File.ReadAllText(requestPath),
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? throw new InvalidOperationException("Empty layout request");
+        if (request.Assemblies.Length == 0 || request.Assemblies.Length > 4096)
+            throw new InvalidOperationException("Expected a bounded list of managed DLLs");
+        var universe = new Universe(request.Assemblies);
+        var result = new Dictionary<string, object>(StringComparer.Ordinal);
+        var definitions = new Dictionary<Module, Dictionary<string, TypeDefinitionHandle>>();
+        foreach (var script in request.Scripts)
+        {
+            if (universe.Find(script.Assembly) is not { } module) continue;
+            if (!definitions.TryGetValue(module, out var byName))
+            {
+                byName = new(StringComparer.Ordinal);
+                foreach (var handle in module.Reader.TypeDefinitions)
+                    byName.TryAdd(Universe.FullName(new TypeId(module, handle)), handle);
+                definitions.Add(module, byName);
+            }
+            if (!byName.TryGetValue(script.Type, out var found)) continue;
+            var type = new TypeId(module, found);
+            var definition = type.Definition;
+            if (type.Nested || definition.GetGenericParameters().Count != 0 || (definition.Attributes & TypeAttributes.Abstract) != 0) continue;
+            var layout = new Dictionary<string, object>
+            {
+                ["className"] = type.Name, ["namespace"] = type.Namespace, ["assembly"] = module.Name, ["baseKind"] = "StateMachineBehaviour",
+            };
+            try
+            {
+                if (!DerivesFrom(universe, type, "UnityEngine", "StateMachineBehaviour")) continue;
+                var fields = new List<object>();
+                layout["overridesStateMachineCallbacks"] = new Reader(universe).Chain(type, ImmutableArray<Sig>.Empty, 0, fields, true);
+                layout["fields"] = fields;
+            }
+            catch (Unsupported error)
+            {
+                layout.Remove("overridesStateMachineCallbacks");
+                layout["unsupported"] = error.Message;
+                layout["fields"] = Array.Empty<object>();
+            }
+            result[script.Guid] = layout;
+        }
+        return result;
+    }
+}
+
 internal static class Program
 {
     internal static readonly string[] Phases = { "Awake", "OnEnable", "OnDisable", "OnDestroy" };
@@ -138,6 +683,11 @@ internal static class Program
             if (args.Length >= 2 && (args[0] == "--type-definitions" || args[0] == "--public-type-definitions"))
             {
                 Console.WriteLine(JsonSerializer.Serialize(DeclarationHash.TypeDefinitions(args.Skip(1).ToArray(), args[0] == "--public-type-definitions")));
+                return 0;
+            }
+            if (args.Length == 2 && args[0] == "--behaviour-layouts")
+            {
+                Console.WriteLine(JsonSerializer.Serialize(BehaviourLayouts.Read(args[1])));
                 return 0;
             }
             if (args.Length == 2 && args[0] == "--source-type-declarations")
