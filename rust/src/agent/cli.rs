@@ -520,7 +520,30 @@ pub fn prepare_agent_project_with_native(
         native_catalog: native_catalog.into(),
         ..Default::default()
     })?;
-    let prepared = session.prepare(&join(&[&staging, "source"]))?;
+    let session = std::sync::Arc::new(session);
+    let source_output = join(&[&staging, "source"]);
+    let prepared = match session.prepare(&source_output) {
+        // A source the baseline's native catalog does not hold, or holds in
+        // an older form: import or bake it as a running session would. The
+        // artifacts stay with the baseline.
+        Err(error)
+            if error
+                .chain()
+                .any(|cause| cause.is::<project::NeedsImportError>()) =>
+        {
+            let mut importer = crate::native::NativeProjectImporter::new(
+                crate::native::NativeOptions {
+                    project: project.clone(),
+                    output: source_output.clone(),
+                    editor: editor.to_string(),
+                },
+                session.clone(),
+            )?;
+            importer.script_assemblies = compiler.script_assemblies();
+            importer.prepare(ctx)?
+        }
+        other => other?,
+    };
     #[derive(Deserialize, Default)]
     #[serde(default)]
     struct Dependency {
