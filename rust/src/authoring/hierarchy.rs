@@ -2,7 +2,7 @@ use super::{store::*, yaml_edit::json_numbers, yamlcodec};
 use crate::{
     graph::{AuthoredGraph, AuthoredIdentity, SourceProject},
     sha256,
-    yaml::{Document, parse_unity_yaml},
+    yaml::{Document, parse_unity_yaml_with_comments},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -295,7 +295,7 @@ impl Store {
     pub(crate) fn raw_hierarchy(&self, path: &str, query: &str) -> Result<HierarchyPage> {
         self.asset_path(path, &[".unity", ".prefab"])?;
         let source = self.read_source(path)?;
-        let docs = parse_unity_yaml(source.content.as_bytes())
+        let docs = parse_unity_yaml_with_comments(source.content.as_bytes())
             .map_err(|error| failure("invalid_yaml", format!("{error:#}"), None))?;
         Ok(hierarchy(&source, &docs, query))
     }
