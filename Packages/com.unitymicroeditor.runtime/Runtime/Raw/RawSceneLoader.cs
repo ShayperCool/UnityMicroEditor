@@ -771,7 +771,8 @@ namespace UnityMicroEditor.Raw
                     var instance = ScriptableObject.CreateInstance(types[asset.typeName]);
                     if (instance == null) throw new InvalidDataException("Could not instantiate ScriptableObject " + asset.typeName);
                     instance.name = string.IsNullOrEmpty(asset.name) ? Path.GetFileNameWithoutExtension(asset.path) : asset.name;
-                    ownedAssets.Add(instance); assets.Add(AssetKey(asset.guid, asset.fileId), instance);
+                    // A source edited since the native catalog was built takes the place of the catalog's object.
+                    ownedAssets.Add(instance); assets[AssetKey(asset.guid, asset.fileId)] = instance;
                 }
             }
 
