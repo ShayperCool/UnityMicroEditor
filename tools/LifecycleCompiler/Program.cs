@@ -127,8 +127,9 @@ internal static class DeclarationHash
 internal sealed record LayoutScript(string Guid, string Assembly, string Type);
 internal sealed record LayoutRequest(string[] Assemblies, LayoutScript[] Scripts);
 
-// Reads, from assembly metadata alone, which fields of a StateMachineBehaviour
-// class the engine serializes, in the engine's order. Whatever the reader
+// Reads, from assembly metadata alone, which fields of a ScriptableObject
+// class, a StateMachineBehaviour among them, the engine serializes, in the
+// engine's order. Whatever the reader
 // cannot decide the way the engine does makes the class unsupported; it never
 // guesses a field in or out.
 internal static class BehaviourLayouts
@@ -576,14 +577,21 @@ internal static class BehaviourLayouts
 
         // The fields of a class and of the classes it derives from, the most basic class first.
         // Returns whether a class of the chain overrides a state machine callback.
-        public bool Chain(TypeId type, ImmutableArray<Sig> arguments, int depth, List<object> fields, bool behaviour)
+        public bool Chain(TypeId type, ImmutableArray<Sig> arguments, int depth, List<object> fields, bool behaviour, bool callbackOwner = true)
         {
             var chain = new List<(TypeId Type, ImmutableArray<Sig> Arguments)>();
             var current = (Type: type, Arguments: arguments);
             while (true)
             {
                 if (chain.Count > 64) throw new Unsupported("a class hierarchy deeper than the reader follows");
-                if (behaviour && current.Type.Module.Engine) break;
+                if (behaviour && current.Type.Module.Engine)
+                {
+                    // An engine class between the script and these may serialize fields of its own.
+                    string root = Universe.FullName(current.Type);
+                    if (root is not ("UnityEngine.StateMachineBehaviour" or "UnityEngine.ScriptableObject"))
+                        throw new Unsupported($"type {Universe.FullName(type)} derives from engine type {root}");
+                    break;
+                }
                 chain.Add(current);
                 if (Base(universe, current.Type, current.Arguments) is not { } parent) break;
                 if (parent.Type is not { } next)
@@ -603,7 +611,7 @@ internal static class BehaviourLayouts
             foreach (var (member, memberArguments) in chain)
             {
                 Fields(member, memberArguments, depth, fields, names);
-                if (!behaviour) continue;
+                if (!behaviour || !callbackOwner) continue;
                 var reader = member.Module.Reader;
                 foreach (var handle in member.Definition.GetMethods())
                 {
@@ -648,14 +656,28 @@ internal static class BehaviourLayouts
             };
             try
             {
-                if (!DerivesFrom(universe, type, "UnityEngine", "StateMachineBehaviour")) continue;
+                bool behaviour = DerivesFrom(universe, type, "UnityEngine", "StateMachineBehaviour");
+                if (!behaviour)
+                {
+                    if (!DerivesFrom(universe, type, "UnityEngine", "ScriptableObject")) continue;
+                    layout["baseKind"] = "ScriptableObject";
+                }
+                var bases = new List<string>();
+                for (var parent = Base(universe, type, ImmutableArray<Sig>.Empty); parent is { Type: { } next }; parent = Base(universe, next, ImmutableArray<Sig>.Empty))
+                {
+                    if (bases.Count > 64) throw new Unsupported("a class hierarchy deeper than the reader follows");
+                    bases.Add(parent.Value.FullName);
+                }
+                layout["bases"] = bases;
                 var fields = new List<object>();
-                layout["overridesStateMachineCallbacks"] = new Reader(universe).Chain(type, ImmutableArray<Sig>.Empty, 0, fields, true);
+                bool callbacks = new Reader(universe).Chain(type, ImmutableArray<Sig>.Empty, 0, fields, true, behaviour);
+                if (behaviour) layout["overridesStateMachineCallbacks"] = callbacks;
                 layout["fields"] = fields;
             }
             catch (Unsupported error)
             {
                 layout.Remove("overridesStateMachineCallbacks");
+                layout.Remove("bases");
                 layout["unsupported"] = error.Message;
                 layout["fields"] = Array.Empty<object>();
             }

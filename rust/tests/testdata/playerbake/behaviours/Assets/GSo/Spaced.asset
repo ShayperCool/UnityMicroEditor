@@ -1,0 +1,32 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: ab23b100605d6397095af89e07797f82, type: 3}
+  m_Name: Spaced
+  m_EditorClassIdentifier: Assembly-CSharp::Gap.Data.SoNamespaced
+  v: 1
+  other: {fileID: 340518300734748806}
+  node: {fileID: 2491423607658540322, guid: 4a560f9dc57aecd8a976f5e3ad3c128c, type: 2}
+--- !u!114 &340518300734748806
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: ab23b100605d6397095af89e07797f82, type: 3}
+  m_Name: Inner
+  m_EditorClassIdentifier: Assembly-CSharp::Gap.Data.SoNamespaced
+  v: 2
+  other: {fileID: 11400000}
+  node: {fileID: 7374535846154265618, guid: 4a560f9dc57aecd8a976f5e3ad3c128c, type: 2}

@@ -102,8 +102,6 @@ pub fn bake_mask_object(fields: &Map<String, Value>) -> Result<Vec<u8>> {
 
 /// Bakes an authored `.mask` source into a ContentFile.
 pub fn bake_mask(yaml: &[u8]) -> Result<Baked> {
-    // A transform path is free text.
-    super::source::refuse_comment_marks(yaml)?;
     let documents = crate::yaml::parse_unity_yaml_lexical(yaml)?;
     let [document] = documents.as_slice() else {
         return Err(unsupported("avatar mask source with several objects"));

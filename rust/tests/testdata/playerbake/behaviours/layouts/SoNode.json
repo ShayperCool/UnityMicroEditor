@@ -1,0 +1,89 @@
+{
+ "className": "SoNode",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "ScriptableObject",
+ "bases": [
+  "SoBase",
+  "UnityEngine.ScriptableObject",
+  "UnityEngine.Object"
+ ],
+ "fields": [
+  {
+   "name": "alpha",
+   "type": {
+    "kind": "primitive",
+    "name": "float"
+   }
+  },
+  {
+   "name": "label",
+   "type": {
+    "kind": "string"
+   }
+  },
+  {
+   "name": "next",
+   "type": {
+    "kind": "object",
+    "className": "SoNode",
+    "namespace": ""
+   }
+  },
+  {
+   "name": "owner",
+   "type": {
+    "kind": "object",
+    "className": "SoPack",
+    "namespace": ""
+   }
+  },
+  {
+   "name": "characterPrefab",
+   "type": {
+    "kind": "object",
+    "className": "GameObject",
+    "namespace": "UnityEngine"
+   }
+  },
+  {
+   "name": "weightOverrides",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "primitive",
+     "name": "float"
+    }
+   }
+  },
+  {
+   "name": "sourceWeaponBone",
+   "type": {
+    "kind": "struct",
+    "name": "BoneRef",
+    "fields": [
+     {
+      "name": "name",
+      "type": {
+       "kind": "string"
+      }
+     },
+     {
+      "name": "index",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     },
+     {
+      "name": "depth",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     }
+    ]
+   }
+  }
+ ]
+}

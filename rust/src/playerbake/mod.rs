@@ -19,11 +19,14 @@ pub use clip::{
     bake_clip_object, bake_model_clips, script_local_id,
 };
 pub use controller::{
-    Behaviour, BehaviourScript, ClipFacts, Controller, ControllerSources, bake_controller,
-    bake_controller_object, read_clip_facts,
+    BakedObjects, Behaviour, BehaviourScript, ClipFacts, Controller, ControllerSources,
+    bake_controller, bake_controller_object, read_clip_facts,
 };
 pub use freeform::{Freeform, precompute as precompute_freeform};
-pub use managed::{Field, FieldType, References, ScriptLayout, ScriptType};
+pub use managed::{
+    DeferredBinding, DeferredReference, Encoded, Field, FieldType, ObjectReference, Pointer,
+    References, Resolution, ScriptLayout, ScriptType,
+};
 pub use mask::{Mask, bake_mask, bake_mask_object, read_mask};
 pub use override_controller::{bake_override, bake_override_object};
 pub use serialized::{External, Object, Read, read as read_serialized, write};

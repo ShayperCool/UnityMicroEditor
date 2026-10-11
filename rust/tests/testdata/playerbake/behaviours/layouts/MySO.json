@@ -1,0 +1,19 @@
+{
+ "className": "MySO",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "ScriptableObject",
+ "bases": [
+  "UnityEngine.ScriptableObject",
+  "UnityEngine.Object"
+ ],
+ "fields": [
+  {
+   "name": "value",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  }
+ ]
+}

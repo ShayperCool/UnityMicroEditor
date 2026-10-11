@@ -503,6 +503,10 @@ struct BehaviourFixtures {
     scripts: std::collections::HashMap<String, FixtureScript>,
     /// The clips and masks the controllers refer to.
     tree: Tree,
+    targets: Targets,
+    /// Whether a reference to an asset that is not a clip is left to the
+    /// caller to bind, as a session does, or held as in a build.
+    defer: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -516,37 +520,53 @@ struct FixtureScript {
 #[derive(serde::Deserialize)]
 struct BuiltBehaviours {
     /// The controller's behaviour list, as authored file IDs.
+    #[serde(default)]
     list: Vec<String>,
     /// The object of each behaviour as hex, by authored file ID.
     objects: std::collections::BTreeMap<String, String>,
-    /// The ID the build gave each object a behaviour field refers to, by
-    /// `<guid>:<file ID>` of the authored reference.
+    /// The ID the build gave each object a field refers to, by
+    /// `<guid>:<file ID>` of the authored reference. A reference that is
+    /// not listed leads to nothing the build holds.
     pointers: std::collections::HashMap<String, i64>,
+    /// The position, counted from one, of the build's external reference to
+    /// the file of such an object, where it is another file.
+    #[serde(default)]
+    files: std::collections::HashMap<String, i64>,
 }
 
-/// Stands in for the bundle the fixtures were built into, where every object
-/// a behaviour field refers to sits in the same file.
-struct BundlePointers<'a>(&'a std::collections::HashMap<String, i64>);
+/// The classes of the objects that fields of the fixtures refer to from a
+/// field of another class, by `<guid>:<file ID>`: the class and what it
+/// derives from. The engine leaves such a field null.
+type Targets = std::collections::HashMap<String, Vec<String>>;
+
+/// Whether a field may hold the object it refers to.
+fn fits(targets: &Targets, reference: &playerbake::ObjectReference<'_>) -> bool {
+    let declared = match reference.namespace {
+        "" => reference.class_name.to_string(),
+        namespace => format!("{namespace}.{}", reference.class_name),
+    };
+    let key = format!("{}:{}", reference.guid, reference.file_id);
+    targets
+        .get(&key)
+        .is_none_or(|classes| classes.contains(&declared))
+}
+
+/// Stands in for the bundles the fixtures were built into.
+struct BundlePointers<'a>(&'a BuiltBehaviours, &'a Targets);
 
 impl playerbake::References for BundlePointers<'_> {
     fn pointer(
         &mut self,
-        _class_name: &str,
-        _namespace: &str,
-        target: &serde_json::Map<String, serde_json::Value>,
-        path: &str,
-    ) -> anyhow::Result<(i64, i64)> {
-        let part = |key: &str| {
-            target
-                .get(key)
-                .and_then(|value| value.as_str())
-                .unwrap_or("")
-        };
-        let key = format!("{}:{}", part("guid"), part("fileID"));
-        match self.0.get(&key) {
-            Some(id) => Ok((0, *id)),
-            None => anyhow::bail!("{path} refers to {key}, which the build does not hold"),
-        }
+        reference: &playerbake::ObjectReference<'_>,
+    ) -> anyhow::Result<playerbake::Pointer> {
+        let key = format!("{}:{}", reference.guid, reference.file_id);
+        Ok(match self.0.pointers.get(&key) {
+            Some(id) if fits(self.1, reference) => playerbake::Pointer::Object {
+                file: self.0.files.get(&key).copied().unwrap_or(0),
+                path_id: *id,
+            },
+            _ => playerbake::Pointer::Null,
+        })
     }
 }
 
@@ -555,10 +575,15 @@ impl BehaviourFixtures {
         let scripts =
             serde_json::from_slice(&fs::read(root.join("scripts.json")).unwrap()).unwrap();
         let tree = Tree::scan(&[root.join("Assets")]);
+        let targets = fs::read(root.join("targets.json"))
+            .map(|targets| serde_json::from_slice(&targets).unwrap())
+            .unwrap_or_default();
         Self {
             root,
             scripts,
             tree,
+            targets,
+            defer: false,
         }
     }
 }
@@ -593,18 +618,36 @@ impl playerbake::ControllerSources for BehaviourFixtures {
             layout,
         }))
     }
+    fn reference(
+        &self,
+        reference: &playerbake::ObjectReference<'_>,
+    ) -> anyhow::Result<playerbake::Resolution> {
+        use playerbake::Resolution;
+        if !fits(&self.targets, reference) {
+            return Ok(Resolution::Null);
+        }
+        let clip = self
+            .tree
+            .clip(reference.guid, &reference.file_id.to_string())
+            .is_ok();
+        Ok(if self.defer && !clip {
+            Resolution::Deferred
+        } else {
+            Resolution::External {
+                guid: reference.guid.to_string(),
+                local_id: reference.file_id,
+            }
+        })
+    }
 }
 
-/// The controllers below `<root>/Assets`, one directory deep.
-fn controller_sources(root: &Path) -> Vec<PathBuf> {
+/// The sources of an extension below `<root>/Assets`, one directory deep.
+fn sources_of(root: &Path, extension: &str) -> Vec<PathBuf> {
     let mut sources = Vec::new();
     for directory in fs::read_dir(root.join("Assets")).unwrap() {
         for entry in fs::read_dir(directory.unwrap().path()).unwrap() {
             let path = entry.unwrap().path();
-            if path
-                .extension()
-                .is_some_and(|extension| extension == "controller")
-            {
+            if path.extension().is_some_and(|found| found == extension) {
                 sources.push(path);
             }
         }
@@ -613,8 +656,18 @@ fn controller_sources(root: &Path) -> Vec<PathBuf> {
     sources
 }
 
+fn controller_sources(root: &Path) -> Vec<PathBuf> {
+    sources_of(root, "controller")
+}
+
 fn hex(data: &[u8]) -> String {
     data.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn unhex(text: &str) -> Vec<u8> {
+    (0..text.len() / 2)
+        .map(|index| u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).unwrap())
+        .collect()
 }
 
 /// Where two hex dumps part, with what follows in each.
@@ -705,8 +758,18 @@ fn compare_behaviours(root: &Path) -> (usize, Vec<(String, String)>) {
         for behaviour in &baked.behaviours {
             let class = &baked.scripts[behaviour.script].0.class_name;
             let actual = hex(&behaviour.data);
+            // A file of its own numbers the objects it refers to otherwise
+            // than the bundle; such objects are compared by which of their
+            // references are the same, and byte for byte in
+            // `compare_behaviour_objects`.
+            let relabelled = |data: &[u8]| {
+                let mut value = baked.scripts[behaviour.script].1.tree.decode(data).unwrap();
+                label_references(&mut value, &mut Vec::new());
+                value
+            };
             match built.objects.get(&behaviour.file_id) {
                 Some(expected) if *expected == actual => {}
+                Some(expected) if relabelled(&behaviour.data) == relabelled(&unhex(expected)) => {}
                 Some(expected) => out.push(format!(
                     "{class} {}: {}",
                     behaviour.file_id,
@@ -743,15 +806,25 @@ fn compare_behaviour_objects(root: &Path) -> (usize, Vec<(String, String)>) {
     use playerbake::ControllerSources;
     let fixtures = BehaviourFixtures::open(root.to_path_buf());
     let (mut matched, mut failed, mut refused) = (0, 0, Vec::new());
-    for source in controller_sources(root) {
+    let mut sources = controller_sources(root);
+    sources.extend(sources_of(root, "asset"));
+    for source in sources {
         let name = source.file_stem().unwrap().to_string_lossy().into_owned();
         let Ok(documents) = parse_unity_yaml_lexical(&fs::read(&source).unwrap()) else {
             refused.push((name, "unreadable".to_string()));
             continue;
         };
-        let built: BuiltBehaviours =
-            serde_json::from_slice(&fs::read(source.with_extension("behaviours.json")).unwrap())
-                .unwrap();
+        let scripted = source.extension().is_some_and(|found| found == "asset");
+        let built = if scripted {
+            "objects.json"
+        } else {
+            "behaviours.json"
+        };
+        let Ok(built) = fs::read(source.with_extension(built)) else {
+            // An asset that only stands for what others refer to.
+            continue;
+        };
+        let built: BuiltBehaviours = serde_json::from_slice(&built).unwrap();
         for document in documents.iter().filter(|document| document.class_id == 114) {
             // A document nothing refers to is not in the build.
             let Some(expected) = built.objects.get(&document.file_id) else {
@@ -770,17 +843,17 @@ fn compare_behaviour_objects(root: &Path) -> (usize, Vec<(String, String)>) {
                 layout.object(
                     &document.data,
                     script.identity.local_id,
-                    &mut BundlePointers(&built.pointers),
+                    &mut BundlePointers(&built, &fixtures.targets),
                 )
             });
             match object {
-                Ok(actual) if hex(&actual) == *expected => matched += 1,
+                Ok(actual) if hex(&actual.data) == *expected => matched += 1,
                 Ok(actual) => {
                     failed += 1;
                     eprintln!(
                         "MISMATCH {label} {}: {}",
                         script.layout.class_name,
-                        first_difference(&hex(&actual), expected)
+                        first_difference(&hex(&actual.data), expected)
                     );
                 }
                 Err(error) if error.is::<Unsupported>() => {
@@ -793,6 +866,9 @@ fn compare_behaviour_objects(root: &Path) -> (usize, Vec<(String, String)>) {
             }
         }
     }
+    for (label, reason) in &refused {
+        eprintln!("refused object {label}: {reason}");
+    }
     eprintln!("matched {matched} objects");
     assert_eq!(failed, 0);
     (matched, refused)
@@ -800,11 +876,14 @@ fn compare_behaviour_objects(root: &Path) -> (usize, Vec<(String, String)>) {
 
 /// Controllers with state machine behaviours, authored through the Editor API
 /// or edited by hand, and built by the engine. `layouts` holds what the
-/// metadata reader reports for the classes under `Scripts`.
+/// metadata reader reports for the classes under `Scripts`. The controllers
+/// of `GRef` refer to objects of another bundle, of their own file and, in
+/// the one edited by hand, to objects that are missing or of another class
+/// than the field, which the engine leaves null.
 #[test]
 fn behaviours_match_the_engine_build() {
     let (matched, refused) = compare_behaviours(&fixture("behaviours"));
-    assert_eq!(matched, 20);
+    assert_eq!(matched, 23);
     // Both hold a class that nests itself up to the engine's depth limit.
     let names: Vec<&str> = refused.iter().map(|(name, _)| name.as_str()).collect();
     assert_eq!(names, ["D01_Stripped", "T01_Filled"]);
@@ -813,7 +892,9 @@ fn behaviours_match_the_engine_build() {
     }
 }
 
-/// Every behaviour document of the fixtures on its own. `T01_Filled` sets
+/// Every behaviour document of the fixtures on its own, and every object of
+/// the scriptable object assets, whose classes the same reader lays out.
+/// `T01_Filled` sets
 /// every field of every class to a value of its own. It is the Editor's file
 /// but for four lines of one document: three closing quotes the Editor wrote
 /// at the start of a line are indented, and `a #b` is quoted. YAML reads
@@ -822,7 +903,7 @@ fn behaviours_match_the_engine_build() {
 #[test]
 fn behaviour_objects_match_the_engine_build() {
     let (matched, refused) = compare_behaviour_objects(&fixture("behaviours"));
-    assert_eq!(matched, 111);
+    assert_eq!(matched, 129);
     // The documents of `D01_Stripped` lack fields their classes serialize.
     // Two classes cannot be laid out at all: one nests itself up to the
     // engine's depth limit, the other holds managed references.
@@ -840,7 +921,9 @@ fn baked_controller_carries_its_behaviours_and_their_scripts() {
     let root = fixture("behaviours");
     let fixtures = BehaviourFixtures::open(root.clone());
     let source = fs::read(root.join("Assets/One/S01_Single.controller")).unwrap();
-    let baked = playerbake::bake_controller(&source, &fixtures).unwrap();
+    let baked = playerbake::bake_controller(&source, &fixtures)
+        .unwrap()
+        .baked;
     // The controller and its behaviours are published, each behaviour as an
     // object of its class; the script objects only travel with them.
     let published: Vec<(&str, &str)> = baked
@@ -890,6 +973,117 @@ fn baked_controller_carries_its_behaviours_and_their_scripts() {
     assert!(refused.is::<Unsupported>());
 }
 
+/// Nulls every reference to an object of a file other than `keep`, zero
+/// being the object's own file, and returns how many there were.
+fn null_references_to_other_files(value: &mut Val, keep: i64) -> usize {
+    match value {
+        Val::Map(fields) if fields.iter().any(|(name, _)| name == "m_PathID") => {
+            match value.field("m_FileID") {
+                Some(Val::I(file)) if *file != 0 && *file != keep => {
+                    *value = Val::Zero;
+                    1
+                }
+                _ => 0,
+            }
+        }
+        Val::Map(fields) => fields
+            .iter_mut()
+            .map(|(_, field)| null_references_to_other_files(field, keep))
+            .sum(),
+        Val::Seq(items) => items
+            .iter_mut()
+            .map(|item| null_references_to_other_files(item, keep))
+            .sum(),
+        _ => 0,
+    }
+}
+
+/// The two answers a source has for a behaviour field that refers to another
+/// asset. Held, the object is the engine's, which `behaviours_match_the_engine_build`
+/// compares. Deferred, as a session answers for all but clips, the same
+/// object has a null in each such place, a list keeps its length, and every
+/// null is reported with the field's path.
+#[test]
+fn behaviour_references_are_held_or_deferred() {
+    let root = fixture("behaviours");
+    let mut fixtures = BehaviourFixtures::open(root.clone());
+    let source = fs::read(root.join("Assets/GRef/R01_External.controller")).unwrap();
+    let clip = "219a6312c29f375719c3273b6b86ada8";
+    let held = playerbake::bake_controller(&source, &fixtures).unwrap();
+    assert!(held.deferred.is_empty());
+    assert!(held.baked.externals.len() > 5);
+    fixtures.defer = true;
+    let deferred = playerbake::bake_controller(&source, &fixtures).unwrap();
+    // Only the clip is left to refer to.
+    let externals: Vec<&str> = deferred
+        .baked
+        .externals
+        .iter()
+        .map(|external| external.guid.as_str())
+        .collect();
+    assert_eq!(externals, [clip]);
+    let kept = held
+        .baked
+        .externals
+        .iter()
+        .position(|external| external.guid == clip)
+        .unwrap() as i64
+        + 1;
+    let held = playerbake::read_serialized(&held.baked.file).unwrap();
+    let (mut nulled, mut behaviours) = (0, 0);
+    for object in playerbake::read_serialized(&deferred.baked.file).unwrap() {
+        let other = held
+            .iter()
+            .find(|other| other.local_id == object.local_id)
+            .unwrap();
+        let mut expected = other.tree.decode(&other.data).unwrap();
+        let mut actual = object.tree.decode(&object.data).unwrap();
+        if object.tree.class_id != 114 {
+            continue;
+        }
+        behaviours += 1;
+        let count = null_references_to_other_files(&mut expected, kept);
+        nulled += count;
+        assert_eq!(null_references_to_other_files(&mut actual, 1), 0);
+        label_references(&mut expected, &mut Vec::new());
+        label_references(&mut actual, &mut Vec::new());
+        assert_eq!(actual, expected, "{}", object.local_id);
+        let owner = object.local_id.to_string();
+        let reported = deferred
+            .deferred
+            .iter()
+            .filter(|binding| binding.owner == owner)
+            .count();
+        assert_eq!(reported, count, "{owner}");
+    }
+    assert_eq!((behaviours, nulled), (3, deferred.deferred.len()));
+    let binding = |owner: &str, path: &str| {
+        deferred
+            .deferred
+            .iter()
+            .find(|binding| binding.owner == owner && binding.path == path)
+            .map(|binding| (binding.guid.as_str(), binding.file_id, binding.kind))
+    };
+    let (refs, nested) = ("1088311419948901774", "-5257619603817630436");
+    let prefab = "6e22b73078ae28e63b7beaa0dafe42c3";
+    let scriptable = ("e686ac87a9de98f34afba5382b737167", 11400000, 2);
+    let material = ("6d3ff677adf6b5815a331deafb745410", 2100000, 2);
+    assert_eq!(binding(refs, "go"), Some((prefab, 5811007898720732970, 3)));
+    assert_eq!(binding(refs, "sos[0]"), Some(scriptable));
+    // The list keeps its null entry, which is not reported.
+    assert_eq!(binding(refs, "sos[1]"), None);
+    assert_eq!(binding(refs, "sos[2]"), Some(scriptable));
+    assert_eq!(binding(refs, "mats[0]"), Some(material));
+    assert_eq!(binding(refs, "clip"), None);
+    assert_eq!(binding(nested, "h.inner.mats[0]"), Some(material));
+    assert_eq!(binding(nested, "hs[2].inners[1].mats[0]"), Some(material));
+    assert_eq!(
+        binding(nested, "hs[2].inners[1].any"),
+        Some(("d4a7b458bb74ee61684a4cf8f427d00f", 11400000, 2))
+    );
+    assert_eq!(binding(nested, "hl[0].so"), Some(scriptable));
+}
+
 /// The Editor writes `Attack #2` without quotes and the engine reads it back
 /// whole, where YAML sees a comment. The reader keeps such a value.
 #[test]
@@ -903,9 +1097,9 @@ fn text_yaml_reads_as_a_comment_is_kept() {
     let quoted = source.replace("tag: single", "tag: 'single #2'");
     let plain = playerbake::bake_controller(plain.as_bytes(), &fixtures).unwrap();
     let quoted = playerbake::bake_controller(quoted.as_bytes(), &fixtures).unwrap();
-    assert!(plain.file == quoted.file);
+    assert!(plain.baked.file == quoted.baked.file);
     let whole = playerbake::bake_controller(source.as_bytes(), &fixtures).unwrap();
-    assert!(plain.file != whole.file);
+    assert!(plain.baked.file != whole.baked.file);
 }
 
 /// Compares the controllers of a directory laid out like the behaviour

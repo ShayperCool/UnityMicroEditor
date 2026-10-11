@@ -54,8 +54,9 @@ struct LayoutCache {
 }
 
 impl Compiler {
-    /// The fields the engine serializes of every script that is a state
-    /// machine behaviour, by script GUID. Like the type inventory this reads
+    /// The fields the engine serializes of every script whose class derives
+    /// from `ScriptableObject`, state machine behaviours among them, by
+    /// script GUID; `ScriptLayout::base_kind` tells the two apart. Like the type inventory this reads
     /// metadata only: neither game code nor the Editor is loaded. A class the
     /// reader cannot lay out the way the engine does comes back marked as
     /// unsupported.

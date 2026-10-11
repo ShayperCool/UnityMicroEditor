@@ -13,7 +13,10 @@
 use super::{
     clip::ScriptIdentity,
     controller_tree, crc32, freeform,
-    managed::{References, ScriptLayout, ScriptType},
+    managed::{
+        DeferredBinding, DeferredReference, FileReferences, ObjectReference, Pointer, Resolution,
+        STATE_MACHINE_BEHAVIOUR, ScriptLayout, ScriptType,
+    },
     mask::Mask,
     serialized::{External, Object},
     source::{flag, float, get, int, list, object, text},
@@ -77,6 +80,30 @@ pub trait ControllerSources {
             "state machine behaviour of script {guid}"
         )))
     }
+    /// Where the object of another asset that a behaviour field refers to is
+    /// at run time. Unless a source knows more, only a clip the controller
+    /// could play is: it is baked and published with the controller.
+    fn reference(&self, reference: &ObjectReference<'_>) -> Result<Resolution> {
+        let refused = || {
+            unsupported(format!(
+                "behaviour field {} refers to an object that is not an animation clip",
+                reference.path
+            ))
+        };
+        let declared = reference.namespace == "UnityEngine"
+            && matches!(reference.class_name, "AnimationClip" | "Motion" | "Object");
+        if !declared {
+            return Err(refused());
+        }
+        match self.clip(reference.guid, &reference.file_id.to_string()) {
+            Ok(_) => Ok(Resolution::External {
+                guid: reference.guid.to_string(),
+                local_id: reference.file_id,
+            }),
+            Err(error) if error.is::<super::Unsupported>() => Err(refused()),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 /// A behaviour object of a baked controller.
@@ -86,6 +113,18 @@ pub struct Behaviour {
     /// The position of its script in `Controller::scripts`.
     pub script: usize,
     pub data: Vec<u8>,
+    /// The references of its fields that were left null for the caller to
+    /// bind.
+    pub deferred: Vec<DeferredReference>,
+}
+
+/// A baked file and the references its objects could not hold.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BakedObjects {
+    pub baked: super::Baked,
+    /// The references that were written as null on the word of
+    /// `ControllerSources::reference`, by object and field.
+    pub deferred: Vec<DeferredBinding>,
 }
 
 /// A baked `AnimatorController` object and what has to travel with it.
@@ -200,6 +239,14 @@ impl<'a> Builder<'a> {
         }
         let position = match self.sources.behaviour(guid)? {
             Some(script) => {
+                if script.layout.base_kind != STATE_MACHINE_BEHAVIOUR
+                    && script.layout.unsupported.is_empty()
+                {
+                    return Err(unsupported(format!(
+                        "script {} is not a state machine behaviour",
+                        script.layout.class_name
+                    )));
+                }
                 let layout = ScriptType::new(&script.layout)?;
                 self.scripts.push((script, layout));
                 Some(self.scripts.len() - 1)
@@ -785,48 +832,6 @@ fn behaviour_table(builder: &mut Builder<'_>, layers: &[Layer<'_>]) -> Result<Be
     Ok(table)
 }
 
-/// Resolves the object references of behaviour fields. Only a clip has a
-/// baked form another file can point to.
-struct ClipReferences<'a> {
-    sources: &'a dyn ControllerSources,
-    externals: &'a mut Vec<External>,
-}
-
-impl References for ClipReferences<'_> {
-    fn pointer(
-        &mut self,
-        class_name: &str,
-        namespace: &str,
-        target: &Map<String, Value>,
-        path: &str,
-    ) -> Result<(i64, i64)> {
-        let refused = || {
-            unsupported(format!(
-                "behaviour field {path} refers to an object that is not an animation clip"
-            ))
-        };
-        let Some(target) = reference(&Value::Object(target.clone()))? else {
-            bail!("behaviour field {path} holds no reference");
-        };
-        let declared = namespace == "UnityEngine"
-            && matches!(class_name, "AnimationClip" | "Motion" | "Object");
-        if !declared || target.guid.is_empty() {
-            return Err(refused());
-        }
-        if let Err(error) = self.sources.clip(&target.guid, &target.file_id) {
-            return Err(if error.is::<super::Unsupported>() {
-                refused()
-            } else {
-                error
-            });
-        }
-        let Ok(path_id) = target.file_id.parse::<i64>() else {
-            bail!("behaviour field {path} holds an invalid file ID");
-        };
-        Ok((external(self.externals, &target.guid) as i64 + 1, path_id))
-    }
-}
-
 /// The position of an asset among the external references.
 fn external(externals: &mut Vec<External>, guid: &str) -> usize {
     match externals.iter().position(|known| known.guid == guid) {
@@ -1105,12 +1110,55 @@ pub fn bake_controller_object(
         }
         let (script, layout) = &builder.scripts[attached.script];
         let fields = builder.document(&attached.file_id, 114, "behaviour")?;
-        let data = layout
+        // Of the controller's file a build holds the controller and the
+        // behaviours it lists. A reference to another of its objects, to
+        // none, or from a field of another class comes out null.
+        let local = |reference: &ObjectReference<'_>| -> Result<Pointer> {
+            let file_id = reference.file_id.to_string();
+            let declared = match reference.namespace {
+                "" => reference.class_name.to_string(),
+                namespace => format!("{namespace}.{}", reference.class_name),
+            };
+            let fits = if controller.file_id == file_id {
+                matches!(
+                    declared.as_str(),
+                    "UnityEngine.RuntimeAnimatorController" | "UnityEngine.Object"
+                )
+            } else if let Some(other) = table.list.iter().find(|other| other.file_id == file_id) {
+                let layout = &builder.scripts[other.script].0.layout;
+                let class = match layout.namespace.as_str() {
+                    "" => layout.class_name.clone(),
+                    namespace => format!("{namespace}.{}", layout.class_name),
+                };
+                declared == class || layout.bases.contains(&declared)
+            } else if builder
+                .documents
+                .get(file_id.as_str())
+                .is_some_and(|document| document.class_id == 114)
+            {
+                return Err(unsupported(format!(
+                    "behaviour field {} refers to a behaviour the controller does not run",
+                    reference.path
+                )));
+            } else {
+                false
+            };
+            Ok(if fits {
+                Pointer::Object {
+                    file: 0,
+                    path_id: reference.file_id,
+                }
+            } else {
+                Pointer::Null
+            })
+        };
+        let encoded = layout
             .object(
                 fields,
                 script.identity.local_id,
-                &mut ClipReferences {
-                    sources,
+                &mut FileReferences {
+                    local: &local,
+                    resolve: &|reference| sources.reference(reference),
                     externals: &mut builder.externals,
                 },
             )
@@ -1124,7 +1172,8 @@ pub fn bake_controller_object(
         behaviours.push(Behaviour {
             file_id: attached.file_id.clone(),
             script: attached.script,
-            data,
+            data: encoded.data,
+            deferred: encoded.deferred,
         });
     }
     let names = builder
@@ -1458,7 +1507,7 @@ pub fn read_clip_facts(yaml: &[u8], path: &str) -> Result<ClipFacts> {
 /// for each of their classes are written into the same file; the Player ties
 /// such an object to the loaded class by name. The behaviours are published
 /// beside the controller, each as an object of its class.
-pub fn bake_controller(yaml: &[u8], sources: &dyn ControllerSources) -> Result<super::Baked> {
+pub fn bake_controller(yaml: &[u8], sources: &dyn ControllerSources) -> Result<BakedObjects> {
     let documents = crate::yaml::parse_unity_yaml_lexical(yaml)?;
     let Some(controller) = documents.iter().find(|document| document.class_id == 91) else {
         bail!("controller source does not hold an AnimatorController");
@@ -1480,6 +1529,7 @@ pub fn bake_controller(yaml: &[u8], sources: &dyn ControllerSources) -> Result<s
     for (identity, layout) in &baked.scripts {
         objects.push(identity.object(layout.properties_hash)?);
     }
+    let mut deferred = Vec::new();
     for behaviour in baked.behaviours {
         let Ok(local_id) = behaviour.file_id.parse::<i64>() else {
             bail!("state machine behaviour has an invalid file ID");
@@ -1492,6 +1542,18 @@ pub fn bake_controller(yaml: &[u8], sources: &dyn ControllerSources) -> Result<s
                 namespace => format!("{namespace}.{}", identity.class_name),
             },
         ));
+        deferred.extend(
+            behaviour
+                .deferred
+                .into_iter()
+                .map(|reference| DeferredBinding {
+                    owner: local_id.to_string(),
+                    path: reference.path,
+                    guid: reference.guid,
+                    file_id: reference.file_id,
+                    kind: reference.kind,
+                }),
+        );
         objects.push(Object {
             local_id,
             tree: &layout.tree,
@@ -1502,9 +1564,12 @@ pub fn bake_controller(yaml: &[u8], sources: &dyn ControllerSources) -> Result<s
     // A build lists the objects of a file by their IDs.
     objects.sort_by_key(|object| object.local_id);
     let file = super::serialized::write(&objects, &baked.externals)?;
-    Ok(super::Baked {
-        file,
-        objects: published,
-        externals: baked.externals,
+    Ok(BakedObjects {
+        baked: super::Baked {
+            file,
+            objects: published,
+            externals: baked.externals,
+        },
+        deferred,
     })
 }
