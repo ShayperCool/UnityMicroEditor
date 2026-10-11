@@ -684,7 +684,7 @@ impl NativeProjectImporter {
                 }),
             ".overridecontroller" => playerbake::bake_override(&data),
             ".mask" => playerbake::bake_mask(&data),
-            ".physicmaterial" | ".physicsmaterial2d" | ".rendertexture" => {
+            ".physicmaterial" | ".physicsmaterial2d" | ".rendertexture" | ".mixer" => {
                 playerbake::bake_native(&data, &ProjectSources { importer: self })
             }
             _ => bail!("no baker for {logical}"),
@@ -700,7 +700,11 @@ impl NativeProjectImporter {
                 continue;
             }
             let dependency = self.source_path(&external.guid)?;
-            if !matches!(lower_ext(&dependency).as_str(), ".anim" | ".controller") {
+            // A mixer refers only to the mixer it plays into.
+            if !matches!(
+                lower_ext(&dependency).as_str(),
+                ".anim" | ".controller" | ".mixer"
+            ) {
                 return Err(anyhow::Error::from(Unsupported(format!(
                     "reference to {} {}, which is not a baked source",
                     external.guid, dependency
