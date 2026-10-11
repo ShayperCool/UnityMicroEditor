@@ -1,0 +1,9 @@
+{
+ ":9100000": ["UnityEngine.RuntimeAnimatorController", "UnityEngine.Object"],
+ "e686ac87a9de98f34afba5382b737167:11400000": ["MySO", "UnityEngine.ScriptableObject", "UnityEngine.Object"],
+ "5c30c36efcd269f41b45b85e3a7baebc:8300000": ["UnityEngine.AudioClip", "UnityEngine.Object"],
+ "d4a7b458bb74ee61684a4cf8f427d00f:11400000": ["OtherSO", "UnityEngine.ScriptableObject", "UnityEngine.Object"],
+ "2100e3421ba4cd72f9bc05a32c4a6d97:11500000": ["UnityEngine.MonoScript", "UnityEngine.TextAsset", "UnityEngine.Object"],
+ "ffffffffffffffffffffffffffffffff:11400000": [],
+ "5ccdfdaa6021cf9d1a7beda943e48a80:123456": []
+}

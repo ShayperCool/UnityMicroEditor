@@ -3,6 +3,13 @@
  "namespace": "",
  "assembly": "Assembly-CSharp",
  "baseKind": "StateMachineBehaviour",
+ "bases": [
+  "SmbBaseB`1",
+  "SmbBaseA",
+  "UnityEngine.StateMachineBehaviour",
+  "UnityEngine.ScriptableObject",
+  "UnityEngine.Object"
+ ],
  "overridesStateMachineCallbacks": false,
  "fields": [
   {

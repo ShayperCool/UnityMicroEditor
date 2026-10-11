@@ -7,6 +7,7 @@
 //! metadata as a `ScriptLayout`; the tree, its type table entry and the object
 //! bytes are derived here.
 use super::{
+    serialized::External,
     source::get,
     typetree::{TypeTree, Val, common_string},
     unsupported,
@@ -31,6 +32,11 @@ pub struct ScriptLayout {
     /// `OnStateMachineEnter` or `OnStateMachineExit`.
     #[serde(default)]
     pub overrides_state_machine_callbacks: bool,
+    /// The classes the class derives from, nearest first, by full name and
+    /// through the engine's own up to `UnityEngine.Object`. A field can refer
+    /// to an object of the class if it declares the class or one of these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bases: Vec<String>,
     /// Why the fields of the class cannot be laid out; empty if they can.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub unsupported: String,
@@ -89,6 +95,11 @@ pub enum FieldType {
         length: usize,
     },
 }
+
+/// `ScriptLayout::base_kind` of a class the engine attaches to animator
+/// states, and of any other scriptable object.
+pub(super) const STATE_MACHINE_BEHAVIOUR: &str = "StateMachineBehaviour";
+pub(super) const SCRIPTABLE_OBJECT: &str = "ScriptableObject";
 
 // Transfer meta flags that occur in script type trees.
 const HIDE: u32 = 0x1;
@@ -437,9 +448,13 @@ fn root(layout: &ScriptLayout) -> Result<Node> {
             layout.class_name, layout.unsupported
         )));
     }
-    if layout.base_kind != "StateMachineBehaviour" {
+    // Both are scriptable objects, which a Player lays out alike.
+    if !matches!(
+        layout.base_kind.as_str(),
+        STATE_MACHINE_BEHAVIOUR | SCRIPTABLE_OBJECT
+    ) {
         return Err(unsupported(format!(
-            "script {} is not a state machine behaviour",
+            "script {} is not a scriptable object",
             layout.class_name
         )));
     }
@@ -657,7 +672,7 @@ impl ScriptType {
         fields: &Map<String, Value>,
         script_local_id: i64,
         references: &mut dyn References,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Encoded> {
         let Some(enabled) = fields.get("m_Enabled") else {
             return Err(unsupported(
                 "behaviour field m_Enabled is not in the authored document",
@@ -676,34 +691,143 @@ impl ScriptType {
             ),
         ];
         let nodes = &self.root.children[BASE_FIELDS.len()..];
-        let mut encoder = Encoder { references };
+        let mut encoder = Encoder {
+            references,
+            deferred: Vec::new(),
+        };
         for (field, node) in self.fields.iter().zip(nodes) {
             values.push((
                 Cow::Owned(field.name.clone()),
                 encoder.field(field, node, fields, "")?,
             ));
         }
-        self.tree.encode(&Val::Map(values))
+        Ok(Encoded {
+            data: self.tree.encode(&Val::Map(values))?,
+            deferred: encoder.deferred,
+        })
     }
 }
 
-/// Resolves the object references a behaviour's fields hold.
+/// An object reference a script field holds, as authored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectReference<'a> {
+    /// The asset that holds the object, in lower case; empty for an object
+    /// of the file the reference stands in.
+    pub guid: &'a str,
+    pub file_id: i64,
+    /// The authored `type`: 2 for an asset stored in Unity's own format, 3
+    /// for an imported one, 0 for a resource built into the engine.
+    pub kind: i64,
+    /// The class the field declares.
+    pub class_name: &'a str,
+    pub namespace: &'a str,
+    /// Where the field is in its object: `field`, `nested.field`, `list[3]`
+    /// or `list[3].field`, as `JsonUtility` names it.
+    pub path: &'a str,
+}
+
+/// What an object reference becomes in a baked object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pointer {
+    /// The file, as the position of an external reference counted from one,
+    /// or zero for the object's own file, and the object's ID in it.
+    Object {
+        file: i64,
+        path_id: i64,
+    },
+    Null,
+    /// Written as null and reported, for the caller to bind once the object
+    /// is loaded.
+    Deferred,
+}
+
+/// Resolves the object references a script object's fields hold.
 pub trait References {
-    /// The pointer for a reference that is not null: the file, as the
-    /// position of an external reference counted from one or zero for the
-    /// behaviour's own file, and the object's ID in it. `class_name` and
-    /// `namespace` are the class the field declares.
-    fn pointer(
-        &mut self,
-        class_name: &str,
-        namespace: &str,
-        reference: &Map<String, Value>,
-        path: &str,
-    ) -> Result<(i64, i64)>;
+    /// The pointer for a reference that is not null.
+    fn pointer(&mut self, reference: &ObjectReference<'_>) -> Result<Pointer>;
+}
+
+/// A reference that was written as null on the resolver's word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeferredReference {
+    /// The field's path, as in `ObjectReference::path`.
+    pub path: String,
+    pub guid: String,
+    pub file_id: i64,
+    pub kind: i64,
+}
+
+/// A baked script object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Encoded {
+    pub data: Vec<u8>,
+    /// The references left null, in field order.
+    pub deferred: Vec<DeferredReference>,
+}
+
+/// Where the object behind a reference to another asset is at run time. This
+/// is the answer of the caller, who knows what else is published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resolution {
+    /// An object of another ContentFile: the GUID that file is published
+    /// under, which becomes an external reference, and the object's ID in it.
+    External { guid: String, local_id: i64 },
+    /// No ContentFile holds the object. The field is written as null and
+    /// the reference is returned as a deferred binding.
+    Deferred,
+    /// The reference leads nowhere, as the engine would find it.
+    Null,
+}
+
+/// A deferred reference of one object of a baked file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeferredBinding {
+    /// The local file ID of the object whose field was left null.
+    pub owner: String,
+    /// The field's path in that object: `field`, `nested.field`, `list[3]`
+    /// or `list[3].field`.
+    pub path: String,
+    pub guid: String,
+    pub file_id: i64,
+    pub kind: i64,
+}
+
+/// Resolves references for the objects of one file: `local` answers for an
+/// object of the file itself, `resolve` for one of another asset.
+pub(super) struct FileReferences<'a> {
+    pub local: &'a dyn Fn(&ObjectReference<'_>) -> Result<Pointer>,
+    pub resolve: &'a dyn Fn(&ObjectReference<'_>) -> Result<Resolution>,
+    pub externals: &'a mut Vec<External>,
+}
+
+impl References for FileReferences<'_> {
+    fn pointer(&mut self, reference: &ObjectReference<'_>) -> Result<Pointer> {
+        if reference.guid.is_empty() {
+            return (self.local)(reference);
+        }
+        Ok(match (self.resolve)(reference)? {
+            Resolution::External { guid, local_id } => {
+                let position = match self.externals.iter().position(|known| known.guid == guid) {
+                    Some(position) => position,
+                    None => {
+                        self.externals.push(External { guid });
+                        self.externals.len() - 1
+                    }
+                };
+                Pointer::Object {
+                    file: position as i64 + 1,
+                    path_id: local_id,
+                }
+            }
+            Resolution::Deferred => Pointer::Deferred,
+            Resolution::Null => Pointer::Null,
+        })
+    }
 }
 
 struct Encoder<'a> {
     references: &'a mut dyn References,
+    deferred: Vec<DeferredReference>,
 }
 
 fn mismatch(path: &str, what: &str) -> anyhow::Error {
@@ -863,13 +987,40 @@ impl Encoder<'_> {
         if file_id.is_empty() || file_id == "0" {
             return Ok(Val::Zero);
         }
-        let (file, path_id) = self
-            .references
-            .pointer(class_name, namespace, reference, path)?;
-        Ok(Val::map([
-            ("m_FileID", Val::I(file)),
-            ("m_PathID", Val::I(path_id)),
-        ]))
+        let Ok(file_id) = file_id.parse::<i64>() else {
+            return Err(mismatch(path, "a reference without a file ID"));
+        };
+        let guid = scalar_text(get(reference, "guid"), path)?.to_ascii_lowercase();
+        let kind = match scalar_text(get(reference, "type"), path)? {
+            "" => 0,
+            kind => match kind.parse::<i64>() {
+                Ok(kind) => kind,
+                Err(_) => return Err(mismatch(path, "a reference of an unknown type")),
+            },
+        };
+        let pointer = self.references.pointer(&ObjectReference {
+            guid: &guid,
+            file_id,
+            kind,
+            class_name,
+            namespace,
+            path,
+        })?;
+        Ok(match pointer {
+            Pointer::Object { file, path_id } => {
+                Val::map([("m_FileID", Val::I(file)), ("m_PathID", Val::I(path_id))])
+            }
+            Pointer::Null => Val::Zero,
+            Pointer::Deferred => {
+                self.deferred.push(DeferredReference {
+                    path: path.to_string(),
+                    guid,
+                    file_id,
+                    kind,
+                });
+                Val::Zero
+            }
+        })
     }
 
     fn value(&mut self, kind: &FieldType, node: &Node, value: &Value, path: &str) -> Result<Val> {

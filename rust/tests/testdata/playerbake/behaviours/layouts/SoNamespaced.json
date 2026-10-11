@@ -1,0 +1,35 @@
+{
+ "className": "SoNamespaced",
+ "namespace": "Gap.Data",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "ScriptableObject",
+ "bases": [
+  "UnityEngine.ScriptableObject",
+  "UnityEngine.Object"
+ ],
+ "fields": [
+  {
+   "name": "v",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "other",
+   "type": {
+    "kind": "object",
+    "className": "SoNamespaced",
+    "namespace": "Gap.Data"
+   }
+  },
+  {
+   "name": "node",
+   "type": {
+    "kind": "object",
+    "className": "SoNode",
+    "namespace": ""
+   }
+  }
+ ]
+}

@@ -1,4 +1,12 @@
 {
+ "00027c53f48af1c4db6cfa23a28bbe2a": {
+  "className": "SmbRefs2",
+  "localId": 1078075935297352376
+ },
+ "01285cc5ca7c09560851e9a09c32d004": {
+  "className": "OtherSO",
+  "localId": -7664705898252597955
+ },
  "2100e3421ba4cd72f9bc05a32c4a6d97": {
   "className": "MySO",
   "localId": -1332065481928836478
@@ -55,6 +63,10 @@
   "className": "SmbDeep2",
   "localId": -283765017412527215
  },
+ "63ef0a1f1eb91fe3a8c10caa572581e3": {
+  "className": "SoNode",
+  "localId": -6037626196725528348
+ },
  "790b220bd0397fff3ad2922e658ea3fa": {
   "className": "SmbUnity2",
   "localId": 2820216420862661739
@@ -91,6 +103,10 @@
   "className": "SmbArrays",
   "localId": -426867437519950546
  },
+ "ab23b100605d6397095af89e07797f82": {
+  "className": "SoNamespaced",
+  "localId": -5415086181842842218
+ },
  "b0884c29b4271bead97ce3395a8cca6c": {
   "className": "SmbEnums",
   "localId": -6249565432717253802
@@ -126,6 +142,10 @@
  "e8f9821482303e6949e6fbed6fb52f4b": {
   "className": "SmbSecond",
   "localId": 8940153493307120243
+ },
+ "eca4fb8cbaee32a79af8ba0d374ecdc2": {
+  "className": "SoPack",
+  "localId": -8390044555241506001
  },
  "ef8255fd6b6e1f75ead3757926e67efb": {
   "className": "SmbCbShared",

@@ -494,7 +494,10 @@ impl NativeProjectImporter {
         }
         let baked = match lower_ext(logical).as_str() {
             ".anim" => playerbake::bake_clip(&data, &ProjectSources { importer: self }),
-            ".controller" => playerbake::bake_controller(&data, &ProjectSources { importer: self }),
+            // No source answers that a behaviour's reference is bound later,
+            // so the file is all there is to publish.
+            ".controller" => playerbake::bake_controller(&data, &ProjectSources { importer: self })
+                .map(|controller| controller.baked),
             ".overridecontroller" => playerbake::bake_override(&data),
             _ => bail!("no baker for {logical}"),
         };
