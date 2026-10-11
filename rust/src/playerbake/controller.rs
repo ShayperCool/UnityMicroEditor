@@ -14,6 +14,7 @@ use super::{
     clip::ScriptIdentity,
     controller_tree, crc32, freeform,
     managed::{References, ScriptLayout, ScriptType},
+    mask::Mask,
     serialized::{External, Object},
     source::{flag, float, get, int, list, object, text},
     typetree::Val,
@@ -55,15 +56,6 @@ pub struct ClipFacts {
     /// The clip's project path, such as `Assets/Run.anim`.
     pub path: String,
     pub name: String,
-}
-
-/// An authored `AvatarMask`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Mask {
-    /// The humanoid body part switches, in `AvatarMaskBodyPart` order.
-    pub body_parts: Vec<bool>,
-    /// Transform paths and their weights, in authored order.
-    pub transforms: Vec<(String, f32)>,
 }
 
 /// The script of a state machine behaviour: its class and the fields the
@@ -1458,35 +1450,6 @@ pub fn read_clip_facts(yaml: &[u8], path: &str) -> Result<ClipFacts> {
         looping,
         path: path.to_string(),
         name: text(get(&clip.data, "m_Name"))?,
-    })
-}
-
-/// Reads an authored `.mask` source.
-pub fn read_mask(yaml: &[u8]) -> Result<Mask> {
-    let documents = crate::yaml::parse_unity_yaml_lexical(yaml)?;
-    let Some(mask) = documents.iter().find(|document| document.class_id == 319) else {
-        bail!("mask source does not hold an AvatarMask");
-    };
-    // The body part switches are a hex dump of little-endian 32-bit integers.
-    let dump = text(get(&mask.data, "m_Mask"))?;
-    let mut body_parts = Vec::new();
-    for word in dump.as_bytes().as_chunks::<8>().0 {
-        let Ok(word) = u32::from_str_radix(&String::from_utf8_lossy(word.as_slice()), 16) else {
-            bail!("avatar mask body parts are not a hex dump");
-        };
-        body_parts.push(word.swap_bytes() != 0);
-    }
-    let mut transforms = Vec::new();
-    for item in list(get(&mask.data, "m_Elements"), "m_Elements")? {
-        let element = object(item, "m_Elements")?;
-        transforms.push((
-            text(get(element, "m_Path"))?,
-            float(get(element, "m_Weight"), "avatar mask")?,
-        ));
-    }
-    Ok(Mask {
-        body_parts,
-        transforms,
     })
 }
 

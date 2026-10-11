@@ -8,6 +8,7 @@ mod controller;
 mod freeform;
 mod humanoid;
 mod managed;
+mod mask;
 mod override_controller;
 mod serialized;
 mod source;
@@ -18,11 +19,12 @@ pub use clip::{
     bake_clip_object, bake_model_clips, script_local_id,
 };
 pub use controller::{
-    Behaviour, BehaviourScript, ClipFacts, Controller, ControllerSources, Mask, bake_controller,
-    bake_controller_object, read_clip_facts, read_mask,
+    Behaviour, BehaviourScript, ClipFacts, Controller, ControllerSources, bake_controller,
+    bake_controller_object, read_clip_facts,
 };
 pub use freeform::{Freeform, precompute as precompute_freeform};
 pub use managed::{Field, FieldType, References, ScriptLayout, ScriptType};
+pub use mask::{Mask, bake_mask, bake_mask_object, read_mask};
 pub use override_controller::{bake_override, bake_override_object};
 pub use serialized::{External, Object, Read, read as read_serialized, write};
 pub use typetree::{TypeTree, Val};
@@ -72,6 +74,17 @@ pub fn override_tree() -> Result<&'static TypeTree> {
     OVERRIDE_TREE
         .as_ref()
         .map_err(|error| anyhow::anyhow!("pinned AnimatorOverrideController type tree: {error}"))
+}
+
+static MASK_TREE: LazyLock<Result<TypeTree, String>> = LazyLock::new(|| {
+    TypeTree::parse(&include_bytes!("engine/type-319.bin")[..]).map_err(|error| error.to_string())
+});
+
+/// The Player layout of `AvatarMask` in the pinned engine.
+pub fn mask_tree() -> Result<&'static TypeTree> {
+    MASK_TREE
+        .as_ref()
+        .map_err(|error| anyhow::anyhow!("pinned AvatarMask type tree: {error}"))
 }
 
 /// An authored feature the baker does not reproduce. The asset stays on the
