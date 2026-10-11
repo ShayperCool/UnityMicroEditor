@@ -1723,8 +1723,17 @@ pub fn bake_controller(yaml: &[u8], sources: &dyn ControllerSources) -> Result<B
             held,
         ));
     }
-    // A build lists the objects of a file by their IDs.
-    objects.sort_by_key(|(object, _)| object.local_id);
+    // A build lists the objects of a file by their IDs. The Player reads them
+    // in the order listed and looks up the class of a behaviour as it reads
+    // it, so the scripts come first: a behaviour read before its script is
+    // left without a class.
+    objects.sort_by_key(|(object, _)| {
+        let script = baked
+            .scripts
+            .iter()
+            .any(|(identity, _)| identity.local_id == object.local_id);
+        (!script, object.local_id)
+    });
     let (objects, held): (Vec<_>, Vec<_>) = objects.into_iter().unzip();
     let file = super::serialized::write_with_references(&objects, &baked.externals, &held)?;
     Ok(BakedObjects {

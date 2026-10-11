@@ -5,7 +5,7 @@ use super::{
     native::{valid_native_guid, valid_native_id},
     session::{Inner, asset_key, needs_import},
     types::Document,
-    value::{self, Map, get, map_file_id, number},
+    value::{self, Map, array, get, map_file_id, number, object, str},
 };
 use anyhow::{Result, anyhow, bail};
 use std::collections::{HashMap, HashSet};
@@ -121,6 +121,34 @@ impl Inner {
                     property: binding.property_path,
                     target: binding.target_guid,
                     target_id: binding.target_file_id,
+                    target_path,
+                });
+            }
+            return Ok(result);
+        }
+        // A controller the preparation baked comes with the baseline, and so
+        // do the pointers its file leaves null: no overlay names them.
+        let prepared = controller
+            && array(get(&self.baseline, "nativeContentFiles"))
+                .iter()
+                .any(|file| str(file.field("guid")) == guid);
+        if prepared {
+            let mut result = Vec::new();
+            for binding in array(get(&self.baseline, "importedAssetBindings")) {
+                let binding = object(binding);
+                if value::text(binding, "ownerGuid") != guid {
+                    continue;
+                }
+                let target = value::text(binding, "targetGuid").into_owned();
+                let target_path = self.path_of(&target).to_string();
+                if target_path.is_empty() {
+                    bail!("{path} refers to asset {target}, which is not a project source");
+                }
+                result.push(AuthoredPointer {
+                    owner: value::text(binding, "ownerFileId").into_owned(),
+                    property: value::text(binding, "propertyPath").into_owned(),
+                    target,
+                    target_id: value::text(binding, "targetFileId").into_owned(),
                     target_path,
                 });
             }
