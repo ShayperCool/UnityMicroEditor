@@ -20,7 +20,7 @@ use super::{
     mask::{Mask, mask_of},
     serialized::{External, Object},
     source::{flag, float, get, int, list, object, text},
-    typetree::Val,
+    typetree::{TypeTree, Val},
     unsupported,
 };
 use crate::yaml::Document;
@@ -48,9 +48,135 @@ const BODY_PART_BITS: [[u32; 3]; 13] = [
     [0, 0x400_0000, 0],
     [0, 0x800_0000, 0],
 ];
-const RESERVE_BASE: u64 = 512;
-const RESERVE_FACTOR: u64 = 4;
-const RESERVE_PER_LAYER: u64 = 256;
+
+/// The size of the constant as the engine lays it out in memory, which a
+/// controller states so that the Player can reserve it before reading.
+///
+/// The engine builds the constant as one block. A structure is laid out as
+/// C++ lays it out. Where the serialized form has an array, memory holds a
+/// 32-bit count and a pointer; a pointer is sixteen bytes in the build that
+/// takes the size, an offset and a pointer for debugging. What a pointer
+/// leads to is appended to the block, at its own alignment, when the field
+/// is reached: depth first, in the order of the serialized fields.
+struct Blob<'a> {
+    tree: &'a TypeTree,
+    size: u64,
+}
+
+const POINTER: (u64, u64) = (16, 8);
+
+impl Blob<'_> {
+    fn push(&mut self, size: u64, align: u64) {
+        self.size = self.size.next_multiple_of(align.max(1)) + size;
+    }
+
+    /// Size and alignment of a node as a member of a structure.
+    fn member(&self, index: usize) -> Result<(u64, u64)> {
+        let node = &self.tree.nodes[index];
+        if self.tree.children(index).is_empty() {
+            let Ok(size) = u64::try_from(node.size) else {
+                bail!("controller constant field {} has no size", node.name);
+            };
+            return Ok((size, size));
+        }
+        if node.type_name == "OffsetPtr" {
+            return Ok(POINTER);
+        }
+        let (mut size, mut align) = (0u64, 1u64);
+        for child in self.tree.children(index) {
+            let parts = match self.tree.element(child) {
+                Some(_) if self.tree.nodes[child].type_name != "OffsetPtr" => {
+                    vec![(4, 4), POINTER]
+                }
+                _ => vec![self.member(child)?],
+            };
+            for (part, part_align) in parts {
+                size = size.next_multiple_of(part_align.max(1)) + part;
+                align = align.max(part_align);
+            }
+        }
+        Ok((size.next_multiple_of(align), align))
+    }
+
+    /// Whether the engine makes the structure a pointer of `owner` leads
+    /// to. It leaves out a mask without transforms and the blend data of
+    /// another kind of node than the node is.
+    fn made(name: &str, owner: &Val, pointee: &Val) -> bool {
+        let number = |field: &str| match owner.field(field) {
+            Some(Val::U(number)) => *number,
+            Some(Val::I(number)) => *number as u64,
+            _ => 0,
+        };
+        match name {
+            "m_SkeletonMask" => {
+                matches!(pointee.field("m_Data"), Some(Val::Seq(items)) if !items.is_empty())
+            }
+            "m_Blend1dData" => number("m_BlendType") == 0 && number("m_ClipID") == u32::MAX as u64,
+            "m_Blend2dData" => matches!(number("m_BlendType"), 1..=3),
+            "m_BlendDirectData" => number("m_BlendType") == 4,
+            _ => true,
+        }
+    }
+
+    /// Appends what the members of a structure point to.
+    fn walk(&mut self, index: usize, value: &Val) -> Result<()> {
+        for child in self.tree.children(index) {
+            let node = &self.tree.nodes[child];
+            let field = value.field(&node.name).unwrap_or(&Val::Zero);
+            if node.type_name == "OffsetPtr" {
+                let pointee = self.tree.children(child)[0];
+                if Self::made(&node.name, value, field) {
+                    let (size, align) = self.member(pointee)?;
+                    self.push(size, align);
+                    self.walk(pointee, field)?;
+                }
+            } else if let Some((_, element)) = self.tree.element(child) {
+                let items = match field {
+                    Val::Seq(items) => items.as_slice(),
+                    _ => &[],
+                };
+                if items.is_empty() {
+                    continue;
+                }
+                let (size, align) = self.member(element)?;
+                self.push(size * items.len() as u64, align);
+                if self.tree.nodes[element].type_name == "OffsetPtr" {
+                    let pointee = self.tree.children(element)[0];
+                    let (size, align) = self.member(pointee)?;
+                    for item in items {
+                        self.push(size, align);
+                        self.walk(pointee, item)?;
+                    }
+                } else if !self.tree.children(element).is_empty() {
+                    for item in items {
+                        self.walk(element, item)?;
+                    }
+                }
+            } else if !self.tree.children(child).is_empty() {
+                self.walk(child, field)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The size in memory of a controller constant given as its serialized
+/// value.
+fn constant_size(constant: &Val) -> Result<u64> {
+    let tree = controller_tree()?;
+    let Some(root) = tree
+        .children(0)
+        .into_iter()
+        .find(|&child| tree.nodes[child].name == "m_Controller")
+    else {
+        bail!("controller type tree has no constant");
+    };
+    let mut blob = Blob { tree, size: 0 };
+    let (size, align) = blob.member(root)?;
+    blob.push(size, align);
+    blob.walk(root, constant)?;
+    Ok(blob.size)
+}
 
 /// What a controller needs to know about a clip it plays.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1218,15 +1344,10 @@ pub fn bake_controller_object(
             ]),
         ),
     ]);
-    // The Player reserves this much for the constant in memory before reading
-    // it, and chains further blocks if that runs out. The engine's exact
-    // figure depends on its allocator; this stays above it for every
-    // reference controller, so one block is enough.
+    // The Player reserves this much for the constant before reading it. A
+    // controller without layers states none.
     let reserve = if has_layers {
-        let serialized = controller_tree()?
-            .encode(&Val::map([("m_Controller", constant.clone())]))?
-            .len();
-        RESERVE_BASE + RESERVE_FACTOR * serialized as u64 + RESERVE_PER_LAYER * layers.len() as u64
+        constant_size(&constant)?
     } else {
         0
     };
