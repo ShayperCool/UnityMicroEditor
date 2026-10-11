@@ -627,7 +627,9 @@ impl Inner {
                 }
             } else if !valid_native_guid(&d.guid) {
                 bail!("native dependency GUID is invalid: {}", d.guid);
-            } else if !self.native_overlays.contains_key(&d.guid) {
+            } else if !self.native_overlays.contains_key(&d.guid)
+                && !self.derived_native.contains_key(&d.guid)
+            {
                 bail!(
                     "native dependency {} has no validated runtime descriptor",
                     d.guid
@@ -639,6 +641,11 @@ impl Inner {
             .iter()
             .map(|(guid, overlay)| (guid.clone(), overlay.content.clone()))
             .collect();
+        files.extend(
+            self.derived_native
+                .iter()
+                .map(|(guid, file)| (guid.clone(), file.clone())),
+        );
         files.insert(r.guid.clone(), r.content.clone());
         super::native_ui::validate_native_ui_bindings(&r.content, &files)?;
         validate_native_dependency_graph(&files)?;
@@ -728,7 +735,7 @@ impl Inner {
     }
 
     pub(crate) fn publish_native_content(&mut self, over: &mut Map) -> Result<()> {
-        if self.native_overlays.is_empty() {
+        if self.native_overlays.is_empty() && self.derived_native.is_empty() {
             return Ok(());
         }
         let mut files: BTreeMap<String, NativeContentFile> = BTreeMap::new();
@@ -750,6 +757,10 @@ impl Inner {
             self.publish_compiled_shader_snapshot(&r, over)?;
             files.insert(guid, r.content);
         }
+        for (guid, file) in self.derived_native.clone() {
+            self.verify_native_artifacts(&file)?;
+            files.insert(guid, file);
+        }
         let ordered: Vec<&NativeContentFile> = files.values().collect();
         over.insert("nativeContentFiles".into(), value::raw(&ordered)?);
         Ok(())
@@ -757,6 +768,39 @@ impl Inner {
 }
 
 impl Session {
+    /// Publishes content derived from part of a source under a GUID that no
+    /// project source owns, so other native content can depend on it. The
+    /// caller keeps it current with the source it was derived from.
+    pub fn set_derived_native_content(&self, file: &NativeContentFile) -> Result<()> {
+        let mut s = self.lock();
+        if !valid_native_guid(&file.guid)
+            || file.objects.is_empty()
+            || !file.resources.is_empty()
+            || !file.dependencies.is_empty()
+            || file
+                .objects
+                .iter()
+                .any(|object| !valid_native_id(&object.file_id))
+        {
+            bail!("derived native content descriptor is invalid");
+        }
+        s.index_guids()?;
+        if !s.path_of(&file.guid).is_empty() || s.native_overlays.contains_key(&file.guid) {
+            bail!(
+                "derived native content GUID belongs to a source: {}",
+                file.guid
+            );
+        }
+        let observed = std::mem::take(&mut s.cache.observed);
+        let stats = std::mem::take(&mut s.cache.stats);
+        let verified = s.verify_native_artifacts(file);
+        s.cache.observed = observed;
+        s.cache.stats = stats;
+        verified?;
+        s.derived_native.insert(file.guid.clone(), file.clone());
+        Ok(())
+    }
+
     /// Accepts an already adapted runtime artifact. It does not run importers
     /// or modify the baseline/catalog. Source hashes, object identities and FBX
     /// authored hierarchy must all match before an overlay becomes visible.

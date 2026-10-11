@@ -76,6 +76,14 @@ impl NativeProjectImporter {
     pub(crate) fn refresh_pending_native(&mut self, ctx: &Context) -> Result<()> {
         let started = Instant::now();
         let discovered = self.session.pending_native_import_sources()?;
+        // A model that only controllers refer to: bake those controllers
+        // again, which bakes its clips; one that cannot be baked is reported.
+        for (guid, path) in self.session.changed_clip_models() {
+            let current = self.model_clip_source_current(&guid, &path);
+            if !current {
+                self.refresh_dependents(ctx, &guid, &path, 0)?;
+            }
+        }
         let unique: BTreeSet<String> = self
             .pending_native_paths
             .iter()

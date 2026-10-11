@@ -282,8 +282,10 @@ pub fn adapt(input: &[u8], profile: &str) -> Result<(Vec<u8>, Metadata)> {
     for entry in &entries {
         let start = data_offset + entry.offset as usize;
         let object = &input[start..start + entry.size as usize];
+        // 1041 is the model importer, 1108 the Editor's preview of a clip and
+        // 41386430 the import log.
         let reason = if entry.class_id == 1001480554
-            || profile == "fbx" && entry.class_id == 1041
+            || profile == "fbx" && matches!(entry.class_id, 1041 | 1108 | 41386430)
             || profile == "wav" && entry.class_id == 1020
         {
             "editor-only"

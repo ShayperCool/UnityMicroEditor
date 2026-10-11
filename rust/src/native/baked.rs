@@ -1,20 +1,27 @@
 //! Native-format sources the tool bakes itself. No worker runs: Unity has no
 //! importer output for them, only Player data derived from the authored YAML.
 use super::{
+    ProbeOptions,
+    import::run_project_import,
     importer::NativeProjectImporter,
     resolve_project_import_source,
     support::{Event, is_not_exist, lower_ext, mkdir_all, read_file, write_file},
 };
 use crate::{
+    cancel::Context,
     playerbake::{
         self, Baked, ClipFacts, ClipSources, ControllerSources, Mask, ScriptIdentity, Unsupported,
     },
     project::{NativeContentDependency, NativeContentFile, NativeContentObject, NativeReplacement},
     registry::meta_guid,
     sha256, sysutil,
+    util::random_id,
 };
 use anyhow::{Result, bail};
-use std::{collections::BTreeSet, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::{Duration, Instant},
+};
 
 /// Reads the scripts, clips and masks a baked source refers to.
 struct ProjectSources<'a> {
@@ -70,7 +77,10 @@ impl ClipSources for ProjectSources<'_> {
 }
 
 impl ControllerSources for ProjectSources<'_> {
-    fn clip(&self, guid: &str, _file_id: &str) -> Result<ClipFacts> {
+    fn clip(&self, guid: &str, file_id: &str) -> Result<ClipFacts> {
+        if let Some(model) = self.importer.model_clips.get(guid) {
+            return model.facts(file_id);
+        }
         let path = self.path(guid, ".anim", "animation clip")?;
         let source = resolve_project_import_source(&self.importer.opts.project, &path)?;
         playerbake::read_clip_facts(&read_file(&source)?, &path)
@@ -82,7 +92,181 @@ impl ControllerSources for ProjectSources<'_> {
     }
 }
 
+/// The baked clips of one imported model, published as derived content.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ModelClipSet {
+    path: String,
+    source_sha256: String,
+    meta_sha256: String,
+    /// The GUID the baked clips are published under; empty if none baked.
+    derived_guid: String,
+    /// Clip name and loop setting by local file ID.
+    clips: BTreeMap<String, (String, bool)>,
+    refused: BTreeMap<String, String>,
+}
+
+impl ModelClipSet {
+    fn facts(&self, file_id: &str) -> Result<ClipFacts> {
+        if let Some((name, looping)) = self.clips.get(file_id) {
+            return Ok(ClipFacts {
+                looping: *looping,
+                path: self.path.clone(),
+                name: name.clone(),
+            });
+        }
+        let reason = self
+            .refused
+            .get(file_id)
+            .map_or("it holds no such clip", String::as_str);
+        Err(Unsupported(format!("clip {file_id} of model {}: {reason}", self.path)).into())
+    }
+}
+
+/// The GUID a model's baked clips are published under. No source owns it.
+fn model_clips_guid(guid: &str) -> String {
+    sha256(format!("playerbake-model-clips\0{guid}").as_bytes())[..32].to_string()
+}
+
+/// The object references of a source that name another asset.
+fn references(data: &[u8]) -> Vec<(String, String)> {
+    static PATTERN: std::sync::LazyLock<regex::bytes::Regex> = std::sync::LazyLock::new(|| {
+        regex::bytes::Regex::new(r"fileID:\s*(-?[0-9]+),\s*guid:\s*([0-9a-fA-F]{32})").unwrap()
+    });
+    PATTERN
+        .captures_iter(data)
+        .map(|found| {
+            (
+                String::from_utf8_lossy(&found[2]).to_ascii_lowercase(),
+                String::from_utf8_lossy(&found[1]).into_owned(),
+            )
+        })
+        .collect()
+}
+
 impl NativeProjectImporter {
+    /// Imports a model with the worker, bakes its clips and publishes them as
+    /// derived content. The clips of an unchanged model are kept.
+    fn prepare_model_clips(&mut self, ctx: &Context, guid: &str, logical: &str) -> Result<()> {
+        let source = resolve_project_import_source(&self.opts.project, logical)?;
+        let source_sha = sha256(&read_file(&source)?);
+        let meta_sha = sha256(&read_file(&format!("{source}.meta"))?);
+        if self
+            .model_clips
+            .get(guid)
+            .is_some_and(|known| known.source_sha256 == source_sha && known.meta_sha256 == meta_sha)
+        {
+            return Ok(());
+        }
+        let started = Instant::now();
+        let root = sysutil::join(&[&self.opts.output, "native/imports", &random_id()]);
+        mkdir_all(&sysutil::dir(&root), 0o700)?;
+        let import_context = ctx.with_timeout(Duration::from_secs(45));
+        let (report, error) = run_project_import(
+            &import_context,
+            ProbeOptions {
+                project: self.opts.project.clone(),
+                editor: self.opts.editor.clone(),
+                output: root,
+                timeout: Duration::from_secs(45),
+                ..Default::default()
+            },
+            &[logical.to_string()],
+        );
+        import_context.cancel();
+        if let Some(error) = error {
+            return Err(error);
+        }
+        let primary = report
+            .as_ref()
+            .and_then(|report| report.content.as_ref())
+            .filter(|content| content.source_unchanged && content.assets.len() == 1)
+            .and_then(|content| {
+                content.assets[0]
+                    .files
+                    .iter()
+                    .find(|file| file.name.is_empty())
+            });
+        let Some(primary) = primary else {
+            bail!("native worker produced no artifact for {logical}");
+        };
+        let artifact = match read_file(&primary.path) {
+            Ok(data) if sha256(&data) == primary.sha256 => data,
+            _ => bail!("native artifact of {logical} changed"),
+        };
+        let baked = playerbake::bake_model_clips(&artifact)
+            .map_err(|error| error.context(format!("bake clips of {logical}")))?;
+        let mut set = ModelClipSet {
+            path: logical.to_string(),
+            source_sha256: source_sha,
+            meta_sha256: meta_sha,
+            refused: baked.refused.into_iter().collect(),
+            ..Default::default()
+        };
+        for (file_id, name, looping) in baked.facts {
+            set.clips.insert(file_id, (name, looping));
+        }
+        if let Some(baked) = baked.baked {
+            set.derived_guid = model_clips_guid(guid);
+            let file_sha = sha256(&baked.file);
+            let filename = self.store_baked(&set.derived_guid, &file_sha, &baked.file)?;
+            let mut content = NativeContentFile {
+                guid: set.derived_guid.clone(),
+                path: filename,
+                sha256: file_sha,
+                ..Default::default()
+            };
+            for (file_id, type_name) in baked.objects {
+                content
+                    .objects
+                    .push(NativeContentObject { file_id, type_name });
+            }
+            self.session.set_derived_native_content(&content)?;
+        }
+        Event::new("native-model-clips-baked")
+            .with("path", logical)
+            .with("clipCount", &set.clips.len())
+            .with("refusedCount", &set.refused.len())
+            .seconds("elapsedSeconds", started.elapsed().as_secs_f64())
+            .emit();
+        self.model_clips.insert(guid.to_string(), set);
+        Ok(())
+    }
+
+    /// Whether the baked clips of a model were made from its current source.
+    pub(crate) fn model_clip_source_current(&self, guid: &str, logical: &str) -> bool {
+        let Some(known) = self.model_clips.get(guid) else {
+            return false;
+        };
+        resolve_project_import_source(&self.opts.project, logical)
+            .and_then(|source| {
+                Ok((
+                    sha256(&read_file(&source)?),
+                    sha256(&read_file(&format!("{source}.meta"))?),
+                ))
+            })
+            .is_ok_and(|(source, meta)| source == known.source_sha256 && meta == known.meta_sha256)
+    }
+
+    /// Writes a baked file under its content hash and returns its path.
+    fn store_baked(&self, guid: &str, file_sha: &str, file: &[u8]) -> Result<String> {
+        // Content-addressed, so a published revision's file is never rewritten.
+        let filename = sysutil::join(&[
+            &self.opts.output,
+            "native/baked",
+            &format!("{guid}-{file_sha}.bin"),
+        ]);
+        match read_file(&filename) {
+            Ok(existing) if existing == file => {}
+            Ok(_) => bail!("baked native artifact changed on disk: {filename}"),
+            Err(error) if is_not_exist(&error) => {
+                mkdir_all(&sysutil::dir(&filename), 0o700)?;
+                write_file(&filename, file, 0o600)?;
+            }
+            Err(error) => return Err(error),
+        }
+        Ok(filename)
+    }
+
     fn source_path(&self, guid: &str) -> Result<String> {
         let mut session = self.session.lock();
         session.index_guids()?;
@@ -92,15 +276,21 @@ impl NativeProjectImporter {
     /// Bakes an authored animation source and publishes it as native content,
     /// then refreshes the baked sources that refer to it. A source using a
     /// feature the baker refuses is reported, not approximated.
-    pub(crate) fn import_baked(&mut self, logical: &str) -> Result<()> {
-        let guid = self.publish_baked(logical, 0)?;
-        self.refresh_dependents(&guid, logical, 0)
+    pub(crate) fn import_baked(&mut self, ctx: &Context, logical: &str) -> Result<()> {
+        let guid = self.publish_baked(ctx, logical, 0)?;
+        self.refresh_dependents(ctx, &guid, logical, 0)
     }
 
     /// A controller holds facts of its clips and, once baked, refers to their
     /// baked form; one built into the catalog never sees a baked clip. The
     /// same holds for an override controller and its controller.
-    fn refresh_dependents(&mut self, guid: &str, logical: &str, depth: usize) -> Result<()> {
+    pub(crate) fn refresh_dependents(
+        &mut self,
+        ctx: &Context,
+        guid: &str,
+        logical: &str,
+        depth: usize,
+    ) -> Result<()> {
         if lower_ext(logical) == ".overridecontroller" || depth > 2 {
             return Ok(());
         }
@@ -129,8 +319,8 @@ impl NativeProjectImporter {
             if !read_file(&source).is_ok_and(|data| contains(&data, guid.as_bytes())) {
                 continue;
             }
-            match self.publish_baked(&dependent, 0) {
-                Ok(published) => self.refresh_dependents(&published, &dependent, depth + 1)?,
+            match self.publish_baked(ctx, &dependent, 0) {
+                Ok(published) => self.refresh_dependents(ctx, &published, &dependent, depth + 1)?,
                 Err(error) if error.chain().any(|cause| cause.is::<Unsupported>()) => {
                     Event::new("native-bake-refused")
                         .with("path", &dependent)
@@ -144,7 +334,7 @@ impl NativeProjectImporter {
     }
 
     /// Bakes one source and the baked sources it refers to; returns its GUID.
-    fn publish_baked(&mut self, logical: &str, depth: usize) -> Result<String> {
+    fn publish_baked(&mut self, ctx: &Context, logical: &str, depth: usize) -> Result<String> {
         if depth > 4 {
             bail!("baked sources refer to each other too deeply: {logical}");
         }
@@ -155,6 +345,24 @@ impl NativeProjectImporter {
         let guid = meta_guid(&meta)?;
         let source_sha = sha256(&data);
         let meta_sha = sha256(&meta);
+        // The clips a controller takes from models are baked first: its own
+        // bake reads their facts.
+        let mut model_references = Vec::new();
+        if lower_ext(logical) != ".anim" {
+            for (reference, file_id) in references(&data) {
+                let path = self.source_path(&reference)?;
+                if lower_ext(&path) == ".fbx" {
+                    self.prepare_model_clips(ctx, &reference, &path)?;
+                    model_references.push((reference, file_id));
+                }
+            }
+        }
+        for (reference, file_id) in &model_references {
+            // An override controller is baked without reading clip facts.
+            self.model_clips[reference]
+                .facts(file_id)
+                .map_err(|error| error.context(format!("bake native {logical}")))?;
+        }
         let baked = match lower_ext(logical).as_str() {
             ".anim" => playerbake::bake_clip(&data, &ProjectSources { importer: self }),
             ".controller" => playerbake::bake_controller(&data, &ProjectSources { importer: self }),
@@ -165,7 +373,12 @@ impl NativeProjectImporter {
         let baked: Baked =
             baked.map_err(|error| error.context(format!("bake native {logical}")))?;
         // Every source this one refers to has to be published in baked form.
+        let mut dependencies = Vec::new();
         for external in &baked.externals {
+            if let Some(model) = self.model_clips.get(&external.guid) {
+                dependencies.push(model.derived_guid.clone());
+                continue;
+            }
             let dependency = self.source_path(&external.guid)?;
             if !matches!(lower_ext(&dependency).as_str(), ".anim" | ".controller") {
                 return Err(anyhow::Error::from(Unsupported(format!(
@@ -182,25 +395,12 @@ impl NativeProjectImporter {
                 .get(&external.guid)
                 .is_some_and(|entry| entry.source_sha256 == current);
             if !published {
-                self.publish_baked(&dependency, depth + 1)?;
+                self.publish_baked(ctx, &dependency, depth + 1)?;
             }
+            dependencies.push(external.guid.clone());
         }
         let file_sha = sha256(&baked.file);
-        // Content-addressed, so a published revision's file is never rewritten.
-        let filename = sysutil::join(&[
-            &self.opts.output,
-            "native/baked",
-            &format!("{guid}-{file_sha}.bin"),
-        ]);
-        match read_file(&filename) {
-            Ok(existing) if existing == baked.file => {}
-            Ok(_) => bail!("baked native artifact changed on disk: {filename}"),
-            Err(error) if is_not_exist(&error) => {
-                mkdir_all(&sysutil::dir(&filename), 0o700)?;
-                write_file(&filename, &baked.file, 0o600)?;
-            }
-            Err(error) => return Err(error),
-        }
+        let filename = self.store_baked(&guid, &file_sha, &baked.file)?;
         let mut replacement = NativeReplacement {
             guid: guid.clone(),
             source_path: logical.into(),
@@ -221,12 +421,12 @@ impl NativeProjectImporter {
                 .objects
                 .push(NativeContentObject { file_id, type_name });
         }
-        for external in baked.externals {
+        for dependency in dependencies {
             replacement
                 .content
                 .dependencies
                 .push(NativeContentDependency {
-                    guid: external.guid,
+                    guid: dependency,
                     global: false,
                 });
         }

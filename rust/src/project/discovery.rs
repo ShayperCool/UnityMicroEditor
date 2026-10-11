@@ -623,6 +623,10 @@ impl Inner {
         let mut queue: VecDeque<String> = VecDeque::from([self.baseline_text("scenePath")]);
         queue.extend(self.extra_assets.iter().cloned());
         let (mut seen, mut heavy) = (HashSet::new(), BTreeSet::new());
+        // Models a controller refers to supply clips, not geometry: their
+        // clips are baked for the controller, and the model is imported only
+        // if something else needs it.
+        let mut clip_models = BTreeSet::new();
         while let Some(logical) = queue.pop_front() {
             if !seen.insert(logical.clone()) {
                 continue;
@@ -644,14 +648,30 @@ impl Inner {
                 | ".anim" => {}
                 _ => continue,
             }
+            let plays_clips = matches!(
+                lexpath::lower_ext(&logical).as_str(),
+                ".controller" | ".overridecontroller"
+            );
             let physical = self.source(&logical)?;
             for guid in self.native_reference_guids(&physical)? {
                 let source = self.path_of(&guid);
-                if !source.is_empty() && !seen.contains(source) {
+                if source.is_empty() {
+                    continue;
+                }
+                if plays_clips && lexpath::lower_ext(source) == ".fbx" {
+                    clip_models.insert(source.to_string());
+                } else if !seen.contains(source) {
                     queue.push_back(source.to_string());
                 }
             }
         }
+        let mut changed_clip_models = Vec::new();
+        for logical in clip_models.difference(&heavy) {
+            if self.needs_native_import(logical)? {
+                changed_clip_models.push(logical.clone());
+            }
+        }
+        self.changed_clip_models = changed_clip_models;
         let mut pending = Vec::new();
         for logical in heavy {
             if self.needs_native_import(&logical)? {
@@ -675,5 +695,16 @@ impl Session {
         s.cache.stats = stats;
         s.dependencies = dependencies;
         result.map_err(|e| anyhow!(e))
+    }
+
+    /// The models the last walk found to be new or changed that only
+    /// controllers refer to, each with its GUID. Their clips reach the Player
+    /// through the controllers baked from them.
+    pub fn changed_clip_models(&self) -> Vec<(String, String)> {
+        let s = self.lock();
+        s.changed_clip_models
+            .iter()
+            .map(|path| (s.guid_of(path).to_string(), path.clone()))
+            .collect()
     }
 }

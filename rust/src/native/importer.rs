@@ -41,6 +41,8 @@ pub struct NativeProjectImporter {
     /// The assembly that defines each script, by script GUID. A baked clip
     /// that refers to a script needs it to name the class for the Player.
     pub script_assemblies: BTreeMap<String, String>,
+    /// The baked clips of models, by model GUID.
+    pub(crate) model_clips: BTreeMap<String, super::baked::ModelClipSet>,
 }
 
 struct Replay<'a> {
@@ -65,6 +67,7 @@ impl NativeProjectImporter {
             environment_sha256: environment.clone(),
             pending_native_paths: Vec::new(),
             script_assemblies: BTreeMap::new(),
+            model_clips: BTreeMap::new(),
         };
         let index = sysutil::join(&[&importer.opts.output, "native/index.json"]);
         let entries: Option<Vec<NativeReplacement>> = match read_json(&index) {
@@ -257,7 +260,7 @@ impl NativeProjectImporter {
             return self.import_warm_ui(ctx, logical, &mut HashSet::new());
         }
         if matches!(profile, "anim" | "controller" | "overridecontroller") {
-            return self.import_baked(logical);
+            return self.import_baked(ctx, logical);
         }
         if !cold_native_profile(logical) {
             bail!(

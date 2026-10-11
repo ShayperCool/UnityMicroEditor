@@ -1156,6 +1156,7 @@ fn native_adoption_rejects_wrong_worker_environment_before_publishing() {
         environment_sha256: entries[0].environment_sha256.clone(),
         pending_native_paths: Vec::new(),
         script_assemblies: BTreeMap::new(),
+        model_clips: BTreeMap::new(),
     };
     let environment = read_worker_environment(&opts.project).unwrap();
     for name in [
