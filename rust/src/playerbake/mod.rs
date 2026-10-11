@@ -13,6 +13,7 @@ mod mask;
 mod native;
 mod override_controller;
 mod serialized;
+mod settle;
 mod source;
 mod typetree;
 mod weighted;
@@ -33,8 +34,8 @@ pub use managed::{
 };
 pub use mask::{Mask, bake_mask, bake_mask_object, read_mask};
 pub use native::{
-    NativeObject, NativeSources, NoNativeSources, bake_native, bake_native_objects, native_class,
-    native_tree,
+    Lightmaps, NativeObject, NativeSources, NoNativeSources, bake_native, bake_native_objects,
+    native_class, native_tree,
 };
 pub use override_controller::{bake_override, bake_override_object};
 pub use serialized::{External, Object, Read, read as read_serialized, write};
