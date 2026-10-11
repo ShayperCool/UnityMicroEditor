@@ -17,7 +17,7 @@ use super::{
         DeferredBinding, DeferredReference, FileReferences, ObjectReference, Pointer, Resolution,
         STATE_MACHINE_BEHAVIOUR, ScriptLayout, ScriptType,
     },
-    mask::Mask,
+    mask::{Mask, mask_of},
     serialized::{External, Object},
     source::{flag, float, get, int, list, object, text},
     typetree::Val,
@@ -954,13 +954,24 @@ pub fn bake_controller_object(
         };
         let mut body = [0xffff_ffffu32, 0xffff_ffff, 0x7_ffff];
         let mut skeleton = Vec::new();
-        match reference(get(layer.fields, "m_Mask"))? {
-            None => {}
+        // A layer takes the mask's content into its own constant, so a mask
+        // stored in the controller's file is read from there. An ID that
+        // leads to no mask is no mask, as the engine finds it.
+        let mask = match reference(get(layer.fields, "m_Mask"))? {
+            None => None,
             Some(mask) if mask.guid.is_empty() => {
-                return Err(unsupported("avatar mask stored inside the controller"));
+                match builder.documents.get(mask.file_id.as_str()) {
+                    Some(document) if document.class_id == 319 && !document.stripped => {
+                        Some(mask_of(&document.data)?)
+                    }
+                    _ => None,
+                }
             }
+            Some(mask) => Some(sources.mask(&mask.guid)?),
+        };
+        match mask {
+            None => {}
             Some(mask) => {
-                let mask = sources.mask(&mask.guid)?;
                 if mask.body_parts.len() != BODY_PART_BITS.len() {
                     return Err(unsupported("avatar mask with an unknown set of body parts"));
                 }
@@ -1131,14 +1142,20 @@ pub fn bake_controller_object(
                     namespace => format!("{namespace}.{}", layout.class_name),
                 };
                 declared == class || layout.bases.contains(&declared)
-            } else if builder
+            } else if let Some(class) = builder
                 .documents
                 .get(file_id.as_str())
-                .is_some_and(|document| document.class_id == 114)
+                .map(|document| document.class_id)
+                .filter(|class| matches!(class, 114 | 319))
             {
+                // A build would hold such an object beside the controller.
                 return Err(unsupported(format!(
-                    "behaviour field {} refers to a behaviour the controller does not run",
-                    reference.path
+                    "behaviour field {} refers to {}",
+                    reference.path,
+                    match class {
+                        319 => "an avatar mask stored inside the controller",
+                        _ => "a behaviour the controller does not run",
+                    }
                 )));
             } else {
                 false
