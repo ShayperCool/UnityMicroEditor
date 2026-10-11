@@ -220,6 +220,86 @@ struct Cached {
     snapshot: SourceSnapshot,
     _guard: TempDir,
 }
+#[test]
+fn shared_stage_follows_the_source_and_keeps_its_caches() {
+    let (_guard, project) = review_project();
+    let modified = |path: &str| fs::metadata(path).unwrap().modified().unwrap();
+    for (name, contents) in [("Kept", "kept"), ("Gone", "gone"), ("Edited", "before")] {
+        write(
+            &join(&[&project, "Assets", &format!("{name}.txt")]),
+            contents,
+        );
+    }
+    let old = std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+    fs::File::open(join(&[&project, "Assets/Kept.txt"]))
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    let (stage, _) = sync_staging(&ctx(), &project).unwrap();
+    assert_eq!(stage, staging::shared_stage(&project));
+    assert_eq!(modified(&join(&[&stage, "Assets/Kept.txt"])), old);
+    // What a stage Editor leaves behind: caches, a build and authored files.
+    let cache = join(&[&stage, "Library/Bee/cache"]);
+    let host = join(&[
+        &stage,
+        "Builds/UnityMicroEditor/earlier-host/Project.x86_64",
+    ]);
+    write(&cache, "warm");
+    write(&host, "earlier host");
+    write(&join(&[&stage, "Assets/Generated/link.xml"]), "generated");
+    write(&join(&[&stage, "Assets/Kept.txt.meta"]), "generated");
+
+    fs::remove_file(join(&[&project, "Assets/Gone.txt"])).unwrap();
+    write(&join(&[&project, "Assets/Edited.txt"]), "after");
+    write(&join(&[&project, "Assets/New/Added.txt"]), "added");
+    let (again, snapshot) = sync_staging(&ctx(), &project).unwrap();
+    assert_eq!(again, stage);
+    assert_eq!(
+        snapshot.files,
+        snapshot_source(&ctx(), &project).unwrap().files
+    );
+    let staged = |logical: &str| fs::read_to_string(join(&[&stage, logical])).unwrap();
+    assert_eq!(staged("Assets/Edited.txt"), "after");
+    assert_eq!(staged("Assets/New/Added.txt"), "added");
+    assert_eq!(staged("Library/Bee/cache"), "warm");
+    assert_eq!(
+        staged("Builds/UnityMicroEditor/earlier-host/Project.x86_64"),
+        "earlier host"
+    );
+    for removed in [
+        "Assets/Gone.txt",
+        "Assets/Generated",
+        "Assets/Kept.txt.meta",
+    ] {
+        assert!(absent(&join(&[&stage, removed])), "{removed} survived");
+    }
+    assert_eq!(
+        modified(&join(&[&stage, "Assets/Kept.txt"])),
+        old,
+        "an unchanged file was rewritten"
+    );
+    for (logical, hash) in snapshot.files.iter() {
+        if logical != "Packages/manifest.json" {
+            assert_eq!(
+                &file_hash(&join(&[&stage, logical])).unwrap(),
+                hash,
+                "{logical}"
+            );
+        }
+    }
+
+    // A stage copied along with another project's Library is not reused.
+    let marker = join(&[&stage, "ProjectSettings/UnityMicroEditorStaging.json"]);
+    fs::remove_file(&marker).unwrap();
+    write(
+        &marker,
+        r#"{"schemaVersion":1,"sourceProject":"/another/project"}"#,
+    );
+    sync_staging(&ctx(), &project).unwrap();
+    assert!(absent(&cache), "a foreign stage kept its Library");
+    assert_eq!(staged("Assets/Edited.txt"), "after");
+}
+
 const REVIEW_EDITOR: &str = "/missing-review-editor";
 fn cached_fixture() -> Cached {
     let (guard, project) = review_project();

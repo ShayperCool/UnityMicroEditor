@@ -5,6 +5,7 @@
 //! cannot reproduce exactly, so the caller can fall back to an Editor build.
 mod clip;
 mod controller;
+mod freeform;
 mod override_controller;
 mod serialized;
 mod source;
@@ -18,6 +19,7 @@ pub use controller::{
     ClipFacts, ControllerSources, Mask, bake_controller, bake_controller_object, read_clip_facts,
     read_mask,
 };
+pub use freeform::{Freeform, precompute as precompute_freeform};
 pub use override_controller::{bake_override, bake_override_object};
 pub use serialized::{External, Object, write};
 pub use typetree::{TypeTree, Val};

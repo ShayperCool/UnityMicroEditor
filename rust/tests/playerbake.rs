@@ -386,8 +386,8 @@ fn controllers_match_the_engine_build() {
     let assets = fixture("controllers/Assets");
     let tree = Tree::scan(std::slice::from_ref(&assets));
     let (matched, refused) = compare_controllers(&[assets.join("Ctl")], &tree);
-    assert_eq!(refused, ["C04_BlendTrees"]);
-    assert_eq!(matched, 8);
+    assert!(refused.is_empty(), "{refused:?}");
+    assert_eq!(matched, 9);
 }
 
 /// Compares every `<name>.controller` / `<name>.controller.bin` pair of the
@@ -514,4 +514,49 @@ fn clip_with_scripts_carries_their_objects() {
     assert!(baked.file.windows(name.len()).any(|window| window == name));
     let refused = playerbake::bake_clip(&source, &playerbake::NoScripts).unwrap_err();
     assert!(refused.is::<Unsupported>());
+}
+
+/// Blend spaces built by the engine: positions and the tables it derived,
+/// all as single-precision bit patterns. `UNITY_PLAYERBAKE_FREEFORM_VECTORS`
+/// names a larger file of the same form.
+#[test]
+fn freeform_tables_match_the_engine_build() {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Case {
+        blend_type: u32,
+        positions: Vec<[u32; 2]>,
+        magnitudes: Vec<u32>,
+        pair_vectors: Vec<[u32; 2]>,
+        pair_avg_mag_inv: Vec<u32>,
+        neighbors: Vec<Vec<u32>>,
+    }
+    let path = std::env::var("UNITY_PLAYERBAKE_FREEFORM_VECTORS")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| fixture("freeform-vectors.json"), PathBuf::from);
+    let cases: Vec<Case> = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert!(cases.len() >= 100);
+    for (index, case) in cases.iter().enumerate() {
+        let positions: Vec<[f32; 2]> = case
+            .positions
+            .iter()
+            .map(|p| p.map(f32::from_bits))
+            .collect();
+        let table = playerbake::precompute_freeform(case.blend_type == 2, &positions);
+        let bits = |values: &[f32]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        let pairs: Vec<[u32; 2]> = table
+            .pair_vectors
+            .iter()
+            .map(|p| p.map(f32::to_bits))
+            .collect();
+        assert_eq!(bits(&table.magnitudes), case.magnitudes, "case {index}");
+        assert_eq!(pairs, case.pair_vectors, "case {index}");
+        assert_eq!(
+            bits(&table.pair_scales),
+            case.pair_avg_mag_inv,
+            "case {index}"
+        );
+        assert_eq!(table.neighbors, case.neighbors, "case {index}");
+    }
 }
