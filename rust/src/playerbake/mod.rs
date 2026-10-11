@@ -3,6 +3,7 @@
 //! Editor reads the YAML and derives the Player data during a build. This
 //! module reproduces that derivation for the pinned engine and refuses what it
 //! cannot reproduce exactly, so the caller can fall back to an Editor build.
+mod binding;
 mod clip;
 mod controller;
 mod freeform;
@@ -13,10 +14,12 @@ mod override_controller;
 mod serialized;
 mod source;
 mod typetree;
+mod weighted;
 
 pub use clip::{
-    ClipSources, MAX_SOURCE_BYTES, ModelClips, NoScripts, ScriptIdentity, bake_clip,
-    bake_clip_object, bake_model_clips, script_local_id,
+    ClipObject, ClipSources, MAX_SOURCE_BYTES, ModelClips, NoScripts, ObjectPointer, ObjectTarget,
+    ScriptIdentity, bake_clip, bake_clip_object, bake_clip_parts, bake_model_clips,
+    script_local_id,
 };
 pub use controller::{
     BakedObjects, Behaviour, BehaviourScript, ClipFacts, Controller, ControllerSources,
