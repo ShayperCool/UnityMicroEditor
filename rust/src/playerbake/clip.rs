@@ -3,10 +3,12 @@
 //! A legacy clip keeps its curves. Any other clip is evaluated by Mecanim from
 //! `m_MuscleClip`, which the Editor derives during a build: every curve of a
 //! binding goes to the streamed clip as cubic segments, or to the constant
-//! clip when the whole binding never changes. The derivation below follows
-//! the pinned engine's output bit for bit on the profiles it accepts.
+//! clip when the whole binding never changes. Float curves named after the
+//! humanoid rig drive it, and the build derives the root's start, stop and
+//! average speed from them. The derivation below follows the pinned engine's
+//! output bit for bit on the profiles it accepts.
 use super::{
-    Baked, clip_tree, crc32, script_tree,
+    Baked, clip_tree, crc32, humanoid, script_tree,
     serialized::{self, Object},
     source::{flag, float, get, int, list, null_reference, object, text},
     typetree::Val,
@@ -26,9 +28,17 @@ pub struct ScriptIdentity {
     pub local_id: i64,
 }
 
-/// Resolves the scripts a clip binds curves or events to.
+/// Resolves the scripts a clip binds curves or events to, and the clip an
+/// additive reference pose is taken from.
 pub trait ClipSources {
     fn script(&self, guid: &str) -> Result<ScriptIdentity>;
+    /// The authored `.anim` source of another clip. A caller that cannot
+    /// bake this clip again when that one changes leaves it refused.
+    fn clip(&self, guid: &str) -> Result<Vec<u8>> {
+        Err(unsupported(format!(
+            "additive reference pose from clip {guid}"
+        )))
+    }
 }
 
 /// For clips that may not refer to scripts.
@@ -78,7 +88,8 @@ impl Scripts<'_> {
 
 /// The muscle clip's size in memory with no curves, as the engine reports it.
 const MUSCLE_CLIP_BASE_SIZE: u64 = 2528;
-const HUMAN_CURVE_COUNT: usize = 200;
+/// The custom type of a binding that drives a curve of the humanoid rig.
+const HUMAN_CURVE: u8 = 8;
 /// Baked motion capture is authored as text of tens of megabytes.
 pub const MAX_SOURCE_BYTES: usize = 256 << 20;
 
@@ -105,10 +116,87 @@ struct Binding {
     curves: Vec<Curve>,
 }
 
+/// The clip an additive reference pose is taken from, and at what time.
+struct Reference {
+    guid: String,
+    file_id: String,
+    time: f32,
+}
+
 struct Settings {
-    start: f32,
-    stop: f32,
+    root: humanoid::Settings,
+    /// Set only when the pose takes effect: the clip asks for one and
+    /// names a clip.
+    reference: Option<Reference>,
     fields: Vec<(&'static str, Val)>,
+}
+
+/// The curves of a clip and what the engine concludes from where they sit.
+struct Curves {
+    /// The authored curve lists, which only a legacy clip keeps.
+    retained: Vec<(&'static str, Val)>,
+    bindings: Vec<Binding>,
+    /// A position or rotation curve on the root object.
+    generic_root: bool,
+    /// A float curve that drives the humanoid motion transform.
+    motion: bool,
+}
+
+/// The bindings of a muscle clip in the order of its value array: streamed
+/// bindings first, then constant ones, each group in binding order.
+struct Layout<'a> {
+    animated: Vec<&'a Binding>,
+    fixed: Vec<&'a Binding>,
+}
+
+impl<'a> Layout<'a> {
+    fn new(bindings: &'a [Binding], high_quality: bool, sample_rate: f32) -> Result<Self> {
+        let (animated, fixed): (Vec<&Binding>, Vec<&Binding>) =
+            bindings
+                .iter()
+                .partition(|binding| match &binding.curves[..] {
+                    [curve] => !constant_float(curve),
+                    curves => !constant_vector(curves),
+                });
+        // The samples of a dense clip are not reproduced. For Transform
+        // curves it is not even established which of them the engine
+        // samples, so any that could qualify is refused as well.
+        if !high_quality {
+            for binding in &animated {
+                let dense = |curve: &Curve| dense_candidate(curve, sample_rate);
+                if binding.curves.iter().any(dense) {
+                    return Err(unsupported(if binding.type_id == 4 {
+                        "Transform curves the engine may store in the dense clip"
+                    } else {
+                        "float curves the engine stores in the dense clip"
+                    }));
+                }
+            }
+        }
+        Ok(Self { animated, fixed })
+    }
+
+    fn bindings(&self) -> impl Iterator<Item = &'a Binding> + '_ {
+        self.animated.iter().chain(&self.fixed).copied()
+    }
+
+    fn animated_curves(&self) -> Vec<&'a Curve> {
+        self.animated.iter().flat_map(|b| &b.curves).collect()
+    }
+
+    fn fixed_curves(&self) -> Vec<&'a Curve> {
+        self.fixed.iter().flat_map(|b| &b.curves).collect()
+    }
+
+    /// The value array at a time.
+    fn sample(&self, time: f32) -> Vec<f32> {
+        let animated = self.animated.iter().flat_map(|b| &b.curves);
+        let fixed = self.fixed.iter().flat_map(|b| &b.curves);
+        animated
+            .map(|curve| evaluate(curve, time))
+            .chain(fixed.map(|curve| curve.keys[0].value))
+            .collect()
+    }
 }
 
 fn vector(value: &Value, names: &[&str], what: &str) -> Result<Vec<f32>> {
@@ -213,67 +301,69 @@ fn read_curve(value: &Value, names: &[&'static str], what: &str) -> Result<(Val,
     Ok((serialized, curves))
 }
 
-/// Attributes the engine binds to the humanoid rig instead of to an Animator
-/// parameter. Conservative: a parameter that merely looks like one is refused.
-fn humanoid_attribute(name: &str) -> bool {
-    const PREFIXES: [&str; 12] = [
-        "RootT.",
-        "RootQ.",
-        "MotionT.",
-        "MotionQ.",
-        "LeftFootT.",
-        "LeftFootQ.",
-        "RightFootT.",
-        "RightFootQ.",
-        "LeftHandT.",
-        "LeftHandQ.",
-        "RightHandT.",
-        "RightHandQ.",
-    ];
-    const MARKS: [&str; 13] = [
-        "Stretched",
-        "Stretch",
-        "Spread",
-        "Front-Back",
-        "Left-Right",
-        "In-Out",
-        "Down-Up",
-        "Up-Down",
-        "Twist",
-        "TDOF",
-        "Jaw Close",
-        "LeftHand.",
-        "RightHand.",
-    ];
-    PREFIXES.iter().any(|prefix| name.starts_with(prefix))
-        || MARKS.iter().any(|mark| name.contains(mark))
-}
-
-/// The engine's binding of a float curve: attribute hash and custom type.
+/// The engine's binding of a float curve: attribute and custom type. An
+/// Animator float named exactly like a curve of the humanoid rig drives that
+/// curve, whatever its path; any other name is a parameter.
 fn float_binding(class_id: i64, attribute: &str, scripted: bool) -> Result<(u32, u8)> {
     if scripted != (class_id == 114) {
         return Err(unsupported(format!(
             "float curve {attribute} of class {class_id} with an unexpected script reference"
         )));
     }
+    let hash = crc32(attribute);
     match (class_id, attribute) {
         // A field of a script: the hash of its property path.
-        (114, name) => Ok((crc32(name), 0)),
-        (95, name) if !humanoid_attribute(name) => Ok((crc32(name), 0)),
-        (95, name) => Err(unsupported(format!("humanoid curve {name}"))),
-        (1, "m_IsActive") => Ok((crc32(attribute), 0)),
+        (114, _) => Ok((hash, 0)),
+        (95, _) => Ok(match humanoid::curve_index(hash) {
+            Some(index) => (index, HUMAN_CURVE),
+            None => (hash, 0),
+        }),
+        (1, "m_IsActive") => Ok((hash, 0)),
         _ => Err(unsupported(format!(
             "float curve binding of class {class_id}: {attribute}"
         ))),
     }
 }
 
-/// Whether the engine stores a binding as one value per curve. Its keys are
-/// compared as vectors: every key stays within the engine's comparison
-/// epsilon of the first value and no tangent bends the curve. A stepped key
-/// has an infinite tangent, so a held binding stays streamed.
-fn constant(curves: &[Curve]) -> bool {
-    const EPSILON: f32 = 0.000001;
+/// The engine's comparison epsilon for a curve that never changes.
+const EPSILON: f32 = 0.000001;
+
+/// Whether the engine stores a float curve as one value: it is streamed as
+/// soon as a value or a tangent exceeds the epsilon. A stepped key has an
+/// infinite tangent, so a held curve stays streamed.
+fn constant_float(curve: &Curve) -> bool {
+    let first = curve.keys[0].value;
+    !curve.keys.iter().any(|key| {
+        EPSILON < (key.value - first).abs()
+            || EPSILON < key.in_slope.abs()
+            || EPSILON < key.out_slope.abs()
+    })
+}
+
+/// Whether the engine would sample a changing curve into the dense clip
+/// when the clip does not ask for high quality curves: no key is stepped,
+/// four bytes a frame take no more than the 28 bytes a streamed key takes,
+/// and no two keys are closer than a frame, less half a millisecond.
+fn dense_candidate(curve: &Curve, sample_rate: f32) -> bool {
+    use std::cmp::Ordering::Greater;
+    let keys = &curve.keys;
+    let frame = 1.0 / sample_rate;
+    let span = keys[keys.len() - 1].time - keys[0].time;
+    let streamed = (28 * keys.len()) as f32;
+    !keys
+        .iter()
+        .any(|key| !key.in_slope.is_finite() || !key.out_slope.is_finite())
+        && (span / frame * 4.0).partial_cmp(&streamed) != Some(Greater)
+        && keys.windows(2).all(|pair| {
+            let spare = (pair[1].time - pair[0].time).abs() - frame;
+            (-0.0005f32).partial_cmp(&spare) != Some(Greater)
+        })
+}
+
+/// Whether the engine stores a Transform binding as one value per curve. Its
+/// keys are compared as vectors: every key stays within the epsilon of the
+/// first value and no tangent bends the curve.
+fn constant_vector(curves: &[Curve]) -> bool {
     let near_zero = |parts: &mut dyn Iterator<Item = f32>| {
         parts.map(|part| part * part).sum::<f32>() < EPSILON * EPSILON
     };
@@ -366,12 +456,35 @@ fn streamed(curves: &[&Curve]) -> Vec<u32> {
     data
 }
 
-fn identity_transform() -> Val {
+fn transform_val(transform: &humanoid::Transform) -> Val {
     Val::map([
-        ("q", Val::map([("w", Val::F(1.0))])),
+        ("t", vector_val(&transform.0, &["x", "y", "z"])),
+        ("q", vector_val(&transform.1, &["x", "y", "z", "w"])),
+        ("s", vector_val(&[1.0; 3], &["x", "y", "z"])),
+    ])
+}
+
+fn pose_val(pose: &humanoid::Pose) -> Val {
+    let goal = |goal: &humanoid::Transform| Val::map([("m_X", transform_val(goal))]);
+    let hand = |fingers: &[f32]| {
+        Val::map([
+            ("m_GrabX", transform_val(&humanoid::IDENTITY)),
+            ("m_DoFArray", Val::floats(fingers.iter().copied())),
+        ])
+    };
+    let translation = |translation: &[f32; 3]| vector_val(translation, &["x", "y", "z"]);
+    Val::map([
+        ("m_RootX", transform_val(&pose.root)),
         (
-            "s",
-            Val::map([("x", Val::F(1.0)), ("y", Val::F(1.0)), ("z", Val::F(1.0))]),
+            "m_GoalArray",
+            Val::Seq(pose.goals.iter().map(goal).collect()),
+        ),
+        ("m_LeftHandPose", hand(&pose.left_fingers)),
+        ("m_RightHandPose", hand(&pose.right_fingers)),
+        ("m_DoFArray", Val::floats(pose.muscles)),
+        (
+            "m_TDoFArray",
+            Val::Seq(pose.translations.iter().map(translation).collect()),
         ),
     ])
 }
@@ -383,17 +496,34 @@ fn settings(fields: &Map<String, Value>) -> Result<Settings> {
         Value::Null => bail!("animation clip has no {what}"),
         _ => bail!("{what} is not a mapping"),
     };
-    if flag(get(map, "m_HasAdditiveReferencePose"), what)?
-        || !null_reference(get(map, "m_AdditiveReferencePoseClip"))?
-    {
-        return Err(unsupported("additive reference pose"));
-    }
     let number = |key: &str| float(get(map, key), what);
     let boolean = |key: &str| flag(get(map, key), what);
+    // The flag without a clip, or a clip without the flag, changes nothing.
+    let clip = get(map, "m_AdditiveReferencePoseClip");
+    let mut reference = None;
+    if boolean("m_HasAdditiveReferencePose")? && !null_reference(clip)? {
+        let clip = object(clip, what)?;
+        reference = Some(Reference {
+            guid: text(get(clip, "guid"))?.to_ascii_lowercase(),
+            file_id: text(get(clip, "fileID"))?,
+            time: number("m_AdditiveReferencePoseTime")?,
+        });
+    }
     Ok(Settings {
-        start: number("m_StartTime")?,
-        stop: number("m_StopTime")?,
+        root: humanoid::Settings {
+            start: number("m_StartTime")?,
+            stop: number("m_StopTime")?,
+            orientation_offset_y: number("m_OrientationOffsetY")?,
+            mirror: boolean("m_Mirror")?,
+            loop_blend_orientation: boolean("m_LoopBlendOrientation")?,
+            loop_blend_position_y: boolean("m_LoopBlendPositionY")?,
+            loop_blend_position_xz: boolean("m_LoopBlendPositionXZ")?,
+            keep_original_orientation: boolean("m_KeepOriginalOrientation")?,
+        },
+        reference,
         fields: vec![
+            ("m_StartTime", Val::F(number("m_StartTime")?)),
+            ("m_StopTime", Val::F(number("m_StopTime")?)),
             (
                 "m_OrientationOffsetY",
                 Val::F(number("m_OrientationOffsetY")?),
@@ -503,24 +633,22 @@ pub fn bake_clip_object(
     ))
 }
 
-fn clip_object(fields: &Map<String, Value>, scripts: &mut Scripts<'_>) -> Result<Vec<u8>> {
+fn read_curves(
+    fields: &Map<String, Value>,
+    scripts: &mut Scripts<'_>,
+    legacy: bool,
+) -> Result<Curves> {
     let what = "animation clip";
-    let legacy = flag(get(fields, "m_Legacy"), what)?;
     if !list(get(fields, "m_CompressedRotationCurves"), what)?.is_empty() {
         return Err(unsupported("compressed rotation curves"));
     }
     if !list(get(fields, "m_PPtrCurves"), what)?.is_empty() {
         return Err(unsupported("object reference curves"));
     }
-    if flag(get(fields, "m_HasGenericRootTransform"), what)?
-        || flag(get(fields, "m_HasMotionFloatCurves"), what)?
-    {
-        return Err(unsupported("root motion curves"));
-    }
-    let settings = settings(fields)?;
     let (xyz, xyzw): (&[&'static str], &[&'static str]) = (&["x", "y", "z"], &["x", "y", "z", "w"]);
     let mut retained: Vec<(&'static str, Val)> = Vec::new();
     let mut bindings: Vec<Binding> = Vec::new();
+    let (mut generic_root, mut motion) = (false, false);
     // Bindings follow the engine's order: position, rotation, Euler rotation,
     // scale and then floats, each in authored order.
     for (field, names, attribute, custom_type) in [
@@ -537,6 +665,9 @@ fn clip_object(fields: &Map<String, Value>, scripts: &mut Scripts<'_>) -> Result
             if curves[0].keys.is_empty() {
                 return Err(unsupported(format!("{field} has a curve without keys")));
             }
+            // Moving or turning the root object is root motion; scaling
+            // it is not.
+            generic_root |= path.is_empty() && field != "m_ScaleCurves";
             bindings.push(Binding {
                 path: crc32(&path),
                 attribute,
@@ -560,8 +691,15 @@ fn clip_object(fields: &Map<String, Value>, scripts: &mut Scripts<'_>) -> Result
             return Err(unsupported("m_FloatCurves has a curve without keys"));
         }
         let script = scripts.pointer(get(entry, "script"), "float curve script")?;
+        let flags = int(get(entry, "flags"), "m_FloatCurves")?;
         if !legacy {
+            // The first flag marks a curve of whole numbers, which the
+            // engine keeps apart from the float curves.
+            if flags & 1 != 0 {
+                return Err(unsupported(format!("discrete curve {attribute}")));
+            }
             let (hash, custom_type) = float_binding(class_id, &attribute, script != Val::Zero)?;
+            motion |= custom_type == HUMAN_CURVE && humanoid::motion_curve(hash);
             bindings.push(Binding {
                 path: crc32(&path),
                 attribute: hash,
@@ -577,10 +715,156 @@ fn clip_object(fields: &Map<String, Value>, scripts: &mut Scripts<'_>) -> Result
             ("path", Val::Str(path)),
             ("classID", Val::I(class_id)),
             ("script", script),
-            ("flags", Val::I(int(get(entry, "flags"), "m_FloatCurves")?)),
+            ("flags", Val::I(flags)),
         ]));
     }
     retained.push(("m_FloatCurves", Val::Seq(floats)));
+    Ok(Curves {
+        retained,
+        bindings,
+        generic_root,
+        motion,
+    })
+}
+
+/// Whether the clip asks for every changing curve to stay streamed, which is
+/// the engine's default when the source does not say.
+fn high_quality(fields: &Map<String, Value>) -> Result<bool> {
+    match get(fields, "m_UseHighQualityCurve") {
+        Value::Null => Ok(true),
+        value => flag(value, "animation clip"),
+    }
+}
+
+/// The value of each curve of the clip in the pose its additive reference
+/// names: the reference clip's value at the reference time where that clip
+/// animates the same binding, zero elsewhere.
+fn reference_pose(
+    reference: &Reference,
+    layout: &Layout<'_>,
+    sources: &dyn ClipSources,
+) -> Result<Vec<f32>> {
+    let what = "additive reference pose";
+    if layout.bindings().any(|binding| binding.script != Val::Zero) {
+        return Err(unsupported(format!("{what} of a clip with script curves")));
+    }
+    if reference.guid.is_empty() {
+        return Err(unsupported(format!("{what} from a clip without a source")));
+    }
+    let yaml = sources.clip(&reference.guid)?;
+    if yaml.len() > MAX_SOURCE_BYTES {
+        return Err(unsupported(format!("{what} from a source too large")));
+    }
+    let documents = crate::yaml::parse_unity_yaml_lexical_within(&yaml, MAX_SOURCE_BYTES)?;
+    let [document] = documents.as_slice() else {
+        return Err(unsupported(format!(
+            "{what} from a source of several objects"
+        )));
+    };
+    if document.class_id != 74 || document.stripped || document.file_id != reference.file_id {
+        return Err(unsupported(format!(
+            "{what} from an object that is not the clip"
+        )));
+    }
+    let fields = &document.data;
+    let mut scripts = Scripts {
+        sources,
+        used: Vec::new(),
+    };
+    // The reference is read like any clip, without its own reference pose.
+    let curves = read_curves(fields, &mut scripts, false)?;
+    if flag(get(fields, "m_Legacy"), what)? || curves.bindings.is_empty() {
+        return Err(unsupported(format!(
+            "{what} from a clip without a muscle clip"
+        )));
+    }
+    let sample_rate = float(get(fields, "m_SampleRate"), what)?;
+    let other = Layout::new(&curves.bindings, high_quality(fields)?, sample_rate)?;
+    let values = other.sample(reference.time);
+    let key = |binding: &Binding| {
+        (
+            binding.path,
+            binding.attribute,
+            binding.type_id,
+            binding.custom_type,
+        )
+    };
+    let rotation = |binding: &Binding| binding.type_id == 4 && matches!(binding.attribute, 2 | 4);
+    let mut pose = Vec::new();
+    for binding in layout.bindings() {
+        // Of several equal bindings in the reference, the last one counts.
+        let mut position = 0;
+        let mut found = None;
+        for candidate in other.bindings() {
+            if key(candidate) == key(binding) {
+                found = Some(position);
+            }
+            position += candidate.curves.len();
+        }
+        match found {
+            Some(position) => pose.extend(&values[position..position + binding.curves.len()]),
+            // The engine converts between a quaternion and an Euler curve
+            // of one object; that conversion is not reproduced.
+            None if rotation(binding)
+                && other
+                    .bindings()
+                    .any(|candidate| rotation(candidate) && candidate.path == binding.path) =>
+            {
+                return Err(unsupported(format!(
+                    "{what} between Euler and quaternion rotation curves"
+                )));
+            }
+            None => pose.extend(std::iter::repeat_n(0.0, binding.curves.len())),
+        }
+    }
+    Ok(pose)
+}
+
+/// The muscle clip fields a build derives from the human curves; for a clip
+/// without curves they stay at rest.
+fn derived_fields(derived: Option<&humanoid::Derived>) -> Vec<(&'static str, Val)> {
+    let rest = transform_val(&humanoid::IDENTITY);
+    let Some(derived) = derived else {
+        return vec![
+            ("m_DeltaPose", pose_val(&humanoid::Pose::identity())),
+            ("m_StartX", rest.clone()),
+            ("m_StopX", rest.clone()),
+            ("m_LeftFootStartX", rest.clone()),
+            ("m_RightFootStartX", rest),
+        ];
+    };
+    vec![
+        ("m_DeltaPose", pose_val(&derived.delta_pose)),
+        ("m_StartX", transform_val(&derived.start)),
+        ("m_StopX", transform_val(&derived.stop)),
+        ("m_LeftFootStartX", transform_val(&derived.left_foot_start)),
+        (
+            "m_RightFootStartX",
+            transform_val(&derived.right_foot_start),
+        ),
+        (
+            "m_AverageSpeed",
+            vector_val(&derived.average_speed, &["x", "y", "z"]),
+        ),
+        (
+            "m_AverageAngularSpeed",
+            Val::F(derived.average_angular_speed),
+        ),
+    ]
+}
+
+fn clip_object(fields: &Map<String, Value>, scripts: &mut Scripts<'_>) -> Result<Vec<u8>> {
+    let what = "animation clip";
+    let legacy = flag(get(fields, "m_Legacy"), what)?;
+    let settings = settings(fields)?;
+    let Curves {
+        retained,
+        bindings,
+        generic_root,
+        motion,
+    } = read_curves(fields, scripts, legacy)?;
+    let high_quality = high_quality(fields)?;
+    let sample_rate = float(get(fields, "m_SampleRate"), what)?;
 
     let mut object: Vec<(&'static str, Val)> = vec![
         ("m_Name", Val::Str(text(get(fields, "m_Name"))?)),
@@ -589,85 +873,79 @@ fn clip_object(fields: &Map<String, Value>, scripts: &mut Scripts<'_>) -> Result
             "m_Compressed",
             Val::Bool(flag(get(fields, "m_Compressed"), what)?),
         ),
-        (
-            "m_UseHighQualityCurve",
-            Val::Bool(flag(get(fields, "m_UseHighQualityCurve"), what)?),
-        ),
-        (
-            "m_SampleRate",
-            Val::F(float(get(fields, "m_SampleRate"), what)?),
-        ),
+        ("m_UseHighQualityCurve", Val::Bool(high_quality)),
+        ("m_SampleRate", Val::F(sample_rate)),
         ("m_WrapMode", Val::I(int(get(fields, "m_WrapMode"), what)?)),
         ("m_Bounds", bounds(fields)?),
         ("m_Events", events(fields, scripts)?),
     ];
-    let sample_rate = float(get(fields, "m_SampleRate"), what)?;
-    let human_pose = || {
-        let goal = Val::map([("m_X", identity_transform())]);
-        let hand = || {
-            Val::map([
-                ("m_GrabX", identity_transform()),
-                ("m_DoFArray", Val::floats([0.0; 20])),
-            ])
-        };
-        Val::map([
-            ("m_RootX", identity_transform()),
-            ("m_GoalArray", Val::Seq(vec![goal; 4])),
-            ("m_LeftHandPose", hand()),
-            ("m_RightHandPose", hand()),
-            ("m_DoFArray", Val::floats([0.0; 55])),
-            ("m_TDoFArray", Val::Seq(vec![Val::Zero; 21])),
-        ])
-    };
-    let mut muscle: Vec<(&'static str, Val)> = vec![
-        ("m_DeltaPose", human_pose()),
-        ("m_StartX", identity_transform()),
-        ("m_StopX", identity_transform()),
-        ("m_LeftFootStartX", identity_transform()),
-        ("m_RightFootStartX", identity_transform()),
-        ("m_StartTime", Val::F(settings.start)),
-        ("m_StopTime", Val::F(settings.stop)),
-        (
-            "m_IndexArray",
-            Val::Seq(vec![Val::I(-1); HUMAN_CURVE_COUNT]),
-        ),
-    ];
-    muscle.extend(settings.fields);
+    let mut muscle = settings.fields;
     // Without curves the engine leaves the muscle clip unbuilt.
     if legacy || bindings.is_empty() {
+        // A build derives the root motion flags and the reference pose from
+        // the muscle clip. What it makes of them without one is not known.
+        if flag(get(fields, "m_HasGenericRootTransform"), what)?
+            || flag(get(fields, "m_HasMotionFloatCurves"), what)?
+        {
+            return Err(unsupported(
+                "root motion flags on a clip without a muscle clip",
+            ));
+        }
+        if settings.reference.is_some() {
+            return Err(unsupported(
+                "additive reference pose on a clip without a muscle clip",
+            ));
+        }
         if legacy {
             object.extend(retained);
         }
+        muscle.extend(derived_fields(None));
+        muscle.push((
+            "m_IndexArray",
+            Val::Seq(vec![Val::I(-1); humanoid::CURVE_COUNT]),
+        ));
         object.push(("m_MuscleClip", Val::Map(named(muscle))));
         return clip_tree()?.encode(&Val::Map(named(object)));
     }
-    // A binding is streamed unless all of its curves are constant; streamed
-    // bindings come first, both groups in the order above.
-    let (animated, fixed): (Vec<&Binding>, Vec<&Binding>) = bindings
-        .iter()
-        .partition(|binding| !constant(&binding.curves));
-    let animated_curves: Vec<&Curve> = animated.iter().flat_map(|b| &b.curves).collect();
-    let fixed_curves: Vec<&Curve> = fixed.iter().flat_map(|b| &b.curves).collect();
+    let layout = Layout::new(&bindings, high_quality, sample_rate)?;
+    let animated_curves = layout.animated_curves();
+    let fixed_curves = layout.fixed_curves();
     if animated_curves.len() > u16::MAX as usize {
         return Err(unsupported("more streamed curves than the format indexes"));
     }
     let stream = streamed(&animated_curves);
     let all_curves = || animated_curves.iter().chain(&fixed_curves);
-    let span =
-        |start: f32, stop: f32| Val::map([("m_Start", Val::F(start)), ("m_Stop", Val::F(stop))]);
-    let delta: Vec<Val> = animated_curves
-        .iter()
-        .map(|curve| {
-            span(
-                evaluate(curve, settings.start),
-                evaluate(curve, settings.stop),
-            )
-        })
-        .chain(fixed_curves.iter().map(|curve| {
-            let value = curve.keys[0].value;
-            span(value, value)
-        }))
+    // Each human curve points at its place in the value array; of several
+    // bindings to one curve the last counts.
+    let mut index: humanoid::Index = [-1; humanoid::CURVE_COUNT];
+    let mut position = 0;
+    for binding in layout.bindings() {
+        if binding.custom_type == HUMAN_CURVE {
+            index[binding.attribute as usize] = position;
+        }
+        position += binding.curves.len() as i32;
+    }
+    let derived = humanoid::derive(&index, &settings.root, &|time| layout.sample(time))?;
+    muscle.extend(derived_fields(Some(&derived)));
+    muscle.push((
+        "m_IndexArray",
+        Val::Seq(
+            index
+                .iter()
+                .map(|&position| Val::I(position as i64))
+                .collect(),
+        ),
+    ));
+    let delta: Vec<Val> = layout
+        .sample(settings.root.start)
+        .into_iter()
+        .zip(layout.sample(settings.root.stop))
+        .map(|(start, stop)| Val::map([("m_Start", Val::F(start)), ("m_Stop", Val::F(stop))]))
         .collect();
+    if let Some(reference) = &settings.reference {
+        let pose = reference_pose(reference, &layout, scripts.sources)?;
+        muscle.push(("m_ValueArrayReferencePose", Val::floats(pose)));
+    }
     let mut dense = Vec::new();
     if all_curves().next().is_some() {
         let begin = all_curves()
@@ -714,9 +992,8 @@ fn clip_object(fields: &Map<String, Value>, scripts: &mut Scripts<'_>) -> Result
         ]),
     ));
     muscle.push(("m_ValueArrayDelta", Val::Seq(delta)));
-    let generic: Vec<Val> = animated
-        .iter()
-        .chain(&fixed)
+    let generic: Vec<Val> = layout
+        .bindings()
         .map(|binding| {
             Val::map([
                 ("path", Val::U(binding.path as u64)),
@@ -729,6 +1006,9 @@ fn clip_object(fields: &Map<String, Value>, scripts: &mut Scripts<'_>) -> Result
         .collect();
     object.push(("m_MuscleClipSize", Val::U(size)));
     object.push(("m_MuscleClip", Val::Map(named(muscle))));
+    // Both flags follow from the curves; the authored values are not used.
+    object.push(("m_HasGenericRootTransform", Val::Bool(generic_root)));
+    object.push(("m_HasMotionFloatCurves", Val::Bool(motion)));
     object.push((
         "m_ClipBindingConstant",
         Val::map([("genericBindings", Val::Seq(generic))]),

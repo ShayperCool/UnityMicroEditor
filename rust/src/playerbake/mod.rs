@@ -6,6 +6,7 @@
 mod clip;
 mod controller;
 mod freeform;
+mod humanoid;
 mod override_controller;
 mod serialized;
 mod source;
