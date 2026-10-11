@@ -7,6 +7,7 @@
 use super::{
     Baked,
     serialized::{self, External, Object},
+    settle::{self, Settle},
     source::{get, text},
     typetree::{TypeTree, Val},
     unsupported,
@@ -15,9 +16,29 @@ use anyhow::{Result, bail};
 use serde_json::{Map, Value};
 use std::sync::LazyLock;
 
+/// The kinds of lightmap the render pipeline of a project lights with
+/// (`SupportedRenderingFeatures.lightmapBakeTypes`). The built-in, universal
+/// and high definition pipelines light with both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lightmaps {
+    pub baked: bool,
+    pub realtime: bool,
+}
+
 /// What a native-format asset takes from its project beyond its own text.
-/// The classes baked so far take nothing.
-pub trait NativeSources {}
+/// Each answer is `None` when the project is not known; an asset whose
+/// Player form depends on it is then refused.
+pub trait NativeSources {
+    /// Whether the project works in linear color space
+    /// (`PlayerSettings.colorSpace`).
+    fn linear_color_space(&self) -> Option<bool> {
+        None
+    }
+
+    fn lightmaps(&self) -> Option<Lightmaps> {
+        None
+    }
+}
 
 /// For a caller without a project.
 pub struct NoNativeSources;
@@ -29,7 +50,7 @@ struct Class {
     managed: &'static str,
     tree: LazyLock<Result<TypeTree, String>>,
     /// Restates what the engine corrects after it has read the source.
-    settle: fn(&mut Val) -> Result<()>,
+    settle: Settle,
 }
 
 macro_rules! class {
@@ -46,12 +67,28 @@ macro_rules! class {
     };
 }
 
-static CLASSES: [Class; 1] = [class!(319, "UnityEngine.AvatarMask", as_authored)];
-
-/// For a class the engine reads without correcting anything.
-fn as_authored(_: &mut Val) -> Result<()> {
-    Ok(())
-}
+static CLASSES: [Class; 8] = [
+    class!(319, "UnityEngine.AvatarMask", settle::as_authored),
+    class!(134, "UnityEngine.PhysicsMaterial", settle::physics_material),
+    class!(
+        62,
+        "UnityEngine.PhysicsMaterial2D",
+        settle::physics_material_2d
+    ),
+    class!(84, "UnityEngine.RenderTexture", settle::render_texture),
+    class!(
+        86,
+        "UnityEngine.CustomRenderTexture",
+        settle::custom_render_texture
+    ),
+    class!(121, "UnityEngine.Flare", settle::as_authored),
+    class!(1953259897, "UnityEngine.TerrainLayer", settle::as_authored),
+    class!(
+        850595691,
+        "UnityEngine.LightingSettings",
+        settle::lighting_settings
+    ),
+];
 
 fn class(id: i64) -> Option<&'static Class> {
     CLASSES.iter().find(|class| class.id as i64 == id)
@@ -348,7 +385,7 @@ pub struct NativeObject {
 /// refer to in order of first use.
 pub fn bake_native_objects(
     yaml: &[u8],
-    _sources: &dyn NativeSources,
+    sources: &dyn NativeSources,
 ) -> Result<(Vec<NativeObject>, Vec<External>)> {
     let documents = crate::yaml::parse_unity_yaml_lexical(yaml)?;
     let mut locals = Vec::new();
@@ -375,7 +412,7 @@ pub fn bake_native_objects(
         let mut transcoder = Transcoder { tree, references };
         let mut value = transcoder.structure(0, &document.data, "")?;
         references = transcoder.references;
-        (class.settle)(&mut value)?;
+        (class.settle)(&document.data, &mut value, sources)?;
         objects.push(NativeObject {
             file_id: document.file_id.clone(),
             class_id: class.id,

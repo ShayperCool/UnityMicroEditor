@@ -148,11 +148,34 @@ Limits of the path as a whole:
 
 Some assets reach a Player as the fields their YAML holds. `rust/src/playerbake/native.rs` bakes them with one transcoder: it walks the Player type tree of the object's class, pinned from the reference build (`engine/type-<class>.bin`), and takes every field from the source by name. A source field the Player lacks is Editor-only and dropped, as the engine drops it. Object references become references to the same file or to another source, which `bake_native` returns in order of first use. Every object is published under its authored file ID.
 
-Nothing is guessed. A Player field the source lacks would take a default only the engine's constructor knows; a structure written in another serialized version than the pinned engine writes would be converted on load; a number spelled otherwise than the Editor spells one (`inf`, `.5`, a value beyond single precision) may be read differently. Each of these is refused.
+Nothing is guessed. A Player field the source lacks would take a default only the engine's constructor knows; a structure written in another serialized version than the pinned engine writes would be converted on load; a number spelled otherwise than the Editor spells one (`inf`, `.5`, `-1` for an unsigned field, a value beyond single precision) may be read differently. Each of these is refused.
+
+The Player form is not always the authored fields. The Editor corrects an object after reading it (`CheckConsistency`, and conversions inside the YAML reader), and a build writes some fields from project settings. `rust/src/playerbake/settle.rs` restates these per class from the pinned Editor:
+
+- `PhysicsMaterial`: frictions limited to zero and one step below the largest single, bounciness to 0..1.
+- `PhysicsMaterial2D`: friction and bounciness limited to 0..100000; an unknown combine mode falls back to the default of its kind.
+- `RenderTexture`, `CustomRenderTexture`: sizes of at least one, 1..32 samples, filter and wrap modes limited, a cube as high as wide, no mipmaps for a depth-only texture, no depth for a volume, no anisotropy with a depth buffer, a zero mip count read as unset, a negative update period as zero. The color format is read as its sRGB or linear counterpart: sRGB only when the texture is marked sRGB **and the project works in linear color space**.
+- `LightingSettings`: the Player keeps seven fields. Bounce scale, albedo boost and indirect scale are limited; the shadowmask flag follows the mixed bake mode; baked and realtime lightmaps stay enabled only **when the project's render pipeline lights with them** (`SupportedRenderingFeatures.lightmapBakeTypes`), and realtime environment lighting follows from both.
+
+The two project settings come from the caller (`NativeSources::linear_color_space`, `NativeSources::lightmaps`). When the caller does not know one, an asset whose Player form depends on it is refused; an asset it cannot affect (a render texture not marked sRGB, lighting settings without lightmaps) is still baked.
 
 | Class | Source | Main file ID | Compared with the engine build |
 | --- | --- | --- | --- |
 | `AvatarMask` (319) | `.mask` | 31900000 | byte for byte, six masks: body parts, transform paths with weights, a shortened and an empty body part list |
+| `PhysicsMaterial` (134) | `.physicMaterial` | 13400000 | byte for byte, including out-of-range values |
+| `PhysicsMaterial2D` (62) | `.physicsMaterial2D` | 6200000 | byte for byte, including out-of-range values |
+| `RenderTexture` (84) | `.renderTexture` | 8400000 | byte for byte in gamma and linear projects; every color format, marked sRGB and not |
+| `CustomRenderTexture` (86) | `.asset` | 8600000 | byte for byte in gamma and linear projects, with update zones and an initialization texture |
+| `Flare` (121) | `.flare` | 12100000 | byte for byte, with elements and a texture |
+| `TerrainLayer` (1953259897) | `.terrainlayer` | 8574412962073106934 | byte for byte, with textures |
+| `LightingSettings` (850595691) | `.lighting` | 4890085278179872738 | byte for byte under pipelines lighting with both kinds of lightmap, with only baked, only realtime, and neither |
+
+Beyond the committed fixtures, randomized sources of each class (several hundred, with out-of-range values) were compared with builds of a gamma and a linear project.
+
+Refused:
+
+- A custom render texture whose `m_UpdateZoneSpace` differs from `m_CurrentUpdateZoneSpace`: the engine converts its update zones between the two spaces.
+- A source holding an object of any other class.
 
 ## UI and fonts
 

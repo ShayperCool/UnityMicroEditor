@@ -1476,12 +1476,40 @@ fn model_clip_corpus_matches_the_engine_build() {
     assert!(matched > 0);
 }
 
+/// The settings of a reference project that reach its native assets.
+struct Project {
+    linear: bool,
+    lightmaps: playerbake::Lightmaps,
+}
+
+impl Project {
+    /// Gamma color space and the built-in render pipeline.
+    const DEFAULT: Project = Project {
+        linear: false,
+        lightmaps: playerbake::Lightmaps {
+            baked: true,
+            realtime: true,
+        },
+    };
+}
+
+impl playerbake::NativeSources for Project {
+    fn linear_color_space(&self) -> Option<bool> {
+        Some(self.linear)
+    }
+
+    fn lightmaps(&self) -> Option<playerbake::Lightmaps> {
+        Some(self.lightmaps)
+    }
+}
+
 /// Compares every `<source>` / `<source>.bin` pair of a directory: a
 /// native-format source and the object the engine built from it. References
 /// compare by identity, since a build numbers its objects its own way.
-/// Returns how many matched and the sources the baker refused.
-fn compare_native(root: &Path) -> (usize, Vec<String>) {
-    let (mut matched, mut refused) = (0, Vec::new());
+/// Returns how many matched, the sources the baker refused and the ones it
+/// baked differently.
+fn compare_native(root: &Path, project: &Project) -> (usize, Vec<String>, Vec<String>) {
+    let (mut matched, mut refused, mut differing) = (0, Vec::new(), Vec::new());
     let mut sources: Vec<PathBuf> = fs::read_dir(root)
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -1491,10 +1519,7 @@ fn compare_native(root: &Path) -> (usize, Vec<String>) {
     for source in sources {
         let name = source.file_name().unwrap().to_string_lossy().into_owned();
         let expected = fs::read(root.join(format!("{name}.bin"))).unwrap();
-        let baked = playerbake::bake_native_objects(
-            &fs::read(&source).unwrap(),
-            &playerbake::NoNativeSources,
-        );
+        let baked = playerbake::bake_native_objects(&fs::read(&source).unwrap(), project);
         let (objects, _) = match baked {
             Ok(baked) => baked,
             Err(error) if error.is::<Unsupported>() => {
@@ -1514,24 +1539,61 @@ fn compare_native(root: &Path) -> (usize, Vec<String>) {
             label_references(&mut expected, &mut Vec::new());
             let mut found = Vec::new();
             differences("", &actual, &expected, &mut found);
-            assert!(
-                found.is_empty(),
-                "{name} differs from the engine build: {found:?}"
-            );
+            if !found.is_empty() {
+                differing.push(format!("{name}: {found:?}"));
+                continue;
+            }
         }
         matched += 1;
     }
-    (matched, refused)
+    (matched, refused, differing)
 }
 
 #[test]
 fn native_assets_match_the_engine_build() {
-    let (matched, refused) = compare_native(&fixture("native"));
-    assert!(refused.is_empty(), "{refused:?}");
-    assert!(matched >= 6, "fixtures are missing");
+    let lit = |baked, realtime| playerbake::Lightmaps { baked, realtime };
+    for (directory, linear, lightmaps, least) in [
+        ("native", false, lit(true, true), 60),
+        ("native/linear", true, lit(true, true), 25),
+        ("native/linear-baked", true, lit(true, false), 10),
+        ("native/linear-realtime", true, lit(false, true), 10),
+        ("native/gamma-mixed", false, lit(false, false), 10),
+    ] {
+        let project = Project { linear, lightmaps };
+        let (matched, refused, differing) = compare_native(&fixture(directory), &project);
+        assert!(refused.is_empty(), "{refused:?}");
+        assert!(differing.is_empty(), "{differing:?}");
+        assert!(matched >= least, "fixtures of {directory} are missing");
+    }
 }
 
-/// `UNITY_PLAYERBAKE_NATIVE_CORPUS` names directories of such pairs.
+/// An asset whose Player form depends on a project setting is refused when
+/// the project is not known, and baked when the setting cannot matter.
+#[test]
+fn native_assets_wait_for_their_project() {
+    let bake = |name: &str| {
+        playerbake::bake_native(
+            &fs::read(fixture(name)).unwrap(),
+            &playerbake::NoNativeSources,
+        )
+    };
+    for name in ["native/RC_4_s1.renderTexture", "native/L_Default.lighting"] {
+        let error = bake(name).unwrap_err();
+        assert!(error.is::<Unsupported>(), "{name}: {error:#}");
+    }
+    for name in [
+        "native/RC_4_s0.renderTexture",
+        "native/R_Hdr.renderTexture",
+        "native/P_Ice.physicMaterial",
+    ] {
+        bake(name).unwrap();
+    }
+}
+
+/// `UNITY_PLAYERBAKE_NATIVE_CORPUS` names directories of such pairs. A
+/// directory built by another project than the default one says so after
+/// `@`: `l` for linear color space, `b` and `r` for the only kinds of
+/// lightmap its render pipeline lights with.
 #[test]
 fn native_corpus_matches_the_engine_build() {
     let Some(roots) = std::env::var("UNITY_PLAYERBAKE_NATIVE_CORPUS")
@@ -1541,13 +1603,33 @@ fn native_corpus_matches_the_engine_build() {
         eprintln!("skipped: set UNITY_PLAYERBAKE_NATIVE_CORPUS");
         return;
     };
+    let mut failed = 0;
     for root in roots.split(':') {
-        let (matched, refused) = compare_native(Path::new(root));
-        eprintln!("{root}: matched {matched}, refused {}", refused.len());
-        for reason in refused {
+        let (root, project) = match root.split_once('@') {
+            Some((root, flags)) => (
+                root,
+                Project {
+                    linear: flags.contains('l'),
+                    lightmaps: playerbake::Lightmaps {
+                        baked: flags.contains('b'),
+                        realtime: flags.contains('r'),
+                    },
+                },
+            ),
+            None => (root, Project::DEFAULT),
+        };
+        let (matched, refused, differing) = compare_native(Path::new(root), &project);
+        eprintln!(
+            "{root}: matched {matched}, refused {}, differing {}",
+            refused.len(),
+            differing.len()
+        );
+        for reason in refused.iter().chain(&differing) {
             eprintln!("  {reason}");
         }
+        failed += differing.len();
     }
+    assert_eq!(failed, 0);
 }
 
 #[test]
