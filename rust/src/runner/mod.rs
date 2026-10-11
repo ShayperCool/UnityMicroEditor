@@ -317,7 +317,7 @@ pub fn relevant_source(path: &str) -> bool {
             // dependency is rejected explicitly rather than silently kept stale.
             | ".mp3" | ".aif" | ".aiff" | ".flac" | ".obj" | ".blend" | ".dae" | ".tga"
             | ".psd" | ".bmp" | ".tif" | ".tiff" | ".hdr" | ".exr" | ".ttf" | ".otf"
-            | ".bytes" | ".txt" | ".mp4" | ".mov"
+            | ".bytes" | ".txt" | ".mp4" | ".mov" | ".webm"
     )
 }
 

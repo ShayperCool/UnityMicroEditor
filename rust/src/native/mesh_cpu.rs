@@ -17,7 +17,8 @@ pub(crate) fn retain_native_model_mesh_cpu(
     opts: &NativeOptions,
     mut entry: NativeReplacement,
 ) -> Result<NativeReplacement> {
-    if !sysutil::ext(&entry.source_path).eq_ignore_ascii_case(".fbx") {
+    let extension = sysutil::ext(&entry.source_path).to_ascii_lowercase();
+    if extension != ".fbx" && !super::scripted::generated_material_profile(&extension) {
         return Ok(entry);
     }
     let (mut source_path, mut source_sha) =

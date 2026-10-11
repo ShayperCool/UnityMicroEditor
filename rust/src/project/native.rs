@@ -17,6 +17,12 @@ use std::{
     sync::Arc,
 };
 
+/// The model formats a native import serves, by lower-case extension with
+/// its dot.
+pub(crate) fn model_profile(extension: &str) -> bool {
+    matches!(extension, ".fbx" | ".obj" | ".dae")
+}
+
 pub(crate) fn native_content_class(type_name: &str) -> i32 {
     match type_name {
         "UnityEngine.Texture2D" => 28,
@@ -380,8 +386,13 @@ impl Inner {
             bail!("native replacement source path is invalid: {path}");
         }
         let profile = lexpath::lower_ext(path);
+        let model = model_profile(&profile);
+        // The objects of a package's scripted importer, and the one clip of a
+        // video, as the worker made them.
+        let scripted = profile == ".inputactions";
+        let video = profile == ".webm";
         if let Some(projection) = &r.mesh_cpu_projection
-            && (profile != ".fbx"
+            && (!model
                 || projection.schema_version != 1
                 || projection.mode != "native-model-mesh-cpu-v1"
                 || !valid_native_hex(&projection.source_sha256, 64)
@@ -389,8 +400,7 @@ impl Inner {
         {
             bail!("native Mesh CPU projection provenance is unsupported");
         }
-        let new_model =
-            profile == ".fbx" && self.models.get(&r.guid).is_none_or(|docs| docs.is_empty());
+        let new_model = model && self.models.get(&r.guid).is_none_or(|docs| docs.is_empty());
         let texture = crate::runtimeartifact::texture_profile(profile.trim_start_matches('.'));
         let audio = crate::runtimeartifact::audio_profile(profile.trim_start_matches('.'));
         let text = crate::runtimeartifact::text_profile(profile.trim_start_matches('.'));
@@ -470,7 +480,9 @@ impl Inner {
         }
         if !audio
             && !text
-            && profile != ".fbx"
+            && !model
+            && !scripted
+            && !video
             && !texture
             && !ui
             && !shader
@@ -522,7 +534,7 @@ impl Inner {
                     )?;
                 }
             }
-            if profile == ".fbx" {
+            if model {
                 for model in &self.catalog.model_prefabs {
                     if model.guid == r.guid {
                         for doc in &model.objects {
@@ -575,11 +587,13 @@ impl Inner {
                 for value in r.content.objects.iter() {
                     expected.insert(value.file_id.clone(), value.type_name.clone());
                 }
-            } else if clip || controller || mask || mixer {
+            } else if video {
+                expected.insert("32900000".into(), "UnityEngine.Video.VideoClip".into());
+            } else if clip || controller || mask || mixer || scripted {
                 for value in r.content.objects.iter() {
                     expected.insert(value.file_id.clone(), value.type_name.clone());
                 }
-            } else if profile == ".fbx" {
+            } else if model {
                 self.static_native_model_documents(r)?;
                 for value in r.content.objects.iter() {
                     expected.insert(value.file_id.clone(), value.type_name.clone());
@@ -719,6 +733,28 @@ impl Inner {
                     "controller replacement must contain exactly its controller object and its behaviours"
                 );
             }
+        } else if scripted {
+            if objects.is_empty()
+                || !r.model_graph.is_empty()
+                || !r.model_graph_sha256.is_empty()
+                || !r.content.resources.is_empty()
+                || !r.content.dependencies.is_empty()
+            {
+                bail!(
+                    "scripted import replacement must contain only its objects without native dependencies"
+                );
+            }
+        } else if video {
+            if objects.len() != 1
+                || objects[0].file_id != "32900000"
+                || objects[0].type_name != "UnityEngine.Video.VideoClip"
+                || !r.model_graph.is_empty()
+                || !r.model_graph_sha256.is_empty()
+                || r.content.resources.len() != 1
+                || !r.content.dependencies.is_empty()
+            {
+                bail!("video replacement must contain one VideoClip and its resource");
+            }
         } else if ui {
             validate_native_ui_objects(&profile, r)?;
         } else if new_model {
@@ -802,7 +838,7 @@ impl Inner {
         let encoded = value::encode_json(replacement)?;
         let owned: NativeReplacement = value::decode_use_number(&encoded)?;
         let mut model_documents: Vec<Document> = Vec::new();
-        if lexpath::equal_fold(lexpath::ext(&owned.source_path), ".fbx")
+        if model_profile(&lexpath::lower_ext(&owned.source_path))
             && self.models.get(&owned.guid).is_none_or(|d| d.is_empty())
         {
             model_documents = self.static_native_model_documents(&owned)?;

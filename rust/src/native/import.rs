@@ -1,15 +1,24 @@
 //! `project-import`: an owned context, one worker run and validated artifacts.
 use super::{
     ArtifactExtraction, JsonF64, NativeImportJob, ProbeOptions, ProbeReport, ProjectImportContext,
-    UdsArtifactStore, create_project_import_context,
+    UdsArtifactStore,
+    context::create_scripted_import_context,
     probe::{rss_kib, run_probe},
-    support::{check, context_error, join, mkdir, nul, text, wrap, write_file},
+    resolve_project_import_source,
+    scripted::{
+        ScriptEnvironment, generated_material_profile, script_environment, scripted_importer,
+        shader_name_registry,
+    },
+    support::{
+        check, context_error, join, lower_ext, mkdir, nul, read_file, text, wrap, write_file,
+    },
     verify_project_import_sources,
 };
 use crate::{cancel::Context, flags::FlagSet, jsondoc, registry, sysutil, util};
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeSet,
     io::Write,
     time::{Duration, Instant},
 };
@@ -156,6 +165,26 @@ pub fn run_project_import_cli(args: &[String]) -> Result<()> {
     error.map_or(Ok(()), Err)
 }
 
+/// The compiled importers the assets' `.meta` files select, if any does.
+fn importer_environment(project: &str, assets: &[String]) -> Result<Option<ScriptEnvironment>> {
+    let mut importers = BTreeSet::new();
+    for asset in assets {
+        // A source that does not resolve is reported by the context.
+        let Ok(source) = resolve_project_import_source(project, asset) else {
+            continue;
+        };
+        if let Ok(meta) = read_file(&format!("{source}.meta"))
+            && let Some(script) = scripted_importer(&meta)
+        {
+            importers.insert(script);
+        }
+    }
+    if importers.is_empty() {
+        return Ok(None);
+    }
+    script_environment(project, &importers).map(Some)
+}
+
 /// Creates the owned context, imports every asset in one worker run and
 /// extracts the linked artifacts. The report accompanies a later failure.
 pub fn run_project_import(
@@ -164,8 +193,12 @@ pub fn run_project_import(
     assets: &[String],
 ) -> (Option<ProbeReport>, Option<anyhow::Error>) {
     let started = Instant::now();
+    let scripts = match importer_environment(&opts.project, assets) {
+        Ok(scripts) => scripts,
+        Err(error) => return (None, Some(error)),
+    };
     let (prepared, created) =
-        create_project_import_context(ctx, &opts.project, &opts.output, assets);
+        create_scripted_import_context(ctx, &opts.project, &opts.output, assets, scripts.as_ref());
     if let Err(error) = created {
         return (None, Some(error));
     }
@@ -173,7 +206,23 @@ pub fn run_project_import(
         project: prepared.project.clone().into(),
         unity_version: prepared.unity_version.clone(),
         assets: Vec::new(),
+        roots: scripts
+            .as_ref()
+            .map(|environment| environment.roots.clone())
+            .unwrap_or_default(),
+        singletons: Default::default(),
     };
+    if assets
+        .iter()
+        .any(|asset| generated_material_profile(&lower_ext(asset)))
+    {
+        match shader_name_registry(&opts.project) {
+            Ok(table) => input
+                .singletons
+                .insert("Library/ScriptMapper".into(), table),
+            Err(error) => return (None, Some(error)),
+        };
+    }
     opts.jobs.clear();
     for asset in prepared.assets() {
         input.assets.push(registry::Asset {
@@ -182,10 +231,22 @@ pub fn run_project_import(
             meta: String::new(),
             guid: asset.guid.clone(),
             directory: false,
+            script: false,
         });
         opts.jobs.push(NativeImportJob {
             guid: asset.guid.clone(),
             importer: -1,
+        });
+    }
+    // The importers' own sources are registered, not imported.
+    for script in scripts.iter().flat_map(|environment| &environment.scripts) {
+        input.assets.push(registry::Asset {
+            path: script.clone(),
+            source: String::new(),
+            meta: String::new(),
+            guid: String::new(),
+            directory: false,
+            script: true,
         });
     }
     let registry = match registry::write(input) {

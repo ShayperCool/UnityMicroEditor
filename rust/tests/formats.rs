@@ -297,7 +297,10 @@ fn registry_preserves_metadata_and_refuses_replacement() {
             meta: String::new(),
             guid: String::new(),
             directory: false,
+            script: false,
         }],
+        roots: Default::default(),
+        singletons: Default::default(),
     };
     let report = registry::write(make_input()).unwrap();
     assert_eq!(report.guid_count, 3);
@@ -316,6 +319,92 @@ fn registry_preserves_metadata_and_refuses_replacement() {
             .any(|r| r.key.starts_with(b"MonoImporter.executionOrder")
                 && r.value == (-12i32).to_le_bytes())
     );
+    // Nothing of an importer's own code is recorded unless it is asked for.
+    assert!(
+        !props
+            .iter()
+            .any(|r| r.key.starts_with(b"scriptCompilationAssetPath"))
+    );
+    assert!(image.table("Misc").unwrap().is_empty());
+    assert!(image.table("SerializedSingletons").unwrap().is_empty());
     assert!(registry::write(make_input()).is_err());
     assert_eq!(std::fs::read(report.database).unwrap(), data);
+}
+#[test]
+fn registry_records_importer_scripts_package_roots_and_singletons() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("Temp/context");
+    let package = "Library/PackageCache/com.example.importer@0123456789ab";
+    std::fs::create_dir_all(project.join(package).join("Editor")).unwrap();
+    std::fs::create_dir_all(project.join("Assets")).unwrap();
+    let meta = |guid: &str| format!("fileFormatVersion: 2\nguid: {guid}\n");
+    for (name, guid) in [
+        ("Editor/Importer.cs", "0123456789abcdef0123456789abcde1"),
+        ("Editor/Example.asmdef", "0123456789abcdef0123456789abcde2"),
+    ] {
+        std::fs::write(project.join(package).join(name), "x\n").unwrap();
+        std::fs::write(
+            project.join(package).join(format!("{name}.meta")),
+            meta(guid),
+        )
+        .unwrap();
+    }
+    std::fs::write(project.join("Assets/a.example"), "a\n").unwrap();
+    std::fs::write(
+        project.join("Assets/a.example.meta"),
+        meta("0123456789abcdef0123456789abcde3"),
+    )
+    .unwrap();
+    let asset = |path: &str, script: bool| registry::Asset {
+        path: path.into(),
+        source: String::new(),
+        meta: String::new(),
+        guid: String::new(),
+        directory: false,
+        script,
+    };
+    let root = "Packages/com.example.importer";
+    let input = |directory: &str| registry::Input {
+        project: project.clone(),
+        unity_version: String::new(),
+        assets: vec![
+            asset("Assets/a.example", false),
+            asset(&format!("{root}/Editor/Importer.cs"), true),
+            asset(&format!("{root}/Editor/Example.asmdef"), true),
+        ],
+        roots: [(root.to_string(), directory.to_string())].into(),
+        singletons: [("Library/ScriptMapper".to_string(), b"table".to_vec())].into(),
+    };
+    // A package may only be placed where the Editor keeps immutable ones.
+    assert!(registry::write(input("Assets/Elsewhere")).is_err());
+    let report = registry::write(input(package)).unwrap();
+    let data = std::fs::read(&report.database).unwrap();
+    let image = Image::open(&data).unwrap();
+    let props = image.table("GuidPropertyIDToProperty").unwrap();
+    let scripts: Vec<&[u8]> = props
+        .iter()
+        .filter(|r| r.key.starts_with(b"scriptCompilationAssetPath"))
+        .map(|r| r.value.as_slice())
+        .collect();
+    assert_eq!(scripts.len(), 2);
+    assert!(scripts.contains(&&b"Packages/com.example.importer/Editor/Importer.cs\0"[..]));
+    // The root folder names the directory the package lies in, and the
+    // refresh version makes the worker read it.
+    let roots = image.table("RootFolders").unwrap();
+    let physical = project.join(package);
+    let physical = physical.as_os_str().as_encoded_bytes();
+    assert!(roots.iter().any(|r| {
+        r.key == format!("{root}\0").as_bytes()
+            && r.value
+                .windows(physical.len())
+                .any(|window| window == physical)
+    }));
+    let misc = image.table("Misc").unwrap();
+    assert_eq!(misc.len(), 1);
+    assert_eq!(misc[0].key, b"refreshVersion\0");
+    assert_eq!(misc[0].value, 1u32.to_le_bytes());
+    let singletons = image.table("SerializedSingletons").unwrap();
+    assert_eq!(singletons.len(), 1);
+    assert_eq!(singletons[0].key, b"mem://Library/ScriptMapper\0");
+    assert_eq!(singletons[0].value, b"table");
 }

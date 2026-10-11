@@ -7,7 +7,8 @@ use super::{
     resolve_project_import_source,
     shader_cache::verify_compiled_shader_cache,
     support::{
-        Event, is_not_exist, lower_ext, mkdir_all, read_file, read_json, text, wrap, write_file,
+        Event, is_not_exist, lower_ext, mkdir_all, read_file, read_json, read_json_verbatim, text,
+        wrap, write_file,
     },
     texture_profile::{native_texture_needs_warm, validate_native_configuration},
 };
@@ -79,7 +80,7 @@ impl NativeProjectImporter {
             additive_references: BTreeMap::new(),
         };
         let index = sysutil::join(&[&importer.opts.output, "native/index.json"]);
-        let entries: Option<Vec<NativeReplacement>> = match read_json(&index) {
+        let entries: Option<Vec<NativeReplacement>> = match read_json_verbatim(&index) {
             Ok(entries) => entries,
             Err(error) if is_not_exist(&error) => None,
             Err(error) => return Err(error),
@@ -305,7 +306,7 @@ impl NativeProjectImporter {
             );
         }
         let input = self.cold_input(logical)?;
-        if let Ok(cached) = read_json::<NativeReplacement>(&input.cache_path)
+        if let Ok(cached) = read_json_verbatim::<NativeReplacement>(&input.cache_path)
             && cached.source_path == logical
             && cached.source_sha256 == input.source_sha
             && cached.meta_sha256 == input.meta_sha
