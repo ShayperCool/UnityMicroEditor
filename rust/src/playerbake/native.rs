@@ -6,6 +6,7 @@
 //! the engine corrects after reading a source is restated per class.
 use super::{
     Baked,
+    material::{self, ShaderFacts},
     serialized::{self, External, Object},
     settle::{self, Settle},
     source::{get, text},
@@ -38,6 +39,21 @@ pub trait NativeSources {
     fn lightmaps(&self) -> Option<Lightmaps> {
         None
     }
+
+    /// What a material needs of the shader it names by GUID and file ID.
+    /// `read_shader_facts` takes it from the shader a build of the project
+    /// wrote. `None` leaves the material refused.
+    fn shader(&self, _guid: &str, _file_id: i64) -> Option<ShaderFacts> {
+        None
+    }
+
+    /// How the project spells a shader tag (a tag name, a tag value or a
+    /// pass a material disables), when a build of it has written that tag.
+    /// The engine finds a tag without regard to case and writes it the way
+    /// it first met it.
+    fn tag_spelling(&self, _tag: &str) -> Option<String> {
+        None
+    }
 }
 
 /// For a caller without a project.
@@ -49,12 +65,19 @@ struct Class {
     /// The managed type a session publishes the object as.
     managed: &'static str,
     tree: LazyLock<Result<TypeTree, String>>,
-    /// Restates what the engine corrects after it has read the source.
-    settle: Settle,
+    how: How,
+}
+
+/// How an object of a class reaches its Player form.
+enum How {
+    /// Field by field, then what the engine corrects after it has read the
+    /// source.
+    Fields(Settle),
+    Material,
 }
 
 macro_rules! class {
-    ($id:literal, $managed:literal, $settle:expr) => {
+    ($id:literal, $managed:literal, $how:expr) => {
         Class {
             id: $id,
             managed: $managed,
@@ -62,33 +85,53 @@ macro_rules! class {
                 TypeTree::parse(&include_bytes!(concat!("engine/type-", $id, ".bin"))[..])
                     .map_err(|error| error.to_string())
             }),
-            settle: $settle,
+            how: $how,
         }
     };
 }
 
-static CLASSES: [Class; 8] = [
-    class!(319, "UnityEngine.AvatarMask", settle::as_authored),
-    class!(134, "UnityEngine.PhysicsMaterial", settle::physics_material),
+static CLASSES: [Class; 9] = [
+    class!(
+        319,
+        "UnityEngine.AvatarMask",
+        How::Fields(settle::as_authored)
+    ),
+    class!(
+        134,
+        "UnityEngine.PhysicsMaterial",
+        How::Fields(settle::physics_material)
+    ),
     class!(
         62,
         "UnityEngine.PhysicsMaterial2D",
-        settle::physics_material_2d
+        How::Fields(settle::physics_material_2d)
     ),
-    class!(84, "UnityEngine.RenderTexture", settle::render_texture),
+    class!(
+        84,
+        "UnityEngine.RenderTexture",
+        How::Fields(settle::render_texture)
+    ),
     class!(
         86,
         "UnityEngine.CustomRenderTexture",
-        settle::custom_render_texture
+        How::Fields(settle::custom_render_texture)
     ),
-    class!(121, "UnityEngine.Flare", settle::as_authored),
-    class!(1953259897, "UnityEngine.TerrainLayer", settle::as_authored),
+    class!(121, "UnityEngine.Flare", How::Fields(settle::as_authored)),
+    class!(
+        1953259897,
+        "UnityEngine.TerrainLayer",
+        How::Fields(settle::as_authored)
+    ),
     class!(
         850595691,
         "UnityEngine.LightingSettings",
-        settle::lighting_settings
+        How::Fields(settle::lighting_settings)
     ),
+    class!(21, "UnityEngine.Material", How::Material),
 ];
+
+const MATERIAL: i64 = 21;
+const MONO_BEHAVIOUR: i64 = 114;
 
 fn class(id: i64) -> Option<&'static Class> {
     CLASSES.iter().find(|class| class.id as i64 == id)
@@ -111,13 +154,13 @@ pub fn native_tree(class_id: i64) -> Result<&'static TypeTree> {
 }
 
 /// The objects a source can refer to and the other sources it has named.
-struct References<'a> {
+pub(super) struct References<'a> {
     locals: &'a [i64],
     externals: Vec<External>,
 }
 
 impl References<'_> {
-    fn pointer(&mut self, value: &Value, path: &str) -> Result<Val> {
+    pub(super) fn pointer(&mut self, value: &Value, path: &str) -> Result<Val> {
         let map = match value {
             Value::Null => return Ok(Val::Zero),
             Value::Object(map) => map,
@@ -179,9 +222,12 @@ fn decimal(text: &str, fraction: bool) -> bool {
             .is_none_or(|exponent| digits(exponent.strip_prefix(['+', '-']).unwrap_or(exponent)))
 }
 
-fn scalar(type_name: &str, source: &str, path: &str) -> Result<Val> {
+pub(super) fn scalar(type_name: &str, source: &str, path: &str) -> Result<Val> {
     let refused = || unsupported(format!("{path} is not a plain number: {source:?}"));
     Ok(match type_name {
+        // The Editor writes an infinite single as a word.
+        "float" if source == "Infinity" => Val::F(f32::INFINITY),
+        "float" if source == "-Infinity" => Val::F(f32::NEG_INFINITY),
         "float" => {
             let number = source
                 .parse::<f32>()
@@ -387,7 +433,15 @@ pub fn bake_native_objects(
     yaml: &[u8],
     sources: &dyn NativeSources,
 ) -> Result<(Vec<NativeObject>, Vec<External>)> {
-    let documents = crate::yaml::parse_unity_yaml_lexical(yaml)?;
+    let mut documents = crate::yaml::parse_unity_yaml_lexical(yaml)?;
+    // A render pipeline keeps Editor-only records next to a material, as
+    // hidden script objects of its Editor assemblies. A Player holds none.
+    if documents
+        .iter()
+        .any(|document| document.class_id == MATERIAL)
+    {
+        documents.retain(|document| document.stripped || document.class_id != MONO_BEHAVIOUR);
+    }
     let mut locals = Vec::new();
     for document in &documents {
         if document.stripped || class(document.class_id).is_none() {
@@ -409,10 +463,16 @@ pub fn bake_native_objects(
     for document in &documents {
         let class = class(document.class_id).unwrap();
         let tree = native_tree(document.class_id)?;
-        let mut transcoder = Transcoder { tree, references };
-        let mut value = transcoder.structure(0, &document.data, "")?;
-        references = transcoder.references;
-        (class.settle)(&document.data, &mut value, sources)?;
+        let value = match class.how {
+            How::Fields(settle) => {
+                let mut transcoder = Transcoder { tree, references };
+                let mut value = transcoder.structure(0, &document.data, "")?;
+                references = transcoder.references;
+                settle(&document.data, &mut value, sources)?;
+                value
+            }
+            How::Material => material::bake(&document.data, &mut references, sources)?,
+        };
         objects.push(NativeObject {
             file_id: document.file_id.clone(),
             class_id: class.id,

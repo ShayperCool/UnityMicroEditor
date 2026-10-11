@@ -169,6 +169,7 @@ The two project settings come from the caller (`NativeSources::linear_color_spac
 | `Flare` (121) | `.flare` | 12100000 | byte for byte, with elements and a texture |
 | `TerrainLayer` (1953259897) | `.terrainlayer` | 8574412962073106934 | byte for byte, with textures |
 | `LightingSettings` (850595691) | `.lighting` | 4890085278179872738 | byte for byte under pipelines lighting with both kinds of lightmap, with only baked, only realtime, and neither |
+| `Material` (21) | `.mat` | 2100000 | byte for byte in gamma and linear projects: hand-written sources in every state (stale, missing, misfiled, unsorted and repeated properties and keywords), and the materials of a game built with the universal pipeline |
 
 Beyond the committed fixtures, randomized sources of each class (several hundred, with out-of-range values) were compared with builds of a gamma and a linear project.
 
@@ -176,6 +177,25 @@ Refused:
 
 - A custom render texture whose `m_UpdateZoneSpace` differs from `m_CurrentUpdateZoneSpace`: the engine converts its update zones between the two spaces.
 - A source holding an object of any other class.
+
+### Materials
+
+A build derives a material from its shader (`rust/src/playerbake/material.rs`), so the caller supplies what the shader declares: `NativeSources::shader` returns `ShaderFacts` (name, keywords, properties with defaults, tags). `read_shader_facts` reads them from a `Shader` object in the Player form, as an earlier build of the project wrote it.
+
+- Keywords: the two authored lists are joined, sorted, and split by whether the shader declares the keyword. Repeats stay.
+- Saved properties: a texture is kept only for a texture property the shader has; integers, floats and colors are kept whether the shader has them or not. A property the shader has and the source lacks is added with the shader's default. Each list is written sorted by name; of a repeated name the first entry counts.
+- An added default of a color (not `[HDR]`) or `[Gamma]` property goes through the engine's two color space conversions in a linear project and can come back one step off. The baker repeats them with the C library's power function; that was compared with the Editor on Linux with glibc, and is refused elsewhere and when the color space is not known. A default the conversions leave alone (0, 1) needs neither.
+- Override tags and disabled passes: the engine finds a shader tag without regard to case and writes it the way it first met it. A tag the engine registers at start is written its way (`QUEUE`, `IGNOREPROJECTOR`, `SHADOWCASTER`, `MOTIONVECTORS`, `true`, ...). Any other is written as `NativeSources::tag_spelling` gives it, which a session answers from the tags of the materials a build of the project wrote. Without that answer the authored spelling is kept, which holds when no other asset of the project spells the tag otherwise; a tag that the shader or a late engine registration spells in another case is refused. Override tags are written sorted by name, and of two that differ only in case the later in byte order counts.
+- The Editor-only script objects a render pipeline keeps next to a material (hidden `MonoBehaviour` documents of its Editor assemblies) are left out: only the material is published.
+
+Refused:
+
+- A material variant (`m_Parent`): a build writes it merged with its parents.
+- A material whose shader the caller does not know, or without a shader: it is written without properties, and whether the shader exists is the project's to say.
+- A material of another serialized version than 8, or with texture stacks (virtual texturing).
+- A material of `Particles/Standard Unlit` or `Particles/Standard Surface`: a build rewrites their disabled passes.
+
+Not covered: a dedicated server build writes a material without its shader reference. A YAML mapping with a repeated key (`stringTagMap`) is read by this tool's parser before the baker sees it.
 
 ## UI and fonts
 
