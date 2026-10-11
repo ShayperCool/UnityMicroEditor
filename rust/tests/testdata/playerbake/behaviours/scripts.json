@@ -39,9 +39,17 @@
   "className": "SmbCbPlayable",
   "localId": 2800644357120200400
  },
+ "46405d6b3e4e960bbb8f3747a5c86876": {
+  "className": "SmbInitDerived",
+  "localId": 4697910861027784157
+ },
  "46ae5f9d9568d04c8a0b46d2ba01cdaf": {
   "className": "SmbCbEnter",
   "localId": -3481593635690534302
+ },
+ "4c255204db4b138a3a875a9ed10c2ff9": {
+  "className": "SmbInit",
+  "localId": -2479131561492519993
  },
  "4f06647f13723a652b2f25a873f37a47": {
   "className": "SmbHidden",
@@ -75,6 +83,10 @@
   "className": "SmbPrims",
   "localId": 4250553827159443259
  },
+ "83606cfc22b1b52b2a9abddbcfbb9a2e": {
+  "className": "SmbKnown",
+  "localId": 7641559225605956949
+ },
  "86cecaf39b9640f129282a92582f35ac": {
   "className": "SmbEmpty",
   "localId": -6171351041549267988
@@ -107,6 +119,10 @@
   "className": "SoNamespaced",
   "localId": -5415086181842842218
  },
+ "ae25e6978dfefd68899628d6e2cd53e3": {
+  "className": "SmbInitPlain",
+  "localId": 583885293200297622
+ },
  "b0884c29b4271bead97ce3395a8cca6c": {
   "className": "SmbEnums",
   "localId": -6249565432717253802
@@ -134,6 +150,10 @@
  "d2c57df67c5736788983466df150f148": {
   "className": "SmbDeep",
   "localId": 8442917830925650339
+ },
+ "d9c3069a73ac0f698a758485f1fd530f": {
+  "className": "SmbKnownDerived",
+  "localId": -6461982776728086506
  },
  "e536c0c88c30b942380147c2ea407363": {
   "className": "SmbCbExit",

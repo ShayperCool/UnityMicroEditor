@@ -12,6 +12,7 @@
  "fields": [
   {
    "name": "dfInt",
+   "initial": "5",
    "type": {
     "kind": "primitive",
     "name": "int"
@@ -19,6 +20,7 @@
   },
   {
    "name": "dfFloat",
+   "initial": "1.5",
    "type": {
     "kind": "primitive",
     "name": "float"
@@ -26,12 +28,14 @@
   },
   {
    "name": "dfStr",
+   "initial": "hello",
    "type": {
     "kind": "string"
    }
   },
   {
    "name": "dfArr",
+   "initialUnknown": true,
    "type": {
     "kind": "array",
     "element": {
@@ -42,6 +46,7 @@
   },
   {
    "name": "dfCurve",
+   "initialUnknown": true,
    "type": {
     "kind": "unity",
     "name": "AnimationCurve"
@@ -49,6 +54,7 @@
   },
   {
    "name": "dfInner",
+   "initialUnknown": true,
    "type": {
     "kind": "struct",
     "name": "Inner",
@@ -199,6 +205,7 @@
   },
   {
    "name": "dfOuterInit",
+   "initialUnknown": true,
    "type": {
     "kind": "struct",
     "name": "Outer",
@@ -313,6 +320,7 @@
   },
   {
    "name": "dfCol",
+   "initialUnknown": true,
    "type": {
     "kind": "unity",
     "name": "Color"
@@ -320,6 +328,7 @@
   },
   {
    "name": "dfOn",
+   "initial": "1",
    "type": {
     "kind": "primitive",
     "name": "bool"
@@ -334,6 +343,7 @@
   },
   {
    "name": "dfEnum",
+   "initial": "10",
    "type": {
     "kind": "enum",
     "underlying": "int"
@@ -341,6 +351,7 @@
   },
   {
    "name": "dfNames",
+   "initialUnknown": true,
    "type": {
     "kind": "array",
     "element": {
@@ -363,6 +374,7 @@
   },
   {
    "name": "dfVec",
+   "initialUnknown": true,
    "type": {
     "kind": "unity",
     "name": "Vector3"
@@ -377,6 +389,7 @@
   },
   {
    "name": "dfMask",
+   "initialUnknown": true,
    "type": {
     "kind": "unity",
     "name": "LayerMask"
@@ -384,6 +397,7 @@
   },
   {
    "name": "dfC32",
+   "initialUnknown": true,
    "type": {
     "kind": "unity",
     "name": "Color32"
@@ -394,6 +408,7 @@
    "formerNames": [
     "dfOldName"
    ],
+   "initial": "9",
    "type": {
     "kind": "primitive",
     "name": "int"
@@ -401,6 +416,7 @@
   },
   {
    "name": "dfDouble",
+   "initial": "2.5",
    "type": {
     "kind": "primitive",
     "name": "double"
@@ -408,6 +424,7 @@
   },
   {
    "name": "dfChar",
+   "initial": "120",
    "type": {
     "kind": "primitive",
     "name": "char"
@@ -415,6 +432,7 @@
   },
   {
    "name": "dfLong",
+   "initial": "-7",
    "type": {
     "kind": "primitive",
     "name": "long"
@@ -440,6 +458,7 @@
   },
   {
    "name": "dfTail",
+   "initial": "200",
    "type": {
     "kind": "primitive",
     "name": "byte"

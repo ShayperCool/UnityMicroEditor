@@ -1,0 +1,442 @@
+{
+ "className": "SmbKnownDerived",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "bases": [
+  "SmbKnownBase",
+  "UnityEngine.StateMachineBehaviour",
+  "UnityEngine.ScriptableObject",
+  "UnityEngine.Object"
+ ],
+ "overridesStateMachineCallbacks": false,
+ "fields": [
+  {
+   "name": "baseA",
+   "initial": "30",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "baseB",
+   "initial": "4",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "baseS",
+   "initial": "base",
+   "type": {
+    "kind": "string"
+   }
+  },
+  {
+   "name": "baseC",
+   "initial": "5",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "own",
+   "initial": "8",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "ownF",
+   "initial": "0.5",
+   "type": {
+    "kind": "primitive",
+    "name": "float"
+   }
+  },
+  {
+   "name": "ownOn",
+   "initial": "1",
+   "type": {
+    "kind": "primitive",
+    "name": "bool"
+   }
+  },
+  {
+   "name": "ownS",
+   "initial": "own",
+   "type": {
+    "kind": "string"
+   }
+  },
+  {
+   "name": "init",
+   "type": {
+    "kind": "struct",
+    "name": "Known",
+    "fields": [
+     {
+      "name": "hp",
+      "initial": "100",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     },
+     {
+      "name": "s",
+      "initial": "x",
+      "type": {
+       "kind": "string"
+      }
+     },
+     {
+      "name": "f",
+      "initial": "1.5",
+      "type": {
+       "kind": "primitive",
+       "name": "float"
+      }
+     },
+     {
+      "name": "on",
+      "initial": "1",
+      "type": {
+       "kind": "primitive",
+       "name": "bool"
+      }
+     },
+     {
+      "name": "plain",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     },
+     {
+      "name": "sub",
+      "type": {
+       "kind": "struct",
+       "name": "Known2",
+       "fields": [
+        {
+         "name": "k",
+         "initial": "7",
+         "type": {
+          "kind": "primitive",
+          "name": "int"
+         }
+        },
+        {
+         "name": "t",
+         "initial": "seven",
+         "type": {
+          "kind": "string"
+         }
+        },
+        {
+         "name": "on",
+         "initial": "1",
+         "type": {
+          "kind": "primitive",
+          "name": "bool"
+         }
+        }
+       ]
+      }
+     },
+     {
+      "name": "subNull",
+      "type": {
+       "kind": "struct",
+       "name": "Known2",
+       "fields": [
+        {
+         "name": "k",
+         "initial": "7",
+         "type": {
+          "kind": "primitive",
+          "name": "int"
+         }
+        },
+        {
+         "name": "t",
+         "initial": "seven",
+         "type": {
+          "kind": "string"
+         }
+        },
+        {
+         "name": "on",
+         "initial": "1",
+         "type": {
+          "kind": "primitive",
+          "name": "bool"
+         }
+        }
+       ]
+      }
+     },
+     {
+      "name": "list",
+      "type": {
+       "kind": "array",
+       "element": {
+        "kind": "primitive",
+        "name": "int"
+       }
+      }
+     },
+     {
+      "name": "v",
+      "type": {
+       "kind": "unity",
+       "name": "Vector3"
+      }
+     },
+     {
+      "name": "subs",
+      "type": {
+       "kind": "array",
+       "element": {
+        "kind": "struct",
+        "name": "Known2",
+        "fields": [
+         {
+          "name": "k",
+          "initial": "7",
+          "type": {
+           "kind": "primitive",
+           "name": "int"
+          }
+         },
+         {
+          "name": "t",
+          "initial": "seven",
+          "type": {
+           "kind": "string"
+          }
+         },
+         {
+          "name": "on",
+          "initial": "1",
+          "type": {
+           "kind": "primitive",
+           "name": "bool"
+          }
+         }
+        ]
+       }
+      }
+     },
+     {
+      "name": "e",
+      "initial": "10",
+      "type": {
+       "kind": "enum",
+       "underlying": "int"
+      }
+     },
+     {
+      "name": "none",
+      "type": {
+       "kind": "array",
+       "element": {
+        "kind": "primitive",
+        "name": "int"
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "inits",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "struct",
+     "name": "Known",
+     "fields": [
+      {
+       "name": "hp",
+       "initial": "100",
+       "type": {
+        "kind": "primitive",
+        "name": "int"
+       }
+      },
+      {
+       "name": "s",
+       "initial": "x",
+       "type": {
+        "kind": "string"
+       }
+      },
+      {
+       "name": "f",
+       "initial": "1.5",
+       "type": {
+        "kind": "primitive",
+        "name": "float"
+       }
+      },
+      {
+       "name": "on",
+       "initial": "1",
+       "type": {
+        "kind": "primitive",
+        "name": "bool"
+       }
+      },
+      {
+       "name": "plain",
+       "type": {
+        "kind": "primitive",
+        "name": "int"
+       }
+      },
+      {
+       "name": "sub",
+       "type": {
+        "kind": "struct",
+        "name": "Known2",
+        "fields": [
+         {
+          "name": "k",
+          "initial": "7",
+          "type": {
+           "kind": "primitive",
+           "name": "int"
+          }
+         },
+         {
+          "name": "t",
+          "initial": "seven",
+          "type": {
+           "kind": "string"
+          }
+         },
+         {
+          "name": "on",
+          "initial": "1",
+          "type": {
+           "kind": "primitive",
+           "name": "bool"
+          }
+         }
+        ]
+       }
+      },
+      {
+       "name": "subNull",
+       "type": {
+        "kind": "struct",
+        "name": "Known2",
+        "fields": [
+         {
+          "name": "k",
+          "initial": "7",
+          "type": {
+           "kind": "primitive",
+           "name": "int"
+          }
+         },
+         {
+          "name": "t",
+          "initial": "seven",
+          "type": {
+           "kind": "string"
+          }
+         },
+         {
+          "name": "on",
+          "initial": "1",
+          "type": {
+           "kind": "primitive",
+           "name": "bool"
+          }
+         }
+        ]
+       }
+      },
+      {
+       "name": "list",
+       "type": {
+        "kind": "array",
+        "element": {
+         "kind": "primitive",
+         "name": "int"
+        }
+       }
+      },
+      {
+       "name": "v",
+       "type": {
+        "kind": "unity",
+        "name": "Vector3"
+       }
+      },
+      {
+       "name": "subs",
+       "type": {
+        "kind": "array",
+        "element": {
+         "kind": "struct",
+         "name": "Known2",
+         "fields": [
+          {
+           "name": "k",
+           "initial": "7",
+           "type": {
+            "kind": "primitive",
+            "name": "int"
+           }
+          },
+          {
+           "name": "t",
+           "initial": "seven",
+           "type": {
+            "kind": "string"
+           }
+          },
+          {
+           "name": "on",
+           "initial": "1",
+           "type": {
+            "kind": "primitive",
+            "name": "bool"
+           }
+          }
+         ]
+        }
+       }
+      },
+      {
+       "name": "e",
+       "initial": "10",
+       "type": {
+        "kind": "enum",
+        "underlying": "int"
+       }
+      },
+      {
+       "name": "none",
+       "type": {
+        "kind": "array",
+        "element": {
+         "kind": "primitive",
+         "name": "int"
+        }
+       }
+      }
+     ]
+    }
+   }
+  }
+ ]
+}

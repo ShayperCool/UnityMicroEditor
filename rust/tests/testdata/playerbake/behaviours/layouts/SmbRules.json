@@ -78,6 +78,7 @@
     "fields": [
      {
       "name": "x",
+      "initialUnknown": true,
       "type": {
        "kind": "primitive",
        "name": "int"
@@ -85,6 +86,7 @@
      },
      {
       "name": "y",
+      "initialUnknown": true,
       "type": {
        "kind": "primitive",
        "name": "int"

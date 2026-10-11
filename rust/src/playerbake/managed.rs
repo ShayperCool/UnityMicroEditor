@@ -54,6 +54,14 @@ pub struct Field {
     /// The names of `[FormerlySerializedAs]`, in declaration order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub former_names: Vec<String>,
+    /// The constant the constructor of the class stores in the field, as
+    /// the engine's text would hold it. Absent for a field the constructor
+    /// leaves as the engine makes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial: Option<String>,
+    /// The constructor stores something the reader does not follow.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub initial_unknown: bool,
     #[serde(rename = "type")]
     pub kind: FieldType,
 }
@@ -665,20 +673,21 @@ impl ScriptType {
     /// is the document's mapping and `script_local_id` the ID of the class's
     /// `MonoScript` object in the same file.
     ///
-    /// A document that lacks a serialized field is refused: the engine would
-    /// keep what the class's constructor left in it, which no layout tells.
+    /// The engine reads a document over a newly constructed object, so a
+    /// field the document lacks keeps what the class's constructor left in
+    /// it. Such a field is filled in where the layout tells that value and
+    /// refused where it does not.
     pub fn object(
         &self,
         fields: &Map<String, Value>,
         script_local_id: i64,
         references: &mut dyn References,
     ) -> Result<Encoded> {
-        let Some(enabled) = fields.get("m_Enabled") else {
-            return Err(unsupported(
-                "behaviour field m_Enabled is not in the authored document",
-            ));
+        // A new object is enabled.
+        let enabled = match fields.get("m_Enabled") {
+            Some(enabled) => integer("UInt8", enabled, "m_Enabled")?,
+            None => Val::U(1),
         };
-        let enabled = integer("UInt8", enabled, "m_Enabled")?;
         let mut values = vec![
             (Cow::Borrowed("m_Enabled"), enabled),
             (
@@ -698,7 +707,7 @@ impl ScriptType {
         for (field, node) in self.fields.iter().zip(nodes) {
             values.push((
                 Cow::Owned(field.name.clone()),
-                encoder.field(field, node, fields, "")?,
+                encoder.field(field, node, fields, "", true)?,
             ));
         }
         Ok(Encoded {
@@ -879,20 +888,60 @@ fn truncated(type_name: &str, number: i128) -> Val {
     }
 }
 
+/// The engine reads an integer as far as the text is one: a sign and the
+/// digits that follow, wrapping at 64 bits; nothing at all reads as zero.
 fn integer(type_name: &str, value: &Value, path: &str) -> Result<Val> {
     let text = scalar_text(value, path)?;
-    let number = match text {
-        "" => 0,
-        text => match text.parse::<i128>() {
-            Ok(number) => number,
-            Err(_) => return Err(mismatch(path, "text that is not an integer")),
-        },
+    let (negative, digits) = match text.as_bytes().first() {
+        Some(b'-') => (true, &text[1..]),
+        Some(b'+') => (false, &text[1..]),
+        _ => (false, text),
     };
-    Ok(truncated(type_name, number))
+    let mut number = 0u64;
+    for digit in digits.bytes().take_while(u8::is_ascii_digit) {
+        number = number.wrapping_mul(10).wrapping_add((digit - b'0') as u64);
+    }
+    if negative {
+        number = number.wrapping_neg();
+    }
+    Ok(truncated(type_name, number as i128))
+}
+
+/// The start of a text that is a decimal number, if it has one.
+fn decimal_prefix(text: &str) -> Option<&str> {
+    let bytes = text.as_bytes();
+    let digits = |from: usize| {
+        bytes[from..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count()
+    };
+    let mut at = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
+    let whole = digits(at);
+    at += whole;
+    let mut fraction = 0;
+    if bytes.get(at) == Some(&b'.') {
+        fraction = digits(at + 1);
+        if whole + fraction > 0 {
+            at += 1 + fraction;
+        }
+    }
+    if whole + fraction == 0 {
+        return None;
+    }
+    if matches!(bytes.get(at), Some(b'e' | b'E')) {
+        let sign = usize::from(matches!(bytes.get(at + 1), Some(b'+' | b'-')));
+        let exponent = digits(at + 1 + sign);
+        if exponent > 0 {
+            at += 1 + sign + exponent;
+        }
+    }
+    Some(&text[..at])
 }
 
 /// A float as the Editor writes it. Its three names for values that are not
-/// finite are read as such; any other text has to be a number.
+/// finite are read as such. Of any other text the engine reads the decimal
+/// number it starts with, and text that starts with none is not a number.
 fn float<T: Copy + std::str::FromStr + Into<f64> + From<f32>>(
     value: &Value,
     path: &str,
@@ -908,9 +957,23 @@ fn float<T: Copy + std::str::FromStr + Into<f64> + From<f32>>(
     if let Some(special) = special {
         return Ok(special.into());
     }
-    match text.parse::<T>() {
-        Ok(number) if !number.into().is_nan() => Ok(number),
-        _ => Err(mismatch(path, "text that is not a number")),
+    let Some(prefix) = decimal_prefix(text) else {
+        // Other spellings of the three names were not compared.
+        let name = text.trim_start_matches(['+', '-']).to_ascii_lowercase();
+        if (name.starts_with("inf") || name.starts_with("nan"))
+            && !matches!(text, "inf" | "-inf" | "nan")
+        {
+            return Err(mismatch(path, "a name of a number that is not finite"));
+        }
+        return Ok(f32::NAN.into());
+    };
+    // What the engine makes of an exponent that breaks off was not compared.
+    if matches!(text.as_bytes().get(prefix.len()), Some(b'e' | b'E')) {
+        return Err(mismatch(path, "a number with an incomplete exponent"));
+    }
+    match prefix.parse::<T>() {
+        Ok(number) => Ok(number),
+        Err(_) => Err(mismatch(path, "text that is not a number")),
     }
 }
 
@@ -947,6 +1010,32 @@ fn authored_version(node: &Node) -> u16 {
     }
 }
 
+/// What the engine makes of an engine struct no text sets. Two of them are
+/// classes, of which it constructs an object: a curve without keys and a
+/// gradient from white to white.
+fn engine_default(node: &Node) -> Val {
+    match node.type_name.as_str() {
+        "AnimationCurve" => Val::map([
+            ("m_PreInfinity", Val::I(2)),
+            ("m_PostInfinity", Val::I(2)),
+            ("m_RotationOrder", Val::I(4)),
+        ]),
+        "Gradient" => {
+            let white = || Val::map(["r", "g", "b", "a"].map(|part| (part, Val::F(1.0))));
+            Val::map([
+                ("key0", white()),
+                ("key1", white()),
+                ("ctime1", Val::U(0xffff)),
+                ("atime1", Val::U(0xffff)),
+                ("m_ColorSpace", Val::I(-1)),
+                ("m_NumColorKeys", Val::U(2)),
+                ("m_NumAlphaKeys", Val::U(2)),
+            ])
+        }
+        _ => Val::Zero,
+    }
+}
+
 impl Encoder<'_> {
     /// One field of a C# type, found by its name or a former name.
     fn field(
@@ -955,19 +1044,74 @@ impl Encoder<'_> {
         node: &Node,
         mapping: &Map<String, Value>,
         path: &str,
+        known: bool,
     ) -> Result<Val> {
         let path = format!("{path}{}", field.name);
         let names = std::iter::once(&field.name).chain(&field.former_names);
         let Some(value) = names.into_iter().find_map(|name| mapping.get(name)) else {
-            // The Editor writes nothing for a type without fields.
-            if matches!(&field.kind, FieldType::Struct { fields, .. } if fields.is_empty()) {
-                return Ok(Val::Zero);
-            }
-            return Err(unsupported(format!(
-                "behaviour field {path} is not in the authored document"
-            )));
+            return self.missing(field, node, &path, known);
         };
-        self.value(&field.kind, node, value, &path)
+        let structure = matches!(value, Value::Object(_) | Value::Array(_));
+        match &field.kind {
+            // The engine does not read a structure into a number: the field
+            // stays as it was. Into a string it reads nothing.
+            FieldType::Primitive { .. } | FieldType::Enum { .. } if structure => {
+                self.missing(field, node, &path, known)
+            }
+            FieldType::String if structure => Ok(Val::Str(String::new())),
+            // Nor a number or a sequence into a class.
+            FieldType::Struct { fields, .. }
+                if !fields.is_empty() && matches!(value, Value::String(_) | Value::Array(_)) =>
+            {
+                self.missing(field, node, &path, known)
+            }
+            kind => self.value(kind, node, value, &path, known && !field.initial_unknown),
+        }
+    }
+
+    /// What a field holds that the document does not set: what the
+    /// constructor of its class stored in it or, failing that, what the
+    /// engine makes of an empty field. `known` tells whether the object the
+    /// field belongs to is as its own constructor left it.
+    fn missing(&mut self, field: &Field, node: &Node, path: &str, known: bool) -> Result<Val> {
+        // The Editor writes nothing for a type without fields.
+        if matches!(&field.kind, FieldType::Struct { fields, .. } if fields.is_empty()) {
+            return Ok(Val::Zero);
+        }
+        if !known || field.initial_unknown {
+            return Err(unsupported(format!(
+                "behaviour field {path} is not in the authored document, and what its class constructs it with is not known"
+            )));
+        }
+        let initial = || Value::String(field.initial.clone().unwrap_or_default());
+        Ok(match &field.kind {
+            // C# has the sign bit set in its `NaN`, which the text loses.
+            FieldType::Primitive { .. } if field.initial.as_deref() == Some("NaN") => {
+                match node.type_name.as_str() {
+                    "float" => Val::F(-f32::NAN),
+                    _ => Val::D(-f64::NAN),
+                }
+            }
+            FieldType::Primitive { .. } | FieldType::Enum { .. } => {
+                scalar(&node.type_name, &initial(), path)?
+            }
+            FieldType::String => Val::Str(field.initial.clone().unwrap_or_default()),
+            FieldType::Object { .. } => Val::Zero,
+            FieldType::Array { .. } => Val::Seq(Vec::new()),
+            FieldType::FixedBuffer { length, .. } => Val::Seq(vec![Val::Zero; *length]),
+            // The engine constructs the object of an empty field itself.
+            FieldType::Struct { fields, .. } => {
+                let mut values = Vec::with_capacity(fields.len());
+                for (field, child) in fields.iter().zip(&node.children) {
+                    values.push((
+                        Cow::Owned(field.name.clone()),
+                        self.missing(field, child, &format!("{path}.{}", field.name), true)?,
+                    ));
+                }
+                Val::Map(values)
+            }
+            FieldType::Unity { .. } => engine_default(node),
+        })
     }
 
     fn pointer(
@@ -1023,7 +1167,16 @@ impl Encoder<'_> {
         })
     }
 
-    fn value(&mut self, kind: &FieldType, node: &Node, value: &Value, path: &str) -> Result<Val> {
+    /// `known` tells whether the object the value is read over is as its
+    /// constructor left it, which decides what a field it lacks holds.
+    fn value(
+        &mut self,
+        kind: &FieldType,
+        node: &Node,
+        value: &Value,
+        path: &str,
+        known: bool,
+    ) -> Result<Val> {
         match kind {
             FieldType::Primitive { .. } | FieldType::Enum { .. } => {
                 scalar(&node.type_name, value, path)
@@ -1042,7 +1195,8 @@ impl Encoder<'_> {
                     // little-endian hex, then a letter for their type.
                     Value::String(text) => {
                         let Some((size, _)) = integer_type(&data.type_name) else {
-                            return Err(mismatch(path, "a value"));
+                            // The engine reads no element out of a value.
+                            return Ok(Val::Seq(Vec::new()));
                         };
                         let digits = text
                             .strip_suffix(|last| dump_suffix(&data.type_name) == Some(last))
@@ -1069,7 +1223,8 @@ impl Encoder<'_> {
                         .iter()
                         .enumerate()
                         .map(|(index, item)| {
-                            self.value(element, data, item, &format!("{path}[{index}]"))
+                            // An element is an object of its own.
+                            self.value(element, data, item, &format!("{path}[{index}]"), true)
                         })
                         .collect::<Result<_>>()?,
                     _ => return Err(mismatch(path, "a structure")),
@@ -1092,7 +1247,7 @@ impl Encoder<'_> {
                 for (field, child) in fields.iter().zip(&node.children) {
                     values.push((
                         Cow::Owned(field.name.clone()),
-                        self.field(field, child, mapping, &format!("{path}."))?,
+                        self.field(field, child, mapping, &format!("{path}."), known)?,
                     ));
                 }
                 Ok(Val::Map(values))
@@ -1100,13 +1255,20 @@ impl Encoder<'_> {
             FieldType::Unity { .. } if node.type_name.starts_with("PPtr<") => {
                 self.pointer("", "", value, path)
             }
-            FieldType::Unity { .. } => self.engine_struct(node, value, path),
+            FieldType::Unity { .. } => self.engine_struct(node, value, path, known),
         }
     }
 
     /// A struct the engine serializes itself: the authored keys are the node
-    /// names. Every value has to be there, in the current form of the struct.
-    fn engine_struct(&mut self, node: &Node, value: &Value, path: &str) -> Result<Val> {
+    /// names, in the current form of the struct. `known` tells whether the
+    /// struct the text is read over is as the engine makes it.
+    fn engine_struct(
+        &mut self,
+        node: &Node,
+        value: &Value,
+        path: &str,
+        known: bool,
+    ) -> Result<Val> {
         let Value::Object(mapping) = value else {
             return Err(mismatch(path, "a value"));
         };
@@ -1146,6 +1308,23 @@ impl Encoder<'_> {
         for child in &node.children {
             let path = format!("{path}.{}", child.name);
             let Some(authored) = mapping.get(&child.name) else {
+                // A part the text lacks stays as the engine made it, unless
+                // the constructor of the class set the struct. Of the
+                // structs that have had several forms, this was compared for
+                // a rectangle and a curve.
+                let compared =
+                    expected <= 1 || matches!(node.type_name.as_str(), "Rectf" | "AnimationCurve");
+                if known && compared && child.version <= 1 {
+                    let made = match engine_default(node) {
+                        Val::Map(parts) => parts
+                            .into_iter()
+                            .find(|(name, _)| *name == child.name)
+                            .map(|(_, part)| part),
+                        _ => None,
+                    };
+                    values.push((Cow::Owned(child.name.clone()), made.unwrap_or(Val::Zero)));
+                    continue;
+                }
                 return Err(unsupported(format!(
                     "behaviour field {path} is not in the authored document"
                 )));
@@ -1164,12 +1343,17 @@ impl Encoder<'_> {
                         .iter()
                         .enumerate()
                         .map(|(index, item)| {
-                            self.engine_struct(child.element(), item, &format!("{path}[{index}]"))
+                            self.engine_struct(
+                                child.element(),
+                                item,
+                                &format!("{path}[{index}]"),
+                                true,
+                            )
                         })
                         .collect::<Result<_>>()?,
                 )
             } else {
-                self.engine_struct(child, authored, &path)?
+                self.engine_struct(child, authored, &path, known)?
             };
             values.push((Cow::Owned(child.name.clone()), value));
         }
