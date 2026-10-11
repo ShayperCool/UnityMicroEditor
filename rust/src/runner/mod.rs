@@ -656,6 +656,8 @@ fn run_session(
         apply_builtin_shaders(&session, &opts.builtin_shaders)?;
         let mut native_importer = NativeProjectImporter::new(opts.native(), session.clone())?;
         native_importer.script_assemblies = compiler.script_assemblies();
+        native_importer
+            .set_behaviour_layouts(ctx, compiler.behaviour_layouts(ctx, &script_types)?)?;
         match native_importer.prepare(ctx) {
             Ok(prepared) => break (session, native_importer, prepared),
             // An addressable prefab the raw loader cannot prepare must not
@@ -832,6 +834,17 @@ fn run_session(
                     rejected(&error);
                     continue;
                 }
+            }
+            // A baked controller lays its behaviours out as the new
+            // assemblies declare them.
+            native_importer.script_assemblies = compiler.script_assemblies();
+            if let Err(error) = compiler
+                .behaviour_layouts(ctx, &script_types)
+                .and_then(|layouts| native_importer.set_behaviour_layouts(ctx, layouts))
+            {
+                managed_rejected = true;
+                rejected(&error);
+                continue;
             }
             apply_compiled_bindings(&session, pending, &script_types);
         }

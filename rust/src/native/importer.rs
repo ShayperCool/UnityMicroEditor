@@ -13,6 +13,7 @@ use super::{
 };
 use crate::{
     cancel::Context,
+    playerbake::ScriptLayout,
     project::{NativeContentFile, NativeReplacement, NeedsImportError, Prepared, Session},
     sha256, sysutil,
     util::{atomic_json, canonical_destination, file_hash, random_id},
@@ -41,6 +42,9 @@ pub struct NativeProjectImporter {
     /// The assembly that defines each script, by script GUID. A baked clip
     /// that refers to a script needs it to name the class for the Player.
     pub script_assemblies: BTreeMap<String, String>,
+    /// The serialized fields of the state machine behaviour scripts, by
+    /// script GUID, as the current script assemblies declare them.
+    pub(crate) behaviour_layouts: BTreeMap<String, ScriptLayout>,
     /// The baked clips of models, by model GUID.
     pub(crate) model_clips: BTreeMap<String, super::baked::ModelClipSet>,
 }
@@ -67,6 +71,7 @@ impl NativeProjectImporter {
             environment_sha256: environment.clone(),
             pending_native_paths: Vec::new(),
             script_assemblies: BTreeMap::new(),
+            behaviour_layouts: BTreeMap::new(),
             model_clips: BTreeMap::new(),
         };
         let index = sysutil::join(&[&importer.opts.output, "native/index.json"]);
@@ -98,6 +103,14 @@ impl NativeProjectImporter {
             };
             if !file_hash(&source).is_ok_and(|sha| sha == entry.source_sha256)
                 || !file_hash(&format!("{source}.meta")).is_ok_and(|sha| sha == entry.meta_sha256)
+            {
+                continue;
+            }
+            // A controller's behaviours are laid out from the scripts that
+            // were compiled when it was baked. Another session bakes it from
+            // its own instead of replaying it.
+            if lower_ext(&entry.source_path) == ".controller"
+                && read_file(&source).is_ok_and(|data| super::baked::holds_behaviours(&data))
             {
                 continue;
             }
