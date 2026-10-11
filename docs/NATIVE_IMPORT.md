@@ -76,11 +76,18 @@ A legacy clip keeps its authored curves. Any other clip gets the muscle clip Mec
 
 A float curve on a field of a script and an animation event that passes a script are supported: the baked file carries a `MonoScript` object naming the class, which the Player ties to the loaded class. The session takes the class and its assembly from the compiler graph of its start; a script added later is unknown until the next session.
 
+Humanoid clips are covered (`rust/src/playerbake/humanoid.rs`). An Animator float curve named exactly like one of the 200 curves of the humanoid rig (`RootT.x`, `Spine Front-Back`, `LeftHand.Thumb.Spread`, `SpineTDOF.x`, ...) is bound to the rig; any other name remains a parameter. From those curves the bake derives what a build derives: the root transform at the start and stop of the clip, the left and right foot at the start, the pose difference between start and stop, and the average speed and turning speed of the root over twenty steps, from the motion curves when the clip has any. The root motion flags are derived from the curves as well, and the authored values are ignored: a clip has motion float curves when a float drives `MotionT` or `MotionQ`, and a generic root transform when a position or rotation curve sits on the root object. Generic root motion is only that flag. The 28 fixtures under `rust/tests/testdata/playerbake/humanoid` hold one clip per rule. The turning speed takes an arc tangent from the system C library, as the Editor does, so a library that rounds differently can move it by one unit in the last place.
+
+An additive reference pose is derived when the caller supplies the source of the reference clip: one value per curve, taken from the reference clip at the reference time where that clip animates the same binding. The flag without a clip, or a clip without the flag, changes nothing. A session does not supply that source, because it would not bake the clip again when its reference changes; there such a clip is refused.
+
 The baker refuses what it does not reproduce exactly, and the session reports the clip instead of publishing an approximation:
 
-- humanoid (muscle) curves and root motion curves;
-- float curves on a built-in component other than an Animator parameter or `GameObject.m_IsActive`;
-- object reference curves, an event that passes an object other than a script, and an additive reference pose;
+- a clip with `m_UseHighQualityCurve` off in which a changing curve qualifies for the dense clip: no stepped key, a key on nearly every frame (four bytes a frame take no more than 28 bytes a key), and no two keys closer than a frame less half a millisecond. The dense samples are not reproduced. For float curves this is the engine's rule; whether Transform curves follow it has not been established, so a Transform curve that would qualify is refused too;
+- human curves whose root, motion or goal rotation has zero length at a sampled time, which makes the derived values not a number;
+- float curves on a built-in component other than an Animator parameter or `GameObject.m_IsActive`, and float curves marked as discrete;
+- object reference curves and an event that passes an object other than a script;
+- an additive reference pose in a session, in a clip imported from a model, on a clip with script curves, from a reference that is legacy, has no curves or is stored in a model, and between an Euler and a quaternion rotation curve of one object;
+- a legacy clip or a clip without curves whose source sets a root motion flag or an effective additive reference pose;
 - weighted tangents and negative infinite tangents;
 - a source larger than 256 MiB. A source of tens of megabytes is read whole and takes a few seconds and up to a few gigabytes of memory.
 

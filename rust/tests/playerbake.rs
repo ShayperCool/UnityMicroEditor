@@ -30,6 +30,16 @@ impl playerbake::ClipSources for FixtureScripts {
             local_id: -7906036524527734719,
         })
     }
+    /// The clips the humanoid fixtures take an additive reference pose from,
+    /// by the GUID their `.meta` files had in the reference project.
+    fn clip(&self, guid: &str) -> anyhow::Result<Vec<u8>> {
+        let name = match guid {
+            "31f1006fa0677c73246324b8155c4168" => "additive_ref",
+            "825f6d7b69cd06c329c0d1223711de42" => "additive_self",
+            _ => panic!("unexpected reference to clip {guid}"),
+        };
+        Ok(fs::read(fixture(&format!("humanoid/{name}.anim")))?)
+    }
 }
 
 fn bake(name: &str) -> anyhow::Result<Vec<u8>> {
@@ -60,9 +70,9 @@ fn assert_matches_engine(name: &str) {
 /// Fixtures whose features the baker refuses instead of approximating.
 const REFUSED: [&str; 3] = ["Mixed", "Ordering", "Tangents"];
 
-#[test]
-fn clips_match_the_engine_build() {
-    let mut names: Vec<String> = fs::read_dir(fixture(""))
+/// The clip fixtures of a directory under the fixture root, by name.
+fn clip_fixtures(directory: &str) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(fixture(directory))
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .filter(|path| {
@@ -70,13 +80,86 @@ fn clips_match_the_engine_build() {
                 .is_some_and(|extension| extension == "anim")
         })
         .map(|path| path.file_stem().unwrap().to_string_lossy().into_owned())
-        .filter(|name| !REFUSED.contains(&name.as_str()))
         .collect();
     names.sort();
+    names
+}
+
+#[test]
+fn clips_match_the_engine_build() {
+    let mut names = clip_fixtures("");
+    names.retain(|name| !REFUSED.contains(&name.as_str()));
     assert!(names.len() >= 30, "fixtures are missing: {names:?}");
     for name in names {
         assert_matches_engine(&name);
     }
+}
+
+/// One small clip per rule of the humanoid bake: the curve table, binding
+/// order, the pose difference, the root's start, stop and average speed under
+/// each setting that affects them, motion curves, generic root motion and the
+/// additive reference pose.
+#[test]
+fn humanoid_clips_match_the_engine_build() {
+    let names = clip_fixtures("humanoid");
+    assert_eq!(names.len(), 28, "fixtures are missing: {names:?}");
+    for name in names {
+        assert_matches_engine(&format!("humanoid/{name}"));
+    }
+}
+
+fn clip_fields(yaml: &str) -> serde_json::Map<String, serde_json::Value> {
+    parse_unity_yaml_lexical(yaml.as_bytes()).unwrap()[0]
+        .data
+        .clone()
+}
+
+/// A humanoid fixture with part of its source replaced.
+fn edited(name: &str, from: &str, to: &str) -> String {
+    let source = fs::read_to_string(fixture(&format!("humanoid/{name}.anim"))).unwrap();
+    assert!(source.contains(from), "{name} has no {from:?}");
+    source.replace(from, to)
+}
+
+#[test]
+fn unreproduced_humanoid_features_are_refused() {
+    let refused = |yaml: &str, sources: &dyn playerbake::ClipSources, reason: &str| {
+        let error = playerbake::bake_clip_object(&clip_fields(yaml), sources).expect_err(reason);
+        assert!(error.is::<Unsupported>(), "{reason}: {error:#}");
+        assert!(error.to_string().contains(reason), "{reason}: {error}");
+    };
+    // A session cannot bake a clip again when its reference clip changes.
+    let additive = fs::read_to_string(fixture("humanoid/additive.anim")).unwrap();
+    refused(&additive, &playerbake::NoScripts, "additive reference pose");
+    // The dense clip: a key on every frame without high quality curves.
+    let keys: String = (0..31)
+        .map(|frame| {
+            format!(
+                "      - serializedVersion: 3\n        time: {}\n        value: {}\n        \
+                 inSlope: 1\n        outSlope: 1\n        tangentMode: 0\n        \
+                 weightedMode: 0\n        inWeight: 0\n        outWeight: 0\n",
+                frame as f32 / 60.0,
+                frame as f32 * 0.1
+            )
+        })
+        .collect();
+    let dense = format!(
+        "%YAML 1.1\n--- !u!74 &7400000\nAnimationClip:\n  m_Name: Dense\n  m_Legacy: 0\n  \
+         m_UseHighQualityCurve: 0\n  m_FloatCurves:\n  - curve:\n      serializedVersion: 2\n      \
+         m_Curve:\n{keys}      m_PreInfinity: 2\n      m_PostInfinity: 2\n      \
+         m_RotationOrder: 4\n    attribute: Spine Front-Back\n    path: \n    classID: 95\n    \
+         script: {{fileID: 0}}\n    flags: 0\n  m_SampleRate: 60\n  m_AnimationClipSettings:\n    \
+         m_StopTime: 0.5\n"
+    );
+    refused(&dense, &FixtureScripts, "dense clip");
+    // With high quality curves the same clip is streamed.
+    let streamed = dense.replace("m_UseHighQualityCurve: 0", "m_UseHighQualityCurve: 1");
+    playerbake::bake_clip_object(&clip_fields(&streamed), &FixtureScripts).unwrap();
+    // A root rotation of zero length has no direction.
+    let zero = edited("root_flipped_up", "value: 1\n", "value: 0\n");
+    refused(&zero, &FixtureScripts, "zero length");
+    let discrete = edited("pose_noroot", "flags: 0", "flags: 1");
+    refused(&discrete, &FixtureScripts, "discrete curve");
 }
 
 #[test]
