@@ -1476,21 +1476,68 @@ fn model_clip_corpus_matches_the_engine_build() {
     assert!(matched > 0);
 }
 
-/// The settings of a reference project that reach its native assets.
+/// What of a reference project reaches its native assets.
 struct Project {
     linear: bool,
     lightmaps: playerbake::Lightmaps,
+    /// The shaders the build wrote, by GUID and file ID.
+    shaders: Vec<((String, i64), playerbake::ShaderFacts)>,
+    /// The spellings of shader tags in the materials the build wrote.
+    tags: Vec<String>,
 }
 
+const LIT: playerbake::Lightmaps = playerbake::Lightmaps {
+    baked: true,
+    realtime: true,
+};
+
 impl Project {
-    /// Gamma color space and the built-in render pipeline.
-    const DEFAULT: Project = Project {
-        linear: false,
-        lightmaps: playerbake::Lightmaps {
-            baked: true,
-            realtime: true,
-        },
-    };
+    fn new(linear: bool, lightmaps: playerbake::Lightmaps) -> Project {
+        Project {
+            linear,
+            lightmaps,
+            shaders: Vec::new(),
+            tags: Vec::new(),
+        }
+    }
+
+    /// Reads `shaders/<guid>_<file ID>.bin` and the tags of the engine-built
+    /// materials of a directory, as a session reads its catalog.
+    fn read(mut self, root: &Path) -> Project {
+        if let Ok(entries) = fs::read_dir(root.join("shaders")) {
+            for entry in entries {
+                let path = entry.unwrap().path();
+                let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+                let (guid, file_id) = stem.split_once('_').unwrap();
+                let facts = playerbake::read_shader_facts(&fs::read(&path).unwrap()).unwrap();
+                self.shaders
+                    .push(((guid.to_string(), file_id.parse().unwrap()), facts));
+            }
+        }
+        let layout = playerbake::native_tree(21).unwrap();
+        for entry in fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if !path.to_string_lossy().ends_with(".mat.bin") {
+                continue;
+            }
+            let material = layout.decode(&fs::read(&path).unwrap()).unwrap();
+            let mut keep = |value: &Val| {
+                if let Val::Str(tag) = value {
+                    self.tags.push(tag.clone());
+                }
+            };
+            if let Some(Val::Seq(pairs)) = material.field("stringTagMap") {
+                for pair in pairs {
+                    pair.field("first").into_iter().for_each(&mut keep);
+                    pair.field("second").into_iter().for_each(&mut keep);
+                }
+            }
+            if let Some(Val::Seq(passes)) = material.field("disabledShaderPasses") {
+                passes.iter().for_each(&mut keep);
+            }
+        }
+        self
+    }
 }
 
 impl playerbake::NativeSources for Project {
@@ -1500,6 +1547,20 @@ impl playerbake::NativeSources for Project {
 
     fn lightmaps(&self) -> Option<playerbake::Lightmaps> {
         Some(self.lightmaps)
+    }
+
+    fn shader(&self, guid: &str, file_id: i64) -> Option<playerbake::ShaderFacts> {
+        self.shaders
+            .iter()
+            .find(|(key, _)| key.0 == guid && key.1 == file_id)
+            .map(|(_, facts)| facts.clone())
+    }
+
+    fn tag_spelling(&self, tag: &str) -> Option<String> {
+        self.tags
+            .iter()
+            .find(|known| known.eq_ignore_ascii_case(tag))
+            .cloned()
     }
 }
 
@@ -1553,14 +1614,15 @@ fn compare_native(root: &Path, project: &Project) -> (usize, Vec<String>, Vec<St
 fn native_assets_match_the_engine_build() {
     let lit = |baked, realtime| playerbake::Lightmaps { baked, realtime };
     for (directory, linear, lightmaps, least) in [
-        ("native", false, lit(true, true), 60),
-        ("native/linear", true, lit(true, true), 25),
+        ("native", false, lit(true, true), 84),
+        ("native/linear", true, lit(true, true), 49),
         ("native/linear-baked", true, lit(true, false), 10),
         ("native/linear-realtime", true, lit(false, true), 10),
         ("native/gamma-mixed", false, lit(false, false), 10),
     ] {
-        let project = Project { linear, lightmaps };
-        let (matched, refused, differing) = compare_native(&fixture(directory), &project);
+        let root = fixture(directory);
+        let project = Project::new(linear, lightmaps).read(&root);
+        let (matched, refused, differing) = compare_native(&root, &project);
         assert!(refused.is_empty(), "{refused:?}");
         assert!(differing.is_empty(), "{differing:?}");
         assert!(matched >= least, "fixtures of {directory} are missing");
@@ -1608,16 +1670,17 @@ fn native_corpus_matches_the_engine_build() {
         let (root, project) = match root.split_once('@') {
             Some((root, flags)) => (
                 root,
-                Project {
-                    linear: flags.contains('l'),
-                    lightmaps: playerbake::Lightmaps {
+                Project::new(
+                    flags.contains('l'),
+                    playerbake::Lightmaps {
                         baked: flags.contains('b'),
                         realtime: flags.contains('r'),
                     },
-                },
+                ),
             ),
-            None => (root, Project::DEFAULT),
+            None => (root, Project::new(false, LIT)),
         };
+        let project = project.read(Path::new(root));
         let (matched, refused, differing) = compare_native(Path::new(root), &project);
         eprintln!(
             "{root}: matched {matched}, refused {}, differing {}",
@@ -1630,6 +1693,75 @@ fn native_corpus_matches_the_engine_build() {
         failed += differing.len();
     }
     assert_eq!(failed, 0);
+}
+
+/// A material is published alone: the Editor-only script objects a render
+/// pipeline keeps next to it are left out, and its shader and textures are
+/// named in order of first use.
+#[test]
+fn baked_material_keeps_its_identity() {
+    let root = fixture("native");
+    let project = Project::new(false, LIT).read(&root);
+    let source = fs::read_to_string(root.join("GA003_lit.mat")).unwrap();
+    let (head, material) = source.split_once("--- !u!21 ").unwrap();
+    let with_record = format!(
+        "{head}--- !u!114 &-7218417781224609008\nMonoBehaviour:\n  m_ObjectHideFlags: 11\n  \
+         m_Script: {{fileID: 11500000, guid: d0353a89b1f911e48b9e16bdc9f2e058, type: 3}}\n  \
+         version: 10\n--- !u!21 {material}"
+    );
+    let expected = fs::read(root.join("GA003_lit.mat.bin")).unwrap();
+    for source in [source.as_str(), with_record.as_str()] {
+        let baked = playerbake::bake_native(source.as_bytes(), &project).unwrap();
+        assert_eq!(
+            baked.objects,
+            [("2100000".to_string(), "UnityEngine.Material".to_string())]
+        );
+        assert_eq!(
+            baked.externals[0].guid, "73dcab8d6bcd67bd996f010a4f58f089",
+            "the shader comes first"
+        );
+        assert!(baked.externals.len() > 1, "textures follow");
+        let objects = playerbake::read_serialized(&baked.file).unwrap();
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].data.len(), expected.len());
+    }
+}
+
+/// What the baker does not reproduce stays with the Editor.
+#[test]
+fn materials_beyond_the_baker_are_refused() {
+    let root = fixture("native");
+    let project = Project::new(false, LIT).read(&root);
+    let source = fs::read_to_string(root.join("GA003_lit.mat")).unwrap();
+    let refused = |source: &str, sources: &dyn playerbake::NativeSources| {
+        let error = playerbake::bake_native(source.as_bytes(), sources).unwrap_err();
+        assert!(error.is::<Unsupported>(), "{error:#}");
+        error.to_string()
+    };
+    assert!(refused(&source, &playerbake::NoNativeSources).contains("shader is not known"));
+    let variant = source.replace(
+        "m_Parent: {fileID: 0}",
+        "m_Parent: {fileID: 2100000, guid: 7ce7eb525fddc12529a8908a725a914e, type: 2}",
+    );
+    assert!(refused(&variant, &project).contains("variant"));
+    let older = source.replace("  serializedVersion: 8\n", "  serializedVersion: 6\n");
+    assert!(refused(&older, &project).contains("serialized version 6"));
+    // The engine writes a tag the way it first met it. One it
+    // registers late, or the shader spells otherwise, could have been met
+    // either way.
+    let mut unsure = Project::new(false, LIT).read(&root);
+    unsure.tags.clear();
+    let respelled = source.replace("stringTagMap: {}", "stringTagMap:\n    Custom: opaque");
+    assert_ne!(respelled, source);
+    assert!(refused(&respelled, &unsure).contains("spelled"));
+    // One the engine registers itself is always written its way.
+    let engine_tag = source.replace("  - FORWARDBASE\n", "  - ForwardBase\n");
+    assert_ne!(engine_tag, source);
+    let bake = |source: &str| {
+        let (objects, _) = playerbake::bake_native_objects(source.as_bytes(), &unsure).unwrap();
+        objects.into_iter().next().unwrap().data
+    };
+    assert_eq!(bake(&engine_tag), bake(&source));
 }
 
 #[test]

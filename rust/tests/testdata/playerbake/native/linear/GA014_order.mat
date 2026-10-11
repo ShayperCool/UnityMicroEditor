@@ -1,0 +1,58 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!21 &2100000
+Material:
+  serializedVersion: 8
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: GA014_order
+  m_Shader: {fileID: 4800000, guid: 7b032d697bddc2bf5ba5dacd17449683, type: 3}
+  m_Parent: {fileID: 0}
+  m_ModifiedSerializedProperties: 3
+  m_ValidKeywords: []
+  m_InvalidKeywords:
+  - ALSO_MISSING
+  - NOT_DECLARED
+  - Z_LAST
+  - a_lower
+  m_LightmapFlags: 255
+  m_EnableInstancingVariants: 1
+  m_DoubleSidedGI: 0
+  m_CustomRenderQueue: 2450
+  stringTagMap:
+    IgnoreProjector: True
+    Queue: Transparent
+    RenderType: opaque
+  disabledShaderPasses:
+  - FORWARDBASE
+  m_LockedProperties: 
+  m_SavedProperties:
+    serializedVersion: 3
+    m_TexEnvs:
+    - _TexA:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 0.00001, y: 0.25}
+        m_Offset: {x: -3.75, y: 1e+10}
+    - _TexZ:
+        m_Texture: {fileID: 2800000, guid: aa28958a8deb55e7e8382014e6d05923, type: 3}
+        m_Scale: {x: -0, y: -1}
+        m_Offset: {x: 0.73, y: 1}
+    m_Ints:
+    - _AaI: -7
+    - _IntA: 2147483647
+    - _IntZ: 3
+    - _StaleI: 2147483647
+    m_Floats:
+    - _Alpha: 0.73
+    - _B2: -0
+    - _Zeta: -1
+    - _alpha: 2.5
+    - _beta: 1e+10
+    m_Colors:
+    - _ColA: {r: -3.75, g: 0.2, b: -1, a: 1}
+    - _ColZ: {r: 1e+10, g: 0.5, b: 0.25, a: 0.00001}
+    - _ZzC: {r: -1, g: 0.25, b: 0, a: -3.75}
+  m_BuildTextureStacks: []
+  m_AllowLocking: 0

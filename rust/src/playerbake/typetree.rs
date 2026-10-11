@@ -167,6 +167,18 @@ impl TypeTree {
         Ok(value)
     }
 
+    /// Reads the first fields of an object and leaves the rest, for an object
+    /// whose tail is too large to be worth a value.
+    pub fn decode_leading(&self, data: &[u8], fields: usize) -> Result<Val> {
+        let mut at = 0;
+        let mut values = Vec::new();
+        for child in self.children(0).into_iter().take(fields) {
+            let name = Cow::Owned(self.nodes[child].name.clone());
+            values.push((name, self.read(child, data, &mut at)?));
+        }
+        Ok(Val::Map(values))
+    }
+
     fn read(&self, index: usize, data: &[u8], at: &mut usize) -> Result<Val> {
         let node = &self.nodes[index];
         let mut take = |size: usize| -> Result<&[u8]> {
