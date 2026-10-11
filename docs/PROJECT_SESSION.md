@@ -55,6 +55,11 @@ resource hashes, then publishes its own `nativeContentFiles` overlay. It leaves
 the original manifest and catalog unchanged. Resource mounting belongs to the
 caller. Previously accepted files are checked again before each publication.
 
+Unity writes a plain value such as `Enemy #1` without quotes and reads it back
+whole. The reader keeps it the same way: a `#` after a blank does not start a
+comment inside a value. A line holding only a comment stays one, and a `#` in a
+plain value folded over several lines is rejected.
+
 The standalone preparation command is useful for inspecting a revision:
 
 ```sh

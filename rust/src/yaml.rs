@@ -3,7 +3,7 @@ use anyhow::{Context, Result, bail, ensure};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
-use std::{collections::HashSet, sync::LazyLock};
+use std::{borrow::Cow, collections::HashSet, sync::LazyLock};
 use yaml_rust2::{
     parser::{Event, Parser, Tag},
     scanner::TScalarStyle,
@@ -70,7 +70,8 @@ fn parse_documents(content: &[u8], lexical: bool, limit: usize) -> Result<Vec<Do
         let end = headers
             .get(i + 1)
             .map_or(text.len(), |h| h.get(0).unwrap().start());
-        let value = match parse_yaml(&text[start..end], lexical) {
+        let body = keep_hash_marks(&text[start..end]).with_context(|| format!("fileID {id}"))?;
+        let value = match parse_yaml(&body, lexical) {
             Err(error) if error.is::<EmptyDocument>() => bail!("fileID {id} requires one object"),
             other => other.with_context(|| format!("fileID {id}"))?,
         };
@@ -91,6 +92,104 @@ fn parse_documents(content: &[u8], lexical: bool, limit: usize) -> Result<Vec<Do
         });
     }
     Ok(result)
+}
+
+/// Unity writes a plain value such as `Attack #2` without quotes and reads it
+/// back whole, where YAML starts a comment at the `#`. Such a value is quoted
+/// here, so the parser keeps it. Unity writes no comments of its own; a line
+/// that only holds a comment stays one.
+fn keep_hash_marks(text: &str) -> Result<Cow<'_, str>> {
+    if !text.contains(" #") && !text.contains("\t#") {
+        return Ok(Cow::Borrowed(text));
+    }
+    let marked = |text: &str| text.contains(" #") || text.contains("\t#");
+    let mut result = String::with_capacity(text.len() + 16);
+    // The quote a scalar left open on an earlier line.
+    let mut open: Option<char> = None;
+    // The column of the key or item whose plain value may continue below.
+    let mut plain: Option<usize> = None;
+    for line in text.split_inclusive('\n') {
+        let content = line.trim_end_matches(['\n', '\r']);
+        let ending = &line[content.len()..];
+        if let Some(quote) = open {
+            if quoted_end(content, quote).is_some() {
+                open = None;
+            }
+            result.push_str(line);
+            continue;
+        }
+        let indent = content.len() - content.trim_start_matches(' ').len();
+        let mut rest = &content[indent..];
+        if rest.is_empty() || rest.starts_with('#') {
+            result.push_str(line);
+            continue;
+        }
+        if plain.is_some_and(|column| indent > column) {
+            ensure!(
+                !marked(content),
+                "yaml: `#` in a plain value that spans lines"
+            );
+            result.push_str(line);
+            continue;
+        }
+        plain = None;
+        let mut column = indent;
+        while let Some(item) = rest.strip_prefix("- ") {
+            let trimmed = item.trim_start_matches(' ');
+            column += rest.len() - trimmed.len();
+            rest = trimmed;
+        }
+        // A plain key ends at the first `: `; a value never starts before it.
+        if !rest.starts_with(['"', '\'', '{', '[']) {
+            if let Some(at) = rest.find(": ") {
+                let trimmed = rest[at + 2..].trim_start_matches(' ');
+                rest = trimmed;
+            } else if rest.ends_with(':') {
+                rest = "";
+            }
+        }
+        match rest.chars().next() {
+            None => {}
+            Some(quote @ ('"' | '\'')) => {
+                if quoted_end(&rest[1..], quote).is_none() {
+                    open = Some(quote);
+                }
+            }
+            Some('{' | '[' | '|' | '>' | '&' | '*' | '!') => {}
+            Some(_) => {
+                plain = Some(column);
+                if marked(rest) {
+                    let value = rest.trim_end_matches([' ', '\t']);
+                    result.push_str(&content[..content.len() - rest.len()]);
+                    result.push('\'');
+                    result.push_str(&value.replace('\'', "''"));
+                    result.push('\'');
+                    result.push_str(ending);
+                    // Quoted now, so a continuation line would be misread.
+                    plain = Some(column);
+                    continue;
+                }
+            }
+        }
+        result.push_str(line);
+    }
+    Ok(Cow::Owned(result))
+}
+
+/// Where a quoted scalar closes within a line, if it does.
+fn quoted_end(text: &str, quote: char) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\\' if quote == '"' => at += 1,
+            b'\'' if quote == '\'' && bytes.get(at + 1) == Some(&b'\'') => at += 1,
+            byte if byte == quote as u8 => return Some(at),
+            _ => {}
+        }
+        at += 1;
+    }
+    None
 }
 
 pub fn metadata_guid(data: &[u8]) -> Option<String> {

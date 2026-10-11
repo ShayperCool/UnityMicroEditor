@@ -1032,6 +1032,24 @@ fn unity_yaml_preserves_identities_and_numbers() {
 }
 
 #[test]
+fn unity_yaml_keeps_hash_marks_of_plain_values() {
+    let input = "--- !u!1 &1\nGameObject:\n  m_Name: Enemy #1\n  m_Tag: it's #2  \n  list:\n  - a #b\n  - name: c #d\n    other: \"e #f\"\n  # a comment\n  quoted: \"g\n    #h\"\n  flow: {x: 1}\n";
+    let docs = parse_unity_yaml(input.as_bytes()).unwrap();
+    let document = &docs[0];
+    assert_eq!(str(document.get("m_Name")), "Enemy #1");
+    assert_eq!(str(document.get("m_Tag")), "it's #2");
+    assert_eq!(
+        serde_json::to_string(document.get("list")).unwrap(),
+        r##"["a #b",{"name":"c #d","other":"e #f"}]"##
+    );
+    assert_eq!(str(document.get("quoted")), "g #h");
+    assert!(
+        parse_unity_yaml(b"--- !u!1 &1\nGameObject:\n  m_Name: a\n    b #c\n").is_err(),
+        "accepted a `#` in a folded plain value"
+    );
+}
+
+#[test]
 fn unity_yaml_rejects_ambiguous_graphs() {
     for body in [
         "  a: 1\n  a: 2\n",

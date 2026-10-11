@@ -116,7 +116,6 @@ Refused, never approximated:
 - a class with a `[SerializeReference]` field; a class whose serialized types nest more than ten deep, where the engine cuts them off, which includes every type that holds a list of itself; an engine type outside the compared set, a dictionary below the top level of the class, a fixed buffer of a type other than `int`, `byte`, `float`, `bool`, `char`, `short`, `long` or `double`, and a method that hides `OnStateMachineEnter` or `OnStateMachineExit` without overriding it;
 - a field authored in an older serialized version of an engine struct, or as a value of another shape than its class declares;
 - a behaviour whose script the session does not know, is not a source file of the project, or is a nested class;
-- a controller whose text holds a `#` after a blank or at the start of a line. The Editor writes a value such as `Attack #2` without quotes and reads it back whole; the YAML reader used here takes the rest for a comment. Controllers are refused for it; other sources are read with the same reader and are not checked;
 - two states or state machines of one layer that share a path and both have behaviours; a nested state machine without exit transitions inside one without a default state;
 - any clip the clip baker refuses;
 - an avatar mask stored inside the controller.
