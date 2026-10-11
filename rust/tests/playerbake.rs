@@ -560,3 +560,64 @@ fn freeform_tables_match_the_engine_build() {
         assert_eq!(table.neighbors, case.neighbors, "case {index}");
     }
 }
+
+/// Bakes the clips of import worker artifacts (`<guid>.artifact.bin`) and
+/// compares each with the engine's object of the same clip name
+/// (`<clip name>.clip.bin`) from a build of the same models.
+#[test]
+fn model_clip_corpus_matches_the_engine_build() {
+    let Some(root) = std::env::var("UNITY_PLAYERBAKE_MODEL_CORPUS")
+        .ok()
+        .filter(|value| !value.is_empty())
+    else {
+        eprintln!("skipped: set UNITY_PLAYERBAKE_MODEL_CORPUS");
+        return;
+    };
+    let (mut matched, mut failed) = (0, 0);
+    for entry in fs::read_dir(&root).unwrap() {
+        let path = entry.unwrap().path();
+        if !path.to_string_lossy().ends_with(".artifact.bin") {
+            continue;
+        }
+        let clips = playerbake::bake_model_clips(&fs::read(&path).unwrap()).unwrap();
+        for (file_id, reason) in &clips.refused {
+            eprintln!("refused {file_id} of {}: {reason}", path.display());
+        }
+        let Some(baked) = clips.baked else { continue };
+        for object in playerbake::read_serialized(&baked.file).unwrap() {
+            let name = clips
+                .facts
+                .iter()
+                .find(|(file_id, _, _)| *file_id == object.local_id.to_string())
+                .map(|(_, name, _)| name.clone())
+                .unwrap();
+            let expected = fs::read(Path::new(&root).join(format!("{name}.clip.bin"))).unwrap();
+            if object.data == expected {
+                matched += 1;
+            } else {
+                failed += 1;
+                let at = object
+                    .data
+                    .iter()
+                    .zip(&expected)
+                    .position(|(a, b)| a != b)
+                    .unwrap_or(object.data.len().min(expected.len()));
+                eprintln!(
+                    "MISMATCH {name}: {} vs {} bytes, first difference at {at}",
+                    object.data.len(),
+                    expected.len()
+                );
+                if let Ok(directory) = std::env::var("UNITY_PLAYERBAKE_DUMP") {
+                    fs::write(
+                        Path::new(&directory).join(format!("{name}.baked.bin")),
+                        &object.data,
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+    eprintln!("matched {matched}");
+    assert_eq!(failed, 0);
+    assert!(matched > 0);
+}

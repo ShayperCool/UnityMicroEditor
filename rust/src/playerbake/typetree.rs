@@ -20,7 +20,7 @@ pub struct Node {
 pub struct TypeTree {
     pub class_id: i32,
     /// The complete type table entry, written unchanged into a baked file.
-    pub entry: &'static [u8],
+    pub entry: Cow<'static, [u8]>,
     pub nodes: Vec<Node>,
 }
 
@@ -41,7 +41,9 @@ fn string(table: &[u8], offset: usize) -> Result<String> {
 impl TypeTree {
     /// Parses an entry laid out as class ID, flags, hashes, blob and
     /// dependency count.
-    pub fn parse(entry: &'static [u8]) -> Result<Self> {
+    pub fn parse(entry: impl Into<Cow<'static, [u8]>>) -> Result<Self> {
+        let owned: Cow<'static, [u8]> = entry.into();
+        let entry: &[u8] = &owned;
         if entry.len() < 4 + 3 + 32 + 4 + 16 {
             bail!("type table entry is truncated");
         }
@@ -85,7 +87,7 @@ impl TypeTree {
         }
         Ok(Self {
             class_id,
-            entry,
+            entry: owned,
             nodes,
         })
     }
