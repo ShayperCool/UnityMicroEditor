@@ -1,5 +1,6 @@
 //! The C# compiler pipeline. Cache keys, manifests and command lines are persisted formats.
 mod baseline;
+mod behaviours;
 mod cli;
 mod compile;
 mod graph;

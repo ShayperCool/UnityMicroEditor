@@ -2853,3 +2853,143 @@ fn compiler_command_reports_failures_and_cancellation() {
     assert_eq!(error.message, "sh: signal: killed\n");
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
 }
+
+/// Compiles the scripts of the behaviour fixtures and reads their layouts
+/// back from the assemblies. The fixture layouts are what the Player objects
+/// of the same classes were compared with, byte for byte.
+#[test]
+fn compiler_behaviour_layouts_sdk() {
+    let Some(editor) = sdk(
+        "UME_LIFECYCLE_SDK",
+        "set UME_LIFECYCLE_SDK to the matching Unity executable; SDK only, no Editor or Player starts",
+    ) else {
+        return;
+    };
+    let (_guard, cache) = temp();
+    let mut compiler = Compiler {
+        editor,
+        cache: cache.clone(),
+        ..Default::default()
+    };
+    compiler.initialize_sdk().unwrap();
+    let ctx = background();
+    let helper = compiler.prepare_lifecycle_helper(&ctx).unwrap();
+    let fixtures = join(&[
+        env!("CARGO_MANIFEST_DIR"),
+        "rust/tests/testdata/playerbake/behaviours",
+    ]);
+    let references: Vec<String> = compiler
+        .base_references
+        .iter()
+        .chain(compiler.engine_references.iter())
+        .cloned()
+        .collect();
+    let mut assemblies = Vec::new();
+    for assembly in ["Assembly-CSharp", "Smb.Second"] {
+        let dll = join(&[&cache, &format!("{assembly}.dll")]);
+        let mut arguments = vec![
+            "-nologo".to_string(),
+            "-target:library".into(),
+            "-nostdlib+".into(),
+            "-langversion:9.0".into(),
+            "-unsafe+".into(),
+            "-nowarn:0169,0649,0414".into(),
+            format!("-out:{dll}"),
+        ];
+        arguments.extend(references.iter().map(|path| format!("-reference:{path}")));
+        let mut sources = sys::glob_lossy(&join(&[&fixtures, "Scripts", assembly, "*.cs"]));
+        sources.sort();
+        assert!(!sources.is_empty());
+        arguments.extend(sources);
+        let response = join(&[&cache, &format!("{assembly}.rsp")]);
+        let text: String = arguments
+            .iter()
+            .map(|argument| format!("\"{argument}\"\n"))
+            .collect();
+        sys::write(&response, text.as_bytes()).unwrap();
+        compiler_command(
+            &ctx,
+            &cache,
+            &compiler.dotnet,
+            &[&compiler.csc, &format!("@{response}")],
+        )
+        .unwrap();
+        assemblies.push(dll);
+    }
+    assemblies.extend(references);
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Script {
+        class_name: String,
+    }
+    let scripts: BTreeMap<String, Script> =
+        read_json_file(&join(&[&fixtures, "scripts.json"])).unwrap();
+    let mut expected = BTreeMap::new();
+    let mut request = Vec::new();
+    for (guid, script) in &scripts {
+        let layout = join(&[&fixtures, "layouts", &format!("{}.json", script.class_name)]);
+        // A script without a fixture layout is not a state machine behaviour.
+        let (assembly, type_name) = match read_json_file::<crate::playerbake::ScriptLayout>(&layout)
+        {
+            Ok(layout) => {
+                let name = match layout.namespace.as_str() {
+                    "" => layout.class_name.clone(),
+                    namespace => format!("{namespace}.{}", layout.class_name),
+                };
+                let assembly = layout.assembly.clone();
+                expected.insert(guid.clone(), layout);
+                (assembly, name)
+            }
+            Err(_) => ("Assembly-CSharp".to_string(), script.class_name.clone()),
+        };
+        request.push(json!({"guid": guid, "assembly": assembly, "type": type_name}));
+    }
+    assert!(expected.len() >= 30 && request.len() > expected.len());
+    let request_path = join(&[&cache, "layouts.json"]);
+    atomic_json(
+        &request_path,
+        &json!({"assemblies": assemblies, "scripts": request}),
+    )
+    .unwrap();
+    let output = compiler_command(
+        &ctx,
+        &cache,
+        &compiler.dotnet,
+        &[&helper, "--behaviour-layouts", &request_path],
+    )
+    .unwrap();
+    let actual: BTreeMap<String, crate::playerbake::ScriptLayout> =
+        serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        actual.keys().collect::<Vec<_>>(),
+        expected.keys().collect::<Vec<_>>()
+    );
+    for (guid, layout) in &actual {
+        assert_eq!(layout, &expected[guid], "{}", layout.class_name);
+    }
+    // What the engine cuts off or stores through a registry is refused.
+    let refused: BTreeSet<&str> = actual
+        .values()
+        .filter(|layout| !layout.unsupported.is_empty())
+        .map(|layout| layout.class_name.as_str())
+        .collect();
+    assert_eq!(
+        refused,
+        BTreeSet::from(["SmbDeep", "SmbDeep2", "SmbDepth", "SmbManaged"])
+    );
+    let callbacks: BTreeSet<&str> = actual
+        .values()
+        .filter(|layout| layout.overrides_state_machine_callbacks)
+        .map(|layout| layout.class_name.as_str())
+        .collect();
+    assert_eq!(
+        callbacks,
+        BTreeSet::from([
+            "SmbCbMachineEnter",
+            "SmbCbMachineEnter3",
+            "SmbCbMachineExit",
+            "SmbCbMachineInherited"
+        ])
+    );
+}
