@@ -659,7 +659,7 @@ fn new_native_project_source_rejects_invalid_ownership_and_runtime_identity() {
             "extra object" => r
                 .content
                 .objects
-                .push(native_object("21300000", "UnityEngine.Sprite")),
+                .push(native_object("8900000", "UnityEngine.Cubemap")),
             "graph" => {
                 r.model_graph = List::from(vec![NativeModelGraphObject {
                     file_id: "1".into(),

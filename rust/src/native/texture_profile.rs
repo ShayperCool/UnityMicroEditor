@@ -1,10 +1,11 @@
-//! Cold TextureImporter delivery is proven for ordinary 2D textures in the
-//! automatic format, including native resize/mips: uncompressed, and the normal
-//! and low quality compression, whose worker artifacts equal the Editor's byte
-//! for byte (DXT1, DXT5, BC6H and the crunched form). High quality compression
-//! selects BC7, whose compressor the main Editor supplies as an import
-//! dependency; a standalone worker aborts without it, so only exact existing
-//! artifacts are used for it and for every explicit format.
+//! Cold TextureImporter delivery covers the importer settings whose worker
+//! artifacts were compared with the Editor's and are equal byte for byte: the
+//! texture types and shapes listed below, the automatic format at every
+//! compression quality (high quality selects BC7), the explicit formats
+//! listed below, and a standalone platform override of any of these. What an
+//! importer asks of the project (the BC7 compressor, the normal map, lightmap
+//! and HDR cubemap encodings) reaches the worker with its environment. Any
+//! other setting keeps to exact existing artifacts.
 use super::{resolve_project_import_source, support::read_file};
 use crate::{
     authoring::yamlcodec::{self, FLOAT, INT, Kind, MERGE, NULL, Node, Resolved},
@@ -16,7 +17,7 @@ use crate::{
 use anyhow::{Result, bail};
 use std::collections::{BTreeMap, HashSet};
 
-const EDITOR_SETTINGS: &str = "ProjectSettings/EditorSettings.asset";
+use super::environment::EDITOR_SETTINGS;
 
 #[derive(Default)]
 struct Platform {
@@ -288,7 +289,10 @@ pub fn native_texture_needs_warm(project: &str, logical: &str) -> Result<bool> {
             "{logical}.meta holds no TextureImporter settings; Unity imports such a file as a cubemap, not a Texture2D"
         );
     };
-    if importer.texture_type != 0 || importer.texture_shape != 1 || importer.platforms.len() > 64 {
+    if !VERIFIED_TYPES.contains(&importer.texture_type)
+        || !VERIFIED_SHAPES.contains(&importer.texture_shape)
+        || importer.platforms.len() > 64
+    {
         return Ok(true);
     }
     let mut selected = None;
@@ -310,9 +314,25 @@ pub fn native_texture_needs_warm(project: &str, logical: &str) -> Result<bool> {
         return Ok(true);
     };
     let platform = &importer.platforms[selected];
-    // 0 is uncompressed, 1 normal and 3 low quality; 2 is high quality.
-    Ok(!matches!(platform.compression, Some(0 | 1 | 3)) || platform.format != Some(-1))
+    // 0 is uncompressed, 1 normal, 2 high and 3 low quality.
+    Ok(!matches!(platform.compression, Some(0..=3))
+        || !platform
+            .format
+            .is_some_and(|format| format == -1 || VERIFIED_FORMATS.contains(&format)))
 }
+
+/// `TextureImporterType`: Default, NormalMap, GUI, Cookie, Lightmap, Cursor,
+/// Sprite, SingleChannel, Shadowmask and DirectionalLightmap.
+const VERIFIED_TYPES: [i64; 10] = [0, 1, 2, 4, 6, 7, 8, 10, 11, 12];
+/// `TextureImporterShape`: 2D, Cube, 2D array and 3D.
+const VERIFIED_SHAPES: [i64; 4] = [1, 2, 4, 8];
+/// `TextureImporterFormat`: Alpha8, ARGB16, RGB24, RGBA32, RGB16, R16, DXT1,
+/// DXT5, RGBAHalf, RGBAFloat, RGB9E5, BC6H, BC7, BC4, BC5, DXT1Crunched,
+/// DXT5Crunched, RG16, R8 and RGBA64. The formats of other platform
+/// families (ETC, ASTC, PVRTC) were not compared.
+const VERIFIED_FORMATS: [i64; 20] = [
+    1, 2, 3, 4, 7, 9, 10, 12, 17, 20, 22, 24, 25, 26, 27, 28, 29, 62, 63, 74,
+];
 
 /// The compressor settings guard of a texture that needs the warm route; empty otherwise.
 pub fn warm_texture_configuration(

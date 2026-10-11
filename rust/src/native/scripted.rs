@@ -88,7 +88,30 @@ pub fn scripted_importer(meta: &[u8]) -> Option<String> {
 /// The models whose importer makes a material of its own and names its
 /// shader, by lower-case extension with its dot.
 pub fn generated_material_profile(extension: &str) -> bool {
-    matches!(extension, ".obj" | ".dae")
+    matches!(extension, ".obj" | ".dae" | ".blend")
+}
+
+/// The program the model importer converts a `.blend` with. It starts
+/// `blender -b <file> -P <Editor>/Data/Tools/Unity-BlenderToFBX.py -- <fbx>`
+/// through the `PATH` of its process, in the Editor as in a worker, and
+/// imports the FBX that the Editor's script makes Blender export. Without
+/// Blender the artifact holds an import log and no model.
+pub fn require_blender() -> Result<()> {
+    let found = std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|directory| {
+            let candidate = directory.join("blender");
+            // SAFETY: the path is a valid C string for the call.
+            std::ffi::CString::new(candidate.as_os_str().as_encoded_bytes())
+                .is_ok_and(|name| unsafe { libc::access(name.as_ptr(), libc::X_OK) } == 0)
+                && candidate.is_file()
+        })
+    });
+    if !found {
+        bail!(
+            "a .blend model is converted by Blender, which Unity's importer starts as `blender` from PATH; no such program was found"
+        );
+    }
+    Ok(())
 }
 
 /// The Editor's table of shaders by name, `Library/ScriptMapper`.

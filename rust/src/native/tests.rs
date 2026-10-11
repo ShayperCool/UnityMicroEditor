@@ -4,6 +4,7 @@ use super::{
     mesh_cpu::{
         read_owned_native_mesh_file, retain_native_model_mesh_cpu, write_immutable_native_mesh_file,
     },
+    probe::{ImportRecord, commit_import_results},
     support::{is_canceled, text},
     texture_profile::{recorded_bc7_dependency, verify_warm_bc7_dependency},
     *,
@@ -17,7 +18,8 @@ use crate::{
         NativeReplacement, Options, RetainedBuiltinShader, Session,
     },
     protocol::{
-        ArtifactFile, ArtifactMetadata, Frame, blob_array, blob_string, guid_wire, write_frame,
+        ArtifactFile, ArtifactMetadata, Frame, blob_array, blob_string, guid_wire, import_address,
+        write_frame,
     },
     registry::{self, native_hash},
     sha256,
@@ -240,20 +242,31 @@ fn worker_environment_preserves_source_graphics_settings_and_native_dependencies
             && word(36) == 1
     );
     let (dependencies, _) = blob_array(&initialize, 44, 24).unwrap();
-    assert_eq!(dependencies.len(), 96);
-    for (index, key) in [
-        "graphics/shader-precision-model",
-        "graphics/metal-needs-renderpass-fbfetch-fallback",
-        "graphics/texture-import-overrides",
-        "graphics/default-texture-compression-format",
-    ]
-    .iter()
-    .enumerate()
-    {
+    // Every key with the value the pinned Editor registers for these
+    // settings (read back from its ArtifactDB).
+    let keys: [(&str, [u8; 2]); 11] = [
+        ("graphics/shader-precision-model", [1, 0]),
+        ("graphics/metal-needs-renderpass-fbfetch-fallback", [1, 0]),
+        ("graphics/texture-import-overrides", [1, 0]),
+        ("graphics/default-texture-compression-format", [1, 0]),
+        ("graphics/texture-platform-settings", [1, 0]),
+        ("graphics/active-color-space", [3, 0]),
+        ("graphics/normal-map-encoding", [2, 0]),
+        ("graphics/lightmap-encoding", [3, 0]),
+        ("graphics/hdr-cubemap-encoding", [3, 0]),
+        ("graphics/bc7-compressor", [1, 2]),
+        ("2d/spriteatlas-import-mode", [1, 0]),
+    ];
+    assert_eq!(dependencies.len(), 24 * keys.len());
+    for (index, (key, value)) in keys.iter().enumerate() {
         assert_eq!(blob_string(&initialize, 96 + 24 * index).unwrap(), *key);
         let mut expected = [0u8; 16];
-        expected[0] = 1;
-        assert_eq!(dependencies[index * 24 + 8..index * 24 + 24], expected);
+        expected[..2].copy_from_slice(value);
+        assert_eq!(
+            dependencies[index * 24 + 8..index * 24 + 24],
+            expected,
+            "{key}"
+        );
     }
     let custom = WORKER_SETTINGS
         .replacen("shaderPrecisionModel: 0", "shaderPrecisionModel: 1", 1)
@@ -1613,9 +1626,18 @@ fn native_texture_profile_preserves_effective_platform_settings_and_compressor_g
     let meta = project.path("Assets/Texture.png.meta");
     write(&meta, NATIVE_TEXTURE_PROFILE);
     assert!(!native_texture_needs_warm(&project.1, "Assets/Texture.png").unwrap());
+    // A standalone override is followed: high quality compression is
+    // imported by a worker, a format of another platform family is not.
+    let overridden = NATIVE_TEXTURE_PROFILE.replacen("overridden: 0", "overridden: 1", 1);
+    write(&meta, &overridden);
+    assert!(!native_texture_needs_warm(&project.1, "Assets/Texture.png").unwrap());
     write(
         &meta,
-        NATIVE_TEXTURE_PROFILE.replacen("overridden: 0", "overridden: 1", 1),
+        overridden.replacen(
+            "textureCompression: 2\n    textureFormat: -1",
+            "textureCompression: 2\n    textureFormat: 48",
+            1,
+        ),
     );
     assert!(native_texture_needs_warm(&project.1, "Assets/Texture.png").unwrap());
     let settings = project.path("ProjectSettings/EditorSettings.asset");
@@ -1637,7 +1659,7 @@ fn native_texture_profile_preserves_effective_platform_settings_and_compressor_g
 }
 
 #[test]
-fn native_texture_profile_covers_every_texture_source_and_keeps_bc7_warm() {
+fn native_texture_profile_covers_every_texture_source_and_keeps_unverified_settings_warm() {
     let project = Temp::new();
     let profile = |compression: &str, format: &str, crunched: &str| {
         format!(
@@ -1650,28 +1672,50 @@ fn native_texture_profile_covers_every_texture_source_and_keeps_bc7_warm() {
     ] {
         let logical = format!("Assets/{name}");
         let meta = project.path(&format!("{logical}.meta"));
-        // Uncompressed, normal and low quality in the automatic format are
-        // imported by a standalone worker, crunched or not.
-        for (compression, crunched) in [("0", "0"), ("1", "0"), ("3", "0"), ("1", "1")] {
+        // Every compression quality in the automatic format is imported by
+        // a standalone worker, crunched or not; high quality selects BC7.
+        for (compression, crunched) in [("0", "0"), ("1", "0"), ("2", "0"), ("3", "0"), ("1", "1")]
+        {
             write(&meta, profile(compression, "-1", crunched));
             assert!(
                 !native_texture_needs_warm(&project.1, &logical).unwrap(),
                 "{name} {compression} {crunched}"
             );
         }
-        // High quality selects BC7; an explicit format may.
-        for (compression, format) in [("2", "-1"), ("1", "25"), ("0", "4")] {
+        // So is a compared explicit format; ASTC, ETC2 and an unknown
+        // quality are not.
+        for (compression, format, warm) in [
+            ("1", "25", false),
+            ("0", "4", false),
+            ("1", "74", false),
+            ("1", "48", true),
+            ("1", "47", true),
+            ("4", "-1", true),
+        ] {
             write(&meta, profile(compression, format, "0"));
-            assert!(
+            assert_eq!(
                 native_texture_needs_warm(&project.1, &logical).unwrap(),
+                warm,
                 "{name} {compression} {format}"
             );
         }
-        write(
-            &meta,
-            profile("1", "-1", "0").replacen("textureType: 0", "textureType: 8", 1),
-        );
-        assert!(native_texture_needs_warm(&project.1, &logical).unwrap());
+        // Sprites, normal maps, cubemaps, arrays and volumes are imported;
+        // a type or shape that was not compared is not.
+        for (from, to, warm) in [
+            ("textureType: 0", "textureType: 8", false),
+            ("textureType: 0", "textureType: 1", false),
+            ("textureShape: 1", "textureShape: 2", false),
+            ("textureShape: 1", "textureShape: 8", false),
+            ("textureType: 0", "textureType: 9", true),
+            ("textureShape: 1", "textureShape: 16", true),
+        ] {
+            write(&meta, profile("1", "-1", "0").replacen(from, to, 1));
+            assert_eq!(
+                native_texture_needs_warm(&project.1, &logical).unwrap(),
+                warm,
+                "{name} {to}"
+            );
+        }
         // Without importer settings the engine makes a cubemap of the file.
         write(
             &meta,
@@ -1751,4 +1795,78 @@ fn builtin_shader_snapshot_rejects_native_payload_substitution() {
     value.content.path = changed;
     value.content.sha256 = sha256(&bytes);
     assert!(verify_builtin_shader_snapshot(&value).is_err());
+}
+
+// ---- dependent imports ----
+
+/// The key and the records are those the pinned Editor wrote for a sprite
+/// texture of the comparison project.
+#[test]
+fn import_results_become_the_current_revisions_of_the_context() {
+    let project = Temp::new();
+    let database = project.path("Library/ArtifactDB");
+    let names = [
+        "CurrentRevisions",
+        "DBVersion",
+        "ImportAddressToImportResultIDs",
+        "ImportResultIDPropertyIDToProperty",
+        "ImportResultIDToArtifactDependencies",
+        "ImportResultIDToArtifactMetaInfo",
+        "ImportResultIDToImportStats",
+    ];
+    let mut tables: Tables = names
+        .iter()
+        .map(|name| (name.to_string(), Vec::new()))
+        .collect();
+    tables.get_mut("DBVersion").unwrap().push(Record {
+        key: vec![0; 8],
+        value: vec![9, 0, 0, 0],
+    });
+    write(&database, lmdb::build(&tables).unwrap());
+    let address = import_address("4c6c282c6d34326599b20a88ae7486cf", -1, [0; 16]).unwrap();
+    let record = |result: u8| ImportRecord {
+        address,
+        result: [result; 16],
+        blobs: vec![vec![1, result], vec![2, result], vec![3, result]],
+    };
+    commit_import_results(&project.1, &[record(7)]).unwrap();
+    // A later result of the same address replaces the revision.
+    commit_import_results(&project.1, &[record(8)]).unwrap();
+    let data = fs::read(&database).unwrap();
+    let tables = lmdb::Image::open(&data).unwrap().tables().unwrap();
+    assert_eq!(tables.keys().map(String::as_str).collect::<Vec<_>>(), names);
+    assert_eq!(tables["DBVersion"][0].value, [9, 0, 0, 0]);
+    let key = [
+        0xad, 0x6f, 0xa5, 0xdb, 0xef, 0x8e, 0x71, 0x7e, 0xd1, 0xf4, 0x3a, 0x85, 0x19, 0xaf, 0x25,
+        0xd2,
+    ];
+    let current = &tables["CurrentRevisions"];
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].key, key);
+    assert_eq!(current[0].value.len(), 56);
+    assert_eq!(current[0].value[..40], address[..40]);
+    assert_eq!(current[0].value[40..], [8; 16]);
+    let history = &tables["ImportAddressToImportResultIDs"];
+    assert_eq!((history.len(), &history[0].key[..]), (1, &key[..]));
+    assert_eq!(history[0].value[40..48], [8, 0, 0, 0, 1, 0, 0, 0]);
+    assert_eq!(history[0].value[48..], [8; 16]);
+    for (name, tag) in [
+        ("ImportResultIDToArtifactDependencies", 1),
+        ("ImportResultIDToArtifactMetaInfo", 2),
+        ("ImportResultIDToImportStats", 3),
+    ] {
+        let records = &tables[name];
+        assert_eq!(records.len(), 2, "{name}");
+        assert!(
+            records
+                .iter()
+                .any(|record| record.key == [8; 16] && record.value == [tag, 8]),
+            "{name}"
+        );
+    }
+    // A database of another layout is not written to.
+    let mut other = tables.clone();
+    other.remove("ImportResultIDToImportStats");
+    write(&database, lmdb::build(&other).unwrap());
+    assert!(commit_import_results(&project.1, &[record(9)]).is_err());
 }

@@ -401,6 +401,56 @@ fn texture_projection_rejects_unverified_profile_and_header() {
     assert!(ra::adapt_shader(&[0u8; 64]).is_err());
 }
 
+/// Worker artifacts of one 16x8 PNG under four importer settings: a sprite,
+/// a cubemap, a texture array and a volume.
+#[test]
+fn texture_projection_keeps_the_texture_of_its_shape_and_its_sprites() {
+    let artifact =
+        |name: &str| fs::read(format!("rust/tests/testdata/native/{name}.png.artifact")).unwrap();
+    let objects = |metadata: &Metadata| -> Vec<(String, i32, String)> {
+        metadata
+            .objects
+            .iter()
+            .map(|object| {
+                (
+                    object.file_id.clone(),
+                    object.class_id,
+                    object.type_name.clone(),
+                )
+            })
+            .collect()
+    };
+    let (output, metadata) = ra::adapt_texture(&artifact("sprite"), "png").unwrap();
+    assert_eq!(
+        objects(&metadata),
+        [
+            ("2800000".into(), 28, "UnityEngine.Texture2D".into()),
+            ("21300000".into(), 213, "UnityEngine.Sprite".into()),
+        ]
+    );
+    // The importer goes; nothing else does.
+    assert_eq!(metadata.removed.len(), 1);
+    assert_eq!(metadata.removed[0].class_id, 1006);
+    let texture = metadata.texture.as_ref().unwrap();
+    assert_eq!((texture.width, texture.height), (16, 8));
+    assert_eq!(metadata.output_sha256, sha256(&output));
+    for (name, id, class, type_name) in [
+        ("cubemap", "8900000", 89, "UnityEngine.Cubemap"),
+        ("array", "18700000", 187, "UnityEngine.Texture2DArray"),
+        ("volume", "11700000", 117, "UnityEngine.Texture3D"),
+    ] {
+        let (_, metadata) = ra::adapt_texture(&artifact(name), "png").unwrap();
+        assert_eq!(
+            objects(&metadata),
+            [(id.to_string(), class, type_name.to_string())],
+            "{name}"
+        );
+        // An array and a volume name a graphics format, which the texture
+        // metadata does not hold.
+        assert_eq!(metadata.texture.is_some(), class == 89, "{name}");
+    }
+}
+
 // ---- Mesh CPU retention -----------------------------------------------------
 
 fn assert_mesh_cpu_projection(input: &[u8]) -> (Vec<u8>, MeshCpuProjection) {

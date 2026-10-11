@@ -2,7 +2,7 @@ use super::{
     MAXIMUM_BYTES, Reader,
     adapt::{ExternalReference, Layout, Metadata, Object, RemovedObject, project_table},
     be32, be64, le16, le32, le64, ordinary_guid, req,
-    texture::read_texture_resources,
+    texture::{read_shaped_texture_resources, read_texture_resources},
 };
 use anyhow::{Result, bail};
 use std::collections::{HashMap, HashSet};
@@ -25,8 +25,11 @@ pub fn texture_profile(profile: &str) -> bool {
     )
 }
 
-/// Retains Unity's imported Texture2D, including its chosen native pixel
-/// format and mip chain. It never resizes or recompresses source pixels.
+/// Retains what TextureImporter made of the source: the texture in its
+/// native pixel format and mip chain, as a Texture2D, a Cubemap, a
+/// Texture2DArray or a Texture3D under the main local ID of its class, and
+/// the Sprite objects of a sprite texture under theirs. It never resizes or
+/// recompresses source pixels.
 pub fn adapt_texture(input: &[u8], profile: &str) -> Result<(Vec<u8>, Metadata)> {
     if !texture_profile(profile) {
         bail!("unsupported texture runtime profile {profile:?}");
@@ -218,12 +221,33 @@ fn adapt_warm_builtin(input: &[u8], profile: &str) -> Result<(Vec<u8>, Metadata)
                 |identifier| *identifier == expected.as_bytes(),
                 "UI serialized class identifier differs from builtin script identity",
             )?;
-        } else if texture && class_id == 28 && entry_id == 2800000 {
-            type_name = "UnityEngine.Texture2D";
-            let (resources, metadata) =
-                read_texture_resources(data, trees.get(&28).copied().unwrap_or_default())?;
-            result.resources.extend(resources);
-            result.texture = Some(metadata);
+        } else if texture {
+            let tree = trees.get(&class_id).copied().unwrap_or_default();
+            match (class_id, entry_id) {
+                (28, 2800000) | (89, 8900000) => {
+                    type_name = if class_id == 28 {
+                        "UnityEngine.Texture2D"
+                    } else {
+                        "UnityEngine.Cubemap"
+                    };
+                    let (resources, metadata) = read_texture_resources(data, tree)?;
+                    result.resources.extend(resources);
+                    result.texture = Some(metadata);
+                }
+                (187, 18700000) | (117, 11700000) => {
+                    type_name = if class_id == 187 {
+                        "UnityEngine.Texture2DArray"
+                    } else {
+                        "UnityEngine.Texture3D"
+                    };
+                    result
+                        .resources
+                        .extend(read_shaped_texture_resources(data, tree)?);
+                }
+                // A sprite refers to its texture in the same file.
+                (213, _) => type_name = "UnityEngine.Sprite",
+                _ => {}
+            }
         } else if font {
             type_name = match class_id {
                 128 => "UnityEngine.Font",
@@ -245,6 +269,16 @@ fn adapt_warm_builtin(input: &[u8], profile: &str) -> Result<(Vec<u8>, Metadata)
     }
     if result.objects.is_empty() {
         bail!("UI artifact has no usable objects");
+    }
+    if texture
+        && result
+            .objects
+            .iter()
+            .filter(|object| object.class_id != 213)
+            .count()
+            != 1
+    {
+        bail!("native texture artifact does not hold exactly one texture");
     }
     let output = project_table(
         input,

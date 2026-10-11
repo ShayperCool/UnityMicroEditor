@@ -32,7 +32,7 @@ pub use player_shader::{
 };
 pub use scripted::adapt_scripted;
 pub use shader_extract::{shader_extract, shader_extract_command};
-pub use texture::{TextureMetadata, read_texture_resources};
+pub use texture::{TextureMetadata, read_shaped_texture_resources, read_texture_resources};
 pub use ui::{adapt_shader, adapt_texture, adapt_ui, texture_profile};
 pub use unityfs_member::{unpack_unityfs_block, verify_unityfs_member};
 pub use video::adapt_video;

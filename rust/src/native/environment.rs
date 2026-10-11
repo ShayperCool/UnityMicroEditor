@@ -36,10 +36,25 @@ pub struct WorkerEnvironment {
     pub texture_compression_override: u32,
     #[serde(deserialize_with = "nul")]
     pub default_texture_compression_format: u32,
+    /// `EditorSettings::GetEffectiveBc7TextureCompressor`: 1 BC7E, 2 ISPC.
+    #[serde(deserialize_with = "nul")]
+    pub bc7_compressor: u32,
+    /// 1 when sprite atlases are importer-based (`m_SpritePackerMode: 5`).
+    #[serde(deserialize_with = "nul")]
+    pub sprite_atlas_v2: u32,
+    /// SHA-256 of `ProjectSettings/EditorSettings.asset`; empty without one.
+    #[serde(deserialize_with = "nul")]
+    pub editor_settings_sha256: String,
 }
 
+/// `NormalMapEncoding::DXT5nm`, the Linux standalone default.
+const NORMAL_MAP_DXT5NM: u32 = 1;
+/// `LightmapEncodingQuality::High` and `HDRCubemapEncodingQuality::High`,
+/// the Linux standalone defaults.
+const ENCODING_QUALITY_HIGH: u32 = 2;
+
 /// Bump this revision whenever the pinned importer wire environment changes.
-pub const WORKER_ENVIRONMENT_REVISION: &str = "6000.6.3f1-linux-native-environment-v2";
+pub const WORKER_ENVIRONMENT_REVISION: &str = "6000.6.3f1-linux-native-environment-v3";
 
 pub fn run_native_environment_cli(args: &[String]) -> Result<()> {
     let mut flags = FlagSet::new("native-environment");
@@ -107,8 +122,80 @@ pub fn read_worker_environment(project: &str) -> Result<WorkerEnvironment> {
     }
     let mut environment = parse_worker_environment(&data)?;
     environment.settings_sha256 = sha256(&data);
+    let editor = read_editor_settings(project)?;
+    environment.bc7_compressor = editor.bc7_compressor;
+    environment.sprite_atlas_v2 = editor.sprite_atlas_v2;
+    environment.editor_settings_sha256 = editor.sha256;
     Ok(environment)
 }
+
+/// What an import takes from `ProjectSettings/EditorSettings.asset`.
+pub(crate) struct EditorImportSettings {
+    /// Empty when the project has no such file.
+    pub sha256: String,
+    pub bc7_compressor: u32,
+    pub sprite_atlas_v2: u32,
+}
+
+pub(crate) const EDITOR_SETTINGS: &str = "ProjectSettings/EditorSettings.asset";
+
+/// A project without the file gets the values the Editor writes into a new
+/// one: the default BC7 compressor and no sprite packing.
+pub(crate) fn read_editor_settings(project: &str) -> Result<EditorImportSettings> {
+    let filename = sysutil::join(&[project, EDITOR_SETTINGS]);
+    let info = match stat(&filename) {
+        Ok(info) => info,
+        Err(error) if super::support::is_not_exist(&error) => {
+            return Ok(EditorImportSettings {
+                sha256: String::new(),
+                bc7_compressor: BC7_ISPC,
+                sprite_atlas_v2: 0,
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    if !info.is_regular() || info.size > 1 << 20 {
+        bail!("native worker EditorSettings is not bounded source text");
+    }
+    let data = read_file(&filename)?;
+    let documents = match parse_unity_yaml(&data) {
+        Ok(documents)
+            if documents.len() == 1
+                && documents[0].class_id == 159
+                && documents[0].type_name == "EditorSettings" =>
+        {
+            documents
+        }
+        _ => bail!("native worker requires one authored EditorSettings document"),
+    };
+    let settings = documents[0].fields();
+    let bc7_compressor = match get(settings, "m_Bc7TextureCompressor") {
+        // `EditorSettings::GetEffectiveBc7TextureCompressor` reads the
+        // authored Default (0) as ISPC; explicit values are kept.
+        Value::Int(0) | Value::Null => BC7_ISPC,
+        Value::Int(value @ 1..=2) => *value as u32,
+        other => bail!(
+            "unsupported pinned BC7 compressor setting: {}",
+            crate::project::value::sprint(other)
+        ),
+    };
+    let sprite_atlas_v2 = match get(settings, "m_SpritePackerMode") {
+        Value::Int(5) => 1,
+        Value::Int(0..=6) | Value::Null => 0,
+        other => bail!(
+            "unsupported sprite packer mode: {}",
+            crate::project::value::sprint(other)
+        ),
+    };
+    Ok(EditorImportSettings {
+        sha256: sha256(&data),
+        bc7_compressor,
+        sprite_atlas_v2,
+    })
+}
+
+/// `EditorSettings::Bc7TextureCompressor::Ispc`.
+const BC7_ISPC: u32 = 2;
 
 pub fn parse_worker_environment(data: &[u8]) -> Result<WorkerEnvironment> {
     if data.len() > 1 << 20 {
@@ -142,8 +229,35 @@ pub fn parse_worker_environment(data: &[u8]) -> Result<WorkerEnvironment> {
         color_space: color,
         graphics_api_mask: 1 << 17 | 1 << 21,
         shader_precision_model: precision,
+        bc7_compressor: BC7_ISPC,
         ..Default::default()
     };
+    // The encodings a texture importer asks for are sent as the standalone
+    // defaults; a project that sets one for the standalone target was not
+    // compared with the Editor.
+    for (field, what) in [
+        ("m_BuildTargetNormalMapEncoding", "normal map encoding"),
+        (
+            "m_BuildTargetGroupLightmapEncodingQuality",
+            "lightmap encoding quality",
+        ),
+        (
+            "m_BuildTargetGroupHDRCubemapEncodingQuality",
+            "HDR cubemap encoding quality",
+        ),
+    ] {
+        let entries = match get(settings, field) {
+            Value::Array(entries) if entries.len() <= 64 => entries,
+            Value::Null => continue,
+            _ => bail!("native worker {what} settings are unsupported"),
+        };
+        for item in entries {
+            match item.field("m_BuildTarget") {
+                Value::String(name) if name != "Standalone" => {}
+                _ => bail!("native worker requires the default standalone {what}"),
+            }
+        }
+    }
     let apis = match get(settings, "m_BuildTargetGraphicsAPIs") {
         Value::Array(apis) if apis.len() <= 64 => apis,
         _ => {
@@ -239,32 +353,42 @@ impl WorkerEnvironment {
         put_u32(&mut payload, 28, self.color_space);
         put_u32(&mut payload, 32, self.graphics_api_mask);
         put_u32(&mut payload, 36, 1); // Unity 6 latest scripting runtime.
-        let keys = [
-            "graphics/shader-precision-model",
-            "graphics/metal-needs-renderpass-fbfetch-fallback",
-            "graphics/texture-import-overrides",
-            "graphics/default-texture-compression-format",
+        // Each value is what the pinned Editor registers for the key
+        // (`RefreshInternalV2`): a setting plus one in the first byte of a
+        // Hash128, so that zero stays "not registered". An importer that
+        // asks for a key the message lacks aborts the worker.
+        let one = |value: u32| [1u8.wrapping_add(value as u8), 0];
+        let keys: [(&str, [u8; 2]); 11] = [
+            (
+                "graphics/shader-precision-model",
+                one(self.shader_precision_model),
+            ),
+            // Linux cannot require the Metal renderpass fallback.
+            ("graphics/metal-needs-renderpass-fbfetch-fallback", one(0)),
+            // Valid marker, optional log2(maxSize)+1 and compression
+            // override. This coordinator uses no overrides.
+            ("graphics/texture-import-overrides", one(0)),
+            (
+                "graphics/default-texture-compression-format",
+                one(self.default_texture_compression_format),
+            ),
+            ("graphics/texture-platform-settings", one(0)),
+            ("graphics/active-color-space", one(1 + self.color_space)),
+            ("graphics/normal-map-encoding", one(NORMAL_MAP_DXT5NM)),
+            ("graphics/lightmap-encoding", one(ENCODING_QUALITY_HIGH)),
+            ("graphics/hdr-cubemap-encoding", one(ENCODING_QUALITY_HIGH)),
+            // Valid marker, then the effective compressor.
+            ("graphics/bc7-compressor", [1, self.bc7_compressor as u8]),
+            ("2d/spriteatlas-import-mode", one(self.sprite_atlas_v2)),
         ];
         put_u32(&mut payload, 44, 96 - 44);
         put_u32(&mut payload, 48, keys.len() as u32);
         payload.resize(96 + keys.len() * 24, 0);
-        for (index, key) in keys.iter().enumerate() {
+        for (index, (key, value)) in keys.iter().enumerate() {
             let start = 96 + index * 24;
             let relative = (payload.len() - start) as u32;
             put_u32(&mut payload, start, relative);
-            // Unity stores enum/bool+1 in the first Hash128 byte for these keys.
-            // Linux cannot require the Metal renderpass fallback, hence false+1.
-            payload[start + 8] = 1;
-            if index == 0 {
-                payload[start + 8] =
-                    payload[start + 8].wrapping_add(self.shader_precision_model as u8);
-            }
-            // Native producer packs valid marker, optional log2(maxSize)+1, and
-            // compression override. This coordinator explicitly uses no overrides.
-            if index == 3 {
-                payload[start + 8] =
-                    payload[start + 8].wrapping_add(self.default_texture_compression_format as u8);
-            }
+            payload[start + 8..start + 10].copy_from_slice(value);
             payload.extend_from_slice(key.as_bytes());
             payload.push(0);
         }

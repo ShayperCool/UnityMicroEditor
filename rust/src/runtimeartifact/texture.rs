@@ -104,6 +104,31 @@ pub fn read_texture_resources(
     data: &[u8],
     tree: &[u8],
 ) -> Result<(Vec<Resource>, TextureMetadata)> {
+    let (resources, m) = walk_texture(data, tree)?;
+    if m.width <= 0
+        || m.height <= 0
+        || m.width > 32768
+        || m.height > 32768
+        || m.format <= 0
+        || m.mip_count <= 0
+        || m.mip_count > 16
+    {
+        bail!("native Texture2D dimensions, format or mip count are invalid");
+    }
+    Ok((resources, m))
+}
+
+/// The streamed resources of a texture of another shape (an array or a
+/// volume), whose format is a graphics format and not a texture format.
+pub fn read_shaped_texture_resources(data: &[u8], tree: &[u8]) -> Result<Vec<Resource>> {
+    let (resources, m) = walk_texture(data, tree)?;
+    if m.width <= 0 || m.height <= 0 || m.width > 32768 || m.height > 32768 || m.mip_count <= 0 {
+        bail!("native texture dimensions or mip count are invalid");
+    }
+    Ok(resources)
+}
+
+fn walk_texture(data: &[u8], tree: &[u8]) -> Result<(Vec<Resource>, TextureMetadata)> {
     if tree.len() < 16 {
         bail!("native Texture2D type tree is missing");
     }
@@ -124,17 +149,6 @@ pub fn read_texture_resources(
     walk.walk(0)?;
     if walk.r.pos != data.len() {
         bail!("native Texture2D payload does not match its inline type tree");
-    }
-    let m = &walk.metadata;
-    if m.width <= 0
-        || m.height <= 0
-        || m.width > 32768
-        || m.height > 32768
-        || m.format <= 0
-        || m.mip_count <= 0
-        || m.mip_count > 16
-    {
-        bail!("native Texture2D dimensions, format or mip count are invalid");
     }
     Ok((walk.resources, walk.metadata))
 }
