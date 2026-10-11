@@ -3,7 +3,9 @@
 //! holds the mixer, the groups and the snapshots; the effects and every value
 //! of a snapshot move into the mixer's `AudioMixerConstant`, which the Editor
 //! derives during a build (`BuildAudioMixerConstant`). This module restates
-//! that derivation as it was observed on engine-built mixers.
+//! that derivation as it was observed on engine-built mixers. One value a
+//! build leaves undefined is written as its effect declares it; see
+//! `Unstored::Declared`.
 //!
 //! Every value a snapshot can hold has an index: the volume and the pitch of
 //! each group, the groups taken depth first from the master, then per effect
@@ -38,9 +40,20 @@ const SILENT: f32 = -80.0;
 /// `ParameterTransitionType` has seven members.
 const TRANSITION_TYPES: i64 = 7;
 
-/// A parameter of a built-in effect and the value a snapshot that does not
-/// store it gets. `None`: the engine leaves that value uninitialized.
-type Parameter = (&'static str, Option<f32>);
+/// The value a snapshot gets for a parameter it does not store.
+#[derive(Clone, Copy)]
+enum Unstored {
+    /// What an engine build writes.
+    Built(f32),
+    /// A build writes memory nothing has set, another value in every Editor
+    /// run: the effect declares the parameter but neither keeps nor returns
+    /// it. Baked as the default the effect declares for it.
+    Declared(f32),
+}
+use Unstored::{Built, Declared};
+
+/// A parameter of a built-in effect and its default.
+type Parameter = (&'static str, Unstored);
 
 /// The effects built into the pinned engine: name, the type the Player knows
 /// it by, and its parameters in the engine's order. The defaults are those of
@@ -54,122 +67,124 @@ static EFFECTS: [(&str, i64, &[Parameter]); 17] = [
         DUCK_VOLUME,
         -5,
         &[
-            ("Threshold", Some(-10.0)),
-            ("Ratio", Some(2.0)),
-            ("Attack Time", Some(0.1)),
-            ("Release Time", Some(0.3)),
-            ("Make-up Gain", Some(0.0)),
-            ("Knee", Some(10.0)),
-            ("Sidechain Mix", Some(1.0)),
+            ("Threshold", Built(-10.0)),
+            ("Ratio", Built(2.0)),
+            ("Attack Time", Built(0.1)),
+            ("Release Time", Built(0.3)),
+            ("Make-up Gain", Built(0.0)),
+            ("Knee", Built(10.0)),
+            ("Sidechain Mix", Built(1.0)),
         ],
     ),
     (
         "Lowpass",
         3,
-        &[("Cutoff freq", Some(5000.0)), ("Resonance", Some(1.0))],
+        &[("Cutoff freq", Built(5000.0)), ("Resonance", Built(1.0))],
     ),
     (
         "Highpass",
         5,
-        &[("Cutoff freq", Some(5000.0)), ("Resonance", Some(1.0))],
+        &[("Cutoff freq", Built(5000.0)), ("Resonance", Built(1.0))],
     ),
     (
         "Echo",
         6,
         &[
-            ("Delay", Some(500.0)),
-            ("Decay", Some(0.0)),
-            ("Max channels", Some(0.0)),
-            ("Drymix", Some(1.0)),
-            ("Wetmix", Some(1.0)),
+            ("Delay", Built(500.0)),
+            ("Decay", Built(0.0)),
+            ("Max channels", Built(0.0)),
+            ("Drymix", Built(1.0)),
+            ("Wetmix", Built(1.0)),
         ],
     ),
     (
         "Flange",
         7,
         &[
-            ("Drymix", Some(0.45)),
-            ("Wetmix", Some(0.55)),
-            ("Depth", Some(1.0)),
-            ("Rate", Some(0.1)),
+            ("Drymix", Built(0.45)),
+            ("Wetmix", Built(0.55)),
+            ("Depth", Built(1.0)),
+            ("Rate", Built(0.1)),
         ],
     ),
-    ("Distortion", 8, &[("Level", Some(0.5))]),
+    ("Distortion", 8, &[("Level", Built(0.5))]),
     (
         "Normalize",
         9,
         &[
-            ("Fade in time", Some(5000.0)),
-            ("Lowest volume", Some(0.1)),
-            ("Maximum amp", Some(20.0)),
+            ("Fade in time", Built(5000.0)),
+            ("Lowest volume", Built(0.1)),
+            ("Maximum amp", Built(20.0)),
         ],
     ),
     (
         "ParamEQ",
         10,
         &[
-            ("Center freq", Some(8000.0)),
-            ("Octave range", Some(1.0)),
-            ("Frequency gain", Some(1.0)),
+            ("Center freq", Built(8000.0)),
+            ("Octave range", Built(1.0)),
+            ("Frequency gain", Built(1.0)),
         ],
     ),
     (
         "Pitch Shifter",
         11,
         &[
-            ("Pitch", Some(1.0)),
-            ("FFT size", Some(1024.0)),
-            ("Overlap", Some(4.0)),
-            ("Max channels", Some(0.0)),
+            ("Pitch", Built(1.0)),
+            ("FFT size", Built(1024.0)),
+            ("Overlap", Built(4.0)),
+            ("Max channels", Built(0.0)),
         ],
     ),
     (
         "Chorus",
         12,
         &[
-            ("Dry mix", Some(0.5)),
-            ("Wet mix tap 1", Some(0.5)),
-            ("Wet mix tap 2", Some(0.5)),
-            ("Wet mix tap 3", Some(0.5)),
-            ("Delay", Some(40.0)),
-            ("Rate", Some(0.8)),
-            ("Depth", Some(0.03)),
-            // Differs from one Editor run to the next.
-            ("Feedback", None),
+            ("Dry mix", Built(0.5)),
+            ("Wet mix tap 1", Built(0.5)),
+            ("Wet mix tap 2", Built(0.5)),
+            ("Wet mix tap 3", Built(0.5)),
+            ("Delay", Built(40.0)),
+            ("Rate", Built(0.8)),
+            ("Depth", Built(0.03)),
+            // FMOD's chorus lists eight parameters and handles seven: the
+            // Editor asks a new effect for its values to learn the defaults,
+            // and for this one gets back a variable nothing wrote.
+            ("Feedback", Declared(0.0)),
         ],
     ),
     (
         "Compressor",
         16,
         &[
-            ("Threshold", Some(0.0)),
-            ("Attack", Some(50.0)),
-            ("Release", Some(50.0)),
-            ("Make up gain", Some(0.0)),
+            ("Threshold", Built(0.0)),
+            ("Attack", Built(50.0)),
+            ("Release", Built(50.0)),
+            ("Make up gain", Built(0.0)),
         ],
     ),
     (
         "SFX Reverb",
         17,
         &[
-            ("Dry Level", Some(0.0)),
-            ("Room", Some(-10000.0)),
-            ("Room HF", Some(0.0)),
-            ("Decay Time", Some(1.0)),
-            ("Decay HF Ratio", Some(0.5)),
-            ("Reflections", Some(-10000.0)),
-            ("Reflect Delay", Some(0.02)),
-            ("Reverb", Some(0.0)),
-            ("Reverb Delay", Some(0.04)),
-            ("Diffusion", Some(100.0)),
-            ("Density", Some(100.0)),
-            ("HF Reference", Some(5000.0)),
-            ("Room LF", Some(0.0)),
-            ("LF Reference", Some(250.0)),
+            ("Dry Level", Built(0.0)),
+            ("Room", Built(-10000.0)),
+            ("Room HF", Built(0.0)),
+            ("Decay Time", Built(1.0)),
+            ("Decay HF Ratio", Built(0.5)),
+            ("Reflections", Built(-10000.0)),
+            ("Reflect Delay", Built(0.02)),
+            ("Reverb", Built(0.0)),
+            ("Reverb Delay", Built(0.04)),
+            ("Diffusion", Built(100.0)),
+            ("Density", Built(100.0)),
+            ("HF Reference", Built(5000.0)),
+            ("Room LF", Built(0.0)),
+            ("LF Reference", Built(250.0)),
         ],
     ),
-    ("Lowpass Simple", 18, &[("Cutoff freq", Some(5000.0))]),
-    ("Highpass Simple", 22, &[("Cutoff freq", Some(1000.0))]),
+    ("Lowpass Simple", 18, &[("Cutoff freq", Built(5000.0))]),
+    ("Highpass Simple", 22, &[("Cutoff freq", Built(1000.0))]),
 ];
 
 /// A GUID as the engine holds it: four integers, each written in the source
@@ -284,8 +299,7 @@ struct Effect<'a> {
 /// One value of a snapshot.
 struct Slot {
     guid: Guid,
-    /// `None` when the engine has no defined default for it.
-    default: Option<f32>,
+    default: Unstored,
     what: String,
 }
 
@@ -309,6 +323,27 @@ pub(super) fn bake(
     documents: &[Document],
     trees: [&TypeTree; 3],
 ) -> Result<(Vec<NativeObject>, Vec<External>)> {
+    let (objects, externals, _) = derive(documents, trees)?;
+    Ok((objects, externals))
+}
+
+/// The values of a mixer source that an engine build leaves undefined, each
+/// as the position of its snapshot in the mixer's list and its index among
+/// the snapshot's values. The baker writes the default the effect declares
+/// there; a build writes something else every time.
+pub fn mixer_undefined_values(yaml: &[u8]) -> Result<Vec<(usize, usize)>> {
+    let documents = crate::yaml::parse_unity_yaml_lexical(yaml)?;
+    let trees = [
+        super::native_tree(MIXER)?,
+        super::native_tree(GROUP)?,
+        super::native_tree(SNAPSHOT)?,
+    ];
+    Ok(derive(&documents, trees)?.2)
+}
+
+type Derived = (Vec<NativeObject>, Vec<External>, Vec<(usize, usize)>);
+
+fn derive(documents: &[Document], trees: [&TypeTree; 3]) -> Result<Derived> {
     let mut by_id: HashMap<i64, &Document> = HashMap::new();
     let mut ids = Vec::new();
     for document in documents {
@@ -391,7 +426,7 @@ pub(super) fn bake(
         for (key, default, what) in [("m_Volume", 0.0, "volume"), ("m_Pitch", 1.0, "pitch")] {
             slots.push(Slot {
                 guid: Guid::read(get(&group.data, key), key)?,
-                default: Some(default),
+                default: Built(default),
                 what: format!("the {what} of group {name:?}"),
             });
         }
@@ -466,7 +501,7 @@ pub(super) fn bake(
         let level = if wet {
             slots.push(Slot {
                 guid: Guid::read(get(effect.fields, "m_MixLevel"), "m_MixLevel")?,
-                default: Some(SILENT),
+                default: Built(SILENT),
                 what: format!("the level of a {} effect", effect.name),
             });
             slots.len() as u64 - 1
@@ -546,6 +581,7 @@ pub(super) fn bake(
     }
     let mut snapshots = Vec::new();
     let mut snapshot_constants = Vec::new();
+    let mut undefined = Vec::new();
     for &id in &snapshot_ids {
         let snapshot = of_class(id, SNAPSHOT, "the snapshot list")?;
         if snapshots
@@ -559,15 +595,13 @@ pub(super) fn bake(
             .into_iter()
             .collect();
         let mut values = Vec::with_capacity(slots.len());
-        for slot in &slots {
+        for (index, slot) in slots.iter().enumerate() {
             values.push(match (stored.get(&slot.guid), slot.default) {
                 (Some(value), _) => finite(value, &slot.what)?,
-                (None, Some(default)) => default,
-                (None, None) => {
-                    return Err(unsupported(format!(
-                        "snapshot {name:?} does not store {}, for which the engine has no defined default",
-                        slot.what
-                    )));
+                (None, Built(default)) => default,
+                (None, Declared(default)) => {
+                    undefined.push((snapshots.len(), index));
+                    default
                 }
             });
         }
@@ -744,5 +778,5 @@ pub(super) fn bake(
             data: tree.encode(&value)?,
         });
     }
-    Ok((objects, references.into_externals()))
+    Ok((objects, references.into_externals(), undefined))
 }
