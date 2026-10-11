@@ -876,9 +876,12 @@ fn compile(
     let mut variants = Vec::new();
     // A pass is enumerated by what materials use until one graphics API has
     // no more than one combination; every later API of the pass then gets
-    // all combinations, unstripped.
+    // all combinations, unstripped. A build visits the APIs by their number,
+    // whatever order the project lists them in.
     let mut by_usage = true;
-    for &platform in &project.platforms {
+    let mut platforms = project.platforms.clone();
+    platforms.sort_unstable();
+    for platform in platforms {
         if !PLATFORMS.contains(&platform) {
             return Err(unsupported(format!(
                 "the graphics API with compiler platform {platform}"
