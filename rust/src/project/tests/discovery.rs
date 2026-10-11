@@ -212,6 +212,68 @@ fn native_discovery_selects_every_texture_source_format() {
     }
 }
 
+#[test]
+fn native_discovery_selects_audio_and_text_sources_and_keeps_current_catalog_assets() {
+    for name in [
+        "Clip.ogg",
+        "Clip.mp3",
+        "Clip.aif",
+        "Clip.aiff",
+        "Clip.flac",
+        "Clip.OGG",
+        "Data.txt",
+        "Data.json",
+        "Data.bytes",
+        "Data.xml",
+        "Data.csv",
+        "Sky.hdr",
+    ] {
+        let fixture = fixture_session();
+        let logical = format!("Assets/{name}");
+        let source = format!("{}/{logical}", fixture.project);
+        write_fixture_file(&source, "native source bytes");
+        write_fixture_file(format!("{source}.meta"), AUTHORED_TEXTURE_META);
+        write_fixture_file(
+            &fixture.scene,
+            format!(
+                "{FIXTURE_SCENE}--- !u!114 &99\nMonoBehaviour:\n  target: {{fileID: 1, guid: 22222222222222222222222222222222, type: 3}}\n"
+            ),
+        );
+        let pending = fixture.session.pending_native_import_sources();
+        assert!(
+            pending
+                .as_ref()
+                .is_ok_and(|pending| *pending == strings(&[&logical])),
+            "{name} was not selected for its importer: {pending:?}"
+        );
+        // The catalog serves an unchanged source in whatever form it holds.
+        {
+            let mut s = fixture.session.lock();
+            let (_, source_sha) = s.read(&source, false).unwrap();
+            let (_, meta_sha) = s.read(&format!("{source}.meta"), true).unwrap();
+            s.critical.insert(logical.clone(), source_sha);
+            s.critical.insert(format!("{logical}.meta"), meta_sha);
+            let mut asset = Map::new();
+            asset.insert("guid".into(), "22222222222222222222222222222222".into());
+            asset.insert("classId".into(), Value::Int(89));
+            s.catalog.assets = vec![asset];
+        }
+        let pending = fixture.session.pending_native_import_sources();
+        assert!(
+            pending.as_ref().is_ok_and(Vec::is_empty),
+            "{name} is current in the catalog: {pending:?}"
+        );
+        write_fixture_file(&source, "changed native source bytes");
+        let pending = fixture.session.pending_native_import_sources();
+        assert!(
+            pending
+                .as_ref()
+                .is_ok_and(|pending| *pending == strings(&[&logical])),
+            "changed {name} was not selected: {pending:?}"
+        );
+    }
+}
+
 const LARGE_CLIP_GUID: &str = "22222222222222222222222222222222";
 const LATE_NATIVE_GUID: &str = "33333333333333333333333333333333";
 

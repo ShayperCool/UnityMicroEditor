@@ -7,7 +7,7 @@ use super::{
     value::{self, Map, Value, get, map_file_id, number},
 };
 use crate::cache::{FileRecord, Identity};
-use crate::runtimeartifact::texture_profile;
+use crate::runtimeartifact::{audio_profile, text_profile, texture_profile};
 use crate::yaml::MAX_TEXT_BYTES;
 use anyhow::{Result, anyhow, bail};
 use sha2::{Digest, Sha256};
@@ -610,15 +610,17 @@ impl Inner {
         if lexpath::equal_fold(lexpath::ext(logical), ".fbx") {
             return Ok(!current || self.models.get(&guid).is_none_or(|d| d.is_empty()));
         }
+        // An unchanged source the session or the catalog already serves stays
+        // there, whatever form the catalog holds it in (a cubemap, for one).
         if current
-            && self
+            && (self.assets.values().any(|asset| {
+                value::text(asset, "guid") == guid
+                    && matches!(number(get(asset, "classId")), 83 | 28 | 49)
+            }) || self
+                .catalog
                 .assets
-                .values()
-                .chain(&self.catalog.assets)
-                .any(|asset| {
-                    value::text(asset, "guid") == guid
-                        && matches!(number(get(asset, "classId")), 83 | 28)
-                })
+                .iter()
+                .any(|asset| value::text(asset, "guid") == guid))
         {
             return Ok(false);
         }
@@ -658,11 +660,15 @@ impl Inner {
                 bail!("authored native dependency closure exceeds supported source bound");
             }
             match lexpath::lower_ext(&logical).as_str() {
-                ".fbx" | ".wav" => {
+                ".fbx" => {
                     heavy.insert(logical);
                     continue;
                 }
-                extension if texture_profile(extension.trim_start_matches('.')) => {
+                extension
+                    if texture_profile(extension.trim_start_matches('.'))
+                        || audio_profile(extension.trim_start_matches('.'))
+                        || text_profile(extension.trim_start_matches('.')) =>
+                {
                     heavy.insert(logical);
                     continue;
                 }
