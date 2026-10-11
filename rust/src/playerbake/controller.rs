@@ -18,7 +18,7 @@ use super::{
         STATE_MACHINE_BEHAVIOUR, ScriptLayout, ScriptType,
     },
     mask::{Mask, mask_of},
-    serialized::{External, Object},
+    serialized::{External, Object, ReferenceType},
     source::{flag, float, get, int, list, object, text},
     typetree::{TypeTree, Val},
     unsupported,
@@ -242,6 +242,9 @@ pub struct Behaviour {
     /// The references of its fields that were left null for the caller to
     /// bind.
     pub deferred: Vec<DeferredReference>,
+    /// The classes of the objects it holds by managed reference, as
+    /// positions in the `ScriptType::managed_types` of its script.
+    pub managed: Vec<usize>,
 }
 
 /// A baked file and the references its objects could not hold.
@@ -1317,6 +1320,7 @@ pub fn bake_controller_object(
             script: attached.script,
             data: encoded.data,
             deferred: encoded.deferred,
+            managed: encoded.managed,
         });
     }
     let names = builder
@@ -1658,14 +1662,18 @@ pub fn bake_controller(yaml: &[u8], sources: &dyn ControllerSources) -> Result<B
         controller.file_id.clone(),
         "UnityEngine.RuntimeAnimatorController".to_string(),
     )];
-    let mut objects = vec![Object {
-        local_id,
-        tree: controller_tree()?,
-        data: baked.data,
-        script: None,
-    }];
+    // Each object with the classes of what it holds by managed reference.
+    let mut objects = vec![(
+        Object {
+            local_id,
+            tree: controller_tree()?,
+            data: baked.data,
+            script: None,
+        },
+        Vec::new(),
+    )];
     for (identity, layout) in &baked.scripts {
-        objects.push(identity.object(layout.properties_hash)?);
+        objects.push((identity.object(layout.properties_hash)?, Vec::new()));
     }
     let mut deferred = Vec::new();
     for behaviour in baked.behaviours {
@@ -1692,16 +1700,33 @@ pub fn bake_controller(yaml: &[u8], sources: &dyn ControllerSources) -> Result<B
                     kind: reference.kind,
                 }),
         );
-        objects.push(Object {
-            local_id,
-            tree: &layout.tree,
-            data: behaviour.data,
-            script: Some(identity.local_id),
-        });
+        let held = behaviour
+            .managed
+            .iter()
+            .map(|&position| {
+                let kind = &layout.managed_types()[position];
+                ReferenceType {
+                    class_name: &kind.class_name,
+                    namespace: &kind.namespace,
+                    assembly: &kind.assembly,
+                    blob: &kind.blob,
+                }
+            })
+            .collect();
+        objects.push((
+            Object {
+                local_id,
+                tree: &layout.tree,
+                data: behaviour.data,
+                script: Some(identity.local_id),
+            },
+            held,
+        ));
     }
     // A build lists the objects of a file by their IDs.
-    objects.sort_by_key(|object| object.local_id);
-    let file = super::serialized::write(&objects, &baked.externals)?;
+    objects.sort_by_key(|(object, _)| object.local_id);
+    let (objects, held): (Vec<_>, Vec<_>) = objects.into_iter().unzip();
+    let file = super::serialized::write_with_references(&objects, &baked.externals, &held)?;
     Ok(BakedObjects {
         baked: super::Baked {
             file,

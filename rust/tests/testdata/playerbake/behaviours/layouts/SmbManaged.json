@@ -3,6 +3,86 @@
  "namespace": "",
  "assembly": "Assembly-CSharp",
  "baseKind": "StateMachineBehaviour",
- "unsupported": "field shape is a managed reference",
- "fields": []
+ "bases": [
+  "UnityEngine.StateMachineBehaviour",
+  "UnityEngine.ScriptableObject",
+  "UnityEngine.Object"
+ ],
+ "overridesStateMachineCallbacks": false,
+ "fields": [
+  {
+   "name": "before",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "shape",
+   "type": {
+    "kind": "managedReference",
+    "name": "IShape"
+   }
+  },
+  {
+   "name": "shapes",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "managedReference",
+     "name": "IShape"
+    }
+   }
+  },
+  {
+   "name": "none",
+   "type": {
+    "kind": "managedReference",
+    "name": "IShape"
+   }
+  },
+  {
+   "name": "after",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  }
+ ],
+ "managedTypes": [
+  {
+   "className": "Box",
+   "namespace": "",
+   "assembly": "Assembly-CSharp",
+   "fields": [
+    {
+     "name": "size",
+     "type": {
+      "kind": "unity",
+      "name": "Vector2"
+     }
+    },
+    {
+     "name": "label",
+     "type": {
+      "kind": "string"
+     }
+    }
+   ]
+  },
+  {
+   "className": "Circle",
+   "namespace": "",
+   "assembly": "Assembly-CSharp",
+   "fields": [
+    {
+     "name": "r",
+     "type": {
+      "kind": "primitive",
+      "name": "float"
+     }
+    }
+   ]
+  }
+ ]
 }
