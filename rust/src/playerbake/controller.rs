@@ -1496,8 +1496,6 @@ pub fn read_mask(yaml: &[u8]) -> Result<Mask> {
 /// such an object to the loaded class by name. The behaviours are published
 /// beside the controller, each as an object of its class.
 pub fn bake_controller(yaml: &[u8], sources: &dyn ControllerSources) -> Result<super::Baked> {
-    // Names and behaviour fields are free text.
-    super::source::refuse_comment_marks(yaml)?;
     let documents = crate::yaml::parse_unity_yaml_lexical(yaml)?;
     let Some(controller) = documents.iter().find(|document| document.class_id == 91) else {
         bail!("controller source does not hold an AnimatorController");

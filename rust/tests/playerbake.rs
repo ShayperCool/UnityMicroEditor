@@ -891,17 +891,21 @@ fn baked_controller_carries_its_behaviours_and_their_scripts() {
 }
 
 /// The Editor writes `Attack #2` without quotes and the engine reads it back
-/// whole, where YAML sees a comment. Such a source is refused.
+/// whole, where YAML sees a comment. The reader keeps such a value.
 #[test]
-fn text_yaml_reads_as_a_comment_is_refused() {
+fn text_yaml_reads_as_a_comment_is_kept() {
     let root = fixture("behaviours");
     let fixtures = BehaviourFixtures::open(root.clone());
     let source = fs::read(root.join("Assets/One/S01_Single.controller")).unwrap();
     let source = String::from_utf8(source).unwrap();
     assert!(source.contains("tag: single"));
-    let marked = source.replace("tag: single", "tag: single #2");
-    let refused = playerbake::bake_controller(marked.as_bytes(), &fixtures).unwrap_err();
-    assert!(refused.is::<Unsupported>(), "{refused:#}");
+    let plain = source.replace("tag: single", "tag: single #2");
+    let quoted = source.replace("tag: single", "tag: 'single #2'");
+    let plain = playerbake::bake_controller(plain.as_bytes(), &fixtures).unwrap();
+    let quoted = playerbake::bake_controller(quoted.as_bytes(), &fixtures).unwrap();
+    assert!(plain.file == quoted.file);
+    let whole = playerbake::bake_controller(source.as_bytes(), &fixtures).unwrap();
+    assert!(plain.file != whole.file);
 }
 
 /// Compares the controllers of a directory laid out like the behaviour
