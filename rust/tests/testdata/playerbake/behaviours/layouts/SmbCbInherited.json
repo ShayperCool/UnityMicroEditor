@@ -1,0 +1,16 @@
+{
+ "className": "SmbCbInherited",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "overridesStateMachineCallbacks": false,
+ "fields": [
+  {
+   "name": "own",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  }
+ ]
+}

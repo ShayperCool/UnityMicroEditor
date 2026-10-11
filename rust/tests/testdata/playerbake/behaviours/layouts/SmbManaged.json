@@ -1,0 +1,8 @@
+{
+ "className": "SmbManaged",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "unsupported": "field shape is a managed reference",
+ "fields": []
+}

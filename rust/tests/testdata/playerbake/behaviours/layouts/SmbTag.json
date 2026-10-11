@@ -1,0 +1,22 @@
+{
+ "className": "SmbTag",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "overridesStateMachineCallbacks": false,
+ "fields": [
+  {
+   "name": "tag",
+   "type": {
+    "kind": "string"
+   }
+  },
+  {
+   "name": "n",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  }
+ ]
+}

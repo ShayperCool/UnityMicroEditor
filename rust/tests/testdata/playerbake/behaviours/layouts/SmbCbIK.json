@@ -1,0 +1,8 @@
+{
+ "className": "SmbCbIK",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "overridesStateMachineCallbacks": false,
+ "fields": []
+}

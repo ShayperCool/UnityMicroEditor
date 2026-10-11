@@ -1,0 +1,189 @@
+{
+ "className": "SmbPrims",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "overridesStateMachineCallbacks": false,
+ "fields": [
+  {
+   "name": "i",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "u",
+   "type": {
+    "kind": "primitive",
+    "name": "uint"
+   }
+  },
+  {
+   "name": "l",
+   "type": {
+    "kind": "primitive",
+    "name": "long"
+   }
+  },
+  {
+   "name": "ul",
+   "type": {
+    "kind": "primitive",
+    "name": "ulong"
+   }
+  },
+  {
+   "name": "s",
+   "type": {
+    "kind": "primitive",
+    "name": "short"
+   }
+  },
+  {
+   "name": "us",
+   "type": {
+    "kind": "primitive",
+    "name": "ushort"
+   }
+  },
+  {
+   "name": "b",
+   "type": {
+    "kind": "primitive",
+    "name": "byte"
+   }
+  },
+  {
+   "name": "sb",
+   "type": {
+    "kind": "primitive",
+    "name": "sbyte"
+   }
+  },
+  {
+   "name": "flag",
+   "type": {
+    "kind": "primitive",
+    "name": "bool"
+   }
+  },
+  {
+   "name": "f",
+   "type": {
+    "kind": "primitive",
+    "name": "float"
+   }
+  },
+  {
+   "name": "d",
+   "type": {
+    "kind": "primitive",
+    "name": "double"
+   }
+  },
+  {
+   "name": "c",
+   "type": {
+    "kind": "primitive",
+    "name": "char"
+   }
+  },
+  {
+   "name": "str",
+   "type": {
+    "kind": "string"
+   }
+  },
+  {
+   "name": "b1",
+   "type": {
+    "kind": "primitive",
+    "name": "bool"
+   }
+  },
+  {
+   "name": "b2",
+   "type": {
+    "kind": "primitive",
+    "name": "bool"
+   }
+  },
+  {
+   "name": "b3",
+   "type": {
+    "kind": "primitive",
+    "name": "byte"
+   }
+  },
+  {
+   "name": "s2",
+   "type": {
+    "kind": "primitive",
+    "name": "short"
+   }
+  },
+  {
+   "name": "b4",
+   "type": {
+    "kind": "primitive",
+    "name": "bool"
+   }
+  },
+  {
+   "name": "str2",
+   "type": {
+    "kind": "string"
+   }
+  },
+  {
+   "name": "b5",
+   "type": {
+    "kind": "primitive",
+    "name": "bool"
+   }
+  },
+  {
+   "name": "c2",
+   "type": {
+    "kind": "primitive",
+    "name": "char"
+   }
+  },
+  {
+   "name": "c3",
+   "type": {
+    "kind": "primitive",
+    "name": "char"
+   }
+  },
+  {
+   "name": "sb2",
+   "type": {
+    "kind": "primitive",
+    "name": "sbyte"
+   }
+  },
+  {
+   "name": "d2",
+   "type": {
+    "kind": "primitive",
+    "name": "double"
+   }
+  },
+  {
+   "name": "b6",
+   "type": {
+    "kind": "primitive",
+    "name": "byte"
+   }
+  },
+  {
+   "name": "l2",
+   "type": {
+    "kind": "primitive",
+    "name": "long"
+   }
+  }
+ ]
+}

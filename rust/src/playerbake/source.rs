@@ -67,6 +67,23 @@ pub(crate) fn flag(value: &Value, what: &str) -> Result<bool> {
     Ok(int(value, what)? != 0)
 }
 
+/// Refuses a source in which the YAML reader would drop text the engine
+/// keeps. The engine reads a `#` after a blank as part of a plain value, and
+/// the Editor writes such a value without quotes; to the reader used here the
+/// `#` starts a comment.
+pub(crate) fn refuse_comment_marks(yaml: &[u8]) -> Result<()> {
+    let mut previous = b'\n';
+    for &byte in yaml {
+        if byte == b'#' && matches!(previous, b' ' | b'\t' | b'\n') {
+            return Err(unsupported(
+                "authored text with a `#` that YAML reads as the start of a comment",
+            ));
+        }
+        previous = byte;
+    }
+    Ok(())
+}
+
 /// Whether an object reference is `{fileID: 0}` or absent.
 pub(crate) fn null_reference(value: &Value) -> Result<bool> {
     match value {

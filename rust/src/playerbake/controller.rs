@@ -6,9 +6,15 @@
 //! every layer's states become one array, entry and exit nodes become selector
 //! states, motions become blend tree node arrays over a clip list, and names
 //! become CRC-32 hashes with a hash-to-string table beside them.
+//!
+//! State machine behaviours are the exception: they stay objects. The
+//! controller lists them and records, per state and per state machine, which
+//! entries of the list it runs.
 use super::{
+    clip::ScriptIdentity,
     controller_tree, crc32, freeform,
-    serialized::External,
+    managed::{References, ScriptLayout, ScriptType},
+    serialized::{External, Object},
     source::{flag, float, get, int, list, object, text},
     typetree::Val,
     unsupported,
@@ -60,10 +66,45 @@ pub struct Mask {
     pub transforms: Vec<(String, f32)>,
 }
 
+/// The script of a state machine behaviour: its class and the fields the
+/// class serializes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BehaviourScript {
+    pub identity: ScriptIdentity,
+    pub layout: ScriptLayout,
+}
+
 /// The other sources a controller's Player data is derived from.
 pub trait ControllerSources {
     fn clip(&self, guid: &str, file_id: &str) -> Result<ClipFacts>;
     fn mask(&self, guid: &str) -> Result<Mask>;
+    /// The script of a state machine behaviour, by script GUID. `None` is a
+    /// script the project does not have: the engine drops such a behaviour.
+    fn behaviour(&self, guid: &str) -> Result<Option<BehaviourScript>> {
+        Err(unsupported(format!(
+            "state machine behaviour of script {guid}"
+        )))
+    }
+}
+
+/// A behaviour object of a baked controller.
+pub struct Behaviour {
+    /// The authored file ID, which the baked object keeps.
+    pub file_id: String,
+    /// The position of its script in `Controller::scripts`.
+    pub script: usize,
+    pub data: Vec<u8>,
+}
+
+/// A baked `AnimatorController` object and what has to travel with it.
+pub struct Controller {
+    pub data: Vec<u8>,
+    /// The assets the controller and its behaviours refer to.
+    pub externals: Vec<External>,
+    /// The behaviours the controller points to, each once.
+    pub behaviours: Vec<Behaviour>,
+    /// The script classes of the behaviours and their Player layouts.
+    pub scripts: Vec<(ScriptIdentity, ScriptType)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +165,17 @@ struct Builder<'a> {
     externals: Vec<External>,
     machines: Vec<Machine>,
     states: Vec<State>,
+    /// The scripts of the behaviours met so far, by GUID, with the position
+    /// of each in `scripts`; `None` for one the project does not have.
+    script_guids: Vec<(String, Option<usize>)>,
+    scripts: Vec<(BehaviourScript, ScriptType)>,
+}
+
+/// One entry of a behaviour list: the behaviour's document and its script.
+#[derive(Clone)]
+struct Attached {
+    file_id: String,
+    script: usize,
 }
 
 impl<'a> Builder<'a> {
@@ -150,11 +202,55 @@ impl<'a> Builder<'a> {
         }
     }
 
-    fn refuse_behaviours(&self, fields: &Map<String, Value>, key: &str) -> Result<()> {
-        if !list(get(fields, key), key)?.is_empty() {
-            return Err(unsupported("state machine behaviours"));
+    fn script(&mut self, guid: &str) -> Result<Option<usize>> {
+        if let Some((_, known)) = self.script_guids.iter().find(|(known, _)| known == guid) {
+            return Ok(*known);
         }
-        Ok(())
+        let position = match self.sources.behaviour(guid)? {
+            Some(script) => {
+                let layout = ScriptType::new(&script.layout)?;
+                self.scripts.push((script, layout));
+                Some(self.scripts.len() - 1)
+            }
+            None => None,
+        };
+        self.script_guids.push((guid.to_string(), position));
+        Ok(position)
+    }
+
+    /// The behaviours of a state or state machine that the engine keeps. An
+    /// entry that is empty, leads nowhere or has no script is dropped.
+    fn attached(&mut self, fields: &Map<String, Value>) -> Result<Vec<Attached>> {
+        let key = "m_StateMachineBehaviours";
+        let mut result = Vec::new();
+        for item in list(get(fields, key), key)? {
+            let Some(file_id) = self.local(item, "state machine behaviour")? else {
+                continue;
+            };
+            let Some(document) = self
+                .documents
+                .get(file_id.as_str())
+                .filter(|document| document.class_id == 114)
+            else {
+                continue;
+            };
+            if document.stripped {
+                return Err(unsupported("state machine behaviour of a prefab"));
+            }
+            let Some(script) = reference(get(&document.data, "m_Script"))? else {
+                continue;
+            };
+            // Every script asset holds its MonoScript at this file ID.
+            if script.file_id != "11500000" || script.guid.is_empty() {
+                return Err(unsupported(
+                    "state machine behaviour whose script is not a source file",
+                ));
+            }
+            if let Some(script) = self.script(&script.guid)? {
+                result.push(Attached { file_id, script });
+            }
+        }
+        Ok(result)
     }
 
     /// Collects a state machine and its children in the engine's order: a
@@ -177,7 +273,6 @@ impl<'a> Builder<'a> {
             return Err(unsupported("more state machines than the baker bounds"));
         }
         let fields = self.document(file_id, 1107, "state machine")?;
-        self.refuse_behaviours(fields, "m_StateMachineBehaviours")?;
         let index = self.machines.len();
         self.machines.push(Machine {
             file_id: file_id.into(),
@@ -192,7 +287,6 @@ impl<'a> Builder<'a> {
                 continue;
             };
             let state_fields = self.document(&state, 1102, "state")?;
-            self.refuse_behaviours(state_fields, "m_StateMachineBehaviours")?;
             let state_name = clean(&text(get(state_fields, "m_Name"))?);
             own.push(State {
                 path: format!("{path}.{state_name}"),
@@ -598,11 +692,168 @@ struct Layer<'a> {
     machine_index: usize,
 }
 
-/// The serialized `AnimatorController` object and the assets it refers to.
+/// Which entries of the controller's behaviour list each state and state
+/// machine runs.
+#[derive(Default)]
+struct BehaviourTable {
+    list: Vec<Attached>,
+    /// Start and length of a run of `indices`, by path hash and layer.
+    ranges: BTreeMap<(u32, usize), (usize, usize)>,
+    indices: Vec<u32>,
+    /// Whether a state machine has a behaviour that follows its entry or
+    /// exit, which keeps the engine from evaluating the controller on a
+    /// worker thread.
+    machine_callbacks: bool,
+}
+
+impl BehaviourTable {
+    /// Appends behaviours to the list and returns their positions. Nothing
+    /// is shared: every reference gets an entry of its own.
+    fn append(&mut self, attached: Vec<Attached>) -> Vec<u32> {
+        let first = self.list.len() as u32;
+        self.list.extend(attached);
+        (first..self.list.len() as u32).collect()
+    }
+
+    fn record(&mut self, path: &str, layer: usize, run: &[u32]) -> Result<()> {
+        if run.is_empty() {
+            return Ok(());
+        }
+        let range = (self.indices.len(), run.len());
+        if self.ranges.insert((crc32(path), layer), range).is_some() {
+            return Err(unsupported(format!(
+                "state machine behaviours of two objects at {path}"
+            )));
+        }
+        self.indices.extend_from_slice(run);
+        Ok(())
+    }
+}
+
+/// Lists the behaviours layer by layer. A layer's state machines come first,
+/// parents before children, each with its own behaviours. Its states follow:
+/// a state runs the behaviours of every state machine around it, outermost
+/// first, and then its own.
+fn behaviour_table(builder: &mut Builder<'_>, layers: &[Layer<'_>]) -> Result<BehaviourTable> {
+    let mut table = BehaviourTable::default();
+    for (index, layer) in layers.iter().enumerate() {
+        // A synced layer walks the state machine it follows and replaces
+        // each state's own behaviours.
+        let source = layer.synced.map_or(layer, |source| &layers[source]);
+        let mut replaced = HashMap::new();
+        if layer.synced.is_some() {
+            for item in list(get(layer.fields, "m_Behaviours"), "m_Behaviours")? {
+                let entry = object(item, "m_Behaviours")?;
+                if let Some(state) = reference(get(entry, "m_State"))?
+                    && !replaced.contains_key(&state.file_id)
+                {
+                    replaced.insert(state.file_id, builder.attached(entry)?);
+                }
+            }
+        }
+        let machines = source.first_machine..source.first_machine + source.machine_count;
+        let mut runs: Vec<Vec<u32>> = Vec::new();
+        for machine in machines.clone() {
+            let fields =
+                builder.document(&builder.machines[machine].file_id, 1107, "state machine")?;
+            let attached = builder.attached(fields)?;
+            table.machine_callbacks |= attached.iter().any(|behaviour| {
+                builder.scripts[behaviour.script]
+                    .0
+                    .layout
+                    .overrides_state_machine_callbacks
+            });
+            let run = table.append(attached);
+            table.record(&builder.machines[machine].path, index, &run)?;
+            runs.push(run);
+        }
+        for machine in machines.clone() {
+            let mut inherited = Vec::new();
+            let mut ancestor = Some(machine);
+            while let Some(position) = ancestor {
+                inherited.splice(0..0, runs[position - machines.start].iter().copied());
+                ancestor = builder.machines[position].parent;
+            }
+            // In authored order: the default state is not moved here.
+            for state in authored_states(builder, machine)? {
+                let fields = builder.document(&state, 1102, "state")?;
+                let attached = if layer.synced.is_some() {
+                    replaced.get(&state).cloned().unwrap_or_default()
+                } else {
+                    builder.attached(fields)?
+                };
+                let mut run = inherited.clone();
+                run.extend(table.append(attached));
+                let name = clean(&text(get(fields, "m_Name"))?);
+                let path = format!("{}.{name}", builder.machines[machine].path);
+                table.record(&path, index, &run)?;
+            }
+        }
+    }
+    Ok(table)
+}
+
+/// Resolves the object references of behaviour fields. Only a clip has a
+/// baked form another file can point to.
+struct ClipReferences<'a> {
+    sources: &'a dyn ControllerSources,
+    externals: &'a mut Vec<External>,
+}
+
+impl References for ClipReferences<'_> {
+    fn pointer(
+        &mut self,
+        class_name: &str,
+        namespace: &str,
+        target: &Map<String, Value>,
+        path: &str,
+    ) -> Result<(i64, i64)> {
+        let refused = || {
+            unsupported(format!(
+                "behaviour field {path} refers to an object that is not an animation clip"
+            ))
+        };
+        let Some(target) = reference(&Value::Object(target.clone()))? else {
+            bail!("behaviour field {path} holds no reference");
+        };
+        let declared = namespace == "UnityEngine"
+            && matches!(class_name, "AnimationClip" | "Motion" | "Object");
+        if !declared || target.guid.is_empty() {
+            return Err(refused());
+        }
+        if let Err(error) = self.sources.clip(&target.guid, &target.file_id) {
+            return Err(if error.is::<super::Unsupported>() {
+                refused()
+            } else {
+                error
+            });
+        }
+        let Ok(path_id) = target.file_id.parse::<i64>() else {
+            bail!("behaviour field {path} holds an invalid file ID");
+        };
+        Ok((external(self.externals, &target.guid) as i64 + 1, path_id))
+    }
+}
+
+/// The position of an asset among the external references.
+fn external(externals: &mut Vec<External>, guid: &str) -> usize {
+    match externals.iter().position(|known| known.guid == guid) {
+        Some(position) => position,
+        None => {
+            externals.push(External {
+                guid: guid.to_string(),
+            });
+            externals.len() - 1
+        }
+    }
+}
+
+/// The serialized `AnimatorController` object, its behaviours and the assets
+/// they refer to.
 pub fn bake_controller_object(
     documents: &[Document],
     sources: &dyn ControllerSources,
-) -> Result<(Vec<u8>, Vec<External>)> {
+) -> Result<Controller> {
     let mut by_id = HashMap::new();
     for document in documents {
         by_id.insert(document.file_id.as_str(), document);
@@ -611,9 +862,6 @@ pub fn bake_controller_object(
     let (Some(controller), None) = (controllers.next(), controllers.next()) else {
         bail!("controller source does not hold exactly one AnimatorController");
     };
-    if documents.iter().any(|document| document.class_id == 114) {
-        return Err(unsupported("state machine behaviours"));
-    }
     let fields = &controller.data;
     let mut builder = Builder {
         documents: by_id,
@@ -623,6 +871,8 @@ pub fn bake_controller_object(
         externals: Vec::new(),
         machines: Vec::new(),
         states: Vec::new(),
+        script_guids: Vec::new(),
+        scripts: Vec::new(),
     };
     builder.id("GravityWeight");
 
@@ -631,13 +881,12 @@ pub fn bake_controller_object(
     let mut machine_count = 0;
     for item in authored {
         let layer = object(item, "m_AnimatorLayers")?;
-        builder.refuse_behaviours(layer, "m_Behaviours")?;
         let name = text(get(layer, "m_Name"))?;
         let synced = int(get(layer, "m_SyncedLayerIndex"), "layer")?;
         let (first_state, first_machine) = (builder.states.len(), builder.machines.len());
         let mut entry = Layer {
             fields: layer,
-            name: name.clone(),
+            name,
             synced: None,
             first_state,
             first_machine,
@@ -658,7 +907,12 @@ pub fn bake_controller_object(
             else {
                 return Err(unsupported("layer without a state machine"));
             };
-            builder.collect(&root, name.clone(), name, None)?;
+            // Paths start at the root state machine's own name, which the
+            // Editor keeps equal to the layer's and, unlike the names below
+            // it, writes with its dots.
+            let fields = builder.document(&root, 1107, "state machine")?;
+            let root_name = text(get(fields, "m_Name"))?;
+            builder.collect(&root, root_name.clone(), root_name, None)?;
             entry.state_count = builder.states.len() - first_state;
             entry.machine_count = builder.machines.len() - first_machine;
             entry.machine_index = machine_count;
@@ -813,19 +1067,7 @@ pub fn bake_controller_object(
 
     let mut clips = Vec::new();
     for clip in builder.clips.clone() {
-        let position = match builder
-            .externals
-            .iter()
-            .position(|external| external.guid == clip.guid)
-        {
-            Some(position) => position,
-            None => {
-                builder.externals.push(External {
-                    guid: clip.guid.clone(),
-                });
-                builder.externals.len() - 1
-            }
-        };
+        let position = external(&mut builder.externals, &clip.guid);
         let Ok(path_id) = clip.file_id.parse::<i64>() else {
             bail!("clip reference has an invalid file ID");
         };
@@ -833,6 +1075,65 @@ pub fn bake_controller_object(
             ("m_FileID", Val::I(position as i64 + 1)),
             ("m_PathID", Val::I(path_id)),
         ]));
+    }
+    let table = behaviour_table(&mut builder, &layers)?;
+    let ranges = table
+        .ranges
+        .iter()
+        .map(|(&(state, layer), &(start, count))| {
+            Val::map([
+                (
+                    "first",
+                    Val::map([
+                        ("m_StateID", Val::U(state as u64)),
+                        ("m_LayerIndex", Val::I(layer as i64)),
+                    ]),
+                ),
+                (
+                    "second",
+                    Val::map([
+                        ("m_StartIndex", Val::U(start as u64)),
+                        ("m_Count", Val::U(count as u64)),
+                    ]),
+                ),
+            ])
+        })
+        .collect();
+    let (mut pointers, mut behaviours) = (Vec::new(), Vec::<Behaviour>::new());
+    for attached in &table.list {
+        let Ok(path_id) = attached.file_id.parse::<i64>() else {
+            bail!("state machine behaviour has an invalid file ID");
+        };
+        pointers.push(Val::map([("m_PathID", Val::I(path_id))]));
+        if behaviours
+            .iter()
+            .any(|known| known.file_id == attached.file_id)
+        {
+            continue;
+        }
+        let (script, layout) = &builder.scripts[attached.script];
+        let fields = builder.document(&attached.file_id, 114, "behaviour")?;
+        let data = layout
+            .object(
+                fields,
+                script.identity.local_id,
+                &mut ClipReferences {
+                    sources,
+                    externals: &mut builder.externals,
+                },
+            )
+            .map_err(|error| {
+                let class = &script.layout.class_name;
+                match error.downcast::<super::Unsupported>() {
+                    Ok(refusal) => unsupported(format!("{class} {}: {refusal}", attached.file_id)),
+                    Err(error) => error.context(format!("{class} {}", attached.file_id)),
+                }
+            })?;
+        behaviours.push(Behaviour {
+            file_id: attached.file_id.clone(),
+            script: attached.script,
+            data,
+        });
     }
     let names = builder
         .names
@@ -878,9 +1179,32 @@ pub fn bake_controller_object(
         ("m_Controller", constant),
         ("m_TOS", Val::Seq(names)),
         ("m_AnimationClips", Val::Seq(clips)),
-        ("m_MultiThreadedStateMachine", Val::Bool(true)),
+        (
+            "m_StateMachineBehaviourVectorDescription",
+            Val::map([
+                ("m_StateMachineBehaviourRanges", Val::Seq(ranges)),
+                (
+                    "m_StateMachineBehaviourIndices",
+                    Val::Seq(table.indices.iter().map(|&i| Val::U(i as u64)).collect()),
+                ),
+            ]),
+        ),
+        ("m_StateMachineBehaviours", Val::Seq(pointers)),
+        (
+            "m_MultiThreadedStateMachine",
+            Val::Bool(!table.machine_callbacks),
+        ),
     ]);
-    Ok((controller_tree()?.encode(&object)?, builder.externals))
+    Ok(Controller {
+        data: controller_tree()?.encode(&object)?,
+        externals: builder.externals,
+        behaviours,
+        scripts: builder
+            .scripts
+            .into_iter()
+            .map(|(script, layout)| (script.identity, layout))
+            .collect(),
+    })
 }
 
 /// A synced layer's replacement motions, by state file ID.
@@ -1069,6 +1393,23 @@ fn machine_constant(
                         }
                     }
                 }
+                // An exit nothing leads out of ends in the default state of
+                // the machine around it.
+                if exit.is_empty() {
+                    let default =
+                        builder.local(get(parent_fields, "m_DefaultState"), "default state")?;
+                    let Some(index) =
+                        default.and_then(|default| builder.state_index(&default, first_state))
+                    else {
+                        return Err(unsupported(
+                            "state machine without exit transitions inside one without a default state",
+                        ));
+                    };
+                    exit.push(Val::map([(
+                        "m_Destination",
+                        Val::U((index - first_state) as u64),
+                    )]));
+                }
             }
         }
         let hash = crc32(&path) as u64;
@@ -1150,8 +1491,12 @@ pub fn read_mask(yaml: &[u8]) -> Result<Mask> {
 }
 
 /// Bakes an authored `.controller` source into a ContentFile whose external
-/// references are the clips it plays.
+/// references are the clips it plays. Its behaviours and a `MonoScript` object
+/// for each of their classes are written into the same file; the Player ties
+/// such an object to the loaded class by name.
 pub fn bake_controller(yaml: &[u8], sources: &dyn ControllerSources) -> Result<super::Baked> {
+    // Names and behaviour fields are free text.
+    super::source::refuse_comment_marks(yaml)?;
     let documents = crate::yaml::parse_unity_yaml_lexical(yaml)?;
     let Some(controller) = documents.iter().find(|document| document.class_id == 91) else {
         bail!("controller source does not hold an AnimatorController");
@@ -1159,21 +1504,37 @@ pub fn bake_controller(yaml: &[u8], sources: &dyn ControllerSources) -> Result<s
     let Ok(local_id) = controller.file_id.parse::<i64>() else {
         bail!("controller has an invalid file ID");
     };
-    let (data, externals) = bake_controller_object(&documents, sources)?;
-    let file = super::serialized::write(
-        &[super::serialized::Object {
+    let baked = bake_controller_object(&documents, sources)?;
+    let mut objects = vec![Object {
+        local_id,
+        tree: controller_tree()?,
+        data: baked.data,
+        script: None,
+    }];
+    for (identity, layout) in &baked.scripts {
+        objects.push(identity.object(layout.properties_hash)?);
+    }
+    for behaviour in baked.behaviours {
+        let Ok(local_id) = behaviour.file_id.parse::<i64>() else {
+            bail!("state machine behaviour has an invalid file ID");
+        };
+        let (identity, layout) = &baked.scripts[behaviour.script];
+        objects.push(Object {
             local_id,
-            tree: controller_tree()?,
-            data,
-        }],
-        &externals,
-    )?;
+            tree: &layout.tree,
+            data: behaviour.data,
+            script: Some(identity.local_id),
+        });
+    }
+    // A build lists the objects of a file by their IDs.
+    objects.sort_by_key(|object| object.local_id);
+    let file = super::serialized::write(&objects, &baked.externals)?;
     Ok(super::Baked {
         file,
         objects: vec![(
             controller.file_id.clone(),
             "UnityEngine.RuntimeAnimatorController".to_string(),
         )],
-        externals,
+        externals: baked.externals,
     })
 }

@@ -1,0 +1,184 @@
+{
+ "className": "SmbUnity2",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "overridesStateMachineCallbacks": false,
+ "fields": [
+  {
+   "name": "rlm",
+   "type": {
+    "kind": "unity",
+    "name": "RenderingLayerMask"
+   }
+  },
+  {
+   "name": "pose",
+   "type": {
+    "kind": "struct",
+    "name": "Pose",
+    "fields": [
+     {
+      "name": "position",
+      "type": {
+       "kind": "unity",
+       "name": "Vector3"
+      }
+     },
+     {
+      "name": "rotation",
+      "type": {
+       "kind": "unity",
+       "name": "Quaternion"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "lazy",
+   "type": {
+    "kind": "unity",
+    "name": "LazyLoadReference"
+   }
+  },
+  {
+   "name": "sh",
+   "type": {
+    "kind": "unity",
+    "name": "SphericalHarmonicsL2"
+   }
+  },
+  {
+   "name": "v2is",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "unity",
+     "name": "Vector2Int"
+    }
+   }
+  },
+  {
+   "name": "rects",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "unity",
+     "name": "Rect"
+    }
+   }
+  },
+  {
+   "name": "bnds",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "unity",
+     "name": "Bounds"
+    }
+   }
+  },
+  {
+   "name": "hashes",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "unity",
+     "name": "Hash128"
+    }
+   }
+  },
+  {
+   "name": "mats",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "unity",
+     "name": "Matrix4x4"
+    }
+   }
+  },
+  {
+   "name": "ros",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "unity",
+     "name": "RectOffset"
+    }
+   }
+  },
+  {
+   "name": "v2s",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "unity",
+     "name": "Vector2"
+    }
+   }
+  },
+  {
+   "name": "v4s",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "unity",
+     "name": "Vector4"
+    }
+   }
+  },
+  {
+   "name": "bis",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "unity",
+     "name": "BoundsInt"
+    }
+   }
+  },
+  {
+   "name": "ris",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "unity",
+     "name": "RectInt"
+    }
+   }
+  },
+  {
+   "name": "v3is",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "unity",
+     "name": "Vector3Int"
+    }
+   }
+  },
+  {
+   "name": "wrap",
+   "type": {
+    "kind": "enum",
+    "underlying": "int"
+   }
+  },
+  {
+   "name": "keyCode",
+   "type": {
+    "kind": "enum",
+    "underlying": "int"
+   }
+  },
+  {
+   "name": "tail",
+   "type": {
+    "kind": "primitive",
+    "name": "byte"
+   }
+  }
+ ]
+}

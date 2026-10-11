@@ -7,6 +7,18 @@ use std::borrow::Cow;
 /// Unity's common type-tree string table, as stored in the pinned Player.
 static COMMON_STRINGS: &[u8] = include_bytes!("engine/common-strings.bin");
 
+/// The offset of a string in the common table, if the table holds it.
+pub(super) fn common_string(text: &str) -> Option<u32> {
+    let mut offset = 0;
+    for entry in COMMON_STRINGS.split(|&byte| byte == 0) {
+        if entry == text.as_bytes() && offset < COMMON_STRINGS.len() {
+            return Some(offset as u32);
+        }
+        offset += entry.len() + 1;
+    }
+    None
+}
+
 #[derive(Debug, Clone)]
 pub struct Node {
     pub type_name: String,
@@ -14,6 +26,8 @@ pub struct Node {
     pub level: u8,
     pub array: bool,
     pub align: bool,
+    /// The byte size the tree declares; negative when it varies.
+    pub size: i32,
 }
 
 /// One class of a SerializedFile type table: the verbatim entry and its nodes.
@@ -23,6 +37,9 @@ pub struct TypeTree {
     pub entry: Cow<'static, [u8]>,
     pub nodes: Vec<Node>,
 }
+
+/// `MonoBehaviour`, the class of every script-backed object.
+pub(super) const SCRIPT_CLASS: i32 = 114;
 
 fn le32(data: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]])
@@ -40,19 +57,21 @@ fn string(table: &[u8], offset: usize) -> Result<String> {
 
 impl TypeTree {
     /// Parses an entry laid out as class ID, flags, hashes, blob and
-    /// dependency count.
+    /// dependency count. The entry of a script class also carries the hash
+    /// that identifies the script.
     pub fn parse(entry: impl Into<Cow<'static, [u8]>>) -> Result<Self> {
         let owned: Cow<'static, [u8]> = entry.into();
         let entry: &[u8] = &owned;
-        if entry.len() < 4 + 3 + 32 + 4 + 16 {
+        if entry.len() < 4 + 3 + 48 + 4 + 16 {
             bail!("type table entry is truncated");
         }
         let class_id = le32(entry, 0) as i32;
-        let size = le32(entry, 39) as usize;
-        let Some(blob) = entry.get(43..43 + size) else {
+        let at = if class_id == SCRIPT_CLASS { 55 } else { 39 };
+        let size = le32(entry, at) as usize;
+        let Some(blob) = entry.get(at + 4..at + 4 + size) else {
             bail!("type tree blob exceeds its entry");
         };
-        if entry.len() != 43 + size + 4 || le32(entry, 43 + size) != 0 {
+        if entry.len() != at + 4 + size + 4 || le32(entry, at + 4 + size) != 0 {
             bail!("type table entry has unsupported dependencies");
         }
         if size < 16 || le32(blob, 0) != 0x7474686d || le32(blob, 4) != 23 {
@@ -80,6 +99,7 @@ impl TypeTree {
                 level: node[2],
                 array: node[3] & 1 != 0,
                 align: le32(node, 20) & 0x4000 != 0,
+                size: le32(node, 12) as i32,
             });
         }
         if nodes[0].level != 0 {
@@ -130,7 +150,7 @@ impl TypeTree {
     }
 
     /// Reads an object written with this tree back into a value. Scalars come
-    /// back as `U`, `I`, `F` or `Bool` by their declared type.
+    /// back as `U`, `I`, `F`, `D` or `Bool` by their declared type.
     pub fn decode(&self, data: &[u8]) -> Result<Val> {
         let mut at = 0;
         let value = self.read(0, data, &mut at)?;
@@ -153,7 +173,10 @@ impl TypeTree {
             Ok(bytes)
         };
         let children = self.children(index);
-        let value = if children.is_empty() {
+        let value = if children.is_empty() && node.size == 0 {
+            // A structure without fields.
+            Val::Zero
+        } else if children.is_empty() {
             match node.type_name.as_str() {
                 "bool" => Val::Bool(take(1)?[0] != 0),
                 "UInt8" => Val::U(take(1)?[0] as u64),
@@ -169,6 +192,7 @@ impl TypeTree {
                 }
                 "SInt64" | "long long" => Val::I(i64::from_le_bytes(take(8)?.try_into()?)),
                 "float" => Val::F(f32::from_le_bytes(take(4)?.try_into()?)),
+                "double" => Val::D(f64::from_le_bytes(take(8)?.try_into()?)),
                 other => bail!("unsupported scalar type {other}"),
             }
         } else if let Some((array, element)) = self.element(index) {
@@ -218,7 +242,9 @@ impl TypeTree {
             )
         };
         let children = self.children(index);
-        if children.is_empty() {
+        if children.is_empty() && node.size == 0 {
+            // A structure without fields takes no bytes.
+        } else if children.is_empty() {
             scalar(&node.type_name, value, out).map_err(|error| fail(&error.to_string()))?;
         } else if let Some((array, element)) = self.element(index) {
             match value {
@@ -297,6 +323,15 @@ fn scalar(type_name: &str, value: &Val, out: &mut Vec<u8>) -> Result<()> {
             out.extend_from_slice(&number.to_le_bytes());
             return Ok(());
         }
+        "double" => {
+            let number = match value {
+                Val::Zero => 0.0,
+                Val::D(number) => *number,
+                _ => bail!("value is not a double"),
+            };
+            out.extend_from_slice(&number.to_le_bytes());
+            return Ok(());
+        }
         _ => bail!("unsupported scalar type"),
     };
     let number: i128 = match value {
@@ -328,6 +363,7 @@ pub enum Val {
     I(i64),
     U(u64),
     F(f32),
+    D(f64),
     Str(String),
     Seq(Vec<Val>),
     Map(Vec<(Cow<'static, str>, Val)>),

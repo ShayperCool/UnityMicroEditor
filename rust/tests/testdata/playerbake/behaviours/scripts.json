@@ -1,0 +1,142 @@
+{
+ "2100e3421ba4cd72f9bc05a32c4a6d97": {
+  "className": "MySO",
+  "localId": -1332065481928836478
+ },
+ "21b8d4f05e2eb1e658b000501b02773c": {
+  "className": "SmbUnity",
+  "localId": -1419526040068407175
+ },
+ "256f6a5536a71efba9ceeb8684584019": {
+  "className": "SmbDefaults",
+  "localId": 3897739733122789766
+ },
+ "2621bee81475d8b07bc2312fe4ae3e9d": {
+  "className": "SmbTag",
+  "localId": 8447386356337188570
+ },
+ "26410c9d6cc6442229ab0991c52fc703": {
+  "className": "SmbCbMachineExit",
+  "localId": -8786995043045636363
+ },
+ "2ef5dce4b87fd5ce18c1775aabd78200": {
+  "className": "HelperMono",
+  "localId": 690110464660137689
+ },
+ "3eed98410e11e958facba8847c4e54d6": {
+  "className": "SmbManaged",
+  "localId": -9170582816411083271
+ },
+ "457008e7b512629b19f3a911f312191a": {
+  "className": "SmbCbPlayable",
+  "localId": 2800644357120200400
+ },
+ "46ae5f9d9568d04c8a0b46d2ba01cdaf": {
+  "className": "SmbCbEnter",
+  "localId": -3481593635690534302
+ },
+ "4f06647f13723a652b2f25a873f37a47": {
+  "className": "SmbHidden",
+  "localId": -269004512106312061
+ },
+ "53396c9e790f5e8e3b58b347a377203a": {
+  "className": "SmbCbMove",
+  "localId": 1482834712336459473
+ },
+ "5871cf1503d9dadc5aadcfa389717b64": {
+  "className": "SmbDict",
+  "localId": -3366480469672533932
+ },
+ "5a78ec9d71a57b52aa4a9c9a987d5572": {
+  "className": "SmbCbIK",
+  "localId": -8220247949065511270
+ },
+ "63761deeb07b6d036b7b21ed90628b9c": {
+  "className": "SmbDeep2",
+  "localId": -283765017412527215
+ },
+ "790b220bd0397fff3ad2922e658ea3fa": {
+  "className": "SmbUnity2",
+  "localId": 2820216420862661739
+ },
+ "82ba280208ff55840a42168bf6b7c970": {
+  "className": "SmbPrims",
+  "localId": 4250553827159443259
+ },
+ "86cecaf39b9640f129282a92582f35ac": {
+  "className": "SmbEmpty",
+  "localId": -6171351041549267988
+ },
+ "8b3b389c8683f9118bbcd0f35862d1bb": {
+  "className": "SmbCbUpdate",
+  "localId": -7759709523811924417
+ },
+ "952a2e0204a203512a2ecda38ab2a2be": {
+  "className": "SmbRules",
+  "localId": -3950252349225143816
+ },
+ "967db3ea08c1b9321a5304a32be1039a": {
+  "className": "SmbCbMachineEnter",
+  "localId": -5297280966256064951
+ },
+ "96f8b0a8ddb13f51db70df1f4df6d987": {
+  "className": "SmbCbInherited",
+  "localId": -1283064112971416632
+ },
+ "a415167375755024cb6f57f59c2445d1": {
+  "className": "SmbNested",
+  "localId": -5751086760410106111
+ },
+ "a750c3daeab50786c8960c4d2e73cf81": {
+  "className": "SmbArrays",
+  "localId": -426867437519950546
+ },
+ "b0884c29b4271bead97ce3395a8cca6c": {
+  "className": "SmbEnums",
+  "localId": -6249565432717253802
+ },
+ "b69010361ee818b8780551d0acaeee6c": {
+  "className": "SmbCbMachineEnter3",
+  "localId": 780057722582141184
+ },
+ "ba48e9079d388955894aff0328ba6b09": {
+  "className": "SmbEvent",
+  "localId": 987653540596513554
+ },
+ "c05e6190e2a795be3b0e199b4c74c218": {
+  "className": "SmbDerived",
+  "localId": 1592028166503679266
+ },
+ "c55e273f33ba4f74ba541b8d0f5ba2d6": {
+  "className": "SmbDepth",
+  "localId": 7487859170697301702
+ },
+ "d29efcda3fc8eba2b847c8d8a07658c3": {
+  "className": "SmbCbMachineInherited",
+  "localId": 5593400728091202904
+ },
+ "d2c57df67c5736788983466df150f148": {
+  "className": "SmbDeep",
+  "localId": 8442917830925650339
+ },
+ "e536c0c88c30b942380147c2ea407363": {
+  "className": "SmbCbExit",
+  "localId": -9149886475095687702
+ },
+ "e8f9821482303e6949e6fbed6fb52f4b": {
+  "className": "SmbSecond",
+  "localId": 8940153493307120243
+ },
+ "ef8255fd6b6e1f75ead3757926e67efb": {
+  "className": "SmbCbShared",
+  "localId": 3342257367215530903
+ },
+ "efcafeed94ff91a4a9dcd079873c0cd2": {
+  "className": "SmbSpecial",
+  "localId": 426022286466030457
+ },
+ "f5b42723e6b1c35dd8169c468b92a608": {
+  "className": "SmbRefs",
+  "localId": 467092598524516404
+ }
+}

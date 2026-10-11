@@ -417,7 +417,7 @@ fn compare_controllers(roots: &[PathBuf], tree: &Tree) -> (usize, Vec<String>) {
             let documents = parse_unity_yaml_lexical(&fs::read(&source).unwrap()).unwrap();
             let name = source.file_stem().unwrap().to_string_lossy().into_owned();
             match playerbake::bake_controller_object(&documents, tree) {
-                Ok((actual, _)) => {
+                Ok(playerbake::Controller { data: actual, .. }) => {
                     let layout = playerbake::controller_tree().unwrap();
                     let (actual, expected) = (
                         layout.decode(&actual).unwrap(),
@@ -493,6 +493,428 @@ fn controller_corpus_matches_the_engine_build() {
         .collect();
     let roots: Vec<PathBuf> = roots.split(':').map(PathBuf::from).collect();
     compare_controllers(&roots, &Tree::scan(&sources));
+}
+
+/// The scripts of the behaviour fixtures: every class with the ID the engine
+/// gave its `MonoScript` object, and the fields of the classes that the
+/// metadata reader lays out.
+struct BehaviourFixtures {
+    root: PathBuf,
+    scripts: std::collections::HashMap<String, FixtureScript>,
+    /// The clips and masks the controllers refer to.
+    tree: Tree,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FixtureScript {
+    class_name: String,
+    local_id: i64,
+}
+
+/// What the engine built for the behaviours of one controller.
+#[derive(serde::Deserialize)]
+struct BuiltBehaviours {
+    /// The controller's behaviour list, as authored file IDs.
+    list: Vec<String>,
+    /// The object of each behaviour as hex, by authored file ID.
+    objects: std::collections::BTreeMap<String, String>,
+    /// The ID the build gave each object a behaviour field refers to, by
+    /// `<guid>:<file ID>` of the authored reference.
+    pointers: std::collections::HashMap<String, i64>,
+}
+
+/// Stands in for the bundle the fixtures were built into, where every object
+/// a behaviour field refers to sits in the same file.
+struct BundlePointers<'a>(&'a std::collections::HashMap<String, i64>);
+
+impl playerbake::References for BundlePointers<'_> {
+    fn pointer(
+        &mut self,
+        _class_name: &str,
+        _namespace: &str,
+        target: &serde_json::Map<String, serde_json::Value>,
+        path: &str,
+    ) -> anyhow::Result<(i64, i64)> {
+        let part = |key: &str| {
+            target
+                .get(key)
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+        };
+        let key = format!("{}:{}", part("guid"), part("fileID"));
+        match self.0.get(&key) {
+            Some(id) => Ok((0, *id)),
+            None => anyhow::bail!("{path} refers to {key}, which the build does not hold"),
+        }
+    }
+}
+
+impl BehaviourFixtures {
+    fn open(root: PathBuf) -> Self {
+        let scripts =
+            serde_json::from_slice(&fs::read(root.join("scripts.json")).unwrap()).unwrap();
+        let tree = Tree::scan(&[root.join("Assets")]);
+        Self {
+            root,
+            scripts,
+            tree,
+        }
+    }
+}
+
+impl playerbake::ControllerSources for BehaviourFixtures {
+    fn clip(&self, guid: &str, file_id: &str) -> anyhow::Result<playerbake::ClipFacts> {
+        self.tree.clip(guid, file_id)
+    }
+    fn mask(&self, guid: &str) -> anyhow::Result<playerbake::Mask> {
+        self.tree.mask(guid)
+    }
+    fn behaviour(&self, guid: &str) -> anyhow::Result<Option<playerbake::BehaviourScript>> {
+        let Some(script) = self.scripts.get(guid) else {
+            return Ok(None);
+        };
+        let path = self
+            .root
+            .join("layouts")
+            .join(format!("{}.json", script.class_name));
+        let Ok(layout) = fs::read(path) else {
+            return Err(Unsupported(format!("script {} has no layout", script.class_name)).into());
+        };
+        let layout: playerbake::ScriptLayout = serde_json::from_slice(&layout)?;
+        Ok(Some(playerbake::BehaviourScript {
+            identity: playerbake::ScriptIdentity {
+                class_name: layout.class_name.clone(),
+                namespace: layout.namespace.clone(),
+                assembly: layout.assembly.clone(),
+                execution_order: 0,
+                local_id: script.local_id,
+            },
+            layout,
+        }))
+    }
+}
+
+/// The controllers below `<root>/Assets`, one directory deep.
+fn controller_sources(root: &Path) -> Vec<PathBuf> {
+    let mut sources = Vec::new();
+    for directory in fs::read_dir(root.join("Assets")).unwrap() {
+        for entry in fs::read_dir(directory.unwrap().path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "controller")
+            {
+                sources.push(path);
+            }
+        }
+    }
+    sources.sort();
+    sources
+}
+
+fn hex(data: &[u8]) -> String {
+    data.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Where two hex dumps part, with what follows in each.
+fn first_difference(actual: &str, expected: &str) -> String {
+    let at = actual
+        .bytes()
+        .zip(expected.bytes())
+        .position(|(a, b)| a != b)
+        .unwrap_or(actual.len().min(expected.len()))
+        & !1;
+    let window = |text: &str| text[at.min(text.len())..(at + 48).min(text.len())].to_string();
+    format!(
+        "{} bytes, engine has {}; first difference at {}: {} vs {}",
+        actual.len() / 2,
+        expected.len() / 2,
+        at / 2,
+        window(actual),
+        window(expected)
+    )
+}
+
+/// Bakes every `<name>.controller` below `<root>/Assets` and compares it with
+/// the engine's build beside it: the controller object field by field, each
+/// behaviour object and each script's type table entry byte for byte. Returns
+/// how many controllers matched and which were refused, with the reason.
+fn compare_behaviours(root: &Path) -> (usize, Vec<(String, String)>) {
+    let fixtures = BehaviourFixtures::open(root.to_path_buf());
+    let (mut matched, mut failed, mut refused) = (0, 0, Vec::new());
+    for source in controller_sources(root) {
+        let name = source.file_stem().unwrap().to_string_lossy().into_owned();
+        let documents = match parse_unity_yaml_lexical(&fs::read(&source).unwrap()) {
+            Ok(documents) => documents,
+            Err(error) => {
+                refused.push((name, format!("unreadable: {error:#}")));
+                continue;
+            }
+        };
+        let baked = match playerbake::bake_controller_object(&documents, &fixtures) {
+            Ok(baked) => baked,
+            Err(error) if error.is::<Unsupported>() => {
+                refused.push((name, error.to_string()));
+                continue;
+            }
+            Err(error) => {
+                failed += 1;
+                eprintln!("ERROR {name}: {error:#}");
+                continue;
+            }
+        };
+        let built: BuiltBehaviours =
+            serde_json::from_slice(&fs::read(source.with_extension("behaviours.json")).unwrap())
+                .unwrap();
+        let layout = playerbake::controller_tree().unwrap();
+        let (mut actual, mut expected) = (
+            layout.decode(&baked.data).unwrap(),
+            layout
+                .decode(&fs::read(source.with_extension("controller.bin")).unwrap())
+                .unwrap(),
+        );
+        let mut out = Vec::new();
+        // The engine gives the objects of a bundle other IDs, so the list is
+        // compared through the authored file IDs.
+        let key = "m_StateMachineBehaviours";
+        let listed: Vec<String> = match actual.field(key) {
+            Some(Val::Seq(pointers)) => pointers
+                .iter()
+                .map(|pointer| match pointer.field("m_PathID") {
+                    Some(Val::I(id)) => id.to_string(),
+                    _ => panic!("behaviour pointer has no ID"),
+                })
+                .collect(),
+            _ => panic!("controller has no behaviour list"),
+        };
+        if listed != built.list {
+            out.push(format!("lists {listed:?}, engine has {:?}", built.list));
+        }
+        for value in [&mut actual, &mut expected] {
+            *value.field_mut(key).unwrap() = Val::Zero;
+        }
+        differences("", &normalize(actual), &normalize(expected), &mut out);
+        if baked.behaviours.len() != built.objects.len() {
+            out.push(format!(
+                "{} behaviour objects, engine has {}",
+                baked.behaviours.len(),
+                built.objects.len()
+            ));
+        }
+        for behaviour in &baked.behaviours {
+            let class = &baked.scripts[behaviour.script].0.class_name;
+            let actual = hex(&behaviour.data);
+            match built.objects.get(&behaviour.file_id) {
+                Some(expected) if *expected == actual => {}
+                Some(expected) => out.push(format!(
+                    "{class} {}: {}",
+                    behaviour.file_id,
+                    first_difference(&actual, expected)
+                )),
+                None => out.push(format!(
+                    "{class} {}: engine has no such object",
+                    behaviour.file_id
+                )),
+            }
+        }
+        for (identity, script) in &baked.scripts {
+            let entry = root.join(format!("types/{}.entry.bin", identity.class_name));
+            if fs::read(entry).unwrap() != *script.tree.entry {
+                out.push(format!("type table entry of {}", identity.class_name));
+            }
+        }
+        if out.is_empty() {
+            matched += 1;
+        } else {
+            failed += 1;
+            eprintln!("MISMATCH {name}:\n  {}", out.join("\n  "));
+        }
+    }
+    eprintln!("matched {matched}");
+    assert_eq!(failed, 0);
+    (matched, refused)
+}
+
+/// Encodes every behaviour document below `<root>/Assets` on its own and
+/// compares it with the engine's object, object references included. Returns
+/// how many matched and which were refused, with the reason.
+fn compare_behaviour_objects(root: &Path) -> (usize, Vec<(String, String)>) {
+    use playerbake::ControllerSources;
+    let fixtures = BehaviourFixtures::open(root.to_path_buf());
+    let (mut matched, mut failed, mut refused) = (0, 0, Vec::new());
+    for source in controller_sources(root) {
+        let name = source.file_stem().unwrap().to_string_lossy().into_owned();
+        let Ok(documents) = parse_unity_yaml_lexical(&fs::read(&source).unwrap()) else {
+            refused.push((name, "unreadable".to_string()));
+            continue;
+        };
+        let built: BuiltBehaviours =
+            serde_json::from_slice(&fs::read(source.with_extension("behaviours.json")).unwrap())
+                .unwrap();
+        for document in documents.iter().filter(|document| document.class_id == 114) {
+            // A document nothing refers to is not in the build.
+            let Some(expected) = built.objects.get(&document.file_id) else {
+                continue;
+            };
+            let guid = document.data["m_Script"]["guid"].as_str().unwrap();
+            let label = format!("{name} {}", document.file_id);
+            let script = match fixtures.behaviour(guid) {
+                Ok(script) => script.unwrap(),
+                Err(error) => {
+                    refused.push((label, error.to_string()));
+                    continue;
+                }
+            };
+            let object = playerbake::ScriptType::new(&script.layout).and_then(|layout| {
+                layout.object(
+                    &document.data,
+                    script.identity.local_id,
+                    &mut BundlePointers(&built.pointers),
+                )
+            });
+            match object {
+                Ok(actual) if hex(&actual) == *expected => matched += 1,
+                Ok(actual) => {
+                    failed += 1;
+                    eprintln!(
+                        "MISMATCH {label} {}: {}",
+                        script.layout.class_name,
+                        first_difference(&hex(&actual), expected)
+                    );
+                }
+                Err(error) if error.is::<Unsupported>() => {
+                    refused.push((label, error.to_string()));
+                }
+                Err(error) => {
+                    failed += 1;
+                    eprintln!("ERROR {label}: {error:#}");
+                }
+            }
+        }
+    }
+    eprintln!("matched {matched} objects");
+    assert_eq!(failed, 0);
+    (matched, refused)
+}
+
+/// Controllers with state machine behaviours, authored through the Editor API
+/// or edited by hand, and built by the engine. `layouts` holds what the
+/// metadata reader reports for the classes under `Scripts`.
+#[test]
+fn behaviours_match_the_engine_build() {
+    let (matched, refused) = compare_behaviours(&fixture("behaviours"));
+    assert_eq!(matched, 20);
+    // Both hold a class that nests itself up to the engine's depth limit.
+    let names: Vec<&str> = refused.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, ["D01_Stripped", "T01_Filled"]);
+    for (name, reason) in &refused {
+        assert!(reason.contains("depth limit"), "{name}: {reason}");
+    }
+}
+
+/// Every behaviour document of the fixtures on its own. `T01_Filled` sets
+/// every field of every class to a value of its own. It is the Editor's file
+/// but for four lines of one document: three closing quotes the Editor wrote
+/// at the start of a line are indented, and `a #b` is quoted. YAML reads
+/// both forms as the same strings; the reader used here fails on the first
+/// and takes the `#` of the second for a comment.
+#[test]
+fn behaviour_objects_match_the_engine_build() {
+    let (matched, refused) = compare_behaviour_objects(&fixture("behaviours"));
+    assert_eq!(matched, 111);
+    // The documents of `D01_Stripped` lack fields their classes serialize.
+    // Two classes cannot be laid out at all: one nests itself up to the
+    // engine's depth limit, the other holds managed references.
+    let reasons = [
+        "is not in the authored document",
+        "depth limit",
+        "managed reference",
+    ];
+    let count = |reason: &str| refused.iter().filter(|(_, r)| r.contains(reason)).count();
+    assert_eq!(reasons.map(count), [12, 2, 2], "{refused:#?}");
+}
+
+#[test]
+fn baked_controller_carries_its_behaviours_and_their_scripts() {
+    let root = fixture("behaviours");
+    let fixtures = BehaviourFixtures::open(root.clone());
+    let source = fs::read(root.join("Assets/One/S01_Single.controller")).unwrap();
+    let baked = playerbake::bake_controller(&source, &fixtures).unwrap();
+    // Only the controller is published; the rest travels with it.
+    assert_eq!(
+        baked.objects,
+        [(
+            "9100000".to_string(),
+            "UnityEngine.RuntimeAnimatorController".to_string()
+        )]
+    );
+    let objects = playerbake::read_serialized(&baked.file).unwrap();
+    let classes: Vec<i32> = objects.iter().map(|object| object.tree.class_id).collect();
+    assert_eq!(classes.iter().filter(|&&class| class == 91).count(), 1);
+    assert_eq!(classes.iter().filter(|&&class| class == 114).count(), 3);
+    assert_eq!(classes.iter().filter(|&&class| class == 115).count(), 2);
+    assert!(objects.is_sorted_by_key(|object| object.local_id));
+    for object in &objects {
+        // The Player finds the class of a behaviour through the script type
+        // table, which has to name a `MonoScript` object of the file.
+        let script = objects
+            .iter()
+            .find(|other| Some(other.local_id) == object.script);
+        assert_eq!(object.tree.class_id == 114, script.is_some());
+        if let Some(script) = script {
+            assert_eq!(script.tree.class_id, 115);
+            let name = script.tree.decode(&script.data).unwrap();
+            let class = match name.field("m_ClassName") {
+                Some(Val::Str(class)) => class.clone(),
+                _ => panic!("script object has no class name"),
+            };
+            let entry = fs::read(root.join(format!("types/{class}.entry.bin"))).unwrap();
+            // The file numbers its script types; the fixture's entry has none.
+            let mut written = object.tree.entry.to_vec();
+            written[5..7].fill(0);
+            assert_eq!(written, entry, "{class}");
+        }
+    }
+    // A source that cannot name behaviour scripts refuses the controller.
+    let tree = Tree::scan(&[root.join("Assets")]);
+    let refused = playerbake::bake_controller(&source, &tree).unwrap_err();
+    assert!(refused.is::<Unsupported>());
+}
+
+/// The Editor writes `Attack #2` without quotes and the engine reads it back
+/// whole, where YAML sees a comment. Such a source is refused.
+#[test]
+fn text_yaml_reads_as_a_comment_is_refused() {
+    let root = fixture("behaviours");
+    let fixtures = BehaviourFixtures::open(root.clone());
+    let source = fs::read(root.join("Assets/One/S01_Single.controller")).unwrap();
+    let source = String::from_utf8(source).unwrap();
+    assert!(source.contains("tag: single"));
+    let marked = source.replace("tag: single", "tag: single #2");
+    let refused = playerbake::bake_controller(marked.as_bytes(), &fixtures).unwrap_err();
+    assert!(refused.is::<Unsupported>(), "{refused:#}");
+}
+
+/// Compares the controllers of a directory laid out like the behaviour
+/// fixtures, such as the full set the fixtures were taken from.
+#[test]
+fn behaviour_corpus_matches_the_engine_build() {
+    let Some(root) = std::env::var("UNITY_PLAYERBAKE_BEHAVIOUR_CORPUS")
+        .ok()
+        .filter(|value| !value.is_empty())
+    else {
+        eprintln!("skipped: set UNITY_PLAYERBAKE_BEHAVIOUR_CORPUS");
+        return;
+    };
+    let (_, refused) = compare_behaviours(Path::new(&root));
+    for (name, reason) in refused {
+        eprintln!("refused {name}: {reason}");
+    }
+    let (_, refused) = compare_behaviour_objects(Path::new(&root));
+    for (name, reason) in refused {
+        eprintln!("refused {name}: {reason}");
+    }
 }
 
 /// Replaces each object reference with the order of its first appearance, so

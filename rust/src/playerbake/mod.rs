@@ -7,6 +7,7 @@ mod clip;
 mod controller;
 mod freeform;
 mod humanoid;
+mod managed;
 mod override_controller;
 mod serialized;
 mod source;
@@ -17,10 +18,11 @@ pub use clip::{
     bake_clip_object, bake_model_clips, script_local_id,
 };
 pub use controller::{
-    ClipFacts, ControllerSources, Mask, bake_controller, bake_controller_object, read_clip_facts,
-    read_mask,
+    Behaviour, BehaviourScript, ClipFacts, Controller, ControllerSources, Mask, bake_controller,
+    bake_controller_object, read_clip_facts, read_mask,
 };
 pub use freeform::{Freeform, precompute as precompute_freeform};
+pub use managed::{Field, FieldType, References, ScriptLayout, ScriptType};
 pub use override_controller::{bake_override, bake_override_object};
 pub use serialized::{External, Object, Read, read as read_serialized, write};
 pub use typetree::{TypeTree, Val};
