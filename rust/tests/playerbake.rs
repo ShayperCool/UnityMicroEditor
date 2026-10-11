@@ -67,9 +67,6 @@ fn assert_matches_engine(name: &str) {
     }
 }
 
-/// Fixtures whose features the baker refuses instead of approximating.
-const REFUSED: [&str; 3] = ["Mixed", "Ordering", "Tangents"];
-
 /// The clip fixtures of a directory under the fixture root, by name.
 fn clip_fixtures(directory: &str) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(fixture(directory))
@@ -87,8 +84,7 @@ fn clip_fixtures(directory: &str) -> Vec<String> {
 
 #[test]
 fn clips_match_the_engine_build() {
-    let mut names = clip_fixtures("");
-    names.retain(|name| !REFUSED.contains(&name.as_str()));
+    let names = clip_fixtures("");
     assert!(names.len() >= 30, "fixtures are missing: {names:?}");
     for name in names {
         assert_matches_engine(&name);
@@ -131,43 +127,9 @@ fn unreproduced_humanoid_features_are_refused() {
     // A session cannot bake a clip again when its reference clip changes.
     let additive = fs::read_to_string(fixture("humanoid/additive.anim")).unwrap();
     refused(&additive, &playerbake::NoScripts, "additive reference pose");
-    // The dense clip: a key on every frame without high quality curves.
-    let keys: String = (0..31)
-        .map(|frame| {
-            format!(
-                "      - serializedVersion: 3\n        time: {}\n        value: {}\n        \
-                 inSlope: 1\n        outSlope: 1\n        tangentMode: 0\n        \
-                 weightedMode: 0\n        inWeight: 0\n        outWeight: 0\n",
-                frame as f32 / 60.0,
-                frame as f32 * 0.1
-            )
-        })
-        .collect();
-    let dense = format!(
-        "%YAML 1.1\n--- !u!74 &7400000\nAnimationClip:\n  m_Name: Dense\n  m_Legacy: 0\n  \
-         m_UseHighQualityCurve: 0\n  m_FloatCurves:\n  - curve:\n      serializedVersion: 2\n      \
-         m_Curve:\n{keys}      m_PreInfinity: 2\n      m_PostInfinity: 2\n      \
-         m_RotationOrder: 4\n    attribute: Spine Front-Back\n    path: \n    classID: 95\n    \
-         script: {{fileID: 0}}\n    flags: 0\n  m_SampleRate: 60\n  m_AnimationClipSettings:\n    \
-         m_StopTime: 0.5\n"
-    );
-    refused(&dense, &FixtureScripts, "dense clip");
-    // With high quality curves the same clip is streamed.
-    let streamed = dense.replace("m_UseHighQualityCurve: 0", "m_UseHighQualityCurve: 1");
-    playerbake::bake_clip_object(&clip_fields(&streamed), &FixtureScripts).unwrap();
     // A root rotation of zero length has no direction.
     let zero = edited("root_flipped_up", "value: 1\n", "value: 0\n");
     refused(&zero, &FixtureScripts, "zero length");
-    let discrete = edited("pose_noroot", "flags: 0", "flags: 1");
-    refused(&discrete, &FixtureScripts, "discrete curve");
-}
-
-#[test]
-fn unreproduced_features_are_refused() {
-    for name in REFUSED {
-        let error = bake(name).expect_err(name);
-        assert!(error.is::<Unsupported>(), "{name}: {error:#}");
-    }
 }
 
 #[test]
@@ -204,6 +166,109 @@ impl playerbake::ClipSources for AnyScript {
     }
 }
 
+/// The identities the engine gave the assets a corpus refers to, from the
+/// optional `ids.tsv` of its directory: `<guid> <file ID> <path ID>` for an
+/// object in the bundle the corpus was taken from, a script's `MonoScript`
+/// among them, and `discrete <script guid> <attribute>` for a field its
+/// class makes discrete.
+#[derive(Default)]
+struct CorpusIds {
+    objects: std::collections::HashMap<(String, i64), i64>,
+    discrete: std::collections::HashSet<(String, String)>,
+    listed: bool,
+}
+
+impl CorpusIds {
+    fn read(root: &Path) -> Self {
+        let mut ids = Self::default();
+        let Ok(text) = fs::read_to_string(root.join("ids.tsv")) else {
+            return ids;
+        };
+        ids.listed = true;
+        for line in text.lines() {
+            let fields: Vec<&str> = line.split('\t').collect();
+            match fields[..] {
+                ["discrete", guid, attribute] => {
+                    ids.discrete.insert((guid.into(), attribute.into()));
+                }
+                [guid, file_id, path_id] => {
+                    let key = (guid.to_string(), file_id.parse().unwrap());
+                    ids.objects.insert(key, path_id.parse().unwrap());
+                }
+                _ => panic!("malformed ids.tsv line {line:?}"),
+            }
+        }
+        ids
+    }
+}
+
+impl playerbake::ClipSources for CorpusIds {
+    fn script(&self, guid: &str) -> anyhow::Result<playerbake::ScriptIdentity> {
+        let mut identity = AnyScript.script(guid)?;
+        if let Some(path_id) = self.objects.get(&(guid.to_string(), 11500000)) {
+            identity.local_id = *path_id;
+        }
+        Ok(identity)
+    }
+    fn object(
+        &self,
+        target: &playerbake::ObjectTarget,
+    ) -> anyhow::Result<playerbake::ObjectPointer> {
+        let key = (target.guid.clone(), target.file_id);
+        match self.objects.get(&key) {
+            Some(path_id) => Ok(playerbake::ObjectPointer {
+                external: false,
+                path_id: *path_id,
+            }),
+            None => Err(Unsupported(format!("object {key:?} without a listed identity")).into()),
+        }
+    }
+    fn discrete(&self, script: &str, attribute: &str) -> anyhow::Result<Option<bool>> {
+        let key = (script.to_string(), attribute.to_string());
+        Ok(self.listed.then(|| self.discrete.contains(&key)))
+    }
+}
+
+/// Clips of `curves` the baker refuses instead of approximating: a particle
+/// force field, whose binding is encoded differently, a script curve without
+/// a script, a material index that is not a number, and a weighted key that
+/// stays weighted where the dense clip would sample it.
+const REFUSED: [&str; 6] = [
+    "N_ForceField",
+    "N_Unknown",
+    "P_Generic",
+    "U_NoScript",
+    "W_KeptLow",
+    "W_KeptSpanLow",
+];
+
+/// One clip per rule of the dense clip, of bindings on components, of
+/// discrete and object reference curves, of the clip's time range and of the
+/// curves a build leaves out, compressed clips among them. The objects and the script they refer to have
+/// the identities of the reference bundle, listed in `ids.tsv`.
+#[test]
+fn curve_clips_match_the_engine_build() {
+    let ids = CorpusIds::read(&fixture("curves"));
+    let names = clip_fixtures("curves");
+    assert_eq!(names.len(), 107, "fixtures are missing: {names:?}");
+    for name in names {
+        let source = fs::read(fixture(&format!("curves/{name}.anim"))).unwrap();
+        let documents = parse_unity_yaml_lexical(&source).unwrap();
+        let baked = playerbake::bake_clip_parts(&documents[0].data, &ids);
+        if REFUSED.contains(&name.as_str()) {
+            let error = baked.expect_err(&name);
+            assert!(error.is::<Unsupported>(), "{name}: {error:#}");
+            continue;
+        }
+        let baked = baked.unwrap_or_else(|error| panic!("{name}: {error:#}"));
+        let expected = fs::read(fixture(&format!("curves/{name}.clip.bin"))).unwrap();
+        assert!(
+            baked.data == expected,
+            "{name} differs from the engine build"
+        );
+    }
+}
+
 /// Compares every `<name>.anim` / `<name>.clip.bin` pair of a directory built
 /// from a real project. Refused clips are counted, mismatches fail the test.
 #[test]
@@ -218,6 +283,7 @@ fn clip_corpus_matches_the_engine_build() {
     let (mut matched, mut mismatched) = (0, Vec::new());
     let mut refused: std::collections::BTreeMap<String, usize> = Default::default();
     for root in roots.split(':') {
+        let ids = CorpusIds::read(Path::new(root));
         let mut sources: Vec<_> = fs::read_dir(root)
             .unwrap()
             .map(|entry| entry.unwrap().path())
@@ -239,15 +305,19 @@ fn clip_corpus_matches_the_engine_build() {
                 continue;
             };
             // A corpus is built without its project's scripts, so a clip that
-            // refers to one cannot be compared; it is only counted.
-            let baked = match playerbake::bake_clip_object(&documents[0].data, &AnyScript) {
-                Ok((_, scripts)) if !scripts.is_empty() => {
+            // refers to one cannot be compared unless the corpus lists the
+            // script's identity; it is only counted.
+            let unlisted = |script: &playerbake::ScriptIdentity| {
+                !ids.objects.values().any(|id| *id == script.local_id)
+            };
+            let baked = match playerbake::bake_clip_parts(&documents[0].data, &ids) {
+                Ok(baked) if baked.scripts.iter().any(unlisted) => {
                     *refused
                         .entry("baked with scripts, not compared".into())
                         .or_default() += 1;
                     continue;
                 }
-                other => other.map(|(data, _)| data),
+                other => other.map(|baked| baked.data),
             };
             match baked {
                 Ok(actual) if actual == expected => matched += 1,

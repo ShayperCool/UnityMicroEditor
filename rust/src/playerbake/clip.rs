@@ -3,19 +3,24 @@
 //! A legacy clip keeps its curves. Any other clip is evaluated by Mecanim from
 //! `m_MuscleClip`, which the Editor derives during a build: every curve of a
 //! binding goes to the streamed clip as cubic segments, or to the constant
-//! clip when the whole binding never changes. Float curves named after the
-//! humanoid rig drive it, and the build derives the root's start, stop and
-//! average speed from them. The derivation below follows the pinned engine's
-//! output bit for bit on the profiles it accepts.
+//! clip when the whole binding never changes. A clip that does not ask for
+//! high quality curves has the curves keyed on nearly every frame sampled
+//! into the dense clip instead. Float curves named after the humanoid rig
+//! drive it, and the build derives the root's start, stop and average speed
+//! from them. The derivation below follows the pinned engine's output bit for
+//! bit on the profiles it accepts.
 use super::{
-    Baked, clip_tree, crc32, humanoid, script_tree,
-    serialized::{self, Object},
+    Baked, binding,
+    binding::HUMAN_CURVE,
+    clip_tree, crc32, humanoid, script_tree,
+    serialized::{self, External, Object},
     source::{flag, float, get, int, list, null_reference, object, text},
     typetree::Val,
-    unsupported,
+    unsupported, weighted,
 };
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value};
+use std::cmp::Ordering;
 
 /// A script a clip refers to: the class its `MonoScript` object names.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,8 +58,30 @@ impl ScriptIdentity {
     }
 }
 
-/// Resolves the scripts a clip binds curves or events to, and the clip an
-/// additive reference pose is taken from.
+/// An object of another asset that a curve assigns or an event passes: a
+/// sprite, a material, a mesh.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectTarget {
+    pub guid: String,
+    /// The object's file ID in its asset.
+    pub file_id: i64,
+    /// The `type` of the authored reference: 2 for a native asset file, 3
+    /// for an imported one.
+    pub kind: i64,
+}
+
+/// Where the baked clip finds an [`ObjectTarget`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectPointer {
+    /// Whether the object lives in the ContentFile of its own asset, which
+    /// then becomes an external reference of the clip, or in the clip's file.
+    pub external: bool,
+    /// The object's local ID in that file.
+    pub path_id: i64,
+}
+
+/// Resolves the scripts and objects a clip binds curves or events to, and
+/// the clip an additive reference pose is taken from.
 pub trait ClipSources {
     fn script(&self, guid: &str) -> Result<ScriptIdentity>;
     /// The authored `.anim` source of another clip. A caller that cannot
@@ -63,6 +90,24 @@ pub trait ClipSources {
         Err(unsupported(format!(
             "additive reference pose from clip {guid}"
         )))
+    }
+    /// The pointer for an object of another asset. By default the object is
+    /// expected under its authored file ID in the ContentFile of its asset,
+    /// which the caller has to publish and load as a dependency; a caller
+    /// that cannot do so for a target refuses it here.
+    fn object(&self, target: &ObjectTarget) -> Result<ObjectPointer> {
+        Ok(ObjectPointer {
+            external: true,
+            path_id: target.file_id,
+        })
+    }
+    /// Whether the class of a script makes the field behind a property path
+    /// discrete: an enum, or an `int` marked `[DiscreteEvaluation]`. The
+    /// engine then keeps the curve apart as a curve of whole numbers,
+    /// whatever the clip says. `None` when the class is not known; the clip's
+    /// own mark is then all there is to go by.
+    fn discrete(&self, _script: &str, _attribute: &str) -> Result<Option<bool>> {
+        Ok(None)
     }
 }
 
@@ -81,13 +126,27 @@ pub fn script_local_id(guid: &str) -> i64 {
     i64::from_str_radix(&digest[..15], 16).unwrap_or(1) | (1 << 40)
 }
 
-/// Collects the scripts a clip refers to and hands out pointers to them.
+/// Collects the scripts and assets a clip refers to and hands out pointers
+/// to them.
 struct Scripts<'a> {
     sources: &'a dyn ClipSources,
     used: Vec<(String, ScriptIdentity)>,
+    /// The assets whose ContentFiles the clip points into.
+    externals: Vec<External>,
 }
 
-impl Scripts<'_> {
+/// Every script asset holds its `MonoScript` at this file ID.
+const SCRIPT_FILE_ID: &str = "11500000";
+
+impl<'a> Scripts<'a> {
+    fn new(sources: &'a dyn ClipSources) -> Self {
+        Self {
+            sources,
+            used: Vec::new(),
+            externals: Vec::new(),
+        }
+    }
+
     /// The pointer for an authored object reference that has to be a script.
     fn pointer(&mut self, value: &Value, what: &str) -> Result<Val> {
         if null_reference(value)? {
@@ -95,8 +154,7 @@ impl Scripts<'_> {
         }
         let map = object(value, what)?;
         let guid = text(get(map, "guid"))?.to_ascii_lowercase();
-        // Every script asset holds its MonoScript at this file ID.
-        if text(get(map, "fileID"))? != "11500000" || guid.is_empty() {
+        if text(get(map, "fileID"))? != SCRIPT_FILE_ID || guid.is_empty() {
             return Err(unsupported(format!("{what} that is not a script")));
         }
         let identity = match self.used.iter().find(|(known, _)| *known == guid) {
@@ -109,12 +167,61 @@ impl Scripts<'_> {
         };
         Ok(Val::map([("m_PathID", Val::I(identity.local_id))]))
     }
+
+    /// The pointer for an authored reference to any object: a script as
+    /// above, anything else through its asset's ContentFile.
+    fn any(&mut self, value: &Value, what: &str) -> Result<Val> {
+        if null_reference(value)? {
+            return Ok(Val::Zero);
+        }
+        let map = object(value, what)?;
+        let file_id = text(get(map, "fileID"))?;
+        if file_id == SCRIPT_FILE_ID {
+            return self.pointer(value, what);
+        }
+        let guid = text(get(map, "guid"))?.to_ascii_lowercase();
+        // An object of the clip's own file, or one built into the engine,
+        // has no asset a ContentFile is baked from.
+        let hex = guid.len() == 32 && guid.bytes().all(|byte| byte.is_ascii_hexdigit());
+        if !hex || guid.starts_with("0000000000000000") {
+            return Err(unsupported(format!(
+                "{what} to an object outside the project's assets"
+            )));
+        }
+        let Ok(file_id) = file_id.parse::<i64>() else {
+            bail!("{what} has an invalid file ID");
+        };
+        let target = ObjectTarget {
+            guid,
+            file_id,
+            kind: int(get(map, "type"), what)?,
+        };
+        let pointer = self.sources.object(&target)?;
+        let mut file = 0;
+        if pointer.external {
+            let known = self.externals.iter().position(|e| e.guid == target.guid);
+            file = 1 + known.unwrap_or_else(|| {
+                self.externals.push(External { guid: target.guid });
+                self.externals.len() - 1
+            }) as i64;
+        }
+        Ok(Val::map([
+            ("m_FileID", Val::I(file)),
+            ("m_PathID", Val::I(pointer.path_id)),
+        ]))
+    }
+
+    /// The GUID of a script reference, for asking about its class.
+    fn guid(value: &Value) -> Result<String> {
+        match value {
+            Value::Object(map) => Ok(text(get(map, "guid"))?.to_ascii_lowercase()),
+            _ => Ok(String::new()),
+        }
+    }
 }
 
 /// The muscle clip's size in memory with no curves, as the engine reports it.
 const MUSCLE_CLIP_BASE_SIZE: u64 = 2528;
-/// The custom type of a binding that drives a curve of the humanoid rig.
-const HUMAN_CURVE: u8 = 8;
 /// Baked motion capture is authored as text of tens of megabytes.
 pub const MAX_SOURCE_BYTES: usize = 256 << 20;
 
@@ -131,14 +238,57 @@ struct Curve {
     keys: Vec<Key>,
 }
 
-/// One animated property: a Transform channel or a single float.
+/// What the curves of a binding hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// A Transform channel or a single float.
+    Value,
+    /// A float of whole numbers, which the engine keeps behind the others.
+    Discrete,
+    /// Positions in the clip's list of objects, one per key.
+    Object,
+}
+
+/// One animated property.
 struct Binding {
     path: u32,
     attribute: u32,
     type_id: i64,
     custom_type: u8,
     script: Val,
+    kind: Kind,
     curves: Vec<Curve>,
+}
+
+/// Where the engine stores the curves of a binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Store {
+    Streamed,
+    Dense,
+    Constant,
+}
+
+impl Binding {
+    fn store(&self, high_quality: bool, sample_rate: f32) -> Store {
+        let constant = match (self.kind, &self.curves[..]) {
+            // An object curve is streamed whatever it holds.
+            (Kind::Object, _) => return Store::Streamed,
+            // Whole numbers are compared exactly and their tangents ignored.
+            (Kind::Discrete, [curve]) => {
+                let first = curve.keys[0].value;
+                curve.keys.iter().all(|key| key.value == first)
+            }
+            (_, [curve]) => constant_float(curve),
+            (_, curves) => constant_vector(curves),
+        };
+        if constant {
+            Store::Constant
+        } else if !high_quality && dense(&self.curves, sample_rate) {
+            Store::Dense
+        } else {
+            Store::Streamed
+        }
+    }
 }
 
 /// The clip an additive reference pose is taken from, and at what time.
@@ -160,7 +310,14 @@ struct Settings {
 struct Curves {
     /// The authored curve lists, which only a legacy clip keeps.
     retained: Vec<(&'static str, Val)>,
+    /// In the order the engine adds them: position, rotation, Euler
+    /// rotation, scale, floats, discrete floats and object curves, each in
+    /// authored order.
     bindings: Vec<Binding>,
+    /// The object of every key of the object curves, in binding order.
+    objects: Vec<Val>,
+    /// The first and last time of any curve or event.
+    range: (f32, f32),
     /// A position or rotation curve on the root object.
     generic_root: bool,
     /// A float curve that drives the humanoid motion transform.
@@ -168,60 +325,109 @@ struct Curves {
 }
 
 /// The bindings of a muscle clip in the order of its value array: streamed
-/// bindings first, then constant ones, each group in binding order.
+/// bindings first, then dense and constant ones, each group in binding
+/// order, and the dense clip sampled from the middle group.
 struct Layout<'a> {
-    animated: Vec<&'a Binding>,
-    fixed: Vec<&'a Binding>,
+    streamed: Vec<&'a Binding>,
+    dense: Vec<&'a Binding>,
+    constant: Vec<&'a Binding>,
+    frames: i32,
+    sample_rate: f32,
+    begin: f32,
+    samples: Vec<f32>,
 }
 
 impl<'a> Layout<'a> {
-    fn new(bindings: &'a [Binding], high_quality: bool, sample_rate: f32) -> Result<Self> {
-        let (animated, fixed): (Vec<&Binding>, Vec<&Binding>) =
-            bindings
-                .iter()
-                .partition(|binding| match &binding.curves[..] {
-                    [curve] => !constant_float(curve),
-                    curves => !constant_vector(curves),
-                });
-        // The samples of a dense clip are not reproduced. For Transform
-        // curves it is not even established which of them the engine
-        // samples, so any that could qualify is refused as well.
-        if !high_quality {
-            for binding in &animated {
-                let dense = |curve: &Curve| dense_candidate(curve, sample_rate);
-                if binding.curves.iter().any(dense) {
-                    return Err(unsupported(if binding.type_id == 4 {
-                        "Transform curves the engine may store in the dense clip"
-                    } else {
-                        "float curves the engine stores in the dense clip"
-                    }));
-                }
+    fn new(
+        bindings: &'a [Binding],
+        high_quality: bool,
+        sample_rate: f32,
+        range: (f32, f32),
+    ) -> Self {
+        let group = |store| {
+            let stored = |binding: &&Binding| binding.store(high_quality, sample_rate) == store;
+            bindings.iter().filter(stored).collect::<Vec<_>>()
+        };
+        let mut layout = Self {
+            streamed: group(Store::Streamed),
+            dense: group(Store::Dense),
+            constant: group(Store::Constant),
+            frames: dense_frames(range, sample_rate),
+            sample_rate,
+            begin: range.0,
+            samples: Vec::new(),
+        };
+        // One row of the dense clip per frame, from the first time of the
+        // clip on.
+        let curves: Vec<&Curve> = layout.dense.iter().flat_map(|b| &b.curves).collect();
+        if !curves.is_empty() {
+            for frame in 0..layout.frames {
+                let time = frame as f32 / sample_rate + layout.begin;
+                let row = curves.iter().map(|curve| evaluate_clamped(curve, time));
+                layout.samples.extend(row);
             }
         }
-        Ok(Self { animated, fixed })
+        layout
     }
 
     fn bindings(&self) -> impl Iterator<Item = &'a Binding> + '_ {
-        self.animated.iter().chain(&self.fixed).copied()
+        let groups = [&self.streamed, &self.dense, &self.constant];
+        groups.into_iter().flatten().copied()
     }
 
-    fn animated_curves(&self) -> Vec<&'a Curve> {
-        self.animated.iter().flat_map(|b| &b.curves).collect()
+    fn curves(group: &[&'a Binding]) -> Vec<&'a Curve> {
+        group.iter().flat_map(|binding| &binding.curves).collect()
     }
 
-    fn fixed_curves(&self) -> Vec<&'a Curve> {
-        self.fixed.iter().flat_map(|b| &b.curves).collect()
+    /// Whether every curve is one the first versions of this baker placed:
+    /// streamed or constant values.
+    fn plain(&self) -> bool {
+        self.dense.is_empty() && self.bindings().all(|binding| binding.kind == Kind::Value)
     }
 
-    /// The value array at a time.
+    /// The value array at a time, as the engine evaluates the muscle clip.
     fn sample(&self, time: f32) -> Vec<f32> {
-        let animated = self.animated.iter().flat_map(|b| &b.curves);
-        let fixed = self.fixed.iter().flat_map(|b| &b.curves);
-        animated
+        let mut values: Vec<f32> = Self::curves(&self.streamed)
+            .into_iter()
             .map(|curve| evaluate(curve, time))
-            .chain(fixed.map(|curve| curve.keys[0].value))
-            .collect()
+            .collect();
+        let width = Self::curves(&self.dense).len();
+        if width > 0 {
+            // Between two frames of the dense clip the engine interpolates.
+            let position = (time - self.begin) * self.sample_rate;
+            let whole = position.trunc();
+            let frame = if whole.abs() < 2147483648.0 {
+                whole as i64
+            } else {
+                i64::MIN
+            };
+            let last = self.frames as i64 - 1;
+            let lower = (frame.max(0).min(last) as usize) * width;
+            let upper = ((frame.max(-1) + 1).min(last) as usize) * width;
+            let part = position.fract();
+            for index in 0..width {
+                let (from, to) = (self.samples[lower + index], self.samples[upper + index]);
+                values.push((to - from) * part + from);
+            }
+        }
+        let constant = Self::curves(&self.constant);
+        values.extend(constant.into_iter().map(|curve| curve.keys[0].value));
+        values
     }
+}
+
+/// The number of frames the engine gives the dense clip: one per sample
+/// period of the clip's range, rounded up, and one more.
+fn dense_frames(range: (f32, f32), sample_rate: f32) -> i32 {
+    let span = (range.1 - range.0) * sample_rate;
+    let rounded = if span >= 0.0 { span + 0.99999994 } else { span };
+    // The engine's conversion turns a number out of range into the lowest.
+    let count = if rounded.abs() < 2147483648.0 {
+        rounded as i32
+    } else {
+        i32::MIN
+    };
+    count.max(1) + 1
 }
 
 fn vector(value: &Value, names: &[&str], what: &str) -> Result<Vec<f32>> {
@@ -242,12 +448,33 @@ fn vector_val(values: &[f32], names: &[&'static str]) -> Val {
     )
 }
 
-/// The serialized `AnimationCurve` and its per-component keys.
-fn read_curve(value: &Value, names: &[&'static str], what: &str) -> Result<(Val, Vec<Curve>)> {
+/// What a curve of the source holds.
+struct Read {
+    /// The serialized `AnimationCurve`, as authored.
+    serialized: Val,
+    /// The keys of each component as a build takes them: without keys for
+    /// a curve it drops.
+    curves: Vec<Curve>,
+    /// The times of the first and the last authored key.
+    range: Option<(f32, f32)>,
+}
+
+/// Reads an `AnimationCurve`. `build` holds the clip's sample rate and
+/// whether all its curves stay streamed: a build samples weighted tangents
+/// into plain keys at that rate, and a legacy clip, which has none, keeps
+/// them as authored.
+fn read_curve(
+    value: &Value,
+    names: &[&'static str],
+    what: &str,
+    build: Option<(f32, bool)>,
+) -> Result<Read> {
     let map = object(value, what)?;
     let width = names.len().max(1);
     let mut curves = vec![Curve::default(); width];
     let mut keys = Vec::new();
+    let mut modes = Vec::new();
+    let mut sources = vec![Vec::new(); width];
     let part = |value: &Value| -> Result<Vec<f32>> {
         if names.is_empty() {
             Ok(vec![float(value, what)?])
@@ -273,29 +500,29 @@ fn read_curve(value: &Value, names: &[&'static str], what: &str) -> Result<(Val,
         }
         previous = time;
         let weighted = int(get(key, "weightedMode"), what)?;
-        if weighted != 0 {
-            return Err(unsupported(format!("{what} uses weighted tangents")));
-        }
+        modes.push(weighted);
         let values = part(get(key, "value"))?;
         let in_slopes = part(get(key, "inSlope"))?;
         let out_slopes = part(get(key, "outSlope"))?;
         let in_weights = part(get(key, "inWeight"))?;
         let out_weights = part(get(key, "outWeight"))?;
         for index in 0..width {
-            let slope_ok = |slope: f32| slope.is_finite() || slope == f32::INFINITY;
-            if !values[index].is_finite()
-                || !slope_ok(in_slopes[index])
-                || !slope_ok(out_slopes[index])
-            {
-                return Err(unsupported(format!(
-                    "{what} has a non-finite value or a negative infinite tangent"
-                )));
+            if !values[index].is_finite() {
+                return Err(unsupported(format!("{what} has a non-finite value")));
             }
             curves[index].keys.push(Key {
                 time,
                 value: values[index],
                 in_slope: in_slopes[index],
                 out_slope: out_slopes[index],
+            });
+            sources[index].push(weighted::Key {
+                time,
+                value: values[index],
+                in_slope: in_slopes[index],
+                out_slope: out_slopes[index],
+                in_weight: in_weights[index],
+                out_weight: out_weights[index],
             });
         }
         keys.push(Val::map([
@@ -323,31 +550,26 @@ fn read_curve(value: &Value, names: &[&'static str], what: &str) -> Result<(Val,
             Val::I(int(get(map, "m_RotationOrder"), what)?),
         ),
     ]);
-    Ok((serialized, curves))
-}
-
-/// The engine's binding of a float curve: attribute and custom type. An
-/// Animator float named exactly like a curve of the humanoid rig drives that
-/// curve, whatever its path; any other name is a parameter.
-fn float_binding(class_id: i64, attribute: &str, scripted: bool) -> Result<(u32, u8)> {
-    if scripted != (class_id == 114) {
-        return Err(unsupported(format!(
-            "float curve {attribute} of class {class_id} with an unexpected script reference"
-        )));
+    let ends = |keys: &[Key]| Some((keys.first()?.time, keys.last()?.time));
+    let range = ends(&curves[0].keys);
+    if let Some((sample_rate, streamed)) = build
+        && let Some(converted) = weighted::convert(&sources, &modes, sample_rate, streamed, what)?
+    {
+        for (curve, plain) in curves.iter_mut().zip(converted) {
+            let key = |[time, value, in_slope, out_slope]: weighted::Plain| Key {
+                time,
+                value,
+                in_slope,
+                out_slope,
+            };
+            curve.keys = plain.into_iter().map(key).collect();
+        }
     }
-    let hash = crc32(attribute);
-    match (class_id, attribute) {
-        // A field of a script: the hash of its property path.
-        (114, _) => Ok((hash, 0)),
-        (95, _) => Ok(match humanoid::curve_index(hash) {
-            Some(index) => (index, HUMAN_CURVE),
-            None => (hash, 0),
-        }),
-        (1, "m_IsActive") => Ok((hash, 0)),
-        _ => Err(unsupported(format!(
-            "float curve binding of class {class_id}: {attribute}"
-        ))),
-    }
+    Ok(Read {
+        serialized,
+        curves,
+        range,
+    })
 }
 
 /// The engine's comparison epsilon for a curve that never changes.
@@ -365,23 +587,34 @@ fn constant_float(curve: &Curve) -> bool {
     })
 }
 
-/// Whether the engine would sample a changing curve into the dense clip
-/// when the clip does not ask for high quality curves: no key is stepped,
-/// four bytes a frame take no more than the 28 bytes a streamed key takes,
-/// and no two keys are closer than a frame, less half a millisecond.
-fn dense_candidate(curve: &Curve, sample_rate: f32) -> bool {
-    use std::cmp::Ordering::Greater;
-    let keys = &curve.keys;
+/// Whether the engine samples the changing curves of a binding into the
+/// dense clip when the clip does not ask for high quality curves: no key is
+/// stepped, the samples of all frames take no more bytes than the streamed
+/// keys would, and no two keys are closer than a frame, less half a
+/// millisecond. A single key qualifies.
+fn dense(curves: &[Curve], sample_rate: f32) -> bool {
+    let keys = &curves[0].keys;
+    let smooth = |index: usize| {
+        let finite = |curve: &Curve| {
+            curve.keys[index].in_slope.is_finite() && curve.keys[index].out_slope.is_finite()
+        };
+        curves.iter().all(finite)
+    };
+    // Bytes of one frame, and of one streamed key with its time and index.
+    let (frame_bytes, key_bytes) = match curves.len() {
+        1 => (4.0, 28),
+        3 => (12.0, 60),
+        _ => (16.0, 76),
+    };
     let frame = 1.0 / sample_rate;
     let span = keys[keys.len() - 1].time - keys[0].time;
-    let streamed = (28 * keys.len()) as f32;
-    !keys
-        .iter()
-        .any(|key| !key.in_slope.is_finite() || !key.out_slope.is_finite())
-        && (span / frame * 4.0).partial_cmp(&streamed) != Some(Greater)
-        && keys.windows(2).all(|pair| {
-            let spare = (pair[1].time - pair[0].time).abs() - frame;
-            (-0.0005f32).partial_cmp(&spare) != Some(Greater)
+    // The engine's comparisons, which a number that is none passes.
+    let exceeds = |left: f32, right: f32| left.partial_cmp(&right) == Some(Ordering::Greater);
+    smooth(0)
+        && !exceeds(span / frame * frame_bytes, (key_bytes * keys.len()) as f32)
+        && (1..keys.len()).all(|index| {
+            let spare = (keys[index].time - keys[index - 1].time).abs() - frame;
+            smooth(index) && !exceeds(-0.0005, spare)
         })
 }
 
@@ -400,10 +633,15 @@ fn constant_vector(curves: &[Curve]) -> bool {
 }
 
 /// Cubic coefficients of the segment between two keys, in the engine's
-/// single-precision order of operations, and the value at its start.
+/// single-precision order of operations, and the value at its start. A
+/// tangent of positive infinity holds the segment at its first key, one of
+/// negative infinity at its second.
 fn segment(lhs: &Key, rhs: &Key) -> [f32; 4] {
     if lhs.out_slope == f32::INFINITY || rhs.in_slope == f32::INFINITY {
         return [0.0, 0.0, 0.0, lhs.value];
+    }
+    if lhs.out_slope == f32::NEG_INFINITY || rhs.in_slope == f32::NEG_INFINITY {
+        return [0.0, 0.0, 0.0, rhs.value];
     }
     let dx = (rhs.time - lhs.time).max(0.0001);
     let dy = rhs.value - lhs.value;
@@ -419,33 +657,60 @@ fn segment(lhs: &Key, rhs: &Key) -> [f32; 4] {
     ]
 }
 
-/// Samples the streamed form of a curve the way the engine does: always
-/// through the cubic of the frame in effect, so `-0` plus a zero term is `+0`.
-fn evaluate(curve: &Curve, time: f32) -> f32 {
-    let keys = &curve.keys;
-    let last = keys.len() - 1;
-    let ([a, b, c, d], t) = if time < keys[0].time {
-        ([0.0, 0.0, 0.0, keys[0].value], 1.0)
-    } else if time >= keys[last].time {
-        ([0.0, 0.0, 0.0, keys[last].value], time - keys[last].time)
-    } else {
-        let index = keys.partition_point(|key| key.time <= time) - 1;
-        (
-            segment(&keys[index], &keys[index + 1]),
-            time - keys[index].time,
-        )
-    };
+/// The cubic of a segment at an offset from its start; `-0` plus a zero term
+/// is `+0`.
+fn cubic([a, b, c, d]: [f32; 4], t: f32) -> f32 {
     t * (t * (t * a + b) + c) + d
 }
 
-fn streamed(curves: &[&Curve]) -> Vec<u32> {
+/// Samples the streamed form of a curve the way the engine does: always
+/// through the cubic of the frame in effect.
+fn evaluate(curve: &Curve, time: f32) -> f32 {
+    let keys = &curve.keys;
+    let last = keys.len() - 1;
+    if time < keys[0].time {
+        cubic([0.0, 0.0, 0.0, keys[0].value], 1.0)
+    } else if time >= keys[last].time {
+        cubic([0.0, 0.0, 0.0, keys[last].value], time - keys[last].time)
+    } else {
+        let index = keys.partition_point(|key| key.time <= time) - 1;
+        cubic(
+            segment(&keys[index], &keys[index + 1]),
+            time - keys[index].time,
+        )
+    }
+}
+
+/// Samples an authored curve for the dense clip, held at its ends. Unlike
+/// the streamed form, the time of the last key still lies in a segment: one
+/// from that key to itself.
+fn evaluate_clamped(curve: &Curve, time: f32) -> f32 {
+    let keys = &curve.keys;
+    let last = keys.len() - 1;
+    if last == 0 {
+        keys[0].value
+    } else if time > keys[last].time {
+        cubic([0.0, 0.0, 0.0, keys[last].value], time - keys[last].time)
+    } else if keys[0].time > time {
+        // The engine starts this stretch a thousand seconds early.
+        cubic([0.0, 0.0, 0.0, keys[0].value], time - (time - 1000.0))
+    } else {
+        let index = keys.partition_point(|key| key.time <= time) - 1;
+        let next = (index + 1).min(last);
+        cubic(segment(&keys[index], &keys[next]), time - keys[index].time)
+    }
+}
+
+/// The streamed clip of curves; `held` marks the object curves, whose first
+/// key only sets the value the clip starts with.
+fn streamed(curves: &[(&Curve, bool)]) -> Vec<u32> {
     // (time, curve index, coefficients and value)
     let mut entries: Vec<(f32, usize, [f32; 4])> = Vec::new();
-    for (index, curve) in curves.iter().enumerate() {
-        for (position, key) in curve.keys.iter().enumerate() {
+    for (index, (curve, held)) in curves.iter().enumerate() {
+        for (position, key) in curve.keys.iter().enumerate().skip(*held as usize) {
             let coefficients = match curve.keys.get(position + 1) {
-                Some(next) => segment(key, next),
-                None => [0.0, 0.0, 0.0, key.value],
+                Some(next) if !held => segment(key, next),
+                _ => [0.0, 0.0, 0.0, key.value],
             };
             entries.push((key.time, index, coefficients));
         }
@@ -456,7 +721,7 @@ fn streamed(curves: &[&Curve]) -> Vec<u32> {
         // The frame before every key holds each curve at its first value.
         data.push(f32::MIN.to_bits());
         data.push(curves.len() as u32);
-        for (index, curve) in curves.iter().enumerate() {
+        for (index, (curve, _)) in curves.iter().enumerate() {
             data.push(index as u32);
             data.extend([0.0f32, 0.0, 0.0, curve.keys[0].value].map(f32::to_bits));
         }
@@ -593,7 +858,7 @@ fn events(fields: &Map<String, Value>, scripts: &mut Scripts<'_>) -> Result<Val>
     let mut result = Vec::new();
     for item in list(get(fields, what), what)? {
         let event = object(item, what)?;
-        let parameter = scripts.pointer(
+        let parameter = scripts.any(
             get(event, "objectReferenceParameter"),
             "animation event object reference",
         )?;
@@ -636,46 +901,113 @@ fn bounds(fields: &Map<String, Value>) -> Result<Val> {
     ]))
 }
 
-/// The serialized `AnimationClip` object of an authored `.anim` document and
-/// the scripts it points to, each of which needs a `MonoScript` object with
-/// its local ID in the same file.
+/// A baked `AnimationClip` object and what its file has to hold beside it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClipObject {
+    pub data: Vec<u8>,
+    /// The scripts the clip points to, each of which needs a `MonoScript`
+    /// object with its local ID in the same file.
+    pub scripts: Vec<ScriptIdentity>,
+    /// The assets the clip points into, in external-reference order.
+    pub externals: Vec<External>,
+}
+
+/// The serialized `AnimationClip` object of an authored `.anim` document
+/// with the scripts and assets it points to.
+pub fn bake_clip_parts(
+    fields: &Map<String, Value>,
+    sources: &dyn ClipSources,
+) -> Result<ClipObject> {
+    let mut scripts = Scripts::new(sources);
+    let data = clip_object(fields, &mut scripts)?;
+    Ok(ClipObject {
+        data,
+        scripts: scripts.used.into_iter().map(|(_, script)| script).collect(),
+        externals: scripts.externals,
+    })
+}
+
+/// [`bake_clip_parts`] for a clip that points into no other asset.
 pub fn bake_clip_object(
     fields: &Map<String, Value>,
     sources: &dyn ClipSources,
 ) -> Result<(Vec<u8>, Vec<ScriptIdentity>)> {
-    let mut scripts = Scripts {
-        sources,
-        used: Vec::new(),
-    };
-    let data = clip_object(fields, &mut scripts)?;
-    Ok((
-        data,
-        scripts
-            .used
+    let baked = bake_clip_parts(fields, sources)?;
+    if !baked.externals.is_empty() {
+        bail!("animation clip refers to objects of other assets");
+    }
+    Ok((baked.data, baked.scripts))
+}
+
+/// A quaternion is held as a whole: an infinite tangent on one component of
+/// a segment holds the others with it, at the first key when it is positive
+/// and at the second when negative.
+fn hold_together(curves: &mut [Curve]) {
+    for index in 1..curves[0].keys.len() {
+        let ends = |curve: &Curve| [curve.keys[index - 1].out_slope, curve.keys[index].in_slope];
+        let any = |slope: f32| curves.iter().any(|curve| ends(curve).contains(&slope));
+        let held = [f32::INFINITY, f32::NEG_INFINITY]
             .into_iter()
-            .map(|(_, identity)| identity)
-            .collect(),
-    ))
+            .find(|slope| any(*slope));
+        if let Some(slope) = held {
+            for curve in curves.iter_mut() {
+                curve.keys[index - 1].out_slope = slope;
+            }
+        }
+    }
+}
+
+/// Widens a range by the first and last time of a list.
+fn widen(range: &mut (f32, f32), first: f32, last: f32) {
+    range.0 = range.0.min(first);
+    range.1 = range.1.max(last);
+}
+
+/// The keys of an object reference curve: the serialized form, which a
+/// legacy clip keeps, and the times with the pointer of each key.
+fn read_objects(value: &Value, scripts: &mut Scripts<'_>) -> Result<(Val, Vec<(f32, Val)>)> {
+    let what = "m_PPtrCurves";
+    let mut keys = Vec::new();
+    let mut previous = f32::NEG_INFINITY;
+    for item in list(value, what)? {
+        let key = object(item, what)?;
+        let time = float(get(key, "time"), what)?;
+        if !time.is_finite() || time <= previous {
+            return Err(unsupported(format!(
+                "{what} has keys that are not in increasing time order"
+            )));
+        }
+        previous = time;
+        let pointer = scripts.any(get(key, "value"), "object reference curve")?;
+        keys.push((time, pointer));
+    }
+    let serialized = keys
+        .iter()
+        .map(|(time, pointer)| Val::map([("time", Val::F(*time)), ("value", pointer.clone())]))
+        .collect();
+    Ok((Val::Seq(serialized), keys))
 }
 
 fn read_curves(
     fields: &Map<String, Value>,
     scripts: &mut Scripts<'_>,
     legacy: bool,
+    sample_rate: f32,
 ) -> Result<Curves> {
     let what = "animation clip";
     if !list(get(fields, "m_CompressedRotationCurves"), what)?.is_empty() {
         return Err(unsupported("compressed rotation curves"));
     }
-    if !list(get(fields, "m_PPtrCurves"), what)?.is_empty() {
-        return Err(unsupported("object reference curves"));
-    }
     let (xyz, xyzw): (&[&'static str], &[&'static str]) = (&["x", "y", "z"], &["x", "y", "z", "w"]);
     let mut retained: Vec<(&'static str, Val)> = Vec::new();
     let mut bindings: Vec<Binding> = Vec::new();
+    let mut range = (f32::INFINITY, f32::NEG_INFINITY);
     let (mut generic_root, mut motion) = (false, false);
-    // Bindings follow the engine's order: position, rotation, Euler rotation,
-    // scale and then floats, each in authored order.
+    // A clip marked as compressed holds its rotations in the compressed
+    // curves alone: a build takes no notice of the plain ones.
+    let compressed = flag(get(fields, "m_Compressed"), what)?;
+    let mut unused: Vec<(f32, f32)> = Vec::new();
+    let build = (!legacy).then_some((sample_rate, high_quality(fields)?));
     for (field, names, attribute, custom_type) in [
         ("m_PositionCurves", xyz, 1u32, 0u8),
         ("m_RotationCurves", xyzw, 2, 0),
@@ -686,67 +1018,223 @@ fn read_curves(
         for item in list(get(fields, field), field)? {
             let entry = object(item, field)?;
             let path = text(get(entry, "path"))?;
-            let (curve, curves) = read_curve(get(entry, "curve"), names, field)?;
-            if curves[0].keys.is_empty() {
+            let Read {
+                serialized: curve,
+                mut curves,
+                range: ends,
+            } = read_curve(get(entry, "curve"), names, field, build)?;
+            let Some((first, last)) = ends else {
                 return Err(unsupported(format!("{field} has a curve without keys")));
+            };
+            if compressed && field == "m_RotationCurves" {
+                unused.push((first, last));
+                continue;
             }
+            widen(&mut range, first, last);
+            serialized.push(Val::map([
+                ("curve", curve),
+                ("path", Val::Str(path.clone())),
+            ]));
             // Moving or turning the root object is root motion; scaling
-            // it is not.
+            // it is not. A curve the build drops below still counts.
             generic_root |= path.is_empty() && field != "m_ScaleCurves";
+            // Weighted keys that weight no segment: the build drops the curve.
+            if curves[0].keys.is_empty() {
+                continue;
+            }
+            if field == "m_RotationCurves" {
+                hold_together(&mut curves);
+            }
             bindings.push(Binding {
                 path: crc32(&path),
                 attribute,
                 type_id: 4,
                 custom_type,
                 script: Val::Zero,
+                kind: Kind::Value,
                 curves,
             });
-            serialized.push(Val::map([("curve", curve), ("path", Val::Str(path))]));
         }
         retained.push((field, Val::Seq(serialized)));
     }
     let mut floats = Vec::new();
+    // The engine adds the discrete floats after all the others.
+    let mut discrete = Vec::new();
     for item in list(get(fields, "m_FloatCurves"), "m_FloatCurves")? {
         let entry = object(item, "m_FloatCurves")?;
         let path = text(get(entry, "path"))?;
         let attribute = text(get(entry, "attribute"))?;
         let class_id = int(get(entry, "classID"), "m_FloatCurves")?;
-        let (curve, curves) = read_curve(get(entry, "curve"), &[], "m_FloatCurves")?;
-        if curves[0].keys.is_empty() {
+        let Read {
+            serialized: curve,
+            curves,
+            range: ends,
+        } = read_curve(get(entry, "curve"), &[], "m_FloatCurves", build)?;
+        let Some((first, last)) = ends else {
             return Err(unsupported("m_FloatCurves has a curve without keys"));
-        }
+        };
+        widen(&mut range, first, last);
         let script = scripts.pointer(get(entry, "script"), "float curve script")?;
         let flags = int(get(entry, "flags"), "m_FloatCurves")?;
-        if !legacy {
-            // The first flag marks a curve of whole numbers, which the
-            // engine keeps apart from the float curves.
-            if flags & 1 != 0 {
-                return Err(unsupported(format!("discrete curve {attribute}")));
-            }
-            let (hash, custom_type) = float_binding(class_id, &attribute, script != Val::Zero)?;
-            motion |= custom_type == HUMAN_CURVE && humanoid::motion_curve(hash);
-            bindings.push(Binding {
-                path: crc32(&path),
-                attribute: hash,
-                type_id: class_id,
-                custom_type,
-                script: script.clone(),
-                curves,
-            });
-        }
         floats.push(Val::map([
             ("curve", curve),
-            ("attribute", Val::Str(attribute)),
-            ("path", Val::Str(path)),
+            ("attribute", Val::Str(attribute.clone())),
+            ("path", Val::Str(path.clone())),
             ("classID", Val::I(class_id)),
-            ("script", script),
+            ("script", script.clone()),
             ("flags", Val::I(flags)),
         ]));
+        if legacy {
+            continue;
+        }
+        let scripted = class_id == binding::MONO_BEHAVIOUR;
+        if scripted != (script != Val::Zero) {
+            return Err(unsupported(format!(
+                "float curve {attribute} of class {class_id} with an unexpected script reference"
+            )));
+        }
+        let Some(generic) = binding::float(class_id, &attribute)? else {
+            continue;
+        };
+        // The first flag marks a curve of whole numbers. What decides is
+        // the class: a field it makes discrete is one whatever the mark
+        // says, and a marked curve on any other property is left out.
+        let marked = flags & 1 != 0;
+        let mut whole = flags & 5 == 5;
+        if scripted && generic.custom_type == 0 {
+            if attribute.contains("managedReferences[") {
+                return Err(unsupported(format!(
+                    "float curve {attribute} into a managed reference"
+                )));
+            }
+            // The engine does not look for a field behind an array element.
+            let by_class = match attribute.contains('[') {
+                true => Some(false),
+                false => {
+                    let guid = Scripts::guid(get(entry, "script"))?;
+                    scripts.sources.discrete(&guid, &attribute)?
+                }
+            };
+            match by_class {
+                Some(by_class) => whole |= by_class,
+                None if marked => {
+                    return Err(unsupported(format!(
+                        "discrete curve {attribute} of a script whose class is not known"
+                    )));
+                }
+                None => {}
+            }
+        }
+        let moves = generic.custom_type == HUMAN_CURVE && humanoid::motion_curve(generic.attribute);
+        // A motion curve counts whatever becomes of it: left out below, or
+        // kept as a curve of whole numbers.
+        motion |= moves;
+        if (!whole && marked) || curves[0].keys.is_empty() {
+            continue;
+        }
+        let target = if whole { &mut discrete } else { &mut bindings };
+        target.push(Binding {
+            path: crc32(&path),
+            attribute: generic.attribute,
+            type_id: class_id,
+            custom_type: generic.custom_type,
+            script,
+            kind: if whole { Kind::Discrete } else { Kind::Value },
+            curves,
+        });
     }
     retained.push(("m_FloatCurves", Val::Seq(floats)));
+    bindings.append(&mut discrete);
+    let mut references = Vec::new();
+    let mut objects = Vec::new();
+    for item in list(get(fields, "m_PPtrCurves"), "m_PPtrCurves")? {
+        let entry = object(item, "m_PPtrCurves")?;
+        let path = text(get(entry, "path"))?;
+        let attribute = text(get(entry, "attribute"))?;
+        let class_id = int(get(entry, "classID"), "m_PPtrCurves")?;
+        let (curve, keys) = read_objects(get(entry, "curve"), scripts)?;
+        let script = scripts.pointer(get(entry, "script"), "object reference curve script")?;
+        references.push(Val::map([
+            ("curve", curve),
+            ("attribute", Val::Str(attribute.clone())),
+            ("path", Val::Str(path.clone())),
+            ("classID", Val::I(class_id)),
+            ("script", script.clone()),
+            ("flags", Val::I(int(get(entry, "flags"), "m_PPtrCurves")?)),
+        ]));
+        // A curve without keys animates nothing.
+        let (Some(first), Some(last), false) = (keys.first(), keys.last(), legacy) else {
+            continue;
+        };
+        // An object stays for a frame after the key that sets it.
+        widen(&mut range, first.0, last.0 + 1.0 / sample_rate);
+        if (class_id == binding::MONO_BEHAVIOUR) != (script != Val::Zero) {
+            return Err(unsupported(format!(
+                "object reference curve {attribute} of class {class_id} with an unexpected \
+                 script reference"
+            )));
+        }
+        let generic = binding::object(class_id, &attribute)?;
+        // Each key holds the position of its object in the clip's list.
+        let key = |(index, (time, _)): (usize, &(f32, Val))| Key {
+            time: *time,
+            value: (objects.len() + index) as f32,
+            in_slope: f32::INFINITY,
+            out_slope: f32::INFINITY,
+        };
+        bindings.push(Binding {
+            path: crc32(&path),
+            attribute: generic.attribute,
+            type_id: class_id,
+            custom_type: generic.custom_type,
+            script,
+            kind: Kind::Object,
+            curves: vec![Curve {
+                keys: keys.iter().enumerate().map(key).collect(),
+            }],
+        });
+        objects.extend(keys.into_iter().map(|(_, pointer)| pointer));
+    }
+    retained.push(("m_PPtrCurves", Val::Seq(references)));
+    // The Editor's copies of the float curves count for the range as well.
+    let what = "m_EditorCurves";
+    for item in list(get(fields, what), what)? {
+        let keys = match get(object(item, what)?, "curve") {
+            Value::Object(curve) => list(get(curve, "m_Curve"), what)?,
+            _ => &[],
+        };
+        if let (Some(first), Some(last)) = (keys.first(), keys.last()) {
+            let time = |key: &Value| float(get(object(key, what)?, "time"), what);
+            widen(&mut range, time(first)?, time(last)?);
+        }
+    }
+    // The first and the last event count as well, in authored order.
+    let events = list(get(fields, "m_Events"), "m_Events")?;
+    if let (Some(first), Some(last)) = (events.first(), events.last()) {
+        let time = |event: &Value| float(get(object(event, "m_Events")?, "time"), "m_Events");
+        let (first, last) = (time(first)?, time(last)?);
+        if first.is_finite() {
+            range.0 = range.0.min(first);
+        }
+        if last.is_finite() {
+            range.1 = range.1.max(last);
+        }
+    }
+    // Whether such a rotation curve still counts for the range of the clip
+    // has no reference to compare.
+    if unused
+        .iter()
+        .any(|(first, last)| *first < range.0 || range.1 < *last)
+    {
+        return Err(unsupported(
+            "rotation curves of a compressed clip that outlast its other curves",
+        ));
+    }
     Ok(Curves {
         retained,
         bindings,
+        objects,
+        range,
         generic_root,
         motion,
     })
@@ -792,19 +1280,23 @@ fn reference_pose(
         )));
     }
     let fields = &document.data;
-    let mut scripts = Scripts {
-        sources,
-        used: Vec::new(),
-    };
+    let mut scripts = Scripts::new(sources);
     // The reference is read like any clip, without its own reference pose.
-    let curves = read_curves(fields, &mut scripts, false)?;
+    let sample_rate = float(get(fields, "m_SampleRate"), what)?;
+    let curves = read_curves(fields, &mut scripts, false, sample_rate)?;
     if flag(get(fields, "m_Legacy"), what)? || curves.bindings.is_empty() {
         return Err(unsupported(format!(
             "{what} from a clip without a muscle clip"
         )));
     }
-    let sample_rate = float(get(fields, "m_SampleRate"), what)?;
-    let other = Layout::new(&curves.bindings, high_quality(fields)?, sample_rate)?;
+    let high_quality = high_quality(fields)?;
+    let other = Layout::new(&curves.bindings, high_quality, sample_rate, curves.range);
+    // The pose has only been compared for streamed and constant values.
+    if !layout.plain() || !other.plain() {
+        return Err(unsupported(format!(
+            "{what} with dense, discrete or object reference curves"
+        )));
+    }
     let values = other.sample(reference.time);
     let key = |binding: &Binding| {
         (
@@ -882,14 +1374,16 @@ fn clip_object(fields: &Map<String, Value>, scripts: &mut Scripts<'_>) -> Result
     let what = "animation clip";
     let legacy = flag(get(fields, "m_Legacy"), what)?;
     let settings = settings(fields)?;
+    let high_quality = high_quality(fields)?;
+    let sample_rate = float(get(fields, "m_SampleRate"), what)?;
     let Curves {
         retained,
         bindings,
+        objects,
+        range,
         generic_root,
         motion,
-    } = read_curves(fields, scripts, legacy)?;
-    let high_quality = high_quality(fields)?;
-    let sample_rate = float(get(fields, "m_SampleRate"), what)?;
+    } = read_curves(fields, scripts, legacy, sample_rate)?;
 
     let mut object: Vec<(&'static str, Val)> = vec![
         ("m_Name", Val::Str(text(get(fields, "m_Name"))?)),
@@ -905,8 +1399,11 @@ fn clip_object(fields: &Map<String, Value>, scripts: &mut Scripts<'_>) -> Result
         ("m_Events", events(fields, scripts)?),
     ];
     let mut muscle = settings.fields;
-    // Without curves the engine leaves the muscle clip unbuilt.
-    if legacy || bindings.is_empty() {
+    // Without events and curves, or with none it does not leave out, the
+    // engine leaves the muscle clip unbuilt. Events alone make it build an
+    // empty one, over the range of the curves left out as well.
+    let eventful = !list(get(fields, "m_Events"), "m_Events")?.is_empty();
+    if legacy || (bindings.is_empty() && !eventful) {
         // A build derives the root motion flags and the reference pose from
         // the muscle clip. What it makes of them without one is not known.
         if flag(get(fields, "m_HasGenericRootTransform"), what)?
@@ -932,20 +1429,30 @@ fn clip_object(fields: &Map<String, Value>, scripts: &mut Scripts<'_>) -> Result
         object.push(("m_MuscleClip", Val::Map(named(muscle))));
         return clip_tree()?.encode(&Val::Map(named(object)));
     }
-    let layout = Layout::new(&bindings, high_quality, sample_rate)?;
-    let animated_curves = layout.animated_curves();
-    let fixed_curves = layout.fixed_curves();
-    if animated_curves.len() > u16::MAX as usize {
+    let layout = Layout::new(&bindings, high_quality, sample_rate, range);
+    // The streamed clip counts the curves of whole numbers and of objects
+    // apart from the others, which they follow.
+    let held = |binding: &Binding| binding.kind != Kind::Value;
+    let stepped = layout.streamed.iter().filter(|b| held(b)).count();
+    let animated: Vec<(&Curve, bool)> = layout
+        .streamed
+        .iter()
+        .flat_map(|binding| {
+            let object = binding.kind == Kind::Object;
+            binding.curves.iter().map(move |curve| (curve, object))
+        })
+        .collect();
+    if animated.len() > u16::MAX as usize {
         return Err(unsupported("more streamed curves than the format indexes"));
     }
-    let stream = streamed(&animated_curves);
-    let all_curves = || animated_curves.iter().chain(&fixed_curves);
+    let stream = streamed(&animated);
+    let fixed = Layout::curves(&layout.constant);
     // Each human curve points at its place in the value array; of several
     // bindings to one curve the last counts.
     let mut index: humanoid::Index = [-1; humanoid::CURVE_COUNT];
     let mut position = 0;
     for binding in layout.bindings() {
-        if binding.custom_type == HUMAN_CURVE {
+        if binding.custom_type == HUMAN_CURVE && binding.kind == Kind::Value {
             index[binding.attribute as usize] = position;
         }
         position += binding.curves.len() as i32;
@@ -971,28 +1478,10 @@ fn clip_object(fields: &Map<String, Value>, scripts: &mut Scripts<'_>) -> Result
         let pose = reference_pose(reference, &layout, scripts.sources)?;
         muscle.push(("m_ValueArrayReferencePose", Val::floats(pose)));
     }
-    let mut dense = Vec::new();
-    if all_curves().next().is_some() {
-        let begin = all_curves()
-            .map(|curve| curve.keys[0].time)
-            .fold(f32::INFINITY, f32::min);
-        let end = all_curves()
-            .map(|curve| curve.keys[curve.keys.len() - 1].time)
-            .fold(f32::NEG_INFINITY, f32::max);
-        dense = vec![
-            (
-                "m_FrameCount",
-                Val::I(((end - begin) * sample_rate).floor() as i64 + 2),
-            ),
-            ("m_SampleRate", Val::F(sample_rate)),
-            ("m_BeginTime", Val::F(begin)),
-        ];
-    }
-    let curve_count = animated_curves.len() + fixed_curves.len();
+    let dense_curves = Layout::curves(&layout.dense).len();
     let size = MUSCLE_CLIP_BASE_SIZE
-        + 4 * stream.len() as u64
-        + 4 * fixed_curves.len() as u64
-        + 8 * curve_count as u64;
+        + 4 * (stream.len() + layout.samples.len() + fixed.len()) as u64
+        + 8 * position as u64;
     muscle.push((
         "m_Clip",
         Val::map([
@@ -1003,15 +1492,25 @@ fn clip_object(fields: &Map<String, Value>, scripts: &mut Scripts<'_>) -> Result
                         "data",
                         Val::Seq(stream.iter().map(|&word| Val::U(word as u64)).collect()),
                     ),
-                    ("curveCount", Val::U(animated_curves.len() as u64)),
+                    ("curveCount", Val::U((animated.len() - stepped) as u64)),
+                    ("discreteCurveCount", Val::U(stepped as u64)),
                 ]),
             ),
-            ("m_DenseClip", Val::Map(named(dense))),
+            (
+                "m_DenseClip",
+                Val::map([
+                    ("m_FrameCount", Val::I(layout.frames as i64)),
+                    ("m_CurveCount", Val::U(dense_curves as u64)),
+                    ("m_SampleRate", Val::F(sample_rate)),
+                    ("m_BeginTime", Val::F(layout.begin)),
+                    ("m_SampleArray", Val::floats(layout.samples.iter().copied())),
+                ]),
+            ),
             (
                 "m_ConstantClip",
                 Val::map([(
                     "data",
-                    Val::floats(fixed_curves.iter().map(|curve| curve.keys[0].value)),
+                    Val::floats(fixed.iter().map(|curve| curve.keys[0].value)),
                 )]),
             ),
         ]),
@@ -1026,6 +1525,11 @@ fn clip_object(fields: &Map<String, Value>, scripts: &mut Scripts<'_>) -> Result
                 ("script", binding.script.clone()),
                 ("typeID", Val::I(binding.type_id)),
                 ("customType", Val::U(binding.custom_type as u64)),
+                ("isPPtrCurve", Val::U((binding.kind == Kind::Object) as u64)),
+                (
+                    "isIntCurve",
+                    Val::U((binding.kind == Kind::Discrete) as u64),
+                ),
             ])
         })
         .collect();
@@ -1036,7 +1540,10 @@ fn clip_object(fields: &Map<String, Value>, scripts: &mut Scripts<'_>) -> Result
     object.push(("m_HasMotionFloatCurves", Val::Bool(motion)));
     object.push((
         "m_ClipBindingConstant",
-        Val::map([("genericBindings", Val::Seq(generic))]),
+        Val::map([
+            ("genericBindings", Val::Seq(generic)),
+            ("pptrCurveMapping", Val::Seq(objects)),
+        ]),
     ));
     clip_tree()?.encode(&Val::Map(named(object)))
 }
@@ -1050,7 +1557,8 @@ fn named(fields: Vec<(&'static str, Val)>) -> Vec<(std::borrow::Cow<'static, str
 
 /// Bakes an authored `.anim` source into a ContentFile. Scripts the clip
 /// points to are written into the same file as `MonoScript` objects, which
-/// the Player ties to the loaded class by name.
+/// the Player ties to the loaded class by name. The assets whose objects its
+/// curves assign or its events pass become external references.
 pub fn bake_clip(yaml: &[u8], sources: &dyn ClipSources) -> Result<Baked> {
     if yaml.len() > MAX_SOURCE_BYTES {
         return Err(unsupported("animation source larger than the baker reads"));
@@ -1063,7 +1571,11 @@ pub fn bake_clip(yaml: &[u8], sources: &dyn ClipSources) -> Result<Baked> {
         bail!("animation source does not hold an AnimationClip");
     }
     let local_id: i64 = document.file_id.parse().context("animation clip file ID")?;
-    let (data, scripts) = bake_clip_object(&document.data, sources)?;
+    let ClipObject {
+        data,
+        scripts,
+        externals,
+    } = bake_clip_parts(&document.data, sources)?;
     let mut objects = Vec::new();
     for script in &scripts {
         if script.local_id == local_id {
@@ -1079,14 +1591,14 @@ pub fn bake_clip(yaml: &[u8], sources: &dyn ClipSources) -> Result<Baked> {
         data,
         script: None,
     });
-    let file = serialized::write(&objects, &[])?;
+    let file = serialized::write(&objects, &externals)?;
     Ok(Baked {
         file,
         objects: vec![(
             document.file_id.clone(),
             "UnityEngine.AnimationClip".to_string(),
         )],
-        externals: Vec::new(),
+        externals,
     })
 }
 
@@ -1162,10 +1674,7 @@ pub fn bake_model_clips(artifact: &[u8]) -> Result<ModelClips> {
             bail!("model animation clip is not a structure");
         };
         let file_id = object.local_id.to_string();
-        let mut scripts = Scripts {
-            sources: &NoScripts,
-            used: Vec::new(),
-        };
+        let mut scripts = Scripts::new(&NoScripts);
         match clip_object(&fields, &mut scripts) {
             Ok(data) => {
                 let looping = match get(&fields, "m_AnimationClipSettings") {
