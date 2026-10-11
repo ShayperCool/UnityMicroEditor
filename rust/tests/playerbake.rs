@@ -841,13 +841,21 @@ fn baked_controller_carries_its_behaviours_and_their_scripts() {
     let fixtures = BehaviourFixtures::open(root.clone());
     let source = fs::read(root.join("Assets/One/S01_Single.controller")).unwrap();
     let baked = playerbake::bake_controller(&source, &fixtures).unwrap();
-    // Only the controller is published; the rest travels with it.
+    // The controller and its behaviours are published, each behaviour as an
+    // object of its class; the script objects only travel with them.
+    let published: Vec<(&str, &str)> = baked
+        .objects
+        .iter()
+        .map(|(file_id, class)| (file_id.as_str(), class.as_str()))
+        .collect();
     assert_eq!(
-        baked.objects,
-        [(
-            "9100000".to_string(),
-            "UnityEngine.RuntimeAnimatorController".to_string()
-        )]
+        published,
+        [
+            ("9100000", "UnityEngine.RuntimeAnimatorController"),
+            ("4871019363250582183", "SmbTag"),
+            ("2735788593747126708", "Second.Deep.Ns.SmbSecond"),
+            ("-9034250506258404624", "SmbTag"),
+        ]
     );
     let objects = playerbake::read_serialized(&baked.file).unwrap();
     let classes: Vec<i32> = objects.iter().map(|object| object.tree.class_id).collect();

@@ -1493,7 +1493,8 @@ pub fn read_mask(yaml: &[u8]) -> Result<Mask> {
 /// Bakes an authored `.controller` source into a ContentFile whose external
 /// references are the clips it plays. Its behaviours and a `MonoScript` object
 /// for each of their classes are written into the same file; the Player ties
-/// such an object to the loaded class by name.
+/// such an object to the loaded class by name. The behaviours are published
+/// beside the controller, each as an object of its class.
 pub fn bake_controller(yaml: &[u8], sources: &dyn ControllerSources) -> Result<super::Baked> {
     // Names and behaviour fields are free text.
     super::source::refuse_comment_marks(yaml)?;
@@ -1505,6 +1506,10 @@ pub fn bake_controller(yaml: &[u8], sources: &dyn ControllerSources) -> Result<s
         bail!("controller has an invalid file ID");
     };
     let baked = bake_controller_object(&documents, sources)?;
+    let mut published = vec![(
+        controller.file_id.clone(),
+        "UnityEngine.RuntimeAnimatorController".to_string(),
+    )];
     let mut objects = vec![Object {
         local_id,
         tree: controller_tree()?,
@@ -1519,6 +1524,13 @@ pub fn bake_controller(yaml: &[u8], sources: &dyn ControllerSources) -> Result<s
             bail!("state machine behaviour has an invalid file ID");
         };
         let (identity, layout) = &baked.scripts[behaviour.script];
+        published.push((
+            behaviour.file_id,
+            match identity.namespace.as_str() {
+                "" => identity.class_name.clone(),
+                namespace => format!("{namespace}.{}", identity.class_name),
+            },
+        ));
         objects.push(Object {
             local_id,
             tree: &layout.tree,
@@ -1531,10 +1543,7 @@ pub fn bake_controller(yaml: &[u8], sources: &dyn ControllerSources) -> Result<s
     let file = super::serialized::write(&objects, &baked.externals)?;
     Ok(super::Baked {
         file,
-        objects: vec![(
-            controller.file_id.clone(),
-            "UnityEngine.RuntimeAnimatorController".to_string(),
-        )],
+        objects: published,
         externals: baked.externals,
     })
 }
