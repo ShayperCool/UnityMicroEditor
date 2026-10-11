@@ -360,6 +360,58 @@ fn fallback_and_used_passes_refer_to_other_published_shaders() {
     }
 }
 
+/// A compiler that answers every request with an error, or with a warning
+/// beside the program it was recorded to give.
+struct Complaining(Option<Recorded>);
+impl SnippetCompiler for Complaining {
+    fn compile(&mut self, request: &SnippetRequest) -> anyhow::Result<SnippetReply> {
+        let complaint = [
+            b"err: 2 15 16".to_vec(),
+            b"Assets/Corpus/s01_unlit.shader".to_vec(),
+            b"undeclared identifier 'colour'".to_vec(),
+        ];
+        match &mut self.0 {
+            Some(recorded) => {
+                let mut reply = recorded.compile(request)?;
+                reply.lines.extend(complaint);
+                Ok(reply)
+            }
+            None => Ok(SnippetReply {
+                lines: complaint.to_vec(),
+                compiled: false,
+                program_type: 0,
+                program: Vec::new(),
+            }),
+        }
+    }
+}
+
+#[test]
+fn a_program_the_compiler_complains_about_is_refused() {
+    let name = "s01_unlit";
+    let project = ShaderProject {
+        platforms: vec![15, 18],
+        settings: ShaderSettings::default(),
+        materials: Vec::new(),
+    };
+    let bake = |mut compiler: Complaining| {
+        let error = playerbake::bake_shader(
+            &artifact(name),
+            &project,
+            &playerbake::NoShaders,
+            &mut compiler,
+        )
+        .unwrap_err();
+        refusal(&error).unwrap_or_else(|| panic!("not a refusal: {error:#}"))
+    };
+    assert!(
+        bake(Complaining(None))
+            .contains("Assets/Corpus/s01_unlit.shader(16): undeclared identifier 'colour'")
+    );
+    let recorded = Recorded::read(&fixtures().join(format!("{name}.replies.bin")));
+    assert!(bake(Complaining(Some(recorded))).contains("warns about"));
+}
+
 #[test]
 fn baked_shader_is_a_content_file_with_the_authored_identity() {
     let name = &fixture_names()[0];
@@ -427,8 +479,17 @@ fn unreproduced_shader_settings_are_refused() {
     .unwrap();
     assert_eq!(defaults, ShaderSettings::default());
     assert_eq!(ShaderSettings::read("", "", "", "").unwrap(), defaults);
-    let explicit = "  m_BuildTargetGraphicsAPIs:\n  - m_BuildTarget: LinuxStandaloneSupport\n    m_APIs: 1500000011000000\n    m_Automatic: 0\n";
-    assert!(playerbake::shader_platforms(explicit).is_err());
+    let listed = |apis: &str| {
+        playerbake::shader_platforms(&format!(
+            "  m_BuildTargetGraphicsAPIs:\n  - m_BuildTarget: LinuxStandaloneSupport\n    m_APIs: {apis}\n    m_Automatic: 0\n"
+        ))
+    };
+    assert_eq!(listed("1500000011000000").unwrap(), [18, 15]);
+    assert_eq!(listed("11000000").unwrap(), [15]);
+    // Another renderer, a repeated one and a malformed list.
+    for apis in ["0b000000", "1100000011000000", "110000", ""] {
+        assert!(refusal(&listed(apis).unwrap_err()).is_some(), "{apis}");
+    }
     assert_eq!(
         playerbake::shader_platforms("  m_BuildTargetGraphicsAPIs: []\n").unwrap(),
         [15, 18]
@@ -489,6 +550,11 @@ fn shader_corpus_matches_the_engine_build() {
     }
     for root in roots.split(':').map(PathBuf::from) {
         let project = fs::read_to_string(root.join("project")).unwrap();
+        let platforms = playerbake::shader_platforms(
+            &fs::read_to_string(root.join("ProjectSettings/ProjectSettings.asset"))
+                .unwrap_or_default(),
+        )
+        .unwrap();
         let settings = match settings(&root) {
             Ok(settings) => settings,
             Err(error) => panic!("{}: {error:#}", root.display()),
@@ -525,7 +591,7 @@ fn shader_corpus_matches_the_engine_build() {
             let artifact = fs::read(root.join(format!("{name}.artifact.bin"))).unwrap();
             let expected = fs::read(root.join(format!("{name}.shader.bin"))).unwrap();
             let project = ShaderProject {
-                platforms: vec![15, 18],
+                platforms: platforms.clone(),
                 settings: settings.clone(),
                 materials: materials(&root.join(format!("{name}.materials"))),
             };

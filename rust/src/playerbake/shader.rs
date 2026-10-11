@@ -486,17 +486,34 @@ impl ShaderSettings {
 }
 
 /// The graphics APIs a Linux standalone build of the project compiles
-/// shaders for, by compiler platform number, from the Player settings. Only
-/// the automatic choice is reproduced: OpenGL Core, then Vulkan.
+/// shaders for, by compiler platform number, from the Player settings:
+/// OpenGL Core and Vulkan, unless the project lists them itself.
 pub fn shader_platforms(player: &str) -> Result<Vec<u32>> {
     for target in entries(player, "m_BuildTargetGraphicsAPIs") {
-        if entry(&target, "m_BuildTarget") == Some("LinuxStandaloneSupport")
-            && entry(&target, "m_Automatic") != Some("1")
+        if entry(&target, "m_BuildTarget") != Some("LinuxStandaloneSupport")
+            || entry(&target, "m_Automatic") == Some("1")
         {
-            return Err(unsupported(
-                "a shader of a project that lists its Linux graphics APIs itself",
-            ));
+            continue;
         }
+        // The list is the renderers' numbers, four hex bytes each.
+        let listed = entry(&target, "m_APIs").unwrap_or("");
+        let refused = || unsupported(format!("the Linux graphics API list {listed:?}"));
+        if listed.is_empty() || !listed.len().is_multiple_of(8) || !listed.is_ascii() {
+            return Err(refused());
+        }
+        let mut platforms = Vec::new();
+        for index in (0..listed.len()).step_by(8) {
+            let platform = match &listed[index..index + 8] {
+                "11000000" => 15,
+                "15000000" => 18,
+                _ => return Err(refused()),
+            };
+            if platforms.contains(&platform) {
+                return Err(refused());
+            }
+            platforms.push(platform);
+        }
+        return Ok(platforms);
     }
     Ok(vec![15, 18])
 }
@@ -514,7 +531,7 @@ pub struct ShaderMaterialUse {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ShaderProject {
     /// The graphics APIs of the build by compiler platform number (OpenGL
-    /// Core is 15, Vulkan 18), in the order the project lists them.
+    /// Core is 15, Vulkan 18). Their order does not matter.
     pub platforms: Vec<u32>,
     pub settings: ShaderSettings,
     /// The materials built with the shader. A `shader_feature` keyword is

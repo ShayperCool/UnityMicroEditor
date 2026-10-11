@@ -146,17 +146,23 @@ fn binding(fields: &[&str], at: usize) -> Result<Binding> {
     })
 }
 
-/// What the compiler said about a program that did not compile.
+/// What the compiler said about a program that did not compile: the first
+/// error with its file and line. An error is a line of three numbers, the
+/// last of them the line, followed by the file and the message.
 pub(super) fn error_text(reply: &[Vec<u8>]) -> String {
     let lines: Vec<String> = reply
         .iter()
         .map(|line| String::from_utf8_lossy(line).into_owned())
         .collect();
-    let message = lines
-        .iter()
-        .position(|line| line.starts_with("err: "))
-        .and_then(|index| lines.get(index + 2));
-    message.cloned().unwrap_or_else(|| "no message".into())
+    let Some(index) = lines.iter().position(|line| line.starts_with("err: ")) else {
+        return "no message".into();
+    };
+    let message = lines.get(index + 2).map_or("no message", String::as_str);
+    let line = lines[index].rsplit(' ').next().unwrap_or("");
+    match lines.get(index + 1) {
+        Some(file) if !file.is_empty() => format!("{file}({line}): {message}"),
+        _ => message.to_string(),
+    }
 }
 
 impl Parameters {
