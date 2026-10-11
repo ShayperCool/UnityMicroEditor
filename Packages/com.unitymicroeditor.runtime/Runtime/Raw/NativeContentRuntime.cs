@@ -212,9 +212,14 @@ namespace UnityMicroEditor.Raw
                                 throw new InvalidDataException("Native ContentFile identity/type readback failed: " + descriptor.guid + "/" + entry.fileId);
                             if (value is Shader shader && !shader.isSupported)
                                 throw new InvalidDataException("Native compiled Shader is unsupported on the active GPU: " + descriptor.guid + "/" + entry.fileId);
-                            if (value is AudioClip clip && (clip.loadState != AudioDataLoadState.Loaded
-                                || (clip.loadType != AudioClipLoadType.DecompressOnLoad && clip.loadType != AudioClipLoadType.CompressedInMemory) || !clip.preloadAudioData))
-                                throw new InvalidDataException("Direct native audio must be loaded, preloaded, and use DecompressOnLoad or CompressedInMemory: " + descriptor.guid);
+                            // A clip that is not preloaded stays unloaded until the game loads or plays it, one
+                            // that loads in the background may still be loading, and a streaming clip opens its
+                            // resource when it plays; each is its authored behaviour. Only a preloaded,
+                            // synchronous clip that is decoded or kept in memory has to hold its data here.
+                            if (value is AudioClip clip && (clip.loadState == AudioDataLoadState.Failed
+                                || (clip.preloadAudioData && !clip.loadInBackground && clip.loadType != AudioClipLoadType.Streaming
+                                    && clip.loadState != AudioDataLoadState.Loaded)))
+                                throw new InvalidDataException("Direct native audio failed to load its data: " + descriptor.guid);
                             handle.Objects.Add(AssetKey(descriptor.guid, entry.fileId), value);
                         }
                         NativeUIRuntime.Prepare(descriptor, handle.Objects, (guid, fileID) =>
