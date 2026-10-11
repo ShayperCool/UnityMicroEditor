@@ -567,18 +567,30 @@ impl Inner {
                 );
             }
         } else if controller {
-            if objects.len() != 1
-                || objects[0].type_name
-                    != if profile == ".controller" {
-                        "UnityEngine.RuntimeAnimatorController"
-                    } else {
-                        "UnityEngine.AnimatorOverrideController"
-                    }
+            // A controller also publishes its state machine behaviours, each
+            // as an object of its script class.
+            let (main, behaviours) = if profile == ".controller" {
+                (
+                    "UnityEngine.RuntimeAnimatorController",
+                    objects.len().saturating_sub(1),
+                )
+            } else {
+                ("UnityEngine.AnimatorOverrideController", 0)
+            };
+            if objects.is_empty()
+                || objects.iter().filter(|o| o.type_name == main).count() != 1
+                || objects
+                    .iter()
+                    .filter(|o| !o.type_name.is_empty() && !o.type_name.starts_with("UnityEngine."))
+                    .count()
+                    != behaviours
                 || !r.model_graph.is_empty()
                 || !r.model_graph_sha256.is_empty()
                 || !r.content.resources.is_empty()
             {
-                bail!("controller replacement must contain exactly its controller object");
+                bail!(
+                    "controller replacement must contain exactly its controller object and its behaviours"
+                );
             }
         } else if ui {
             validate_native_ui_objects(&profile, r)?;
