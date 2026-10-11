@@ -433,6 +433,7 @@ impl Resolver<'_> {
         let mut total: u64 = 0;
         let mut files: i64 = 0;
         let mut seen: BTreeSet<Vec<u8>> = BTreeSet::new();
+        let mut long_name: Option<Vec<u8>> = None;
         for entry in archive.entries()? {
             self.ctx.err()?;
             let mut entry = entry?;
@@ -442,7 +443,25 @@ impl Resolver<'_> {
             if kind.is_pax_global_extensions() {
                 continue;
             }
-            let name = entry.path_bytes().into_owned();
+            // A long name in the GNU way under a POSIX header, as some
+            // registry archives carry it: the reader hands the record over
+            // as an entry of its own, and its data names the next entry.
+            if kind.is_gnu_longname() {
+                let mut long = Vec::new();
+                (&mut entry).take(4097).read_to_end(&mut long)?;
+                while long.last() == Some(&0) {
+                    long.pop();
+                }
+                if long.is_empty() || long.len() > 4096 || long_name.is_some() {
+                    bail!("package archive long name record is invalid");
+                }
+                long_name = Some(long);
+                continue;
+            }
+            let name = match long_name.take() {
+                Some(long) => long,
+                None => entry.path_bytes().into_owned(),
+            };
             let shown = String::from_utf8_lossy(&name).into_owned();
             let mut sparse = kind.is_gnu_sparse();
             if let Some(extensions) = entry.pax_extensions()? {

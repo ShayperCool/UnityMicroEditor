@@ -1244,6 +1244,7 @@ fn archive_metadata_members_are_applied_and_unsupported_members_refused() {
         (temp, resolved.map_err(|error| format!("{error:#}")))
     };
     let long = format!("package/{}/Deep.cs", "d".repeat(120));
+    let older = format!("package/{}/Older.cs", "o".repeat(120));
     let (_temp, path) = unpack(
         &|data| {
             let comment = pax_record("comment", &"0".repeat(40));
@@ -1255,6 +1256,18 @@ fn archive_metadata_members_are_applied_and_unsupported_members_refused() {
             name.push(0);
             member(data, "././@LongLink", b'L', 0, &name);
             member(data, "package/truncated", b'0', 0o600, b"gnu");
+            // The same record under a header without a format mark, which
+            // the archive reader passes through as an entry.
+            let mut name = older.clone().into_bytes();
+            name.push(0);
+            let mut header = tar::Header::new_old();
+            header.as_old_mut().name[..13].copy_from_slice(b"././@LongLink");
+            header.set_entry_type(tar::EntryType::new(b'L'));
+            header.set_mode(0);
+            header.set_size(name.len() as u64);
+            header.set_cksum();
+            data.append(&header, &name[..]).unwrap();
+            member(data, "package/cut", b'0', 0o600, b"old");
             member(data, "package/Old/", 0, 0o755, b"");
         },
         0,
@@ -1266,6 +1279,11 @@ fn archive_metadata_members_are_applied_and_unsupported_members_refused() {
         listed(long.strip_prefix("package/").unwrap()).as_deref(),
         Some(&b"gnu"[..])
     );
+    assert_eq!(
+        listed(older.strip_prefix("package/").unwrap()).as_deref(),
+        Some(&b"old"[..])
+    );
+    assert!(listed("cut").is_none());
     assert!(Path::new(&format!("{path}/Old")).is_dir());
     assert!(listed("pax_global_header").is_none() && listed("short").is_none());
     let (_temp, sparse) = unpack(
