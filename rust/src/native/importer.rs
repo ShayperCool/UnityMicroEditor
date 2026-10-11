@@ -38,6 +38,9 @@ pub struct NativeProjectImporter {
     pub(crate) entries: BTreeMap<String, NativeReplacement>,
     pub environment_sha256: String,
     pub(crate) pending_native_paths: Vec<String>,
+    /// The assembly that defines each script, by script GUID. A baked clip
+    /// that refers to a script needs it to name the class for the Player.
+    pub script_assemblies: BTreeMap<String, String>,
 }
 
 struct Replay<'a> {
@@ -61,6 +64,7 @@ impl NativeProjectImporter {
             entries: BTreeMap::new(),
             environment_sha256: environment.clone(),
             pending_native_paths: Vec::new(),
+            script_assemblies: BTreeMap::new(),
         };
         let index = sysutil::join(&[&importer.opts.output, "native/index.json"]);
         let entries: Option<Vec<NativeReplacement>> = match read_json(&index) {

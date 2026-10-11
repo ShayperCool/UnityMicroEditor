@@ -440,8 +440,8 @@ pub(crate) fn identity_catalog(project: &str, graph_path: &str, directory: &str)
 }
 
 impl Service {
-    /// Imports the scene's native content in an owned staging
-    /// clone and publishes the verified catalog. Empty when the project has no
+    /// Imports the scene's native content in the owned staging
+    /// copy and publishes the verified catalog. Empty when the project has no
     /// native assets.
     pub(crate) fn prepare_native(
         &self,
@@ -451,8 +451,7 @@ impl Service {
         directory: &str,
     ) -> Result<String> {
         let project = self.0.project.as_str();
-        let (stage, snapshot) =
-            super::clone_staging(ctx, project, &join(&[directory, "native-stage"]))?;
+        let (stage, snapshot) = super::sync_staging(ctx, project)?;
         seed_stage_library(ctx, self, &stage)?;
         let (_, _, _, settings) = project_references(project)?;
         let client = Client::new(
@@ -473,7 +472,7 @@ impl Service {
         let _close = Close(client.clone());
         self.stage(
             "import_native_content",
-            "importing the scene's native assets in an owned staging copy",
+            "importing the scene's native assets in the owned staging copy",
             &join(&[client.mailbox(), "editor.log"]),
         );
         let arguments = marshal(&Any::Object(obj([

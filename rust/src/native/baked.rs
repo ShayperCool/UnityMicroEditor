@@ -6,7 +6,9 @@ use super::{
     support::{Event, is_not_exist, lower_ext, mkdir_all, read_file, write_file},
 };
 use crate::{
-    playerbake::{self, Baked, ClipFacts, ControllerSources, Mask, Unsupported},
+    playerbake::{
+        self, Baked, ClipFacts, ClipSources, ControllerSources, Mask, ScriptIdentity, Unsupported,
+    },
     project::{NativeContentDependency, NativeContentFile, NativeContentObject, NativeReplacement},
     registry::meta_guid,
     sha256, sysutil,
@@ -14,7 +16,7 @@ use crate::{
 use anyhow::{Result, bail};
 use std::{collections::BTreeSet, time::Instant};
 
-/// Reads a controller's clips and masks from the project.
+/// Reads the scripts, clips and masks a baked source refers to.
 struct ProjectSources<'a> {
     importer: &'a NativeProjectImporter,
 }
@@ -31,6 +33,39 @@ impl ProjectSources<'_> {
             return Err(Unsupported(format!("{what} stored in {path}")).into());
         }
         Ok(path)
+    }
+}
+
+impl ClipSources for ProjectSources<'_> {
+    fn script(&self, guid: &str) -> Result<ScriptIdentity> {
+        let type_name = self.importer.session.lock().script_type(guid).to_string();
+        let assembly = self.importer.script_assemblies.get(guid);
+        let (Some(assembly), false) = (assembly, type_name.is_empty()) else {
+            return Err(
+                Unsupported(format!("reference to script {guid} of an unknown class")).into(),
+            );
+        };
+        let path = self.importer.source_path(guid)?;
+        let source = resolve_project_import_source(&self.importer.opts.project, &path)?;
+        let meta = String::from_utf8_lossy(&read_file(&format!("{source}.meta"))?).into_owned();
+        let execution_order = meta
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("executionOrder:"))
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        let (namespace, class_name) = type_name.rsplit_once('.').unwrap_or(("", &type_name));
+        if class_name.contains('+') {
+            return Err(
+                Unsupported(format!("reference to nested script class {type_name}")).into(),
+            );
+        }
+        Ok(ScriptIdentity {
+            class_name: class_name.to_string(),
+            namespace: namespace.to_string(),
+            assembly: assembly.clone(),
+            execution_order,
+            local_id: playerbake::script_local_id(guid),
+        })
     }
 }
 
@@ -121,7 +156,7 @@ impl NativeProjectImporter {
         let source_sha = sha256(&data);
         let meta_sha = sha256(&meta);
         let baked = match lower_ext(logical).as_str() {
-            ".anim" => playerbake::bake_clip(&data),
+            ".anim" => playerbake::bake_clip(&data, &ProjectSources { importer: self }),
             ".controller" => playerbake::bake_controller(&data, &ProjectSources { importer: self }),
             ".overridecontroller" => playerbake::bake_override(&data),
             _ => bail!("no baker for {logical}"),

@@ -64,8 +64,8 @@ pub const HOST_CODEGEN_DIRECTORY: &str = "UnityMicroEditorCodeGen";
 const NETCODE_RUNTIME: &str = "Unity.Netcode.Runtime.dll";
 
 /// The project roots whose `Library` may hold Unity's package and build
-/// caches: the target, the staging copy a host was built in, then every host
-/// stage of this project, newest first.
+/// caches: the target, the staging copy a host was built in, the shared
+/// staging copy, then every earlier host stage of this project, newest first.
 fn library_roots(project: &str, player: &str) -> Vec<String> {
     let mut roots = vec![project.to_string()];
     // <stage>/Builds/UnityMicroEditor/<phase>/Project.x86_64
@@ -78,6 +78,10 @@ fn library_roots(project: &str, player: &str) -> Vec<String> {
         "ProjectSettings/UnityMicroEditorStaging.json",
     ])) {
         roots.push(stage);
+    }
+    let shared = join(&[project, "Library/UnityMicroEditor/stage/project"]);
+    if !roots.contains(&shared) && !sys::absent(&shared) {
+        roots.push(shared);
     }
     let mut stages: Vec<(std::time::SystemTime, String)> = sys::glob_lossy(&join(&[
         project,

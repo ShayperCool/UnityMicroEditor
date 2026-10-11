@@ -12,7 +12,7 @@ use crate::{
     compiler::{NilMap, NilVec, Walk, WalkEntry, compiler_command, walk_dir},
     jsondoc,
     mcp::HandlerValue,
-    project::{lexpath, value},
+    project::{is_owned_cache_path, lexpath, value},
     sha256, sysutil,
     util::{agent_canonical, agent_immutable_json, agent_read_json, file_hash, read_agent_file},
 };
@@ -222,6 +222,142 @@ pub fn clone_staging(
     verify_snapshot(ctx, &snapshot)?;
     agent_immutable_json(&marker, &snapshot)?;
     Ok((stage, snapshot))
+}
+
+/// The one staging copy every Editor stage of `project` runs in. Its
+/// `Library` and build caches outlive a preparation, so only the first host
+/// build of a project is cold.
+pub(crate) fn shared_stage(project: &str) -> String {
+    join(&[project, "Library/UnityMicroEditor/stage/project"])
+}
+
+const STAGE_ROOTS: [&str; 3] = ["Assets", "Packages", "ProjectSettings"];
+const STAGE_MARKER: &str = "ProjectSettings/UnityMicroEditorStaging.json";
+
+/// Brings the shared staging copy of `source` up to date with its authored
+/// roots and installs the runtime package there. Files whose bytes already
+/// match keep their timestamps, so Unity reimports only what changed; whatever
+/// an earlier stage Editor authored in those roots is removed. An interrupted
+/// run is repaired by the next one.
+pub fn sync_staging(ctx: &Context, source: &str) -> Result<(String, SourceSnapshot)> {
+    let stage = shared_stage(source);
+    if !is_owned_cache_path(source, &stage) {
+        return Err(anyhow!("shared stage is outside owned project caches"));
+    }
+    agent_canonical(&stage)?;
+    let exists = match sysutil::lstat(&stage) {
+        Ok(info) if info.is_dir() => true,
+        Ok(_) => return Err(anyhow!("shared staging project is not a regular directory")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(sysutil::Error::os("lstat", &stage, &error).into()),
+    };
+    if exists {
+        if crate::editorbridge::project_is_open(&stage)? {
+            return Err(fail(
+                "staging_busy",
+                "an Editor still has the shared staging copy open; wait for it or stop it before another preparation",
+            ));
+        }
+        // A project copied together with its Library carries the stage of the
+        // original, whose caches hold that path.
+        let foreign = match super::read_map(&join(&[&stage, STAGE_MARKER]), 65536) {
+            Ok(marker) => marker.get("sourceProject") != Some(&Any::from(source)),
+            Err(error) if not_exist(&error) => false,
+            Err(error) => return Err(error),
+        };
+        if foreign {
+            let directory = sysutil::dir(&stage);
+            fs::remove_dir_all(&directory)
+                .map_err(|error| sysutil::Error::os("remove", &directory, &error))?;
+        }
+    }
+    let snapshot = snapshot_source(ctx, source)?;
+    sysutil::mkdir_all(&stage)?;
+    for root in STAGE_ROOTS {
+        prune_staged(ctx, source, &stage, root, &snapshot)?;
+        walk_dir(&join(&[source, root]), &mut |entry: &WalkEntry| {
+            if entry.is_dir() {
+                let logical = sysutil::rel(source, entry.path).ok_or_else(|| {
+                    anyhow!("Rel: can't make {} relative to {source}", entry.path)
+                })?;
+                sysutil::mkdir_all(&join(&[&stage, &logical]))?;
+            }
+            Ok(Walk::Continue)
+        })?;
+    }
+    for (logical, hash) in snapshot.files.iter() {
+        ctx.err()?;
+        let (from, to) = (join(&[source, logical]), join(&[&stage, logical]));
+        match sysutil::lstat(&to) {
+            Ok(info) if info.is_regular() && file_hash(&to)? == *hash => continue,
+            Ok(_) => {
+                fs::remove_file(&to).map_err(|error| sysutil::Error::os("remove", &to, &error))?
+            }
+            Err(_) => {}
+        }
+        // Reflinked where the filesystem can; the source timestamp tells Unity
+        // an unchanged file apart from an edited one.
+        fs::copy(&from, &to).map_err(|error| sysutil::Error::os("copy", &to, &error))?;
+        let modified = fs::metadata(&from)
+            .and_then(|info| info.modified())
+            .map_err(|error| sysutil::Error::os("stat", &from, &error))?;
+        fs::File::open(&to)
+            .and_then(|file| file.set_modified(modified))
+            .map_err(|error| sysutil::Error::os("utimens", &to, &error))?;
+    }
+    normalize_staged_package_paths(source, &stage)?;
+    super::install_agent_package(&stage)?;
+    let staging_marker = join(&[&stage, STAGE_MARKER]);
+    if snapshot.files.contains_key(STAGE_MARKER) {
+        fs::remove_file(&staging_marker)
+            .map_err(|error| sysutil::Error::os("remove", &staging_marker, &error))?;
+    }
+    agent_immutable_json(
+        &staging_marker,
+        &Any::Object(obj([
+            ("schemaVersion", 1.into()),
+            ("sourceProject", source.into()),
+        ])),
+    )?;
+    verify_snapshot(ctx, &snapshot)?;
+    Ok((stage, snapshot))
+}
+
+/// Removes what the staged `relative` directory holds beyond the snapshot.
+fn prune_staged(
+    ctx: &Context,
+    source: &str,
+    stage: &str,
+    relative: &str,
+    snapshot: &SourceSnapshot,
+) -> Result<()> {
+    ctx.err()?;
+    let directory = join(&[stage, relative]);
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(sysutil::Error::os("open", &directory, &error).into()),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| sysutil::Error::os("readdirent", &directory, &error))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let (logical, path) = (join(&[relative, &name]), join(&[&directory, &name]));
+        let kind = entry
+            .file_type()
+            .map_err(|error| sysutil::Error::os("lstat", &path, &error))?;
+        if !kind.is_dir() {
+            if logical != STAGE_MARKER && !snapshot.files.contains_key(&logical) {
+                fs::remove_file(&path)
+                    .map_err(|error| sysutil::Error::os("remove", &path, &error))?;
+            }
+        } else if sysutil::lstat(&join(&[source, &logical])).is_ok_and(|info| info.is_dir()) {
+            prune_staged(ctx, source, stage, &logical, snapshot)?;
+        } else {
+            fs::remove_dir_all(&path)
+                .map_err(|error| sysutil::Error::os("remove", &path, &error))?;
+        }
+    }
+    Ok(())
 }
 
 /// Decodes the arguments into a `PrefabEditRequest`:

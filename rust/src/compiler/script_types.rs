@@ -40,6 +40,17 @@ struct CacheIdentity<'a> {
 }
 
 impl Compiler {
+    /// The assembly each script of the compiler graph is compiled into, by
+    /// script GUID.
+    pub fn script_assemblies(&self) -> BTreeMap<String, String> {
+        self.manifest
+            .scripts
+            .iter()
+            .filter(|script| !script.guid.is_empty() && !script.assembly.is_empty())
+            .map(|script| (script.guid.clone(), script.assembly.clone()))
+            .collect()
+    }
+
     /// Reads type metadata without loading game code or the
     /// Editor. The prepared compiler graph ties each MonoScript GUID to its
     /// defining DLL.

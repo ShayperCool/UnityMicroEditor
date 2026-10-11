@@ -37,7 +37,8 @@ pub use defaults::{DefaultsCatalog, DefaultsProfile, component_defaults_profile}
 pub use scene::{publish_agent_baseline, validate_scene_lighting};
 pub use source_scene::{SourceSceneProof, build_source_scene_proof};
 pub use staging::{
-    SourceSnapshot, clone_staging, snapshot_source, validate_staged_metadata, verify_snapshot,
+    SourceSnapshot, clone_staging, snapshot_source, sync_staging, validate_staged_metadata,
+    verify_snapshot,
 };
 
 use crate::{

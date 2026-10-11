@@ -74,13 +74,15 @@ Unity has no importer output for a `.anim` file: the worker returns only the imp
 
 A legacy clip keeps its authored curves. Any other clip gets the muscle clip Mecanim evaluates: streamed cubic segments, the constant clip, value deltas and bindings. The result is compared byte for byte with objects built by Unity `6000.6.3f1`: the fixtures under `rust/tests/testdata/playerbake`, and any project's clips through `UNITY_PLAYERBAKE_CLIP_CORPUS`.
 
+A float curve on a field of a script and an animation event that passes a script are supported: the baked file carries a `MonoScript` object naming the class, which the Player ties to the loaded class. The session takes the class and its assembly from the compiler graph of its start; a script added later is unknown until the next session.
+
 The baker refuses what it does not reproduce exactly, and the session reports the clip instead of publishing an approximation:
 
 - humanoid (muscle) curves and root motion curves;
-- float curves on a script field or on a component other than an Animator parameter or `GameObject.m_IsActive`;
-- object reference curves, events with an object reference and an additive reference pose;
+- float curves on a built-in component other than an Animator parameter or `GameObject.m_IsActive`;
+- object reference curves, an event that passes an object other than a script, and an additive reference pose;
 - weighted tangents and negative infinite tangents;
-- a source larger than the 32 MiB text bound.
+- a source larger than 256 MiB. A source of tens of megabytes is read whole and takes a few seconds and up to a few gigabytes of memory.
 
 ## Animator controllers
 
