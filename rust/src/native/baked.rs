@@ -88,6 +88,26 @@ impl ClipSources for ProjectSources<'_> {
     }
 }
 
+impl playerbake::NativeSources for ProjectSources<'_> {
+    fn linear_color_space(&self) -> Option<bool> {
+        let settings = resolve_project_import_source(
+            &self.importer.opts.project,
+            "ProjectSettings/ProjectSettings.asset",
+        )
+        .and_then(|source| read_file(&source))
+        .ok()?;
+        let text = String::from_utf8_lossy(&settings);
+        let value = text
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("m_ActiveColorSpace:"))?;
+        match value.trim() {
+            "0" => Some(false),
+            "1" => Some(true),
+            _ => None,
+        }
+    }
+}
+
 impl ControllerSources for ProjectSources<'_> {
     fn clip(&self, guid: &str, file_id: &str) -> Result<ClipFacts> {
         if let Some(model) = self.importer.model_clips.get(guid) {
@@ -182,7 +202,8 @@ pub(super) fn holds_behaviours(source: &[u8]) -> bool {
 }
 
 /// The baked clips of one imported model, published as derived content.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub(crate) struct ModelClipSet {
     path: String,
     source_sha256: String,
@@ -192,6 +213,8 @@ pub(crate) struct ModelClipSet {
     /// Clip name and loop setting by local file ID.
     clips: BTreeMap<String, (String, bool)>,
     refused: BTreeMap<String, String>,
+    /// The published file, kept so another session need not import the model.
+    content: Option<NativeContentFile>,
 }
 
 impl ModelClipSet {
@@ -244,6 +267,33 @@ impl NativeProjectImporter {
             .get(guid)
             .is_some_and(|known| known.source_sha256 == source_sha && known.meta_sha256 == meta_sha)
         {
+            return Ok(());
+        }
+        // What an earlier session baked from this revision of the model.
+        let signature = sha256(
+            format!(
+                "playerbake-model-clips\0{}\0{guid}\0{source_sha}\0{meta_sha}",
+                self.environment_sha256
+            )
+            .as_bytes(),
+        );
+        let cache = sysutil::join(&[
+            &self.opts.output,
+            "native/cache",
+            &format!("model-clips-{signature}.json"),
+        ]);
+        if let Ok(known) = crate::util::read_json_file::<ModelClipSet>(&cache)
+            && known.path == logical
+            && known.source_sha256 == source_sha
+            && known.meta_sha256 == meta_sha
+            && known.content.as_ref().is_none_or(|content| {
+                read_file(&content.path).is_ok_and(|file| sha256(&file) == content.sha256)
+            })
+        {
+            if let Some(content) = &known.content {
+                self.session.set_derived_native_content(content)?;
+            }
+            self.model_clips.insert(guid.to_string(), known);
             return Ok(());
         }
         let started = Instant::now();
@@ -310,7 +360,10 @@ impl NativeProjectImporter {
                     .push(NativeContentObject { file_id, type_name });
             }
             self.session.set_derived_native_content(&content)?;
+            set.content = Some(content);
         }
+        mkdir_all(&sysutil::dir(&cache), 0o700)?;
+        crate::util::atomic_json(&cache, &set)?;
         Event::new("native-model-clips-baked")
             .with("path", logical)
             .with("clipCount", &set.clips.len())
@@ -620,6 +673,9 @@ impl NativeProjectImporter {
                 }),
             ".overridecontroller" => playerbake::bake_override(&data),
             ".mask" => playerbake::bake_mask(&data),
+            ".physicmaterial" | ".physicsmaterial2d" | ".rendertexture" => {
+                playerbake::bake_native(&data, &ProjectSources { importer: self })
+            }
             _ => bail!("no baker for {logical}"),
         };
         // Keeps the cause, so a refusal can be told from a failure.

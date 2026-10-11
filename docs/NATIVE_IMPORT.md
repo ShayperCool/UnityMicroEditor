@@ -194,6 +194,8 @@ Refused:
 - A custom render texture whose `m_UpdateZoneSpace` differs from `m_CurrentUpdateZoneSpace`: the engine converts its update zones between the two spaces.
 - A source holding an object of any other class.
 
+A session publishes this way a new or changed `.mask`, `.physicMaterial`, `.physicsMaterial2D` and `.renderTexture`, each as one object without references to other files; a scene that refers to one the native catalog lacks, or holds in an older form, is prepared without an Editor. It reads the color space a render texture needs from `ProjectSettings/ProjectSettings.asset`. The other classes are baked and compared but not published by a session yet: what they refer to (a flare's or terrain layer's textures, a material's shader and textures) lives in the catalog's bundles, which a published file cannot point into, so a material keeps its raw path and a custom render texture, flare, terrain layer or lighting settings asset still needs a refreshed catalog.
+
 ### Materials
 
 A build derives a material from its shader (`rust/src/playerbake/material.rs`), so the caller supplies what the shader declares: `NativeSources::shader` returns `ShaderFacts` (name, keywords, properties with defaults, tags). `read_shader_facts` reads them from a `Shader` object in the Player form, as an earlier build of the project wrote it.

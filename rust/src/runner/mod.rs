@@ -311,7 +311,7 @@ pub fn relevant_source(path: &str) -> bool {
         lexpath::rune_lower(sysutil::ext(path)).as_str(),
         ".unity" | ".prefab" | ".asset" | ".cs" | ".dll" | ".rsp" | ".meta" | ".asmdef"
             | ".asmref" | ".json" | ".fbx" | ".wav" | ".png" | ".mat" | ".controller"
-            | ".anim" | ".overridecontroller" | ".mask" | ".ogg" | ".jpg" | ".jpeg" | ".shader" | ".shadergraph" | ".hlsl"
+            | ".anim" | ".overridecontroller" | ".mask" | ".physicmaterial" | ".physicsmaterial2d" | ".rendertexture" | ".ogg" | ".jpg" | ".jpeg" | ".shader" | ".shadergraph" | ".hlsl"
             | ".cginc" | ".compute" | ".uxml" | ".uss" | ".inputactions"
             // Unsupported native profiles must also reach Prepare so that a changed
             // dependency is rejected explicitly rather than silently kept stale.

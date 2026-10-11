@@ -571,8 +571,10 @@ pub fn write(input: Input) -> Result<Report> {
     let project = crate::paths::lexical_abs(&input.project)?;
     ensure!(
         project.canonicalize().ok().as_ref() == Some(&project)
-            && project.to_string_lossy().contains("/Temp/"),
-        "project registry requires a new owned context under Temp without symlink ancestors"
+            && ["/Temp/", "/Library/UnityMicroEditor/"]
+                .iter()
+                .any(|owned| project.to_string_lossy().contains(owned)),
+        "project registry requires a new owned context under Temp or Library/UnityMicroEditor without symlink ancestors"
     );
     ensure!(
         project.is_dir()

@@ -364,7 +364,9 @@ impl DataStoreService {
                 sysutil::errno_text(&error)
             );
         }
-        if done.wait(Some(Duration::from_secs(3))) {
+        // The kill cannot fail, but releasing the store's mapped memory takes
+        // a loaded machine longer than the process took to end by itself.
+        if done.wait(Some(Duration::from_secs(60))) {
             return Ok(());
         }
         bail!("Unity.DataStore did not exit after SIGKILL")

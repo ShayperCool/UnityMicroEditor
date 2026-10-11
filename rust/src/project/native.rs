@@ -33,6 +33,9 @@ pub(crate) fn native_content_class(type_name: &str) -> i32 {
         "UnityEngine.RuntimeAnimatorController" => 91,
         "UnityEngine.AnimatorOverrideController" => 221,
         "UnityEngine.AvatarMask" => 319,
+        "UnityEngine.PhysicsMaterial" => 134,
+        "UnityEngine.PhysicsMaterial2D" => 62,
+        "UnityEngine.RenderTexture" => 84,
         "UnityEngine.UIElements.StyleSheet" | "UnityEngine.UIElements.VisualTreeAsset" => 114,
         _ => 0,
     }
@@ -393,7 +396,16 @@ impl Inner {
         // Baked by this tool from the authored source; see `playerbake`.
         let clip = profile == ".anim";
         let controller = profile == ".controller" || profile == ".overridecontroller";
-        let mask = profile == ".mask";
+        // Transcoded by this tool: one object under the file ID the engine
+        // gives the class.
+        let transcoded = match profile.as_str() {
+            ".mask" => Some(("31900000", "UnityEngine.AvatarMask")),
+            ".physicmaterial" => Some(("13400000", "UnityEngine.PhysicsMaterial")),
+            ".physicsmaterial2d" => Some(("6200000", "UnityEngine.PhysicsMaterial2D")),
+            ".rendertexture" => Some(("8400000", "UnityEngine.RenderTexture")),
+            _ => None,
+        };
+        let mask = transcoded.is_some();
         for binding in r.deferred_bindings.iter() {
             // Only a behaviour of a baked controller is bound after loading.
             let owner = r.content.objects.iter().find(|object| {
@@ -620,17 +632,17 @@ impl Inner {
                     "animation replacement must contain one AnimationClip without native dependencies"
                 );
             }
-        } else if mask {
+        } else if let Some((file_id, type_name)) = transcoded {
             if objects.len() != 1
-                || objects[0].file_id != "31900000"
-                || objects[0].type_name != "UnityEngine.AvatarMask"
+                || objects[0].file_id != file_id
+                || objects[0].type_name != type_name
                 || !r.model_graph.is_empty()
                 || !r.model_graph_sha256.is_empty()
                 || !r.content.resources.is_empty()
                 || !r.content.dependencies.is_empty()
             {
                 bail!(
-                    "avatar mask replacement must contain one AvatarMask without native dependencies"
+                    "{path} replacement must contain one {type_name} without native dependencies"
                 );
             }
         } else if controller {

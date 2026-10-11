@@ -286,7 +286,13 @@ impl NativeProjectImporter {
         }
         if matches!(
             profile,
-            "anim" | "controller" | "overridecontroller" | "mask"
+            "anim"
+                | "controller"
+                | "overridecontroller"
+                | "mask"
+                | "physicmaterial"
+                | "physicsmaterial2d"
+                | "rendertexture"
         ) {
             return self.import_baked(ctx, logical);
         }
