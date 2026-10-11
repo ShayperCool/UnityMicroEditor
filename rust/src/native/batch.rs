@@ -8,7 +8,7 @@ use super::{
     mesh_cpu::retain_native_model_mesh_cpu,
     resolve_project_import_source,
     support::{Event, check, join, lower_ext, mkdir_all, read_file, wrap, write_file},
-    texture_profile::{native_png_needs_warm, warm_texture_configuration},
+    texture_profile::{native_texture_needs_warm, texture_source, warm_texture_configuration},
 };
 use crate::{
     cancel::Context,
@@ -30,7 +30,17 @@ use std::{
 pub const NATIVE_IMPORT_BATCH_SIZE: usize = 32;
 
 pub fn cold_native_profile(logical: &str) -> bool {
-    matches!(lower_ext(logical).as_str(), ".fbx" | ".wav" | ".png")
+    cold_runtime_profile(logical).is_some()
+}
+
+/// The runtime adapter profile of a source a standalone worker imports.
+fn cold_runtime_profile(logical: &str) -> Option<&'static str> {
+    match lower_ext(logical).as_str() {
+        ".fbx" => Some("fbx"),
+        ".wav" => Some("wav"),
+        _ if texture_source(logical) => Some("texture"),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -119,7 +129,7 @@ impl NativeProjectImporter {
             .emit();
         let mut cold = Vec::new();
         for logical in paths {
-            if native_png_needs_warm(&self.opts.project, &logical)? {
+            if native_texture_needs_warm(&self.opts.project, &logical)? {
                 self.import_warm_ui(ctx, &logical, &mut HashSet::new())?;
             } else {
                 cold.push(logical);
@@ -287,12 +297,14 @@ pub(crate) fn adapt_cold_asset(
         _ => bail!("native primary artifact changed"),
     };
     let extension = lower_ext(&input.path);
-    let profile = extension.strip_prefix('.').unwrap_or(&extension);
-    let adapted = if profile == "png" {
-        runtimeartifact::adapt_texture(&data, profile)
-    } else {
-        runtimeartifact::adapt(&data, profile)
+    let adapted = match cold_runtime_profile(&input.path) {
+        Some("texture") => {
+            runtimeartifact::adapt_texture(&data, extension.strip_prefix('.').unwrap_or(&extension))
+        }
+        Some(profile) => runtimeartifact::adapt(&data, profile),
+        None => bail!("unsupported native cold profile: {}", input.path),
     };
+    let profile = extension.strip_prefix('.').unwrap_or(&extension);
     let (output, metadata) =
         adapted.map_err(|e| wrap(&format!("adapt native {}", input.path), e))?;
     if profile == "fbx" && asset.files.len() != 1 {

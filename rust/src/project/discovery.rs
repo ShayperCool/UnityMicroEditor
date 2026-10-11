@@ -7,6 +7,7 @@ use super::{
     value::{self, Map, Value, get, map_file_id, number},
 };
 use crate::cache::{FileRecord, Identity};
+use crate::runtimeartifact::texture_profile;
 use crate::yaml::MAX_TEXT_BYTES;
 use anyhow::{Result, anyhow, bail};
 use sha2::{Digest, Sha256};
@@ -621,7 +622,11 @@ impl Inner {
         {
             return Ok(false);
         }
-        if lexpath::equal_fold(lexpath::ext(logical), ".png") {
+        // The formats the raw decoder profile may serve without an import.
+        if matches!(
+            lexpath::lower_ext(logical).as_str(),
+            ".png" | ".jpg" | ".jpeg"
+        ) {
             let mut probe = value::map([("path", logical.into())]);
             match self.refresh_authored_texture(&mut probe) {
                 Ok(()) => return Ok(false),
@@ -653,7 +658,11 @@ impl Inner {
                 bail!("authored native dependency closure exceeds supported source bound");
             }
             match lexpath::lower_ext(&logical).as_str() {
-                ".fbx" | ".wav" | ".png" => {
+                ".fbx" | ".wav" => {
+                    heavy.insert(logical);
+                    continue;
+                }
+                extension if texture_profile(extension.trim_start_matches('.')) => {
                     heavy.insert(logical);
                     continue;
                 }

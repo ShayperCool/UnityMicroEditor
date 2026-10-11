@@ -1,6 +1,10 @@
-//! Cold TextureImporter delivery is proven for uncompressed ordinary textures,
-//! including native resize/mips. Compression requires additional pinned native
-//! compressor dependencies; until verified, only exact existing artifacts are used.
+//! Cold TextureImporter delivery is proven for ordinary 2D textures in the
+//! automatic format, including native resize/mips: uncompressed, and the normal
+//! and low quality compression, whose worker artifacts equal the Editor's byte
+//! for byte (DXT1, DXT5, BC6H and the crunched form). High quality compression
+//! selects BC7, whose compressor the main Editor supplies as an import
+//! dependency; a standalone worker aborts without it, so only exact existing
+//! artifacts are used for it and for every explicit format.
 use super::{resolve_project_import_source, support::read_file};
 use crate::{
     authoring::yamlcodec::{self, FLOAT, INT, Kind, MERGE, NULL, Node, Resolved},
@@ -20,7 +24,6 @@ struct Platform {
     overridden: i64,
     compression: Option<i64>,
     format: Option<i64>,
-    crunched: i64,
 }
 #[derive(Default)]
 struct Importer {
@@ -181,10 +184,10 @@ impl Decoder<'_> {
                         platform.format = Some(self.int(value).unwrap_or_default());
                     }
                 }
+                // Crunching does not change the route; a malformed value is
+                // still a metadata error.
                 _ => {
-                    if let Some(crunched) = self.int(value) {
-                        platform.crunched = crunched;
-                    }
+                    self.int(value);
                 }
             }
         }
@@ -262,8 +265,14 @@ fn texture_importer(data: &[u8]) -> Result<Option<Importer>> {
     Ok(importer)
 }
 
-pub fn native_png_needs_warm(project: &str, logical: &str) -> Result<bool> {
-    if !sysutil::ext(logical).eq_ignore_ascii_case(".png") {
+/// Whether TextureImporter reads the source.
+pub fn texture_source(logical: &str) -> bool {
+    let extension = sysutil::ext(logical).to_ascii_lowercase();
+    crate::runtimeartifact::texture_profile(extension.strip_prefix('.').unwrap_or(&extension))
+}
+
+pub fn native_texture_needs_warm(project: &str, logical: &str) -> Result<bool> {
+    if !texture_source(logical) {
         return Ok(false);
     }
     let physical = resolve_project_import_source(project, &format!("{logical}.meta"))?;
@@ -271,16 +280,17 @@ pub fn native_png_needs_warm(project: &str, logical: &str) -> Result<bool> {
         bail!("native texture profile requires bounded source metadata");
     }
     let data = read_file(&physical)?;
-    let importer = match texture_importer(&data)? {
-        Some(importer)
-            if importer.texture_type == 0
-                && importer.texture_shape == 1
-                && importer.platforms.len() <= 64 =>
-        {
-            importer
-        }
-        _ => return Ok(true),
+    let Some(importer) = texture_importer(&data)? else {
+        // The pinned engine reads metadata without an importer block as a
+        // version 1 importer and makes an 8x8 cubemap of the file, in the
+        // Editor and in a worker alike: there is no Texture2D to deliver.
+        bail!(
+            "{logical}.meta holds no TextureImporter settings; Unity imports such a file as a cubemap, not a Texture2D"
+        );
     };
+    if importer.texture_type != 0 || importer.texture_shape != 1 || importer.platforms.len() > 64 {
+        return Ok(true);
+    }
     let mut selected = None;
     let mut seen = HashSet::new();
     for (index, platform) in importer.platforms.iter().enumerate() {
@@ -300,7 +310,8 @@ pub fn native_png_needs_warm(project: &str, logical: &str) -> Result<bool> {
         return Ok(true);
     };
     let platform = &importer.platforms[selected];
-    Ok(platform.compression != Some(0) || platform.format != Some(-1) || platform.crunched != 0)
+    // 0 is uncompressed, 1 normal and 3 low quality; 2 is high quality.
+    Ok(!matches!(platform.compression, Some(0 | 1 | 3)) || platform.format != Some(-1))
 }
 
 /// The compressor settings guard of a texture that needs the warm route; empty otherwise.
@@ -308,7 +319,7 @@ pub fn warm_texture_configuration(
     project: &str,
     logical: &str,
 ) -> Result<BTreeMap<String, String>> {
-    if !native_png_needs_warm(project, logical)? {
+    if !native_texture_needs_warm(project, logical)? {
         return Ok(BTreeMap::new());
     }
     let (sha, _) = read_bc7_compressor_settings(project)?;

@@ -186,6 +186,32 @@ fn native_discovery_keeps_raw_png_fast_and_selects_native_npot_resize() {
     );
 }
 
+#[test]
+fn native_discovery_selects_every_texture_source_format() {
+    for extension in [
+        "tga", "tif", "tiff", "bmp", "psd", "gif", "exr", "hdr", "TGA",
+    ] {
+        let fixture = fixture_session();
+        let logical = format!("Assets/Texture.{extension}");
+        let texture = format!("{}/{logical}", fixture.project);
+        write_fixture_file(&texture, "texture source bytes");
+        write_fixture_file(format!("{texture}.meta"), AUTHORED_TEXTURE_META);
+        write_fixture_file(
+            &fixture.scene,
+            format!(
+                "{FIXTURE_SCENE}--- !u!114 &99\nMonoBehaviour:\n  image: {{fileID: 2800000, guid: 22222222222222222222222222222222, type: 3}}\n"
+            ),
+        );
+        let pending = fixture.session.pending_native_import_sources();
+        assert!(
+            pending
+                .as_ref()
+                .is_ok_and(|pending| *pending == strings(&[&logical])),
+            "{extension} was not selected for TextureImporter: {pending:?}"
+        );
+    }
+}
+
 const LARGE_CLIP_GUID: &str = "22222222222222222222222222222222";
 const LATE_NATIVE_GUID: &str = "33333333333333333333333333333333";
 

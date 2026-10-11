@@ -12,7 +12,8 @@ use super::{
         write_file,
     },
     texture_profile::{
-        validate_native_configuration, verify_warm_bc7_dependency, warm_texture_configuration,
+        texture_source, validate_native_configuration, verify_warm_bc7_dependency,
+        warm_texture_configuration,
     },
 };
 use crate::{
@@ -70,7 +71,7 @@ pub fn extract_warm_native_ui(
     check(ctx)?;
     let extension = lower_ext(logical);
     let profile = extension.strip_prefix('.').unwrap_or(&extension);
-    let texture = matches!(profile, "png" | "jpg" | "jpeg");
+    let texture = texture_source(logical);
     if !matches!(profile, "uxml" | "uss" | "ttf" | "otf" | "shader") && !texture {
         bail!("warm native UI profile is unsupported");
     }
