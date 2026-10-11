@@ -3,10 +3,10 @@
 use super::{FIXTURE_SCENE, Fixture, fixture_session, message, write_fixture_file};
 use crate::project::{
     BUILTIN_RESOURCE_GUID, CompiledShaderSnapshot, Document, List, NativeContentDependency,
-    NativeContentFile, NativeContentObject, NativeContentResource, NativeMeshCPURetention,
-    NativeModelGraphObject, NativeModelGraphReference, NativeModelGraphTarget, NativeReplacement,
-    NativeUIBinding, NativeUIBindingProof, NeedsImportError, Options, RetainedBuiltinShader,
-    Session, collect_shader_source_requirements,
+    NativeContentFile, NativeContentObject, NativeContentResource, NativeDeferredBinding,
+    NativeMeshCPURetention, NativeModelGraphObject, NativeModelGraphReference,
+    NativeModelGraphTarget, NativeReplacement, NativeUIBinding, NativeUIBindingProof,
+    NeedsImportError, Options, RetainedBuiltinShader, Session, collect_shader_source_requirements,
     expand::apply_override,
     manifest_json,
     native::{match_native_model_graph, native_content_class, native_scalar_equal},
@@ -487,6 +487,86 @@ fn new_native_project_texture_publishes_without_mutating_baseline() {
         needs_import(&error).is_some(),
         "accepted texture change without an importer: {}",
         message(&error)
+    );
+}
+
+/// A baked controller's behaviour holds no pointer out of its file: the
+/// session publishes the binding and brings the target into the closure.
+#[test]
+fn baked_controller_publishes_the_bindings_its_file_leaves_null() {
+    let fixture = fixture_session();
+    let logical = "Assets/New.controller";
+    let source = format!("{}/{logical}", fixture.project);
+    write_fixture_file(&source, "authored controller");
+    write_fixture_file(
+        format!("{source}.meta"),
+        format!("fileFormatVersion: 2\nguid: {NATIVE_FIXTURE_GUID}\n"),
+    );
+    let target = format!("{}/Assets/Target.prefab", fixture.project);
+    write_fixture_file(
+        &target,
+        "%YAML 1.1\n--- !u!1 &100\nGameObject:\n  m_Component:\n  - component: {fileID: 101}\n  m_Name: Target\n  m_IsActive: 1\n--- !u!4 &101\nTransform:\n  m_GameObject: {fileID: 100}\n  m_LocalPosition: {x: 0, y: 0, z: 0}\n  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}\n  m_LocalScale: {x: 1, y: 1, z: 1}\n  m_Father: {fileID: 0}\n  m_Children: []\n",
+    );
+    write_fixture_file(format!("{target}.meta"), format!("guid: {OTHER_GUID}\n"));
+    let runtime = format!("{}/native/controller.bin", fixture.output);
+    write_fixture_file(&runtime, "baked controller");
+    let binding = |owner: &str, property: &str| NativeDeferredBinding {
+        owner_file_id: owner.into(),
+        property_path: property.into(),
+        target_guid: OTHER_GUID.into(),
+        target_file_id: "100".into(),
+    };
+    let mut r = NativeReplacement {
+        guid: NATIVE_FIXTURE_GUID.into(),
+        source_path: logical.into(),
+        source_sha256: native_fixture_hash(&source),
+        meta_sha256: native_fixture_hash(&format!("{source}.meta")),
+        content: NativeContentFile {
+            guid: NATIVE_FIXTURE_GUID.into(),
+            path: runtime.clone(),
+            sha256: native_fixture_hash(&runtime),
+            objects: List::from(vec![
+                native_object("9100000", "UnityEngine.RuntimeAnimatorController"),
+                native_object("500", "Game.Behaviour"),
+            ]),
+            ..NativeContentFile::default()
+        },
+        ..NativeReplacement::default()
+    };
+    for (owner, property) in [
+        ("9100000", "prefab"),
+        ("500", "prefab[x]"),
+        ("501", "prefab"),
+    ] {
+        r.deferred_bindings = List::from(vec![binding(owner, property)]);
+        let error = fixture.session.replace_native_content(&r).unwrap_err();
+        assert!(
+            message(&error).contains("native deferred binding is invalid"),
+            "accepted binding {owner}.{property}: {}",
+            message(&error)
+        );
+    }
+    r.deferred_bindings = List::from(vec![binding("500", "items[1].prefab")]);
+    fixture.session.replace_native_content(&r).unwrap();
+    let prepared = fixture.session.prepare(&fixture.output).unwrap();
+    let manifest = manifest_json(&prepared.manifest).unwrap();
+    let bindings = array(value::get(&manifest, "importedAssetBindings"));
+    assert!(
+        bindings.len() == 1
+            && value::text(object(&bindings[0]), "ownerGuid") == NATIVE_FIXTURE_GUID
+            && value::text(object(&bindings[0]), "ownerFileId") == "500"
+            && value::text(object(&bindings[0]), "propertyPath") == "items[1].prefab"
+            && value::text(object(&bindings[0]), "targetGuid") == OTHER_GUID
+            && value::text(object(&bindings[0]), "targetFileId") == "100"
+            && value::text(object(&bindings[0]), "targetPath") == "Assets/Target.prefab",
+        "binding was not published: {bindings:?}"
+    );
+    assert!(
+        array(value::get(&manifest, "assets")).iter().any(|asset| {
+            value::text(object(asset), "guid") == OTHER_GUID
+                && value::text(object(asset), "kind") == "prefab"
+        }),
+        "binding target is outside the published closure"
     );
 }
 

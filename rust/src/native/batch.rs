@@ -84,6 +84,9 @@ impl NativeProjectImporter {
                 self.refresh_dependents(ctx, &guid, &path, 0)?;
             }
         }
+        for mask in self.session.controller_masks()? {
+            self.refresh_mask_dependents(ctx, &mask)?;
+        }
         let unique: BTreeSet<String> = self
             .pending_native_paths
             .iter()

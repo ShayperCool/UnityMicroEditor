@@ -1260,6 +1260,8 @@ fn relevant_sources() {
         "x.mp4",
         "x.Bytes",
         "x.inputactions",
+        "x.mask",
+        "x.overrideController",
     ] {
         assert!(relevant_source(path), "{path}");
     }

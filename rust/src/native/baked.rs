@@ -2,6 +2,7 @@
 //! importer output for them, only Player data derived from the authored YAML.
 use super::{
     ProbeOptions,
+    batch::GLOBAL_GUIDS,
     import::run_project_import,
     importer::NativeProjectImporter,
     resolve_project_import_source,
@@ -11,9 +12,12 @@ use crate::{
     cancel::Context,
     playerbake::{
         self, Baked, BehaviourScript, ClipFacts, ClipSources, ControllerSources, Mask,
-        ScriptIdentity, ScriptLayout, Unsupported,
+        ObjectReference, Resolution, ScriptIdentity, ScriptLayout, Unsupported,
     },
-    project::{NativeContentDependency, NativeContentFile, NativeContentObject, NativeReplacement},
+    project::{
+        NativeContentDependency, NativeContentFile, NativeContentObject, NativeDeferredBinding,
+        NativeReplacement,
+    },
     registry::meta_guid,
     sha256, sysutil,
     util::random_id,
@@ -124,6 +128,51 @@ impl ControllerSources for ProjectSources<'_> {
             identity,
             layout: layout.clone(),
         }))
+    }
+    // A clip is published in baked form, so the behaviour's file can point at
+    // it. Any other object reaches the Player some other way; the session
+    // binds it once the scene's assets are loaded.
+    fn reference(&self, reference: &ObjectReference<'_>) -> Result<Resolution> {
+        let refused = |what: &str| {
+            Unsupported(format!(
+                "behaviour field {} refers to {what} {}",
+                reference.path, reference.guid
+            ))
+        };
+        if GLOBAL_GUIDS.contains(&reference.guid) {
+            return Err(refused("a resource built into the engine,").into());
+        }
+        let path = self.importer.source_path(reference.guid)?;
+        if path.is_empty() {
+            // The engine nulls a reference to nothing, but a source this
+            // session does not know may still exist for the engine.
+            return Err(refused("an asset that is not a project source,").into());
+        }
+        let file_id = reference.file_id.to_string();
+        let clip = match lower_ext(&path).as_str() {
+            ".anim" => true,
+            ".fbx" => self
+                .importer
+                .model_clips
+                .get(reference.guid)
+                .is_some_and(|model| model.clips.contains_key(&file_id)),
+            _ => false,
+        };
+        if !clip {
+            return Ok(Resolution::Deferred);
+        }
+        // The engine nulls a reference to an object of another class than
+        // the field declares.
+        let declared = reference.namespace == "UnityEngine"
+            && matches!(reference.class_name, "AnimationClip" | "Motion" | "Object");
+        if !declared {
+            return Ok(Resolution::Null);
+        }
+        ControllerSources::clip(self, reference.guid, &file_id)?;
+        Ok(Resolution::External {
+            guid: reference.guid.to_string(),
+            local_id: reference.file_id,
+        })
     }
 }
 
@@ -431,6 +480,58 @@ impl NativeProjectImporter {
         Ok(())
     }
 
+    /// Bakes again the controllers whose layers were baked with another
+    /// revision of a mask than the current one: those of the catalog if the
+    /// mask has changed since the catalog was built, and those baked since.
+    pub(crate) fn refresh_mask_dependents(
+        &mut self,
+        ctx: &Context,
+        mask: &crate::project::ControllerMask,
+    ) -> Result<()> {
+        let mut controllers: BTreeSet<String> =
+            self.session.lock().native_asset_paths(".controller");
+        controllers.extend(
+            self.entries
+                .values()
+                .filter(|entry| lower_ext(&entry.source_path) == ".controller")
+                .map(|entry| entry.source_path.clone()),
+        );
+        let meta_path = format!("{}.meta", mask.path);
+        for controller in controllers {
+            let Ok(source) = resolve_project_import_source(&self.opts.project, &controller) else {
+                continue;
+            };
+            if !read_file(&source).is_ok_and(|data| contains(&data, mask.guid.as_bytes())) {
+                continue;
+            }
+            let baked = self
+                .entries
+                .values()
+                .find(|entry| entry.source_path == controller);
+            let current = match baked {
+                Some(entry) => {
+                    entry.ingredient_sha256.get(&mask.path) == Some(&mask.source_sha256)
+                        && entry.ingredient_sha256.get(&meta_path) == Some(&mask.meta_sha256)
+                }
+                None => mask.in_catalog,
+            };
+            if current {
+                continue;
+            }
+            match self.publish_baked(ctx, &controller, 0) {
+                Ok(published) => self.refresh_dependents(ctx, &published, &controller, 1)?,
+                Err(error) if error.chain().any(|cause| cause.is::<Unsupported>()) => {
+                    Event::new("native-bake-refused")
+                        .with("path", &controller)
+                        .with("reason", &format!("{error:#}"))
+                        .emit();
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
     /// The clips whose additive reference pose is taken from a clip.
     fn additive_dependents(&mut self, guid: &str) -> Result<Vec<String>> {
         let mut clips: BTreeSet<String> = self.session.lock().native_asset_paths(".anim");
@@ -486,19 +587,39 @@ impl NativeProjectImporter {
                 }
             }
         }
-        for (reference, file_id) in &model_references {
-            // An override controller is baked without reading clip facts.
-            self.model_clips[reference]
-                .facts(file_id)
-                .map_err(|error| error.context(format!("bake native {logical}")))?;
+        // An override controller is baked without reading clip facts. A
+        // controller reads those of its motions itself, and its behaviours
+        // may refer to other objects of a model.
+        if lower_ext(logical) == ".overridecontroller" {
+            for (reference, file_id) in &model_references {
+                self.model_clips[reference]
+                    .facts(file_id)
+                    .map_err(|error| error.context(format!("bake native {logical}")))?;
+            }
         }
+        // The masks a controller's layers are baked with.
+        let mut ingredients = BTreeMap::new();
+        if lower_ext(logical) == ".controller" {
+            for (reference, _) in references(&data) {
+                let path = self.source_path(&reference)?;
+                if lower_ext(&path) != ".mask" {
+                    continue;
+                }
+                let mask = resolve_project_import_source(&self.opts.project, &path)?;
+                ingredients.insert(format!("{path}.meta"), file_sha(&format!("{mask}.meta"))?);
+                ingredients.insert(path, file_sha(&mask)?);
+            }
+        }
+        let mut deferred = Vec::new();
         let baked = match lower_ext(logical).as_str() {
             ".anim" => playerbake::bake_clip(&data, &ProjectSources { importer: self }),
-            // No source answers that a behaviour's reference is bound later,
-            // so the file is all there is to publish.
             ".controller" => playerbake::bake_controller(&data, &ProjectSources { importer: self })
-                .map(|controller| controller.baked),
+                .map(|controller| {
+                    deferred = controller.deferred;
+                    controller.baked
+                }),
             ".overridecontroller" => playerbake::bake_override(&data),
+            ".mask" => playerbake::bake_mask(&data),
             _ => bail!("no baker for {logical}"),
         };
         // Keeps the cause, so a refusal can be told from a failure.
@@ -539,6 +660,7 @@ impl NativeProjectImporter {
             source_sha256: source_sha,
             meta_sha256: meta_sha,
             environment_sha256: self.environment_sha256.clone(),
+            ingredient_sha256: ingredients,
             content: NativeContentFile {
                 guid: guid.clone(),
                 path: filename,
@@ -547,6 +669,14 @@ impl NativeProjectImporter {
             },
             ..Default::default()
         };
+        for binding in deferred {
+            replacement.deferred_bindings.push(NativeDeferredBinding {
+                owner_file_id: binding.owner,
+                property_path: binding.path,
+                target_guid: binding.guid,
+                target_file_id: binding.file_id.to_string(),
+            });
+        }
         for (file_id, type_name) in baked.objects {
             replacement
                 .content
@@ -586,6 +716,10 @@ fn additive_reference(data: &[u8]) -> String {
     PATTERN.captures(data).map_or_else(String::new, |found| {
         String::from_utf8_lossy(&found[1]).to_ascii_lowercase()
     })
+}
+
+fn file_sha(path: &str) -> Result<String> {
+    Ok(sha256(&read_file(path)?))
 }
 
 fn contains(data: &[u8], needle: &[u8]) -> bool {

@@ -80,9 +80,11 @@ impl Inner {
         Ok(authored)
     }
 
-    /// The pointers of a catalog ScriptableObject, or of the state machine
-    /// behaviours of a catalog controller, to objects now loaded from their
-    /// authored text: owner file ID, property path and target.
+    /// The pointers to bind when the scene loads: those of a catalog
+    /// ScriptableObject, or of the state machine behaviours of a catalog
+    /// controller, to objects now loaded from their authored text, and those a
+    /// controller baked in this session leaves null. Each is an owner file
+    /// ID, a property path and a target.
     pub(crate) fn authored_scriptable_references(
         &mut self,
         asset: &Map,
@@ -98,9 +100,31 @@ impl Inner {
             value::text(asset, "guid").into_owned(),
             value::text(asset, "fileId").into_owned(),
         );
-        // Content baked in this session names its own deferred pointers.
-        if self.native_overlays.contains_key(&guid) {
-            return Ok(Vec::new());
+        // Content baked in this session names the pointers its file leaves
+        // null. They are taken once, with the controller itself.
+        if let Some(overlay) = self.native_overlays.get(&guid) {
+            let deferred = match class {
+                91 => overlay.deferred_bindings.to_vec(),
+                _ => Vec::new(),
+            };
+            let mut result = Vec::new();
+            for binding in deferred {
+                let target_path = self.path_of(&binding.target_guid).to_string();
+                if target_path.is_empty() {
+                    bail!(
+                        "{path} refers to asset {}, which is not a project source",
+                        binding.target_guid
+                    );
+                }
+                result.push(AuthoredPointer {
+                    owner: binding.owner_file_id,
+                    property: binding.property_path,
+                    target: binding.target_guid,
+                    target_id: binding.target_file_id,
+                    target_path,
+                });
+            }
+            return Ok(result);
         }
         let physical = self.source(&path)?;
         let (content, _) = self.read_text(&physical)?;

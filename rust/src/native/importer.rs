@@ -118,6 +118,14 @@ impl NativeProjectImporter {
             {
                 continue;
             }
+            // So does one whose layers hold another revision of a mask.
+            if entry.ingredient_sha256.iter().any(|(logical, expected)| {
+                !resolve_project_import_source(&importer.opts.project, logical)
+                    .and_then(|ingredient| file_hash(&ingredient))
+                    .is_ok_and(|sha| sha == *expected)
+            }) {
+                continue;
+            }
             if let Err(error) = verify_compiled_shader_cache(&entry) {
                 Event::new("native-cache-rejected")
                     .with("path", &entry.source_path)
@@ -276,7 +284,10 @@ impl NativeProjectImporter {
         if profile == "png" && native_png_needs_warm(&self.opts.project, logical)? {
             return self.import_warm_ui(ctx, logical, &mut HashSet::new());
         }
-        if matches!(profile, "anim" | "controller" | "overridecontroller") {
+        if matches!(
+            profile,
+            "anim" | "controller" | "overridecontroller" | "mask"
+        ) {
             return self.import_baked(ctx, logical);
         }
         if !cold_native_profile(logical) {

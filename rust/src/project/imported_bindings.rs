@@ -20,7 +20,7 @@ pub(crate) struct ImportedBindingClosure {
 }
 
 /// `^[A-Za-z_][A-Za-z0-9_]*(?:(?:\.[A-Za-z_][A-Za-z0-9_]*)|(?:\[[0-9]+\]))*$`
-fn binding_property(property: &str) -> bool {
+pub(crate) fn binding_property(property: &str) -> bool {
     let bytes = property.as_bytes();
     let name = |i: &mut usize| {
         if !bytes
@@ -160,9 +160,9 @@ impl ImportedBindingClosure {
         Ok(())
     }
 
-    /// Points a property of a catalog object at an object loaded from its
-    /// authored text: the catalog's own pointer still leads to the copy the
-    /// catalog was built with.
+    /// Points a property of a native object at an object its file does not
+    /// lead to: a catalog pointer still leads to the copy the catalog was
+    /// built with, and a baked behaviour holds no pointer out of its file.
     pub fn rebind(
         &mut self,
         owner: (&str, &str),
@@ -171,7 +171,7 @@ impl ImportedBindingClosure {
     ) -> Result<()> {
         if !binding_property(property) {
             bail!(
-                "catalog object {}/{} refers to an edited ScriptableObject through unsupported property {property}",
+                "native object {}/{} cannot be bound through property {property}",
                 owner.0,
                 owner.1
             );

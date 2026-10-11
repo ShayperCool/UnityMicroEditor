@@ -393,6 +393,7 @@ pub fn str(value: &Value) -> Cow<'_, str> {
 pub fn number(value: &Value) -> i64 {
     match value {
         Value::Int(n) => *n,
+        Value::Int32(n) => i64::from(*n),
         // NaN and out-of-range floats become the minimum i64, as the recorded cases expect.
         Value::Float(f) => {
             const LIMIT: f64 = 9_223_372_036_854_775_808.0;
