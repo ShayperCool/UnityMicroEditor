@@ -726,6 +726,15 @@ impl NativeProjectImporter {
             ..Default::default()
         };
         for binding in deferred {
+            // The Player sets a deferred field by its path in the object; an
+            // object held by managed reference has no such path.
+            if binding.path.starts_with("managedReferences[") {
+                return Err(anyhow::Error::from(Unsupported(format!(
+                    "behaviour field {} of an object held by managed reference refers to asset {}",
+                    binding.path, binding.guid
+                )))
+                .context(format!("bake native {logical}")));
+            }
             replacement.deferred_bindings.push(NativeDeferredBinding {
                 owner_file_id: binding.owner,
                 property_path: binding.path,
