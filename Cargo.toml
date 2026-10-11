@@ -69,3 +69,7 @@ path = "rust/tests/playerbake.rs"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[[test]]
+name = "shader"
+path = "rust/tests/shader.rs"

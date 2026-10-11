@@ -10,7 +10,7 @@
 use super::support::{abs, mkdir_all, os_error, stat, wrap};
 use crate::{
     cancel::Context,
-    playerbake::{SnippetCompiler, SnippetReply, SnippetRequest},
+    playerbake::{SnippetCompiler, SnippetReply, SnippetRequest, WIRE_MARKER as MARKER},
     sysutil,
 };
 use anyhow::{Result, anyhow, bail};
@@ -24,7 +24,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const MARKER: [u8; 4] = [0xe4, 0xd1, 0x0b, 0x0c];
 /// The protocol revision the pinned compiler answers `initializeCompiler`
 /// with. Another revision may frame requests differently.
 const PROTOCOL: u32 = 0xf404_c210;
@@ -228,44 +227,12 @@ impl ShaderCompiler {
     fn put_int(&mut self, value: i32) -> Result<()> {
         self.put(&[&MARKER[..], &value.to_le_bytes()].concat())
     }
-    fn put_long(&mut self, value: u64) -> Result<()> {
-        self.put(&[&MARKER[..], &value.to_le_bytes()].concat())
-    }
     fn put_text(&mut self, text: &[u8]) -> Result<()> {
         self.put(&[&MARKER[..], &(text.len() as u64).to_le_bytes(), text].concat())
     }
-    fn put_list(&mut self, items: &[String]) -> Result<()> {
-        self.put_int(items.len() as i32)?;
-        for item in items {
-            self.put_text(item.as_bytes())?;
-        }
-        Ok(())
-    }
-
     fn request(&mut self, request: &SnippetRequest) -> Result<SnippetReply> {
         self.put_text(b"c:compileSnippet")?;
-        self.put_text(&request.source)?;
-        self.put_text(request.asset_directory.as_bytes())?;
-        self.put_text(request.asset_name.as_bytes())?;
-        self.put_text(request.shader_name.as_bytes())?;
-        self.put_text(request.pass_name.as_bytes())?;
-        self.put_int(request.leading[0])?;
-        self.put_int(request.leading[1])?;
-        self.put_int(request.build_target)?;
-        self.put_int(request.leading[2])?;
-        self.put_list(&request.enabled)?;
-        self.put_list(&request.keywords)?;
-        self.put_list(&request.disabled)?;
-        self.put_int(request.keywords_off as i32)?;
-        self.put_text(request.constants.as_bytes())?;
-        self.put_long(request.middle.0)?;
-        self.put_int(request.middle.1)?;
-        self.put_int(request.middle.2)?;
-        self.put_int(request.platform as i32)?;
-        self.put_long(request.requirements)?;
-        self.put_int(request.program_mask as i32)?;
-        self.put_int(request.start_line)?;
-        self.put_int(request.trailing)?;
+        self.put(&request.encode())?;
         self.stream.flush()?;
         let mut lines = Vec::new();
         let compiled = loop {

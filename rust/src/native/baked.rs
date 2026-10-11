@@ -674,6 +674,15 @@ impl NativeProjectImporter {
                 ingredients.insert(path, file_sha(&mask)?);
             }
         }
+        // The shaders a shader falls back on or takes passes from are baked
+        // first: its own bake reads them.
+        if lower_ext(logical) == ".shader" {
+            for (path, linked) in self.linked_shaders(&data)? {
+                if !self.shader_current(&path, &linked) {
+                    self.publish_baked(ctx, &path, depth + 1)?;
+                }
+            }
+        }
         let mut deferred = Vec::new();
         let baked = match lower_ext(logical).as_str() {
             ".anim" => playerbake::bake_clip(&data, &ProjectSources { importer: self }),
@@ -704,7 +713,7 @@ impl NativeProjectImporter {
             // A mixer refers only to the mixer it plays into.
             if !matches!(
                 lower_ext(&dependency).as_str(),
-                ".anim" | ".controller" | ".mixer"
+                ".anim" | ".controller" | ".mixer" | ".shader"
             ) {
                 return Err(anyhow::Error::from(Unsupported(format!(
                     "reference to {} {}, which is not a baked source",
@@ -785,14 +794,23 @@ impl NativeProjectImporter {
     }
 }
 
-/// The hash of every file a baked shader was made from beside its own source,
-/// and the keyword sets of its materials.
-type ShaderIngredients = (BTreeMap<String, String>, Vec<Vec<String>>);
+/// What a baked shader was made from beside its own source: the hash of every
+/// such file, and how its materials use it.
+type ShaderIngredients = (BTreeMap<String, String>, Vec<playerbake::ShaderMaterialUse>);
 
-/// The keywords a material source enables.
-fn material_keywords(source: &[u8]) -> Vec<String> {
+/// The settings files a build of a shader reads beside the Player settings,
+/// which the import environment covers.
+const SHADER_SETTINGS: [&str; 3] = [
+    "ProjectSettings/GraphicsSettings.asset",
+    "ProjectSettings/QualitySettings.asset",
+    "Packages/manifest.json",
+];
+
+/// How a material source uses its shader: the keywords it enables, valid for
+/// the shader or not, and whether it asks for instancing variants.
+fn material_use(path: &str, source: &[u8]) -> Result<playerbake::ShaderMaterialUse> {
     let text = String::from_utf8_lossy(source);
-    let mut keywords = Vec::new();
+    let mut usage = playerbake::ShaderMaterialUse::default();
     let mut listing = false;
     for line in text.lines() {
         let trimmed = line.trim();
@@ -801,22 +819,158 @@ fn material_keywords(source: &[u8]) -> Vec<String> {
             .or_else(|| trimmed.strip_prefix("m_InvalidKeywords:"))
         {
             listing = rest.trim().is_empty();
-        } else if let (true, Some(keyword)) = (listing, trimmed.strip_prefix("- ")) {
-            keywords.push(keyword.trim().to_string());
-        } else {
-            listing = false;
+            continue;
+        }
+        if let (true, Some(keyword)) = (listing, trimmed.strip_prefix("- ")) {
+            usage.keywords.push(keyword.trim().to_string());
+            continue;
+        }
+        listing = false;
+        if let Some(value) = trimmed.strip_prefix("m_EnableInstancingVariants:") {
+            usage.instancing = value.trim() != "0";
+        }
+        // A variant takes keywords from its parent, which a build merges.
+        if let Some(parent) = trimmed.strip_prefix("m_Parent:")
+            && !parent.replace(' ', "").starts_with("{fileID:0}")
+        {
+            return Err(Unsupported(format!(
+                "a shader used by the material variant {path}, whose keywords come from its parent"
+            ))
+            .into());
         }
     }
-    keywords.sort();
-    keywords.dedup();
-    keywords
+    usage.keywords.sort();
+    usage.keywords.dedup();
+    Ok(usage)
+}
+
+/// The shaders a shader source names as its fallback or as the owner of a
+/// pass it uses.
+fn linked_shader_names(source: &[u8]) -> Vec<String> {
+    static PATTERN: std::sync::LazyLock<regex::bytes::Regex> = std::sync::LazyLock::new(|| {
+        regex::bytes::Regex::new(r#"(?i-u)\b(fallback|usepass)\s*"([^"\r\n]+)""#).unwrap()
+    });
+    let Ok(text) = crate::project::shader_without_comments(source) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for found in PATTERN.captures_iter(&text) {
+        let name = String::from_utf8_lossy(&found[2]).into_owned();
+        // A used pass is named after its shader.
+        let name = if found[1].eq_ignore_ascii_case(b"usepass") {
+            match name.rsplit_once('/') {
+                Some((shader, _)) => shader.to_string(),
+                None => continue,
+            }
+        } else {
+            name
+        };
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// Finds the shaders a shader names among the baked shaders of the session.
+struct PublishedShaders<'a> {
+    importer: &'a NativeProjectImporter,
+}
+
+impl playerbake::ShaderSources for PublishedShaders<'_> {
+    fn shader(&self, name: &str) -> Result<Option<playerbake::ShaderDependency>> {
+        let found = self.importer.session.shaders_named(name)?;
+        let (path, guid) = match &found[..] {
+            [] => return Ok(None),
+            [one] => one,
+            _ => {
+                return Err(Unsupported(format!(
+                    "the shader {name:?}, which several sources declare"
+                ))
+                .into());
+            }
+        };
+        let Some(entry) = self.importer.entries.get(guid) else {
+            return Err(Unsupported(format!(
+                "the shader {name:?} of {path}, which this session has not baked"
+            ))
+            .into());
+        };
+        let file = read_file(&entry.content.path)?;
+        if sha256(&file) != entry.content.sha256 {
+            bail!("baked shader of {path} changed on disk");
+        }
+        let objects = playerbake::read_serialized(&file)?;
+        let Some(object) = objects
+            .iter()
+            .find(|object| object.local_id == playerbake::SHADER_LOCAL_ID)
+        else {
+            bail!("baked file of {path} holds no Shader");
+        };
+        Ok(Some(playerbake::ShaderDependency {
+            pointer: playerbake::ShaderPointer::External { guid: guid.clone() },
+            links: playerbake::read_shader_links(&object.data)?,
+        }))
+    }
 }
 
 impl NativeProjectImporter {
+    /// The sources of the shaders a shader source names, each with its GUID.
+    /// A name no source or several sources declare is left to the bake,
+    /// which refuses it.
+    fn linked_shaders(&self, source: &[u8]) -> Result<Vec<(String, String)>> {
+        let mut linked = Vec::new();
+        for name in linked_shader_names(source) {
+            if let [one] = &self.session.shaders_named(&name)?[..] {
+                linked.push(one.clone());
+            }
+        }
+        Ok(linked)
+    }
+
+    /// Whether a shader is published as baked from what it is made of now.
+    fn shader_current(&self, logical: &str, guid: &str) -> bool {
+        let Some(entry) = self.entries.get(guid) else {
+            return false;
+        };
+        resolve_project_import_source(&self.opts.project, logical)
+            .and_then(|source| Ok((file_sha(&source)?, file_sha(&format!("{source}.meta"))?)))
+            .is_ok_and(|(source, meta)| source == entry.source_sha256 && meta == entry.meta_sha256)
+            && self
+                .shader_ingredients(logical, guid)
+                .is_ok_and(|(current, _)| current == entry.ingredient_sha256)
+    }
+
     /// What a baked shader was made from beside its own source: the files it
-    /// includes and the materials that use it, each with its hash.
+    /// includes, the settings files a build reads, the materials that use
+    /// it and the shaders it names with what those are made from, each with
+    /// its hash.
     fn shader_ingredients(&self, logical: &str, guid: &str) -> Result<ShaderIngredients> {
         let mut ingredients = BTreeMap::new();
+        let mut visited = BTreeSet::from([logical.to_string()]);
+        let mut pending = vec![logical.to_string()];
+        while let Some(next) = pending.pop() {
+            let Ok(source) = resolve_project_import_source(&self.opts.project, &next) else {
+                continue;
+            };
+            let data = read_file(&source)?;
+            if next != logical {
+                ingredients.insert(next.clone(), sha256(&data));
+                let (included, _) =
+                    crate::project::collect_shader_source_requirements(&self.opts.project, &next)
+                        .map_err(|error| Unsupported(format!("{error:#}")))?;
+                for file in included {
+                    if file.path != logical {
+                        ingredients.insert(file.path, file.sha256);
+                    }
+                }
+            }
+            for (path, _) in self.linked_shaders(&data)? {
+                if visited.len() < 64 && visited.insert(path.clone()) {
+                    pending.push(path);
+                }
+            }
+        }
         let (included, _) =
             crate::project::collect_shader_source_requirements(&self.opts.project, logical)
                 .map_err(|error| Unsupported(format!("{error:#}")))?;
@@ -825,9 +979,24 @@ impl NativeProjectImporter {
                 ingredients.insert(file.path, file.sha256);
             }
         }
+        // The worker's project holds no packages, so a file of one would be
+        // missing where the shader is parsed.
+        if let Some(package) = ingredients
+            .keys()
+            .find(|path| path.starts_with("Packages/"))
+        {
+            return Err(
+                Unsupported(format!("a shader that includes the package file {package}")).into(),
+            );
+        }
+        for settings in SHADER_SETTINGS {
+            if let Ok(source) = resolve_project_import_source(&self.opts.project, settings) {
+                ingredients.insert(settings.to_string(), file_sha(&source)?);
+            }
+        }
         let mut usage = Vec::new();
         for material in self.session.shader_materials(guid)? {
-            usage.push(material_keywords(&material.source));
+            usage.push(material_use(&material.path, &material.source)?);
             ingredients.insert(material.path, material.sha256);
         }
         usage.sort();
@@ -846,17 +1015,23 @@ impl NativeProjectImporter {
     ) -> Result<Baked> {
         let (guards, materials) = self.shader_ingredients(logical, guid)?;
         *ingredients = guards;
-        let environment = super::read_worker_environment(&self.opts.project)?;
-        // The compiler numbers the graphics APIs its own way.
-        let mut platforms = Vec::new();
-        for (renderer, platform) in [(17, 15), (21, 18)] {
-            if environment.graphics_api_mask & (1 << renderer) != 0 {
-                platforms.push(platform);
+        let settings = |logical: &str| -> Result<String> {
+            match resolve_project_import_source(&self.opts.project, logical) {
+                Ok(source) => Ok(String::from_utf8_lossy(&read_file(&source)?).into_owned()),
+                // A file the project lacks holds the engine's defaults.
+                Err(error) if is_not_exist(&error) => Ok(String::new()),
+                Err(error) => Err(error),
             }
-        }
+        };
+        let player = settings("ProjectSettings/ProjectSettings.asset")?;
         let project = playerbake::ShaderProject {
-            platforms,
-            linear: environment.color_space == 1,
+            platforms: playerbake::shader_platforms(&player)?,
+            settings: playerbake::ShaderSettings::read(
+                &player,
+                &settings(SHADER_SETTINGS[0])?,
+                &settings(SHADER_SETTINGS[1])?,
+                &settings(SHADER_SETTINGS[2])?,
+            )?,
             materials,
         };
         let root = sysutil::join(&[&self.opts.output, "native/imports", &random_id()]);
@@ -901,7 +1076,12 @@ impl NativeProjectImporter {
             &self.opts.project,
             &sysutil::join(&[&root, "logs"]),
         )?;
-        let baked = playerbake::bake_shader(&artifact, &project, &mut compiler);
+        let baked = playerbake::bake_shader(
+            &artifact,
+            &project,
+            &PublishedShaders { importer: self },
+            &mut compiler,
+        );
         drop(compiler);
         compile_context.cancel();
         baked

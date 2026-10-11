@@ -147,15 +147,16 @@ impl NativeProjectImporter {
             }
             current.insert(entry.guid.clone(), entry);
         }
-        // A baked controller whose clip has changed is baked again on demand
-        // rather than replayed against a clip that is no longer current.
+        // A baked controller whose clip has changed, or a baked shader whose
+        // fallback has, is baked again on demand rather than replayed against
+        // a source that is no longer current.
         loop {
             let stale: Vec<String> = current
                 .values()
                 .filter(|entry| {
                     matches!(
                         lower_ext(&entry.source_path).as_str(),
-                        ".controller" | ".overridecontroller"
+                        ".controller" | ".overridecontroller" | ".shader"
                     ) && entry.content.dependencies.iter().any(|dependency| {
                         !dependency.global && !current.contains_key(&dependency.guid)
                     })

@@ -641,7 +641,10 @@ impl Inner {
                 || !r.model_graph.is_empty()
                 || !r.model_graph_sha256.is_empty()
                 || !r.content.resources.is_empty()
-                || !r.content.dependencies.is_empty()
+                // A shader baked by this tool refers to its fallback and to
+                // the shaders whose passes it uses, which are sources too.
+                || r.compiled_shader_snapshot.is_some() && !r.content.dependencies.is_empty()
+                || r.content.dependencies.iter().any(|dependency| dependency.global)
             {
                 bail!(
                     "standalone Shader replacement must contain only Shader 4800000 without native dependencies"

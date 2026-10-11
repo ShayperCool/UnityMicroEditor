@@ -291,6 +291,48 @@ A session publishes a new or changed `.mixer` this way, and a scene that refers 
 
 Not covered: what the mixers sound like was not measured, only that the Player holds the objects an engine build holds; a mixer that changes while a Player has it loaded was not tried.
 
+## Shaders
+
+The worker parses a `.shader` and leaves a `Shader` object with the parsed passes and the source of every program, but no compiled program. A build compiles each program with `UnityShaderCompiler`, a separate program the Editor ships in `Data/Tools`, and stores the results in compressed tables. The tool does the same (`rust/src/playerbake/shader.rs` and `shader/`, `rust/src/native/shader_compiler.rs`): the worker imports the shader, the tool starts the compiler, takes the Editor's side of its local socket protocol, asks for every variant a build compiles and writes the Player's object through the Player's type tree. The main Editor does not run. A new or changed `.shader` is published like a baked clip, and a watched session applies it to the running Player. An unlit shader of two passes takes about three seconds, most of it the worker.
+
+What is reproduced is an AssetBundle build for Linux standalone, started from the command line, of the shader and the materials of the project that use it. The result is compared byte for byte with objects built by Unity `6000.6.3f1`: 62 objects of 48 shaders, built with default settings, without materials, and with changed settings (linear colour space, another lightmap encoding, the unified precision model, deferred reflections off, hardware tiers that differ, custom lightmap and fog stripping, instancing variants kept, a shader chunk size of 1 MB). 51 are equal and 11 are refused for a reason of the list below; none differs. `rust/tests/testdata/playerbake/shaders` holds 28 of them with the compiler's replies, each stored under the hash of its request, so the test also pins what the compiler is asked. `UNITY_PLAYERBAKE_SHADER_CORPUS` with `UNITY_PLAYERBAKE_EDITOR` compares directories of the same form with the real compiler. The rules below were read out of the Editor binary and then confirmed against those builds.
+
+Covered: `CGPROGRAM` and `HLSLPROGRAM` passes with `HLSLINCLUDE` blocks, vertex, fragment, geometry and tessellation stages, surface shaders (the worker generates their passes), fixed-function passes (the worker generates their programs), grab passes, several subshaders, every property type and attribute, render state given as values or as properties, includes of files under `Assets` and `#include_with_pragmas`, `multi_compile` and `shader_feature` in their global, local and per-stage forms, `dynamic_branch`, `skip_variants`, `only_renderers` and `exclude_renderers`, `multi_compile_instancing`, `multi_compile_fog`, `multi_compile_fwdbase`, `multi_compile_fwdadd_fullshadows`, `multi_compile_shadowcaster`, `hardware_tier_variants`, structures, arrays, integer and matrix constants, constant buffers, every texture dimension, separate and inline samplers, buffers and random-access targets.
+
+Which variants are compiled:
+
+- A `multi_compile` group is compiled in every combination. A `shader_feature` group is compiled in the combinations the materials enable: a material's keywords are reduced to those of the pass, and a material that enables two keywords of one group, or a `dynamic_branch` keyword, adds nothing. Without materials only the first combination remains.
+- The built-in keyword sets (`multi_compile_fwdbase` and the like) are stripped as a build strips them: stereo variants always; instancing variants unless a material enables instancing or the project keeps them; lightmap, shadowmask and fog variants by the project's stripping settings. Under automatic stripping a build reads the scene open in the Editor, and a build from the command line has none, so fog and lightmap variants are left out. This is the one point where the result is narrower than an interactive build can be: a shader that needs fog or lightmap variants needs custom stripping in the graphics settings.
+- A pass is enumerated by material usage until one graphics API has no more than one combination; every later API of that pass then gets all combinations, unstripped, as in the Editor.
+- A pass whose `LightMode` is `Meta` is kept only when the project keeps dynamic lightmaps; `Picking` and `SceneSelectionPass` passes are dropped.
+- Hardware tier variants are compiled when the three tiers of the standalone target differ or the pass asks for them.
+
+The settings read are `ProjectSettings.asset` (colour space, precision model, virtual texturing, lightmap encoding, shader chunk size), `GraphicsSettings.asset` (deferred reflections, tier settings, stripping), `QualitySettings.asset` (level-of-detail cross-fade) and `Packages/manifest.json`. A file the project lacks stands for the engine's defaults.
+
+The parameters all programs of a pass share move into the pass, as in a build, and each graphics API gets a table of entries cut at the project's chunk size and compressed with LZ4 at high compression level 9. The reference LZ4 library is linked (`lz4-sys`, MIT), since the compressed bytes depend on its match search.
+
+`Fallback` and `UsePass` name another shader. When that shader is a source of the project, it is baked and published first, and the object lists it and takes over its keywords as a build does; the reference to it leads to the other published file, which is the one deliberate difference from a bundle, whose references depend on its layout. Chains of fallbacks are followed.
+
+A baked shader is kept with the hashes of everything it was made from: the files it includes, the three settings files, the materials that use it and the shaders it names. A session bakes it again when one of them changes or a material starts to use it. The programs of a shader are compiled one after another by one compiler process, so a shader of thousands of variants takes minutes; a pass of more than a million keyword combinations is refused.
+
+Refused, never approximated:
+
+- a project with a scriptable render pipeline asset: the pipeline's Editor scripts decide which variants remain, and its pass kinds and keyword filters are not reproduced;
+- a `Fallback` or `UsePass` that names a shader built into the engine (`VertexLit`, `Diffuse`), a shader the project has no source for or one that several sources declare, a used pass its shader lacks, and a shader whose keywords more than one other shader extends, for which the order was not established;
+- a program that does not compile, with the compiler's message, and a program the compiler warns about. A build leaves a failed variant out and goes on;
+- a shader with an import error; an include that is not a literal path; an include of a package file, which the worker's project does not hold;
+- a material variant that uses the shader, whose keywords come from its parent;
+- a project that lists its Linux graphics APIs itself, non-empty shader build settings, 360 stereo capture, a pass that selects a compiler toolchain, a ray tracing pass, a pass without a vertex program;
+- a shader in `Packages`.
+
+Not covered:
+
+- What a build takes from outside the project's files: scriptable stripping (`IPreprocessShaders`), shader variant collections, XR, native shader plugins. A project that has one of these gets the variants described above, not those of its own build.
+- A material-less shader used only from code (`Shader.Find`, `new Material`) gets no `shader_feature` variant beyond the first.
+- Compute shaders: the worker imports a `.compute`, but its kernels are compiled by another request of the compiler and laid out otherwise. A `.shadergraph` is imported by a script, which a standalone worker does not run.
+- A Player loaded shaders with one and two passes, keyword variants, an include, a fallback and a used pass, on OpenGL Core. The Vulkan programs are compared with the engine's but were not run.
+- Rules read from the Editor binary that no reference build exercises: virtual texturing, entities graphics, a `stats:` or warning line in a compiler reply.
+
 ## UI and fonts
 
 Unchanged UXML, USS and font assets are extracted from an existing Unity import cache rather than imported cold. See [UI_IMPORTS.md](UI_IMPORTS.md).
@@ -300,7 +342,7 @@ Unchanged UXML, USS and font assets are extracted from an existing Unity import 
 - The wire protocol, LMDB schema and DataStore layout were derived for one Unity version and are not a stable public API. A worker version mismatch is refused, and another engine version needs its own verification.
 - There is no proven general support for animation inside models, skinned meshes, complex model settings, arbitrary texture settings, streamed audio, platform overrides, custom AssetPostprocessors or every dependency of an arbitrary project.
 - Models other than FBX (`.obj`, `.dae`, `.blend`), video clips, `.inputactions` and other ScriptedImporter assets, sprite atlases and compute shaders are not imported; a scene that refers to a new one needs a catalog built by the Editor. A standalone worker has no script assemblies, so it runs no ScriptedImporter.
-- A shader can be imported, but the result has no platform GPU programs and cannot be delivered to a Player without a separate bake.
+- A shader is delivered only in the cases listed under [Shaders](#shaders); a shader of a project with a scriptable render pipeline and a compute shader still need a catalog built by the Editor.
 - The store reader handles inline and concatenated storage, limits one file to 64 MiB and refuses other layouts. The LMDB reader targets the observed Linux x64 format.
 - A worker is started per import batch. A persistent native service is not used.
 
@@ -319,6 +361,7 @@ The coordinator lives in `rust/src/native/`, with the wire format, LMDB reader a
 | `rust/src/native/artifact.rs` | Extracting stored files and checking content keys |
 | `rust/src/native/environment.rs` | The import environment fingerprint |
 | `rust/src/native/baked.rs`, `rust/src/playerbake/` | Assets baked from authored YAML without a worker |
+| `rust/src/playerbake/shader.rs`, `shader/`, `rust/src/native/shader_compiler.rs` | Shaders: variants, program tables, the client of `UnityShaderCompiler` |
 
 `rust/src/runtimeartifact/` adapts imported serialized files for the Player.
 
