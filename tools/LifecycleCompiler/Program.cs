@@ -149,7 +149,19 @@ internal static class BehaviourLayouts
     private sealed class Module
     {
         public string Name = "";
+        public string Path = "";
         public MetadataReader Reader = null!;
+        // Method bodies are read on demand: only a few classes have constructors that matter.
+        private PEReader? image;
+        public MethodBodyBlock? Body(int address)
+        {
+            try
+            {
+                image ??= new PEReader(ImmutableArray.Create(File.ReadAllBytes(Path)));
+                return image.GetMethodBody(address);
+            }
+            catch (Exception error) when (error is BadImageFormatException or IOException or InvalidOperationException) { return null; }
+        }
         public readonly Dictionary<(string, string), TypeDefinitionHandle> Types = new();
         public readonly Dictionary<(string, string), string> Forwarded = new();
         public bool Engine => Name == "UnityEngine" || Name.StartsWith("UnityEngine.", StringComparison.Ordinal);
@@ -202,7 +214,7 @@ internal static class BehaviourLayouts
                 files.Add(pe);
                 var reader = pe.GetMetadataReader();
                 if (!reader.IsAssembly) continue;
-                var module = new Module { Name = reader.GetString(reader.GetAssemblyDefinition().Name), Reader = reader };
+                var module = new Module { Name = reader.GetString(reader.GetAssemblyDefinition().Name), Path = path, Reader = reader };
                 // The first file of a name wins, as the caller lists the project's own assemblies first.
                 if (!modules.TryAdd(module.Name, module)) continue;
                 foreach (var handle in reader.TypeDefinitions)
@@ -283,6 +295,13 @@ internal static class BehaviourLayouts
             return handle.Kind == HandleKind.TypeSpecification
                 ? module.Reader.GetTypeSpecification((TypeSpecificationHandle)handle).DecodeSignature(this, null)
                 : Named(module, handle);
+        }
+
+        // The provider, set to decode signatures of `module`.
+        public Universe Enter(Module module)
+        {
+            current = module;
+            return this;
         }
 
         public Sig Decode(Module module, FieldDefinition field)
@@ -400,13 +419,298 @@ internal static class BehaviourLayouts
         throw new Unsupported("a class hierarchy deeper than the reader follows");
     }
 
+
+    // What a field holds once the constructors of its class have run, as far as the code tells.
+    private abstract record Initial;
+    private sealed record ConstantInitial(object? Value) : Initial;
+    // A new object of this type, made by its constructor without arguments, or an empty array.
+    private sealed record FreshInitial(Sig? Type) : Initial;
+    private sealed record UnknownInitial : Initial;
+    private sealed record SelfInitial : Initial;
+
+    private static bool SameSig(Sig a, Sig b) => (a, b) switch
+    {
+        (PrimitiveSig x, PrimitiveSig y) => x.Code == y.Code,
+        (NamedSig x, NamedSig y) => x.FullName == y.FullName,
+        (InstanceSig x, InstanceSig y) => x.Generic.FullName == y.Generic.FullName && x.Arguments.Length == y.Arguments.Length
+            && x.Arguments.Zip(y.Arguments).All(pair => SameSig(pair.First, pair.Second)),
+        (ArraySig x, ArraySig y) => x.Vector == y.Vector && SameSig(x.Element, y.Element),
+        (ParameterSig x, ParameterSig y) => x.Index == y.Index,
+        _ => false,
+    };
+
+    // Follows the constructor the engine runs for a new object, the one without parameters, and
+    // records what it stores in the object's fields. The engine reads an authored object over
+    // such an instance, so a field the text lacks keeps what the constructor left in it. Code
+    // the reader cannot follow makes the whole object unknown rather than guessed at.
+    private sealed class Construction
+    {
+        private static readonly Dictionary<ushort, System.Reflection.Emit.OpCode> Codes = typeof(System.Reflection.Emit.OpCodes)
+            .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+            .Select(field => (System.Reflection.Emit.OpCode)field.GetValue(null)!).ToDictionary(code => (ushort)code.Value);
+
+        private readonly Universe universe;
+        private readonly Dictionary<TypeId, Dictionary<(TypeId, string), Initial>?> known = new();
+        public Construction(Universe universe) { this.universe = universe; }
+
+        // The fields the constructors of a type and of its base types set; null if that is unknown.
+        public Dictionary<(TypeId, string), Initial>? Of(TypeId type)
+        {
+            if (known.TryGetValue(type, out var found)) return found;
+            var result = new Dictionary<(TypeId, string), Initial>();
+            if (!Run(type, result, 0)) result = null;
+            known[type] = result;
+            return result;
+        }
+
+        private bool Run(TypeId type, Dictionary<(TypeId, string), Initial> fields, int depth)
+        {
+            if (depth > 64) return false;
+            var reader = type.Module.Reader;
+            var definition = type.Definition;
+            bool valueType = Base(universe, type, ImmutableArray<Sig>.Empty)?.FullName == "System.ValueType";
+            MethodDefinition? constructor = null;
+            foreach (var handle in definition.GetMethods())
+            {
+                var method = reader.GetMethodDefinition(handle);
+                if ((method.Attributes & MethodAttributes.Static) != 0 || reader.GetString(method.Name) != ".ctor") continue;
+                if (method.DecodeSignature(universe.Enter(type.Module), null).ParameterTypes.Length != 0) continue;
+                // Only a public constructor was compared with the engine.
+                if ((method.Attributes & MethodAttributes.MemberAccessMask) != MethodAttributes.Public) return false;
+                constructor = method;
+            }
+            // The engine makes an object of a class without such a constructor, and a struct, without running code.
+            if (constructor is not { } run) return true;
+            if (valueType || run.RelativeVirtualAddress == 0) return false;
+            var body = type.Module.Body(run.RelativeVirtualAddress);
+            if (body is null || body.ExceptionRegions.Length != 0) return false;
+            var il = body.GetILReader();
+            var stack = new List<Initial>();
+            Initial Pop() { var top = stack[^1]; stack.RemoveAt(stack.Count - 1); return top; }
+            bool ended = false;
+            while (il.RemainingBytes > 0)
+            {
+                if (ended) return false;
+                ushort value = il.ReadByte();
+                if (value == 0xfe) value = (ushort)(0xfe00 | il.ReadByte());
+                if (!Codes.TryGetValue(value, out var code)) return false;
+                long operand = 0;
+                switch (code.OperandType)
+                {
+                    case System.Reflection.Emit.OperandType.InlineNone: break;
+                    case System.Reflection.Emit.OperandType.ShortInlineBrTarget:
+                    case System.Reflection.Emit.OperandType.ShortInlineI: operand = il.ReadSByte(); break;
+                    case System.Reflection.Emit.OperandType.ShortInlineVar: operand = il.ReadByte(); break;
+                    case System.Reflection.Emit.OperandType.InlineVar: operand = il.ReadUInt16(); break;
+                    case System.Reflection.Emit.OperandType.InlineI8:
+                    case System.Reflection.Emit.OperandType.InlineR: operand = il.ReadInt64(); break;
+                    case System.Reflection.Emit.OperandType.InlineSwitch: return false;
+                    default: operand = il.ReadInt32(); break;
+                }
+                if (code.FlowControl is System.Reflection.Emit.FlowControl.Branch or System.Reflection.Emit.FlowControl.Cond_Branch or System.Reflection.Emit.FlowControl.Throw)
+                    return false;
+                string name = code.Name ?? "";
+                int pops, pushes;
+                switch (name)
+                {
+                    case "nop": continue;
+                    case "ret": if (stack.Count != 0) return false; ended = true; continue;
+                    case "ldarg.0": stack.Add(new SelfInitial()); continue;
+                    case "ldnull": stack.Add(new ConstantInitial(null)); continue;
+                    case "ldstr": stack.Add(new ConstantInitial(reader.GetUserString(MetadataTokens.UserStringHandle((int)operand & 0xffffff)))); continue;
+                    case "ldc.i4.m1": stack.Add(new ConstantInitial(-1L)); continue;
+                    case "ldc.i4.0": case "ldc.i4.1": case "ldc.i4.2": case "ldc.i4.3": case "ldc.i4.4": case "ldc.i4.5": case "ldc.i4.6": case "ldc.i4.7": case "ldc.i4.8":
+                        stack.Add(new ConstantInitial((long)(name[^1] - '0'))); continue;
+                    case "ldc.i4.s": case "ldc.i4": stack.Add(new ConstantInitial((long)(int)operand)); continue;
+                    case "ldc.i8": stack.Add(new ConstantInitial(operand)); continue;
+                    case "ldc.r4": stack.Add(new ConstantInitial((double)BitConverter.Int32BitsToSingle((int)operand))); continue;
+                    case "ldc.r8": stack.Add(new ConstantInitial(BitConverter.Int64BitsToDouble(operand))); continue;
+                    case "conv.i8": case "conv.u8": case "conv.r4": case "conv.r8":
+                    {
+                        if (stack.Count == 0) return false;
+                        var top = Pop();
+                        if (top is SelfInitial) return false;
+                        stack.Add(top is ConstantInitial { Value: long integer } ? new ConstantInitial(name switch
+                        {
+                            "conv.i8" => integer,
+                            // An unsigned 32-bit constant is loaded as its signed bits.
+                            "conv.u8" => (long)(uint)integer,
+                            "conv.r4" => (object)(double)(float)integer,
+                            _ => (double)integer,
+                        }) : top is ConstantInitial { Value: double real } && name is "conv.r4" or "conv.r8"
+                            ? new ConstantInitial(name == "conv.r4" ? (double)(float)real : real) : new UnknownInitial());
+                        continue;
+                    }
+                    case "dup":
+                    {
+                        if (stack.Count == 0) return false;
+                        var top = Pop();
+                        if (top is SelfInitial) return false;
+                        // An object under construction is no longer the plain new object.
+                        if (top is FreshInitial) top = new UnknownInitial();
+                        stack.Add(top); stack.Add(top);
+                        continue;
+                    }
+                    case "newarr":
+                    {
+                        if (stack.Count == 0) return false;
+                        var length = Pop();
+                        if (length is SelfInitial) return false;
+                        stack.Add(length is ConstantInitial { Value: 0L } ? new FreshInitial(null) : new UnknownInitial());
+                        continue;
+                    }
+                    case "ldfld": case "ldflda":
+                    {
+                        if (stack.Count == 0) return false;
+                        var owner = Pop();
+                        if (owner is SelfInitial)
+                        {
+                            // Whatever takes the address may write the field, and whatever
+                            // loads a new object may change it.
+                            if (Field(type.Module, (int)operand) is not { } taken) return false;
+                            if (name == "ldflda" || fields.GetValueOrDefault(taken) is FreshInitial) fields[taken] = new UnknownInitial();
+                        }
+                        stack.Add(new UnknownInitial());
+                        continue;
+                    }
+                    case "stfld":
+                    {
+                        if (stack.Count < 2) return false;
+                        var stored = Pop(); var owner = Pop();
+                        if (stored is SelfInitial) return false;
+                        if (owner is not SelfInitial) continue;
+                        if (Field(type.Module, (int)operand) is not { } target) return false;
+                        fields[target] = stored;
+                        continue;
+                    }
+                    case "call": case "callvirt": case "newobj":
+                    {
+                        if (Method(type.Module, (int)operand) is not { } method) return false;
+                        pops = method.Parameters + (method.Instance && name != "newobj" ? 1 : 0);
+                        if (stack.Count < pops) return false;
+                        var arguments = stack.GetRange(stack.Count - pops, pops);
+                        stack.RemoveRange(stack.Count - pops, pops);
+                        bool chained = name == "call" && method.Name == ".ctor" && arguments.Count > 0 && arguments[0] is SelfInitial;
+                        if (arguments.Skip(chained ? 1 : 0).Any(argument => argument is SelfInitial)) return false;
+                        if (chained)
+                        {
+                            // The constructor of the base class: of the project, followed in turn; of the engine or the base library, without fields of ours.
+                            if (method.Owner is not NamedSig owner || owner.Type == type) return false;
+                            if (owner.Type is { } parent && !parent.Module.Engine)
+                            {
+                                if (method.Parameters != 0 || !Run(parent, fields, depth + 1)) return false;
+                            }
+                            else if (owner.Type is null && owner.FullName != "System.Object") return false;
+                            continue;
+                        }
+                        if (name == "newobj") stack.Add(method.Parameters == 0 ? new FreshInitial(method.Owner) : new UnknownInitial());
+                        else if (method.Returns) stack.Add(new UnknownInitial());
+                        continue;
+                    }
+                }
+                pops = code.StackBehaviourPop switch
+                {
+                    System.Reflection.Emit.StackBehaviour.Pop0 => 0,
+                    System.Reflection.Emit.StackBehaviour.Pop1 or System.Reflection.Emit.StackBehaviour.Popi or System.Reflection.Emit.StackBehaviour.Popref => 1,
+                    System.Reflection.Emit.StackBehaviour.Pop1_pop1 or System.Reflection.Emit.StackBehaviour.Popi_pop1 or System.Reflection.Emit.StackBehaviour.Popi_popi
+                        or System.Reflection.Emit.StackBehaviour.Popi_popi8 or System.Reflection.Emit.StackBehaviour.Popi_popr4 or System.Reflection.Emit.StackBehaviour.Popi_popr8
+                        or System.Reflection.Emit.StackBehaviour.Popref_pop1 or System.Reflection.Emit.StackBehaviour.Popref_popi => 2,
+                    System.Reflection.Emit.StackBehaviour.Popi_popi_popi or System.Reflection.Emit.StackBehaviour.Popref_popi_popi or System.Reflection.Emit.StackBehaviour.Popref_popi_popi8
+                        or System.Reflection.Emit.StackBehaviour.Popref_popi_popr4 or System.Reflection.Emit.StackBehaviour.Popref_popi_popr8
+                        or System.Reflection.Emit.StackBehaviour.Popref_popi_popref or System.Reflection.Emit.StackBehaviour.Popref_popi_pop1 => 3,
+                    _ => -1,
+                };
+                pushes = code.StackBehaviourPush switch
+                {
+                    System.Reflection.Emit.StackBehaviour.Push0 => 0,
+                    System.Reflection.Emit.StackBehaviour.Push1 or System.Reflection.Emit.StackBehaviour.Pushi or System.Reflection.Emit.StackBehaviour.Pushi8
+                        or System.Reflection.Emit.StackBehaviour.Pushr4 or System.Reflection.Emit.StackBehaviour.Pushr8 or System.Reflection.Emit.StackBehaviour.Pushref => 1,
+                    System.Reflection.Emit.StackBehaviour.Push1_push1 => 2,
+                    _ => -1,
+                };
+                if (pops < 0 || pushes < 0 || stack.Count < pops) return false;
+                // The object itself may only be stored into and passed to its base constructor.
+                for (int index = 0; index < pops; index++) if (Pop() is SelfInitial) return false;
+                for (int index = 0; index < pushes; index++) stack.Add(new UnknownInitial());
+            }
+            return ended;
+        }
+
+        // The field a token of a module names, if a type of the request declares it.
+        private (TypeId, string)? Field(Module module, int token)
+        {
+            var handle = MetadataTokens.EntityHandle(token);
+            var reader = module.Reader;
+            if (handle.Kind == HandleKind.FieldDefinition)
+            {
+                var field = reader.GetFieldDefinition((FieldDefinitionHandle)handle);
+                return (new TypeId(module, field.GetDeclaringType()), reader.GetString(field.Name));
+            }
+            if (handle.Kind != HandleKind.MemberReference) return null;
+            var reference = reader.GetMemberReference((MemberReferenceHandle)handle);
+            var owner = universe.Decode(module, reference.Parent) switch { NamedSig named => named, InstanceSig instance => instance.Generic, _ => null };
+            return owner?.Type is { } type ? (type, reader.GetString(reference.Name)) : null;
+        }
+
+        private (string Name, Sig Owner, int Parameters, bool Instance, bool Returns)? Method(Module module, int token)
+        {
+            var handle = MetadataTokens.EntityHandle(token);
+            var reader = module.Reader;
+            if (handle.Kind == HandleKind.MethodSpecification) handle = reader.GetMethodSpecification((MethodSpecificationHandle)handle).Method;
+            MethodSignature<Sig> signature; string name; Sig owner;
+            if (handle.Kind == HandleKind.MethodDefinition)
+            {
+                var method = reader.GetMethodDefinition((MethodDefinitionHandle)handle);
+                name = reader.GetString(method.Name); owner = universe.Decode(module, method.GetDeclaringType());
+                signature = method.DecodeSignature(universe.Enter(module), null);
+            }
+            else if (handle.Kind == HandleKind.MemberReference)
+            {
+                var reference = reader.GetMemberReference((MemberReferenceHandle)handle);
+                if (reference.GetKind() != MemberReferenceKind.Method || reference.Parent.Kind is not (HandleKind.TypeReference or HandleKind.TypeDefinition or HandleKind.TypeSpecification)) return null;
+                name = reader.GetString(reference.Name); owner = universe.Decode(module, reference.Parent);
+                signature = reference.DecodeMethodSignature(universe.Enter(module), null);
+            }
+            else return null;
+            return (name, owner, signature.ParameterTypes.Length, signature.Header.IsInstance, signature.ReturnType is not PrimitiveSig { Code: PrimitiveTypeCode.Void });
+        }
+    }
+
+    // A constant as the engine's text would hold it, for a field of a simple type.
+    private static string? InitialText(object? constant, Dictionary<string, object> kind)
+    {
+        string keyword = kind["kind"] switch { "primitive" => (string)kind["name"], "enum" => (string)kind["underlying"], "string" => "string", _ => "" };
+        var culture = System.Globalization.CultureInfo.InvariantCulture;
+        switch (constant)
+        {
+            case string text when keyword == "string": return text;
+            case long integer:
+                return keyword switch
+                {
+                    "bool" => integer != 0 ? "1" : "0",
+                    "byte" => ((byte)integer).ToString(culture), "sbyte" => ((sbyte)integer).ToString(culture),
+                    "short" => ((short)integer).ToString(culture), "ushort" or "char" => ((ushort)integer).ToString(culture),
+                    "int" => ((int)integer).ToString(culture), "uint" => ((uint)integer).ToString(culture),
+                    "long" => integer.ToString(culture), "ulong" => ((ulong)integer).ToString(culture),
+                    _ => null,
+                };
+            case double real:
+                // The text has one name for every value that is not a number; only the one a
+                // compiler writes for `NaN` is told by it.
+                if (double.IsNaN(real) && BitConverter.DoubleToInt64Bits(real) != BitConverter.DoubleToInt64Bits(double.NaN)) return null;
+                return keyword switch { "float" => ((float)real).ToString("R", culture), "double" => real.ToString("R", culture), _ => null };
+            default: return null;
+        }
+    }
+
     private sealed class Reader
     {
         private readonly Universe universe;
-        public Reader(Universe universe) { this.universe = universe; }
+        private readonly Construction construction;
+        public Reader(Universe universe) { this.universe = universe; construction = new Construction(universe); }
 
         // The serialized fields a class declares itself, in declaration order.
-        public void Fields(TypeId type, ImmutableArray<Sig> arguments, int depth, List<object> fields, HashSet<string> names)
+        public void Fields(TypeId type, ImmutableArray<Sig> arguments, int depth, List<object> fields, HashSet<string> names, Dictionary<(TypeId, string), Initial>? initials)
         {
             var reader = type.Module.Reader;
             foreach (var handle in type.Definition.GetFields())
@@ -441,6 +745,7 @@ internal static class BehaviourLayouts
                 }
                 if ((field.Attributes & FieldAttributes.FieldAccessMask) != FieldAttributes.Public && !attributed) continue;
                 Dictionary<string, object>? kind;
+                Sig? declared = null;
                 if (buffer is { } fixedBuffer)
                 {
                     // The element types a build was compared with.
@@ -456,6 +761,7 @@ internal static class BehaviourLayouts
                 else
                 {
                     var sig = Substitute(universe.Decode(type.Module, field), arguments);
+                    declared = sig;
                     kind = Classify(sig, depth, attributed, type, false, name);
                 }
                 if (kind is null) continue;
@@ -463,6 +769,18 @@ internal static class BehaviourLayouts
                 var entry = new Dictionary<string, object> { ["name"] = name };
                 if (hidden) entry["hidden"] = true;
                 if (former.Count != 0) entry["formerNames"] = former;
+                // What a document that lacks the field leaves in it. Nothing is said of a field the
+                // constructor leaves alone, sets to null or to a plain new object of the field's own
+                // type: the engine fills such a field the same way itself.
+                Initial? initial = initials is null ? new UnknownInitial() : initials.GetValueOrDefault((type, name));
+                switch (initial)
+                {
+                    case null: case ConstantInitial { Value: null }: break;
+                    case ConstantInitial constant when InitialText(constant.Value, kind) is { } text: entry["initial"] = text; break;
+                    case FreshInitial { Type: null } when (string)kind["kind"] == "array": break;
+                    case FreshInitial { Type: { } made } when declared is not null && SameSig(made, declared) && (string)kind["kind"] is "array" or "struct": break;
+                    default: entry["initialUnknown"] = true; break;
+                }
                 entry["type"] = kind;
                 fields.Add(entry);
             }
@@ -608,9 +926,10 @@ internal static class BehaviourLayouts
             chain.Reverse();
             var names = new HashSet<string>(StringComparer.Ordinal);
             bool callbacks = false;
+            var initials = construction.Of(type);
             foreach (var (member, memberArguments) in chain)
             {
-                Fields(member, memberArguments, depth, fields, names);
+                Fields(member, memberArguments, depth, fields, names, initials);
                 if (!behaviour || !callbackOwner) continue;
                 var reader = member.Module.Reader;
                 foreach (var handle in member.Definition.GetMethods())

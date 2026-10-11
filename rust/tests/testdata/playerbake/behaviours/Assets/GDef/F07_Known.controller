@@ -1,0 +1,335 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1102 &-8256826457084409429
+AnimatorState:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: Derived
+  m_Speed: 1
+  m_CycleOffset: 0
+  m_Transitions: []
+  m_StateMachineBehaviours:
+  - {fileID: 6950879677889465812}
+  m_Position: {x: 50, y: 50, z: 0}
+  m_IKOnFeet: 0
+  m_WriteDefaultValues: 1
+  m_Mirror: 0
+  m_SpeedParameterActive: 0
+  m_MirrorParameterActive: 0
+  m_CycleOffsetParameterActive: 0
+  m_TimeParameterActive: 0
+  m_Motion: {fileID: 0}
+  m_Tag: 
+  m_SpeedParameter: 
+  m_MirrorParameter: 
+  m_CycleOffsetParameter: 
+  m_TimeParameter: 
+--- !u!114 &-5406061559934633375
+MonoBehaviour:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 83606cfc22b1b52b2a9abddbcfbb9a2e, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::SmbKnown
+  i0: 0
+  i5: 5
+  u: 4000000000
+  l: -7
+  ul: 18446744073709551615
+  sh: -3
+  by: 200
+  sb: -5
+  on: 1
+  off: 0
+  f: 1.5
+  d: 2.5
+  c: 120
+  s: hello
+  sNull: 
+  sEmpty: 
+  e: 10
+  eb: 1
+  fNeg: -0
+  fInf: Infinity
+  fNaN: NaN
+  dBig: 1e+300
+  iMin: -2147483648
+  fThird: 0.33333334
+  sUni: "g\xE4mma \u4E2D"
+  cUni: 20013
+  lBig: 5000000000
+  us: 60000
+  dThird: 0.3333333333333333
+  m1: -1
+  big: 100000
+  fSmall: 1e-10
+  dNeg: -123456789.12345679
+  fMax: 3.4028235e+38
+  dEps: 5e-324
+  sQuote: "a \"b\" c\n d"
+  fInt: 3
+  a:
+    hp: 100
+    s: x
+    f: 1.5
+    on: 1
+    plain: 0
+    sub:
+      k: 7
+      t: seven
+      on: 1
+    subNull:
+      k: 7
+      t: seven
+      on: 1
+    list: 
+    v: {x: 0, y: 0, z: 0}
+    subs: []
+    e: 10
+    none: 
+  b:
+    hp: 100
+    s: x
+    f: 1.5
+    on: 1
+    plain: 0
+    sub:
+      k: 7
+      t: seven
+      on: 1
+    subNull:
+      k: 7
+      t: seven
+      on: 1
+    list: 
+    v: {x: 0, y: 0, z: 0}
+    subs: []
+    e: 10
+    none: 
+  items: []
+  itemList: []
+  st:
+    a: 0
+    c:
+      k: 7
+      t: seven
+      on: 1
+    s: 
+  sts: []
+  ndc:
+    q: 0
+    w: 
+    sub:
+      k: 7
+      t: seven
+      on: 1
+  ndcs: []
+  v: {x: 0, y: 0, z: 0}
+  col: {r: 0, g: 0, b: 0, a: 0}
+  curve:
+    serializedVersion: 2
+    m_Curve: []
+    m_PreInfinity: 2
+    m_PostInfinity: 2
+    m_RotationOrder: 4
+  grad:
+    serializedVersion: 2
+    key0: {r: 1, g: 1, b: 1, a: 1}
+    key1: {r: 1, g: 1, b: 1, a: 1}
+    key2: {r: 0, g: 0, b: 0, a: 0}
+    key3: {r: 0, g: 0, b: 0, a: 0}
+    key4: {r: 0, g: 0, b: 0, a: 0}
+    key5: {r: 0, g: 0, b: 0, a: 0}
+    key6: {r: 0, g: 0, b: 0, a: 0}
+    key7: {r: 0, g: 0, b: 0, a: 0}
+    ctime0: 0
+    ctime1: 65535
+    ctime2: 0
+    ctime3: 0
+    ctime4: 0
+    ctime5: 0
+    ctime6: 0
+    ctime7: 0
+    atime0: 0
+    atime1: 65535
+    atime2: 0
+    atime3: 0
+    atime4: 0
+    atime5: 0
+    atime6: 0
+    atime7: 0
+    m_Mode: 0
+    m_ColorSpace: -1
+    m_NumColorKeys: 2
+    m_NumAlphaKeys: 2
+  mask:
+    serializedVersion: 2
+    m_Bits: 0
+  ro:
+    m_Left: 0
+    m_Right: 0
+    m_Top: 0
+    m_Bottom: 0
+  rect:
+    serializedVersion: 2
+    x: 0
+    y: 0
+    width: 0
+    height: 0
+  bn:
+    m_Center: {x: 0, y: 0, z: 0}
+    m_Extent: {x: 0, y: 0, z: 0}
+  q: {x: 0, y: 0, z: 0, w: 0}
+  c32:
+    serializedVersion: 2
+    rgba: 0
+  h:
+    serializedVersion: 2
+    Hash: 00000000000000000000000000000000
+  m:
+    e00: 0
+    e01: 0
+    e02: 0
+    e03: 0
+    e10: 0
+    e11: 0
+    e12: 0
+    e13: 0
+    e20: 0
+    e21: 0
+    e22: 0
+    e23: 0
+    e30: 0
+    e31: 0
+    e32: 0
+    e33: 0
+  arr: 
+  strs: []
+  clip: {fileID: 0}
+  v2i: {x: 0, y: 0}
+  names: []
+  ctorSet: 12
+  tail: 9
+--- !u!91 &9100000
+AnimatorController:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: F07_Known
+  serializedVersion: 6
+  m_AnimatorParameters: []
+  m_AnimatorLayers:
+  - serializedVersion: 5
+    m_Name: Base Layer
+    m_StateMachine: {fileID: 1091392950602704550}
+    m_Mask: {fileID: 0}
+    m_Motions: []
+    m_Behaviours: []
+    m_BlendingMode: 0
+    m_SyncedLayerIndex: -1
+    m_DefaultWeight: 0
+    m_IKPass: 0
+    m_SyncedLayerAffectsTiming: 0
+    m_Controller: {fileID: 9100000}
+  m_EvaluateTransitionsOnStart: 1
+--- !u!1107 &1091392950602704550
+AnimatorStateMachine:
+  serializedVersion: 7
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: Base Layer
+  m_ChildStates:
+  - serializedVersion: 1
+    m_State: {fileID: 4750378977397856034}
+    m_Position: {x: 200, y: 0, z: 0}
+  - serializedVersion: 1
+    m_State: {fileID: -8256826457084409429}
+    m_Position: {x: 235, y: 65, z: 0}
+  m_ChildStateMachines: []
+  m_AnyStateTransitions: []
+  m_EntryTransitions: []
+  m_StateMachineTransitions: {}
+  m_StateMachineBehaviours: []
+  m_AnyStatePosition: {x: 50, y: 20, z: 0}
+  m_EntryPosition: {x: 50, y: 120, z: 0}
+  m_ExitPosition: {x: 800, y: 120, z: 0}
+  m_ParentStateMachinePosition: {x: 800, y: 20, z: 0}
+  m_DefaultState: {fileID: 4750378977397856034}
+--- !u!1102 &4750378977397856034
+AnimatorState:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: Known
+  m_Speed: 1
+  m_CycleOffset: 0
+  m_Transitions: []
+  m_StateMachineBehaviours:
+  - {fileID: -5406061559934633375}
+  m_Position: {x: 50, y: 50, z: 0}
+  m_IKOnFeet: 0
+  m_WriteDefaultValues: 1
+  m_Mirror: 0
+  m_SpeedParameterActive: 0
+  m_MirrorParameterActive: 0
+  m_CycleOffsetParameterActive: 0
+  m_TimeParameterActive: 0
+  m_Motion: {fileID: 0}
+  m_Tag: 
+  m_SpeedParameter: 
+  m_MirrorParameter: 
+  m_CycleOffsetParameter: 
+  m_TimeParameter: 
+--- !u!114 &6950879677889465812
+MonoBehaviour:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: d9c3069a73ac0f698a758485f1fd530f, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::SmbKnownDerived
+  baseA: 30
+  baseB: 4
+  baseS: base
+  baseC: 5
+  own: 8
+  ownF: 0.5
+  ownOn: 1
+  ownS: own
+  init:
+    hp: 100
+    s: x
+    f: 1.5
+    on: 1
+    plain: 0
+    sub:
+      k: 7
+      t: seven
+      on: 1
+    subNull:
+      k: 7
+      t: seven
+      on: 1
+    list: 
+    v: {x: 0, y: 0, z: 0}
+    subs: []
+    e: 10
+    none: 
+  inits: []

@@ -146,6 +146,7 @@
               "m_Enabled",
               "enabled"
              ],
+             "initial": "2",
              "type": {
               "kind": "enum",
               "underlying": "int"
@@ -297,6 +298,7 @@
               "m_Enabled",
               "enabled"
              ],
+             "initial": "2",
              "type": {
               "kind": "enum",
               "underlying": "int"

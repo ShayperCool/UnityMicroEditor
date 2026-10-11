@@ -1,0 +1,723 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &-3335443619763115262
+MonoBehaviour:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 256f6a5536a71efba9ceeb8684584019, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::SmbDefaults
+  dfInt: 5
+  dfFloat: 1.5
+  dfStr: hello
+  dfArr: 010000000200000003000000i
+  dfCurve:
+    serializedVersion: 2
+    m_Curve:
+    - serializedVersion: 3
+      time: 0
+      value: 0
+      inSlope: 0
+      outSlope: 1
+      tangentMode: 0
+      weightedMode: 0
+      inWeight: 0
+      outWeight: 0
+    - serializedVersion: 3
+      time: 1
+      value: 1
+      inSlope: 1
+      outSlope: 0
+      tangentMode: 0
+      weightedMode: 0
+      inWeight: 0
+      outWeight: 0
+    m_PreInfinity: 2
+    m_PostInfinity: 2
+    m_RotationOrder: 4
+  dfInner:
+    a: 7
+    name: seven
+    pos: {x: 0, y: 0, z: 0}
+    on: 0
+  dfOuter:
+    inner:
+      a: 0
+      name: 
+      pos: {x: 0, y: 0, z: 0}
+      on: 0
+    w: 0
+    inners: []
+    tags: []
+    tail: 0
+    hiddenByte: 0
+  dfOuterInit:
+    inner:
+      a: 0
+      name: 
+      pos: {x: 0, y: 0, z: 0}
+      on: 0
+    w: 2.5
+    inners: []
+    tags: []
+    tail: 0
+    hiddenByte: 0
+  dfCol: {r: 1, g: 0, b: 0, a: 1}
+  dfOn: 1
+  dfGrad:
+    serializedVersion: 2
+    key0: {r: 1, g: 1, b: 1, a: 1}
+    key1: {r: 1, g: 1, b: 1, a: 1}
+    key2: {r: 0, g: 0, b: 0, a: 0}
+    key3: {r: 0, g: 0, b: 0, a: 0}
+    key4: {r: 0, g: 0, b: 0, a: 0}
+    key5: {r: 0, g: 0, b: 0, a: 0}
+    key6: {r: 0, g: 0, b: 0, a: 0}
+    key7: {r: 0, g: 0, b: 0, a: 0}
+    ctime0: 0
+    ctime1: 65535
+    ctime2: 0
+    ctime3: 0
+    ctime4: 0
+    ctime5: 0
+    ctime6: 0
+    ctime7: 0
+    atime0: 0
+    atime1: 65535
+    atime2: 0
+    atime3: 0
+    atime4: 0
+    atime5: 0
+    atime6: 0
+    atime7: 0
+    m_Mode: 0
+    m_ColorSpace: -1
+    m_NumColorKeys: 2
+    m_NumAlphaKeys: 2
+  dfEnum: 10
+  dfNames:
+  - a
+  - bc
+  dfNullStr: 
+  dfNullCurve:
+    serializedVersion: 2
+    m_Curve: []
+    m_PreInfinity: 2
+    m_PostInfinity: 2
+    m_RotationOrder: 4
+  dfVec: {x: 1, y: 2, z: 3}
+  dfQuat: {x: 0, y: 0, z: 0, w: 0}
+  dfMask:
+    serializedVersion: 2
+    m_Bits: 3
+  dfC32:
+    serializedVersion: 2
+    rgba: 67305985
+  dfRenamed: 9
+  dfDouble: 2.5
+  dfChar: 120
+  dfLong: -7
+  dfClip: {fileID: 0}
+  dfNullArr: 
+  dfTail: 200
+--- !u!1107 &-2108691763649672706
+AnimatorStateMachine:
+  serializedVersion: 7
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: Base Layer
+  m_ChildStates:
+  - serializedVersion: 1
+    m_State: {fileID: 4982104097602530992}
+    m_Position: {x: 200, y: 0, z: 0}
+  - serializedVersion: 1
+    m_State: {fileID: 3449408551296314371}
+    m_Position: {x: 235, y: 65, z: 0}
+  - serializedVersion: 1
+    m_State: {fileID: 567055958836181429}
+    m_Position: {x: 270, y: 130, z: 0}
+  - serializedVersion: 1
+    m_State: {fileID: 6674073578310570451}
+    m_Position: {x: 305, y: 195, z: 0}
+  m_ChildStateMachines: []
+  m_AnyStateTransitions: []
+  m_EntryTransitions: []
+  m_StateMachineTransitions: {}
+  m_StateMachineBehaviours: []
+  m_AnyStatePosition: {x: 50, y: 20, z: 0}
+  m_EntryPosition: {x: 50, y: 120, z: 0}
+  m_ExitPosition: {x: 800, y: 120, z: 0}
+  m_ParentStateMachinePosition: {x: 800, y: 20, z: 0}
+  m_DefaultState: {fileID: 4982104097602530992}
+--- !u!114 &-1457742770262736896
+MonoBehaviour:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 4c255204db4b138a3a875a9ed10c2ff9, type: 3}
+  m_EditorClassIdentifier: Assembly-CSharp::SmbInit
+  i0: 0
+  i5: 5
+  u: 4000000000
+  l: -7
+  ul: 18446744073709551615
+  sh: -3
+  by: 200
+  sb: -5
+  on: 1
+  off: 0
+  f: 1.5
+  d: 2.5
+  c: 120
+  s: hello
+  sNull: 
+  sEmpty: 
+  e: 10
+  eb: 1
+  fNeg: -0
+  fInf: Infinity
+  fNaN: NaN
+  dBig: 1e+300
+  iMin: -2147483648
+  fThird: 0.33333334
+  iExpr: 21
+  sUni: "g\xE4mma \u4E2D"
+  cUni: 20013
+  lBig: 5000000000
+  us: 60000
+  dThird: 0.3333333333333333
+  a:
+    hp: 100
+    s: x
+    f: 1.5
+    on: 1
+    plain: 0
+    sub:
+      k: 7
+      t: seven
+    subNull:
+      k: 7
+      t: seven
+    arr: 0100000002000000i
+    list: 
+    v: {x: 1, y: 1, z: 1}
+  b:
+    hp: 100
+    s: x
+    f: 1.5
+    on: 1
+    plain: 0
+    sub:
+      k: 7
+      t: seven
+    subNull:
+      k: 7
+      t: seven
+    arr: 0100000002000000i
+    list: 
+    v: {x: 1, y: 1, z: 1}
+  c5:
+    hp: 5
+    s: x
+    f: 1.5
+    on: 1
+    plain: 0
+    sub:
+      k: 7
+      t: seven
+    subNull:
+      k: 7
+      t: seven
+    arr: 0100000002000000i
+    list: 
+    v: {x: 1, y: 1, z: 1}
+  items: []
+  itemList: []
+  st:
+    a: 0
+    c:
+      k: 7
+      t: seven
+    s: 
+  ndc:
+    q: 0
+    w: 
+  cb:
+    a: 1
+    b: 42
+  cbs: []
+  v: {x: 0, y: 0, z: 0}
+  v1: {x: 1, y: 2, z: 3}
+  col: {r: 1, g: 0, b: 0, a: 1}
+  curve:
+    serializedVersion: 2
+    m_Curve: []
+    m_PreInfinity: 2
+    m_PostInfinity: 2
+    m_RotationOrder: 4
+  curveInit:
+    serializedVersion: 2
+    m_Curve:
+    - serializedVersion: 3
+      time: 0
+      value: 0
+      inSlope: 0
+      outSlope: 1
+      tangentMode: 0
+      weightedMode: 0
+      inWeight: 0
+      outWeight: 0
+    - serializedVersion: 3
+      time: 1
+      value: 1
+      inSlope: 1
+      outSlope: 0
+      tangentMode: 0
+      weightedMode: 0
+      inWeight: 0
+      outWeight: 0
+    m_PreInfinity: 2
+    m_PostInfinity: 2
+    m_RotationOrder: 4
+  grad:
+    serializedVersion: 2
+    key0: {r: 1, g: 1, b: 1, a: 1}
+    key1: {r: 1, g: 1, b: 1, a: 1}
+    key2: {r: 0, g: 0, b: 0, a: 0}
+    key3: {r: 0, g: 0, b: 0, a: 0}
+    key4: {r: 0, g: 0, b: 0, a: 0}
+    key5: {r: 0, g: 0, b: 0, a: 0}
+    key6: {r: 0, g: 0, b: 0, a: 0}
+    key7: {r: 0, g: 0, b: 0, a: 0}
+    ctime0: 0
+    ctime1: 65535
+    ctime2: 0
+    ctime3: 0
+    ctime4: 0
+    ctime5: 0
+    ctime6: 0
+    ctime7: 0
+    atime0: 0
+    atime1: 65535
+    atime2: 0
+    atime3: 0
+    atime4: 0
+    atime5: 0
+    atime6: 0
+    atime7: 0
+    m_Mode: 0
+    m_ColorSpace: -1
+    m_NumColorKeys: 2
+    m_NumAlphaKeys: 2
+  gradInit:
+    serializedVersion: 2
+    key0: {r: 1, g: 1, b: 1, a: 1}
+    key1: {r: 1, g: 1, b: 1, a: 1}
+    key2: {r: 0, g: 0, b: 0, a: 0}
+    key3: {r: 0, g: 0, b: 0, a: 0}
+    key4: {r: 0, g: 0, b: 0, a: 0}
+    key5: {r: 0, g: 0, b: 0, a: 0}
+    key6: {r: 0, g: 0, b: 0, a: 0}
+    key7: {r: 0, g: 0, b: 0, a: 0}
+    ctime0: 0
+    ctime1: 65535
+    ctime2: 0
+    ctime3: 0
+    ctime4: 0
+    ctime5: 0
+    ctime6: 0
+    ctime7: 0
+    atime0: 0
+    atime1: 65535
+    atime2: 0
+    atime3: 0
+    atime4: 0
+    atime5: 0
+    atime6: 0
+    atime7: 0
+    m_Mode: 0
+    m_ColorSpace: -1
+    m_NumColorKeys: 2
+    m_NumAlphaKeys: 2
+  mask:
+    serializedVersion: 2
+    m_Bits: 3
+  arrNull: 
+  arrInit: 010000000200000003000000i
+  clip: {fileID: 0}
+  rect:
+    serializedVersion: 2
+    x: 0
+    y: 0
+    width: 0
+    height: 0
+  h:
+    serializedVersion: 2
+    Hash: 00000000000000000000000000000000
+  ro:
+    m_Left: 0
+    m_Right: 0
+    m_Top: 0
+    m_Bottom: 0
+  c32:
+    serializedVersion: 2
+    rgba: 0
+  bn:
+    m_Center: {x: 0, y: 0, z: 0}
+    m_Extent: {x: 0, y: 0, z: 0}
+  m:
+    e00: 0
+    e01: 0
+    e02: 0
+    e03: 0
+    e10: 0
+    e11: 0
+    e12: 0
+    e13: 0
+    e20: 0
+    e21: 0
+    e22: 0
+    e23: 0
+    e30: 0
+    e31: 0
+    e32: 0
+    e33: 0
+  q: {x: 0, y: 0, z: 0, w: 0}
+  qi: {x: 0, y: 0, z: 0, w: 1}
+  v2i: {x: 0, y: 0}
+  strs: []
+  strList:
+  - a
+  ctorSet: 12
+  afterCtor: 1
+  tail: 9
+--- !u!114 &-919530180043923748
+MonoBehaviour:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 5
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: ae25e6978dfefd68899628d6e2cd53e3, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::SmbInitPlain
+  i0: 0
+  i5: 15
+  u: 4000000000
+  l: -7
+  ul: 18446744073709551615
+  sh: -3
+  by: 200
+  sb: -5
+  on: 1
+  off: 0
+  f: 1.5
+  d: 2.5
+  c: 120
+  s: hello
+  sNull: 
+  sEmpty: 
+  e: 10
+  eb: 1
+  fNeg: -0
+  fInf: Infinity
+  fNaN: NaN
+  dBig: 1e+300
+  iMin: -2147483648
+  fThird: 0.33333334
+  iExpr: 21
+  sUni: "g\xE4mma \u4E2D"
+  cUni: 20013
+  lBig: 5000000000
+  us: 60000
+  dThird: 0.3333333333333333
+  m1: -1
+  big: 100000
+  i8: 8
+  i100: 100
+  a:
+    hp: 100
+    s: x
+    f: 1.5
+    on: 1
+    plain: 0
+    sub:
+      k: 7
+      t: seven
+    subNull:
+      k: 7
+      t: seven
+    arr: 0100000002000000i
+    list: 
+    v: {x: 1, y: 1, z: 1}
+  items: []
+  st:
+    a: 0
+    c:
+      k: 7
+      t: seven
+    s: 
+  v: {x: 0, y: 0, z: 0}
+  curve:
+    serializedVersion: 2
+    m_Curve: []
+    m_PreInfinity: 2
+    m_PostInfinity: 2
+    m_RotationOrder: 4
+  grad:
+    serializedVersion: 2
+    key0: {r: 1, g: 1, b: 1, a: 1}
+    key1: {r: 1, g: 1, b: 1, a: 1}
+    key2: {r: 0, g: 0, b: 0, a: 0}
+    key3: {r: 0, g: 0, b: 0, a: 0}
+    key4: {r: 0, g: 0, b: 0, a: 0}
+    key5: {r: 0, g: 0, b: 0, a: 0}
+    key6: {r: 0, g: 0, b: 0, a: 0}
+    key7: {r: 0, g: 0, b: 0, a: 0}
+    ctime0: 0
+    ctime1: 65535
+    ctime2: 0
+    ctime3: 0
+    ctime4: 0
+    ctime5: 0
+    ctime6: 0
+    ctime7: 0
+    atime0: 0
+    atime1: 65535
+    atime2: 0
+    atime3: 0
+    atime4: 0
+    atime5: 0
+    atime6: 0
+    atime7: 0
+    m_Mode: 0
+    m_ColorSpace: -1
+    m_NumColorKeys: 2
+    m_NumAlphaKeys: 2
+  arrNull: 
+  clip: {fileID: 0}
+  rect:
+    serializedVersion: 2
+    x: 0
+    y: 0
+    width: 0
+    height: 0
+  h:
+    serializedVersion: 2
+    Hash: 00000000000000000000000000000000
+  ro:
+    m_Left: 0
+    m_Right: 0
+    m_Top: 0
+    m_Bottom: 0
+  c32:
+    serializedVersion: 2
+    rgba: 0
+  bn:
+    m_Center: {x: 0, y: 0, z: 0}
+    m_Extent: {x: 0, y: 0, z: 0}
+  m:
+    e00: 0
+    e01: 0
+    e02: 0
+    e03: 0
+    e10: 0
+    e11: 0
+    e12: 0
+    e13: 0
+    e20: 0
+    e21: 0
+    e22: 0
+    e23: 0
+    e30: 0
+    e31: 0
+    e32: 0
+    e33: 0
+  q: {x: 0, y: 0, z: 0, w: 0}
+  v2i: {x: 0, y: 0}
+  strs: []
+  mask:
+    serializedVersion: 2
+    m_Bits: 0
+  col: {r: 0, g: 0, b: 0, a: 0}
+  tail: 9
+  unknownField: 99
+  unknownStruct: {x: 1, y: 2}
+--- !u!114 &-745898592127219060
+MonoBehaviour:
+  m_ObjectHideFlags: 3
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 0
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 46405d6b3e4e960bbb8f3747a5c86876, type: 3}
+  m_Name: Named
+  m_EditorClassIdentifier: Assembly-CSharp::SmbInitDerived
+  baseA: 3
+  baseB: 4
+  baseS: base
+  own: 8
+  ownF: 0.25
+  ownOn: 1
+  ownS: own
+  init:
+    hp: 100
+    s: x
+    f: 1.5
+    on: 1
+    plain: 0
+    sub:
+      k: 7
+      t: seven
+    subNull:
+      k: 7
+      t: seven
+    arr: 0100000002000000i
+    list: 
+    v: {x: 1, y: 1, z: 1}
+  inits: []
+--- !u!91 &9100000
+AnimatorController:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: F01_Created
+  serializedVersion: 6
+  m_AnimatorParameters: []
+  m_AnimatorLayers:
+  - serializedVersion: 5
+    m_Name: Base Layer
+    m_StateMachine: {fileID: -2108691763649672706}
+    m_Mask: {fileID: 0}
+    m_Motions: []
+    m_Behaviours: []
+    m_BlendingMode: 0
+    m_SyncedLayerIndex: -1
+    m_DefaultWeight: 0
+    m_IKPass: 0
+    m_SyncedLayerAffectsTiming: 0
+    m_Controller: {fileID: 9100000}
+  m_EvaluateTransitionsOnStart: 1
+--- !u!1102 &567055958836181429
+AnimatorState:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: Plain
+  m_Speed: 1
+  m_CycleOffset: 0
+  m_Transitions: []
+  m_StateMachineBehaviours:
+  - {fileID: -919530180043923748}
+  m_Position: {x: 50, y: 50, z: 0}
+  m_IKOnFeet: 0
+  m_WriteDefaultValues: 1
+  m_Mirror: 0
+  m_SpeedParameterActive: 0
+  m_MirrorParameterActive: 0
+  m_CycleOffsetParameterActive: 0
+  m_TimeParameterActive: 0
+  m_Motion: {fileID: 0}
+  m_Tag: 
+  m_SpeedParameter: 
+  m_MirrorParameter: 
+  m_CycleOffsetParameter: 
+  m_TimeParameter: 
+--- !u!1102 &3449408551296314371
+AnimatorState:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: Derived
+  m_Speed: 1
+  m_CycleOffset: 0
+  m_Transitions: []
+  m_StateMachineBehaviours:
+  - {fileID: -745898592127219060}
+  m_Position: {x: 50, y: 50, z: 0}
+  m_IKOnFeet: 0
+  m_WriteDefaultValues: 1
+  m_Mirror: 0
+  m_SpeedParameterActive: 0
+  m_MirrorParameterActive: 0
+  m_CycleOffsetParameterActive: 0
+  m_TimeParameterActive: 0
+  m_Motion: {fileID: 0}
+  m_Tag: 
+  m_SpeedParameter: 
+  m_MirrorParameter: 
+  m_CycleOffsetParameter: 
+  m_TimeParameter: 
+--- !u!1102 &4982104097602530992
+AnimatorState:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: Init
+  m_Speed: 1
+  m_CycleOffset: 0
+  m_Transitions: []
+  m_StateMachineBehaviours:
+  - {fileID: -1457742770262736896}
+  m_Position: {x: 50, y: 50, z: 0}
+  m_IKOnFeet: 0
+  m_WriteDefaultValues: 1
+  m_Mirror: 0
+  m_SpeedParameterActive: 0
+  m_MirrorParameterActive: 0
+  m_CycleOffsetParameterActive: 0
+  m_TimeParameterActive: 0
+  m_Motion: {fileID: 0}
+  m_Tag: 
+  m_SpeedParameter: 
+  m_MirrorParameter: 
+  m_CycleOffsetParameter: 
+  m_TimeParameter: 
+--- !u!1102 &6674073578310570451
+AnimatorState:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: Defaults
+  m_Speed: 1
+  m_CycleOffset: 0
+  m_Transitions: []
+  m_StateMachineBehaviours:
+  - {fileID: -3335443619763115262}
+  m_Position: {x: 50, y: 50, z: 0}
+  m_IKOnFeet: 0
+  m_WriteDefaultValues: 1
+  m_Mirror: 0
+  m_SpeedParameterActive: 0
+  m_MirrorParameterActive: 0
+  m_CycleOffsetParameterActive: 0
+  m_TimeParameterActive: 0
+  m_Motion: {fileID: 0}
+  m_Tag: 
+  m_SpeedParameter: 
+  m_MirrorParameter: 
+  m_CycleOffsetParameter: 
+  m_TimeParameter: 

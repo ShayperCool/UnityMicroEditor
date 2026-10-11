@@ -950,17 +950,35 @@ fn compare_behaviour_objects(root: &Path) -> (usize, Vec<(String, String)>) {
 /// of `GRef` refer to objects of another bundle, of their own file and, in
 /// the one edited by hand, to objects that are missing or of another class
 /// than the field, which the engine leaves null. Two layers of
-/// `M01_Embedded` take their masks from the controller's own file.
+/// `M01_Embedded` take their masks from the controller's own file. The
+/// documents of `F08_KnownMissing` to `F10_KnownBase` lack fields of their
+/// classes, down to all of them, and hold fields their classes do not have.
 #[test]
 fn behaviours_match_the_engine_build() {
     let (matched, refused) = compare_behaviours(&fixture("behaviours"));
-    assert_eq!(matched, 24);
-    // Both hold a class that nests itself up to the engine's depth limit.
-    let names: Vec<&str> = refused.iter().map(|(name, _)| name.as_str()).collect();
-    assert_eq!(names, ["D01_Stripped", "T01_Filled"]);
-    for (name, reason) in &refused {
-        assert!(reason.contains("depth limit"), "{name}: {reason}");
-    }
+    assert_eq!(matched, 29);
+    // Two hold a class that nests itself up to the engine's depth limit;
+    // the documents of the third lack fields that their classes construct
+    // in ways the reader does not follow.
+    let reasons: Vec<(&str, bool, bool)> = refused
+        .iter()
+        .map(|(name, reason)| {
+            (
+                name.as_str(),
+                reason.contains("depth limit"),
+                reason.contains("what its class constructs it with is not known"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            ("D01_Stripped", true, false),
+            ("T01_Filled", true, false),
+            ("F02_Missing", false, true)
+        ],
+        "{refused:#?}"
+    );
 }
 
 /// Every behaviour document of the fixtures on its own, and every object of
@@ -974,17 +992,20 @@ fn behaviours_match_the_engine_build() {
 #[test]
 fn behaviour_objects_match_the_engine_build() {
     let (matched, refused) = compare_behaviour_objects(&fixture("behaviours"));
-    assert_eq!(matched, 129);
-    // The documents of `D01_Stripped` lack fields their classes serialize.
-    // Two classes cannot be laid out at all: one nests itself up to the
-    // engine's depth limit, the other holds managed references.
+    assert_eq!(matched, 151);
+    // The documents of `D01_Stripped` and `F02_Missing` lack fields their
+    // classes serialize. Twelve of them are filled in with what the
+    // constructors set; six lack a field set in a way the reader does not
+    // follow, such as an array with elements. Two classes cannot be laid
+    // out at all: one nests itself up to the engine's depth limit, the
+    // other holds managed references.
     let reasons = [
-        "is not in the authored document",
+        "what its class constructs it with is not known",
         "depth limit",
         "managed reference",
     ];
     let count = |reason: &str| refused.iter().filter(|(_, r)| r.contains(reason)).count();
-    assert_eq!(reasons.map(count), [12, 2, 2], "{refused:#?}");
+    assert_eq!(reasons.map(count), [6, 2, 2], "{refused:#?}");
 }
 
 #[test]
@@ -1153,6 +1174,133 @@ fn behaviour_references_are_held_or_deferred() {
         Some(("d4a7b458bb74ee61684a4cf8f427d00f", 11400000, 2))
     );
     assert_eq!(binding(nested, "hl[0].so"), Some(scriptable));
+}
+
+/// Never asked: the layouts of the tests that use it hold no references.
+struct NoReferences;
+impl playerbake::References for NoReferences {
+    fn pointer(
+        &mut self,
+        reference: &playerbake::ObjectReference<'_>,
+    ) -> anyhow::Result<playerbake::Pointer> {
+        panic!("unexpected reference from {}", reference.path)
+    }
+}
+
+/// What the engine made of text that is not what a field's type is written
+/// as, recorded from a build of a controller edited by hand: it reads a
+/// number as far as the text is one, keeps what the constructor set where
+/// the text is a structure, and reads no string out of one.
+#[test]
+fn text_of_another_type_reads_as_the_engine_reads_it() {
+    use serde_json::json;
+    let field = |name: &str, kind: serde_json::Value, initial: Option<&str>| {
+        let mut field = json!({"name": name, "type": kind});
+        if let Some(initial) = initial {
+            field["initial"] = json!(initial);
+        }
+        field
+    };
+    let primitive = |name: &str| json!({"kind": "primitive", "name": name});
+    let layout: playerbake::ScriptLayout = serde_json::from_value(json!({
+        "className": "Probe", "assembly": "Assembly-CSharp", "baseKind": "StateMachineBehaviour",
+        "fields": [
+            field("i0", primitive("int"), None),
+            field("i5", primitive("int"), Some("5")),
+            field("u", primitive("uint"), None),
+            field("sh", primitive("short"), None),
+            field("by", primitive("byte"), None),
+            field("sb", primitive("sbyte"), None),
+            field("us", primitive("ushort"), None),
+            field("l", primitive("long"), None),
+            field("ul", primitive("ulong"), None),
+            field("on", primitive("bool"), Some("1")),
+            field("c", primitive("char"), None),
+            field("e", json!({"kind": "enum", "underlying": "int"}), None),
+            field("f", primitive("float"), Some("1.5")),
+            field("d", primitive("double"), Some("2.5")),
+            field("s", json!({"kind": "string"}), Some("hello")),
+        ],
+    }))
+    .unwrap();
+    let layout = playerbake::ScriptType::new(&layout).unwrap();
+    let read = |name: &str, authored: serde_json::Value| {
+        let mut document = serde_json::Map::new();
+        document.insert(name.to_string(), authored);
+        let object = layout.object(&document, 1, &mut NoReferences).unwrap();
+        let value = layout.tree.decode(&object.data).unwrap();
+        value.field(name).unwrap().clone()
+    };
+    let structure = || json!({"x": "1"});
+    let sequence = || json!(["1", "2"]);
+    let integers: [(&str, serde_json::Value, i128); 26] = [
+        ("i5", json!("1.5"), 1),
+        ("i5", json!("abc"), 0),
+        ("i5", structure(), 5),
+        ("i5", sequence(), 5),
+        ("i0", json!("0x10"), 0),
+        ("i0", json!("+5"), 5),
+        ("i0", json!(" 7 "), 7),
+        ("i0", json!("1e2"), 1),
+        ("i0", json!("12abc"), 12),
+        ("i0", json!("true"), 0),
+        ("u", json!("-1"), 4294967295),
+        ("sh", json!("70000"), 4464),
+        ("by", json!("300"), 44),
+        ("sb", json!("200"), -56),
+        ("us", json!("-1"), 65535),
+        ("l", json!("1e3"), 1),
+        ("l", json!("99999999999999999999"), 7766279631452241919),
+        ("ul", json!("-1"), 18446744073709551615),
+        ("on", json!("true"), 0),
+        ("on", json!("false"), 0),
+        ("on", json!("2"), 2),
+        ("c", json!("x"), 0),
+        ("c", json!("65"), 65),
+        ("c", json!("xy"), 0),
+        ("e", json!("C"), 0),
+        ("e", json!("99"), 99),
+    ];
+    for (name, authored, expected) in integers {
+        let actual = match read(name, authored.clone()) {
+            Val::I(value) => value as i128,
+            Val::U(value) => value as i128,
+            other => panic!("{name}: {other:?}"),
+        };
+        assert_eq!(actual, expected, "{name}: {authored}");
+    }
+    let nan = f32::NAN.to_bits();
+    let floats: [(serde_json::Value, u32); 10] = [
+        (json!("abc"), nan),
+        (json!("inf"), nan),
+        (json!("-inf"), nan),
+        (json!("nan"), nan),
+        (structure(), 1.5f32.to_bits()),
+        (json!("1,5"), 1f32.to_bits()),
+        (json!(".5"), 0.5f32.to_bits()),
+        (json!("5."), 5f32.to_bits()),
+        (json!("1e-3"), 0x3a83126f),
+        (json!("1.5abc"), 1.5f32.to_bits()),
+    ];
+    for (authored, expected) in floats {
+        match read("f", authored.clone()) {
+            Val::F(value) => assert_eq!(value.to_bits(), expected, "{authored}"),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(read("d", json!("1e3")), Val::D(1000.0));
+    assert_eq!(read("d", sequence()), Val::D(2.5));
+    assert_eq!(read("s", structure()), Val::Str(String::new()));
+    assert_eq!(read("s", sequence()), Val::Str(String::new()));
+    // A field the text lacks is as the constructor left it.
+    assert_eq!(read("i0", json!("3")), Val::I(3));
+    let object = layout
+        .object(&serde_json::Map::new(), 1, &mut NoReferences)
+        .unwrap();
+    let made = layout.tree.decode(&object.data).unwrap();
+    assert_eq!(made.field("i5"), Some(&Val::I(5)));
+    assert_eq!(made.field("s"), Some(&Val::Str("hello".into())));
+    assert_eq!(made.field("m_Enabled"), Some(&Val::U(1)));
 }
 
 /// A layer reads a mask stored inside the controller, which the baked file
