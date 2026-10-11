@@ -36,6 +36,9 @@ pub(crate) fn native_content_class(type_name: &str) -> i32 {
         "UnityEngine.PhysicsMaterial" => 134,
         "UnityEngine.PhysicsMaterial2D" => 62,
         "UnityEngine.RenderTexture" => 84,
+        "UnityEngine.Audio.AudioMixer" => 241,
+        "UnityEngine.Audio.AudioMixerGroup" => 243,
+        "UnityEngine.Audio.AudioMixerSnapshot" => 245,
         "UnityEngine.UIElements.StyleSheet" | "UnityEngine.UIElements.VisualTreeAsset" => 114,
         _ => 0,
     }
@@ -406,6 +409,8 @@ impl Inner {
             _ => None,
         };
         let mask = transcoded.is_some();
+        // Baked by this tool: the mixer, its groups and its snapshots.
+        let mixer = profile == ".mixer";
         for binding in r.deferred_bindings.iter() {
             // Only a behaviour of a baked controller is bound after loading.
             let owner = r.content.objects.iter().find(|object| {
@@ -468,6 +473,7 @@ impl Inner {
             && !clip
             && !controller
             && !mask
+            && !mixer
         {
             bail!("native replacement profile is unsupported: {path}");
         }
@@ -522,6 +528,23 @@ impl Inner {
                 }
             }
         }
+        if mixer && !expected.is_empty() {
+            // The groups and snapshots of a mixer come and go with its
+            // source; what stays is the mixer itself.
+            let main = |(id, type_name): (&String, &String)| {
+                type_name == "UnityEngine.Audio.AudioMixer"
+                    && r.content.objects.iter().any(|o| o.file_id == *id)
+            };
+            if !expected.iter().any(main) {
+                bail!("native mixer identity changed for {path}");
+            }
+            expected = r
+                .content
+                .objects
+                .iter()
+                .map(|o| (o.file_id.clone(), o.type_name.clone()))
+                .collect();
+        }
         if known_path.is_empty() || expected.is_empty() {
             // Index current project metadata rather than trusting caller-provided
             // GUIDs. Refresh once for an asset absent from the previous index.
@@ -548,7 +571,7 @@ impl Inner {
                 for value in r.content.objects.iter() {
                     expected.insert(value.file_id.clone(), value.type_name.clone());
                 }
-            } else if clip || controller || mask {
+            } else if clip || controller || mask || mixer {
                 for value in r.content.objects.iter() {
                     expected.insert(value.file_id.clone(), value.type_name.clone());
                 }
@@ -643,6 +666,24 @@ impl Inner {
             {
                 bail!(
                     "{path} replacement must contain one {type_name} without native dependencies"
+                );
+            }
+        } else if mixer {
+            let count =
+                |type_name: &str| objects.iter().filter(|o| o.type_name == type_name).count();
+            let mixers = count("UnityEngine.Audio.AudioMixer");
+            let parts = count("UnityEngine.Audio.AudioMixerGroup")
+                + count("UnityEngine.Audio.AudioMixerSnapshot");
+            if mixers != 1
+                || parts < 2
+                || mixers + parts != objects.len()
+                || !r.model_graph.is_empty()
+                || !r.model_graph_sha256.is_empty()
+                || !r.content.resources.is_empty()
+                || r.content.dependencies.iter().any(|d| d.global)
+            {
+                bail!(
+                    "mixer replacement must contain exactly its mixer, its groups and its snapshots"
                 );
             }
         } else if controller {
@@ -788,7 +829,7 @@ impl Inner {
         // A source may be outside the baseline closure while still being a genuine
         // project asset. Publish its verified runtime identities alongside the
         // native descriptor so raw references can resolve it.
-        if new_source {
+        if new_source || lexpath::equal_fold(lexpath::ext(&owned.source_path), ".mixer") {
             for value in owned.content.objects.iter() {
                 self.assets
                     .entry(asset_key(&owned.guid, &value.file_id))

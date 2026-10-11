@@ -244,13 +244,36 @@ Not covered: a dedicated server build writes a material without its shader refer
 
 ### Audio mixers
 
-A `.mixer` is not baked; a source holding one is refused. Its Player form is a derivation, not its fields. Of the four classes of the source, three reach a Player and the effects (`AudioMixerEffectController`, 244) do not:
+A `.mixer` is baked by `rust/src/playerbake/mixer.rs`, which `bake_native` calls for a source holding an `AudioMixerController`. Its Player form is a derivation, not its fields. Of the four classes of the source, three reach a Player, under their authored file IDs and with the class IDs of the source; the effects (`AudioMixerEffectController`, 244) do not:
 
 - `AudioMixerGroupController` (243) keeps its name, its mixer, its GUID as four integers and its children.
 - `AudioMixerSnapshotController` (245) keeps its name, its mixer and its GUID. Its values move into the mixer.
-- `AudioMixerController` (241) keeps the output group, master group, snapshots, start snapshot, suspend threshold and update mode, and gains an `AudioMixerConstant`: the groups in a flat list (parent index, the indices of volume and pitch among the snapshot values, mute, solo, bypass), the effects (type, group index, send target, wet mix index, previous effect, bypass, parameter indices), the count of side-chain buffers, each snapshot as a name hash with one value per index plus transition types and indices, the GUIDs of groups, effects and snapshots, three name buffers, and the exposed parameters as name hashes with value indices.
+- `AudioMixerController` (241) keeps the output group, master group, snapshots, start snapshot, suspend threshold, suspend switch and update mode, and gains an `AudioMixerConstant`.
 
-What is not derived: the order in which values get their indices, the effect types and their chaining (the attenuation effect of a default group leaves no effect entry), the defaults of values a snapshot does not store, the transition lists, and the two hashes. One engine-built mixer (a default one) is at hand, which fixes none of these.
+The constant was derived from engine builds of mixers authored through the Editor's own mixer API and of hand-written ones (`BuildAudioMixerConstant` in the Editor binary writes it; no tool outside the Editor does):
+
+- Groups are listed depth first from the master group, children in authored order, each with the index of its parent. A group or snapshot of the source that nothing lists is still an object of the Player, but takes no part in the constant.
+- Every value a snapshot can hold has an index. The volume and the pitch of each group come first, two per group in group order. Then, per effect in effect order: its level, when it has one, followed by its parameters in the order the engine defines them, whichever order the source lists them in.
+- Effects are listed group by group in authored order, each naming the effect before it in the whole list. An `Attenuation` that is the last effect of its group is left out, as is a `Send` without a target; an attenuation anywhere else stays. A send names its target by index, or none when the target was left out. A send always has a level; another effect has one only with its wet mix enabled.
+- An effect type is a negative number for the four kinds the mixer implements itself (attenuation −2, send −3, receive −4, duck volume −5) and the FMOD type of the others (lowpass 3, highpass 5, echo 6, flange 7, distortion 8, normalize 9, parametric EQ 10, pitch shifter 11, chorus 12, compressor 16, SFX reverb 17, simple lowpass 18, simple highpass 22).
+- The side-chain buffer count is the number of `Receive` and `Duck Volume` effects.
+- A snapshot holds the CRC-32 of its name and one value per index: the stored one, as written and without limiting it to the parameter's range, or the default. Defaults are 0 dB for a volume, 1 for a pitch, −80 dB for a level and the engine's value per parameter. These are the values an engine build writes, which differ from the list the Editor shows in one place: the release time of the ducker is 0.3, not 0.1. A value stored for a GUID without an index is dropped.
+- Transition overrides are listed in the order of their GUIDs as the engine compares them (four 32-bit integers, each written in the source with its hexadecimal digits reversed), as a type and a value index each; one for a GUID without an index is dropped.
+- Exposed parameters are two lists: the index of every exposed GUID that has one, and beside them as many name hashes taken from the head of the authored list. When a parameter is exposed whose GUID has no index (the level of an effect without wet mix), the names therefore shift against the indices. The baker reproduces this.
+- The name buffers hold the group and snapshot names in order, each ended by a zero byte, with one more zero at the end.
+
+Compared with the engine build byte for byte, every object of every mixer: 36 mixers authored through the Editor API (groups several deep, each built-in effect, sends, receives and ducking, up to five snapshots, transition overrides, exposed parameters, mute, solo and bypass switches, suspend and update mode, a mixer playing into a group of another, and the Editor's own randomized test mixers), 13 hand-written edge cases (values outside their ranges, parameters in another order, stray values and overrides, groups without or with two attenuations, sends to effects that take none, unlisted groups and snapshots, names with quotes and non-ASCII letters), 80 randomized hand-written mixers and the mixer of a game: 130 mixers, 1026 objects. A selection is committed under `rust/tests/testdata/playerbake/mixers`; `UNITY_PLAYERBAKE_MIXER_CORPUS` names further directories of `<name>.mixer` / `<name>.mixer.bin` pairs.
+
+Refused:
+
+- A `Chorus` effect whose `Feedback` a listed snapshot does not store. The engine has no default for it: the value an Editor writes changes from one run to the next (it reads memory it never set).
+- An effect that is not built into the engine (a native audio plugin), an effect whose parameters are not exactly the ones the engine defines, and an effect other than a send with a send target.
+- A transition override of a type outside the seven the engine names; the engine reads it as another.
+- A mixer without snapshots, a value that is not a finite plain number, two values sharing a GUID or a value without one, a group with two parents, an effect listed twice, a send to an effect no group lists, a reference to an object the source lacks or of another class, a mixer that plays into a group of its own, a group or snapshot that belongs to another mixer, and a source holding an object of any other class.
+
+A session publishes a new or changed `.mixer` this way, and a scene that refers to one the native catalog lacks, or holds in an older form, is prepared without an Editor. The groups and snapshots a mixer publishes follow its source, so one built into the catalog may gain and lose them. A mixer that plays into a group of another mixer refers to that mixer's baked file, which is published with it; when the other mixer is refused, so is this one. In a Player (`Temp/e2e/mixer`), with the mixers baked: an `AudioSource` routed to a group reported that group, script fields held the mixer, a group and a snapshot, `FindMatchingGroups` and `FindSnapshot` found them by name and path, `GetFloat`, `SetFloat` and `ClearFloat` worked on exposed parameters, `TransitionTo` reached the values of the other snapshot, and a second mixer reported the first mixer's group as its output.
+
+Not covered: what the mixers sound like was not measured, only that the Player holds the objects an engine build holds; a mixer that changes while a Player has it loaded was not tried.
 
 ## UI and fonts
 

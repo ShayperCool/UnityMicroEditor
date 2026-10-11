@@ -293,6 +293,7 @@ impl NativeProjectImporter {
                 | "physicmaterial"
                 | "physicsmaterial2d"
                 | "rendertexture"
+                | "mixer"
         ) {
             return self.import_baked(ctx, logical);
         }
