@@ -31,6 +31,10 @@
   "className": "HelperMono",
   "localId": 690110464660137689
  },
+ "3dfae602239731f73a83f43cbd2693bd": {
+  "className": "SmbCallback",
+  "localId": 1968795326568885573
+ },
  "3eed98410e11e958facba8847c4e54d6": {
   "className": "SmbManaged",
   "localId": -9170582816411083271
@@ -86,6 +90,10 @@
  "83606cfc22b1b52b2a9abddbcfbb9a2e": {
   "className": "SmbKnown",
   "localId": 7641559225605956949
+ },
+ "85e5c7e8c4c724a678dd470d8225b40c": {
+  "className": "SmbEngine",
+  "localId": 7994755441390363471
  },
  "86cecaf39b9640f129282a92582f35ac": {
   "className": "SmbEmpty",

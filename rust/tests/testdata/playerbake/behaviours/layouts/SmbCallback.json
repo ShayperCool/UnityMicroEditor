@@ -1,0 +1,8 @@
+{
+ "className": "SmbCallback",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "unsupported": "type SmbCallback has serialization callbacks, which a build runs",
+ "fields": []
+}

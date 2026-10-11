@@ -759,11 +759,86 @@ fn first_difference(actual: &str, expected: &str) -> String {
     )
 }
 
+/// A node as a type table entry holds it: the names the tree reader resolves
+/// and the version, level, flags, size and meta flags.
+type RawNode = (String, String, [u8; 12]);
+
+/// The fields of a script class in which two type table entries differ.
+fn entry_differences(actual: &[u8], expected: &[u8]) -> Vec<String> {
+    let nodes = |entry: &[u8]| -> Option<Vec<RawNode>> {
+        let tree = playerbake::TypeTree::parse(entry.to_vec()).ok()?;
+        let records = entry.get(59 + 16..)?;
+        Some(
+            tree.nodes
+                .iter()
+                .zip(records.chunks(32))
+                .map(|(node, record)| {
+                    let mut raw = [0; 12];
+                    raw[..4].copy_from_slice(&record[..4]);
+                    raw[4..8].copy_from_slice(&record[12..16]);
+                    raw[8..].copy_from_slice(&record[20..24]);
+                    (node.type_name.clone(), node.name.clone(), raw)
+                })
+                .collect(),
+        )
+    };
+    let (Some(actual), Some(expected)) = (nodes(actual), nodes(expected)) else {
+        return vec!["an entry the reader does not parse".into()];
+    };
+    let fields = |nodes: &[RawNode]| {
+        let mut fields: Vec<(String, Vec<RawNode>)> = Vec::new();
+        for node in nodes.iter().skip(1) {
+            if node.2[2] == 1 {
+                fields.push((node.1.clone(), Vec::new()));
+            }
+            fields.last_mut().unwrap().1.push(node.clone());
+        }
+        fields
+    };
+    let (actual, expected) = (fields(&actual), fields(&expected));
+    let mut out = Vec::new();
+    for (name, nodes) in &expected {
+        match actual.iter().find(|(known, _)| known == name) {
+            Some((_, found)) if found == nodes => {}
+            Some(_) => out.push(name.clone()),
+            None => out.push(format!("{name} (missing)")),
+        }
+    }
+    for (name, _) in &actual {
+        if !expected.iter().any(|(known, _)| known == name) {
+            out.push(format!("{name} (not in the engine's)"));
+        }
+    }
+    if out.is_empty() && actual != expected {
+        out.push("the order of the fields".into());
+    }
+    out
+}
+
+/// The fields in which two objects of a script class differ, each decoded
+/// with its own type tree.
+fn field_differences(actual: &Val, expected: &Val) -> Vec<String> {
+    let (Val::Map(actual), Val::Map(expected)) = (actual, expected) else {
+        return Vec::new();
+    };
+    expected
+        .iter()
+        .filter(|(name, value)| {
+            actual
+                .iter()
+                .find(|(known, _)| known == name)
+                .is_none_or(|(_, found)| format!("{found:?}") != format!("{value:?}"))
+        })
+        .map(|(name, _)| name.to_string())
+        .collect()
+}
+
 /// Bakes every `<name>.controller` below `<root>/Assets` and compares it with
 /// the engine's build beside it: the controller object field by field, each
 /// behaviour object and each script's type table entry byte for byte. Returns
-/// how many controllers matched and which were refused, with the reason.
-fn compare_behaviours(root: &Path) -> (usize, Vec<(String, String)>) {
+/// how many controllers matched, how many differ and which were refused, with
+/// the reason.
+fn compare_behaviours(root: &Path) -> (usize, usize, Vec<(String, String)>) {
     let fixtures = BehaviourFixtures::open(root.to_path_buf());
     let (mut matched, mut failed, mut refused) = (0, 0, Vec::new());
     for source in controller_sources(root) {
@@ -832,14 +907,18 @@ fn compare_behaviours(root: &Path) -> (usize, Vec<(String, String)>) {
             // than the bundle; such objects are compared by which of their
             // references are the same, and byte for byte in
             // `compare_behaviour_objects`.
+            // An object of the engine's that the class's tree does not
+            // describe compares with nothing.
             let relabelled = |data: &[u8]| {
-                let mut value = baked.scripts[behaviour.script].1.tree.decode(data).unwrap();
+                let mut value = baked.scripts[behaviour.script].1.tree.decode(data).ok()?;
                 label_references(&mut value, &mut Vec::new());
-                value
+                Some(value)
             };
             match built.objects.get(&behaviour.file_id) {
                 Some(expected) if *expected == actual => {}
-                Some(expected) if relabelled(&behaviour.data) == relabelled(&unhex(expected)) => {}
+                Some(expected)
+                    if relabelled(&unhex(expected))
+                        .is_some_and(|engine| relabelled(&behaviour.data) == Some(engine)) => {}
                 Some(expected) => out.push(format!(
                     "{class} {}: {}",
                     behaviour.file_id,
@@ -853,8 +932,13 @@ fn compare_behaviours(root: &Path) -> (usize, Vec<(String, String)>) {
         }
         for (identity, script) in &baked.scripts {
             let entry = root.join(format!("types/{}.entry.bin", identity.class_name));
-            if fs::read(entry).unwrap() != *script.tree.entry {
-                out.push(format!("type table entry of {}", identity.class_name));
+            let entry = fs::read(entry).unwrap();
+            if entry != *script.tree.entry {
+                out.push(format!(
+                    "type table entry of {}: {}",
+                    identity.class_name,
+                    entry_differences(&script.tree.entry, &entry).join(", ")
+                ));
             }
         }
         if out.is_empty() {
@@ -865,17 +949,18 @@ fn compare_behaviours(root: &Path) -> (usize, Vec<(String, String)>) {
         }
     }
     eprintln!("matched {matched}");
-    assert_eq!(failed, 0);
-    (matched, refused)
+    (matched, failed, refused)
 }
 
 /// Encodes every behaviour document below `<root>/Assets` on its own and
-/// compares it with the engine's object, object references included. Returns
-/// how many matched and which were refused, with the reason.
-fn compare_behaviour_objects(root: &Path) -> (usize, Vec<(String, String)>) {
+/// compares it with the engine's object, object references included, and
+/// the type table entry of its class with the engine's. Returns how many
+/// matched, how many differ and which were refused, with the reason.
+fn compare_behaviour_objects(root: &Path) -> (usize, usize, Vec<(String, String)>) {
     use playerbake::ControllerSources;
     let fixtures = BehaviourFixtures::open(root.to_path_buf());
     let (mut matched, mut failed, mut refused) = (0, 0, Vec::new());
+    let mut mistyped: Vec<String> = Vec::new();
     let mut sources = controller_sources(root);
     sources.extend(sources_of(root, "asset"));
     for source in sources {
@@ -909,21 +994,44 @@ fn compare_behaviour_objects(root: &Path) -> (usize, Vec<(String, String)>) {
                     continue;
                 }
             };
-            let object = playerbake::ScriptType::new(&script.layout).and_then(|layout| {
-                layout.object(
+            let class = &script.layout.class_name;
+            let layout = playerbake::ScriptType::new(&script.layout);
+            // The engine's entry of the class, where the directory has it.
+            let entry = fs::read(root.join(format!("types/{class}.entry.bin"))).ok();
+            if let (Ok(layout), Some(entry)) = (&layout, &entry)
+                && *entry != *layout.tree.entry
+                && !mistyped.contains(class)
+            {
+                mistyped.push(class.clone());
+                failed += 1;
+                eprintln!(
+                    "MISMATCH type table entry of {class}: {}",
+                    entry_differences(&layout.tree.entry, entry).join(", ")
+                );
+            }
+            let object = layout.and_then(|layout| {
+                let object = layout.object(
                     &document.data,
                     script.identity.local_id,
                     &mut BundlePointers(&built, &fixtures.targets),
-                )
+                )?;
+                Ok((layout, object))
             });
             match object {
-                Ok(actual) if hex(&actual.data) == *expected => matched += 1,
-                Ok(actual) => {
+                Ok((_, actual)) if hex(&actual.data) == *expected => matched += 1,
+                Ok((layout, actual)) => {
                     failed += 1;
+                    let engine = entry
+                        .and_then(|entry| playerbake::TypeTree::parse(entry).ok())
+                        .and_then(|tree| tree.decode(&unhex(expected)).ok());
+                    let fields = match (layout.tree.decode(&actual.data), engine) {
+                        (Ok(actual), Some(engine)) => field_differences(&actual, &engine),
+                        _ => Vec::new(),
+                    };
                     eprintln!(
-                        "MISMATCH {label} {}: {}",
-                        script.layout.class_name,
-                        first_difference(&hex(&actual.data), expected)
+                        "MISMATCH {label} {class}: {}; in {}",
+                        first_difference(&hex(&actual.data), expected),
+                        fields.join(", ")
                     );
                 }
                 Err(error) if error.is::<Unsupported>() => {
@@ -940,8 +1048,7 @@ fn compare_behaviour_objects(root: &Path) -> (usize, Vec<(String, String)>) {
         eprintln!("refused object {label}: {reason}");
     }
     eprintln!("matched {matched} objects");
-    assert_eq!(failed, 0);
-    (matched, refused)
+    (matched, failed, refused)
 }
 
 /// Controllers with state machine behaviours, authored through the Editor API
@@ -955,29 +1062,41 @@ fn compare_behaviour_objects(root: &Path) -> (usize, Vec<(String, String)>) {
 /// classes, down to all of them, and hold fields their classes do not have.
 /// The classes of `C01_Cut` nest serialized types past the engine's depth
 /// limit, where it keeps the numbers and strings of a type and nothing else.
+/// `E02_Engine` holds engine types as fields: the ones the engine stores in
+/// a form of its own, among them an ID, a property name and a GUI style, and
+/// a choice of those it stores by their C# fields.
 #[test]
 fn behaviours_match_the_engine_build() {
-    let (matched, refused) = compare_behaviours(&fixture("behaviours"));
-    assert_eq!(matched, 30);
+    let (matched, failed, refused) = compare_behaviours(&fixture("behaviours"));
+    assert_eq!(failed, 0);
+    assert_eq!(matched, 31);
     // Two hold a class with managed references; the documents of the third
     // lack fields that their classes construct in ways the reader does not
-    // follow.
-    let reasons: Vec<(&str, bool, bool)> = refused
+    // follow; the class of the fourth has serialization callbacks, and its
+    // reference object shows that the build ran them: it holds what they
+    // set, not what the text holds.
+    let reasons: Vec<(&str, &str)> = refused
         .iter()
         .map(|(name, reason)| {
-            (
-                name.as_str(),
-                reason.contains("managed reference"),
-                reason.contains("what its class constructs it with is not known"),
-            )
+            let known = [
+                "managed reference",
+                "what its class constructs it with is not known",
+                "has serialization callbacks",
+            ];
+            let reason = known.into_iter().find(|known| reason.contains(known));
+            (name.as_str(), reason.unwrap_or("another reason"))
         })
         .collect();
     assert_eq!(
         reasons,
         [
-            ("D01_Stripped", true, false),
-            ("T01_Filled", true, false),
-            ("F02_Missing", false, true)
+            ("D01_Stripped", "managed reference"),
+            ("T01_Filled", "managed reference"),
+            (
+                "F02_Missing",
+                "what its class constructs it with is not known"
+            ),
+            ("E04_CallbackHand", "has serialization callbacks"),
         ],
         "{refused:#?}"
     );
@@ -993,19 +1112,22 @@ fn behaviours_match_the_engine_build() {
 /// and takes the `#` of the second for a comment.
 #[test]
 fn behaviour_objects_match_the_engine_build() {
-    let (matched, refused) = compare_behaviour_objects(&fixture("behaviours"));
-    assert_eq!(matched, 157);
+    let (matched, failed, refused) = compare_behaviour_objects(&fixture("behaviours"));
+    assert_eq!(failed, 0);
+    assert_eq!(matched, 159);
     // The documents of `D01_Stripped` and `F02_Missing` lack fields their
     // classes serialize. Twelve of them are filled in with what the
     // constructors set; six lack a field set in a way the reader does not
-    // follow, such as an array with elements. One class cannot be laid out
-    // at all: it holds managed references.
+    // follow, such as an array with elements. Two classes cannot be laid
+    // out at all: one holds managed references, the other has serialization
+    // callbacks.
     let reasons = [
         "what its class constructs it with is not known",
         "managed reference",
+        "has serialization callbacks",
     ];
     let count = |reason: &str| refused.iter().filter(|(_, r)| r.contains(reason)).count();
-    assert_eq!(reasons.map(count), [6, 2], "{refused:#?}");
+    assert_eq!(reasons.map(count), [6, 2, 1], "{refused:#?}");
 }
 
 #[test]
@@ -1358,14 +1480,15 @@ fn behaviour_corpus_matches_the_engine_build() {
         eprintln!("skipped: set UNITY_PLAYERBAKE_BEHAVIOUR_CORPUS");
         return;
     };
-    let (_, refused) = compare_behaviours(Path::new(&root));
+    let (_, failed, refused) = compare_behaviours(Path::new(&root));
     for (name, reason) in refused {
         eprintln!("refused {name}: {reason}");
     }
-    let (_, refused) = compare_behaviour_objects(Path::new(&root));
+    let (_, failed_objects, refused) = compare_behaviour_objects(Path::new(&root));
     for (name, reason) in refused {
         eprintln!("refused {name}: {reason}");
     }
+    assert_eq!((failed, failed_objects), (0, 0));
 }
 
 /// Bakes every `<name>.mask` of a directory and compares the object with the

@@ -342,6 +342,13 @@ internal static class BehaviourLayouts
         ["UnityEngine.BoundsInt"] = "BoundsInt", ["UnityEngine.Matrix4x4"] = "Matrix4x4", ["UnityEngine.Hash128"] = "Hash128",
         ["UnityEngine.RectOffset"] = "RectOffset", ["UnityEngine.RenderingLayerMask"] = "RenderingLayerMask",
         ["UnityEngine.Rendering.SphericalHarmonicsL2"] = "SphericalHarmonicsL2", ["UnityEngine.LazyLoadReference`1"] = "LazyLoadReference",
+        ["UnityEngine.GUID"] = "GUID", ["UnityEngine.PropertyName"] = "PropertyName", ["UnityEngine.GUIStyle"] = "GUIStyle",
+    };
+
+    // Engine types whose text is in a form of its own that no build was reproduced from.
+    private static readonly HashSet<string> EngineTypesRefused = new(StringComparer.Ordinal)
+    {
+        "Unity.Loading.LoadableObjectId", "Unity.Loading.LoadableSceneId",
     };
 
     // Engine structs a build was seen to leave out of a script's data.
@@ -879,8 +886,12 @@ internal static class BehaviourLayouts
             {
                 if (EngineStructs.TryGetValue(named.FullName, out var known)) return new() { ["kind"] = "unity", ["name"] = known };
                 if (EngineStructsNotSerialized.Contains(named.FullName)) return null;
-                // An engine type may be stored by native code in a form its C# fields do not show.
-                if (!PlainEngineType(named.FullName)) throw new Unsupported($"engine type {named.FullName} of field {field}");
+                // Native code stores the types above in forms their C# fields do not show. A build of
+                // every other public type of the engine's assemblies, as a field and in an array,
+                // stored it by its C# fields like a type of the project. Generic types were not part
+                // of that build.
+                if (EngineTypesRefused.Contains(named.FullName) || (arguments.Length != 0 && !PlainEngineType(named.FullName)))
+                    throw new Unsupported($"engine type {named.FullName} of field {field}");
             }
             if ((definition.Attributes & TypeAttributes.Abstract) != 0) return null;
             if ((definition.Attributes & Serializable) == 0) return null;
@@ -897,8 +908,25 @@ internal static class BehaviourLayouts
             return new() { ["kind"] = "struct", ["name"] = type.Name, ["fields"] = fields };
         }
 
-        private static bool PlainEngineType(string name) =>
-            name == "UnityEngine.Pose" || name.StartsWith("UnityEngine.Events.", StringComparison.Ordinal);
+        // The generic engine types a build was compared with.
+        private static bool PlainEngineType(string name) => name.StartsWith("UnityEngine.Events.", StringComparison.Ordinal);
+
+        // A build runs the callbacks of such a type before it writes an object, so what it writes
+        // need not be what the text holds. The engine's events have them and store what they read.
+        private bool HasSerializationCallbacks(TypeId type)
+        {
+            if (type.Module.Engine && PlainEngineType(Universe.FullName(type))) return false;
+            var reader = type.Module.Reader;
+            foreach (var handle in type.Definition.GetInterfaceImplementations())
+            {
+                string name = universe.Decode(type.Module, reader.GetInterfaceImplementation(handle).Interface) switch
+                {
+                    NamedSig named => named.FullName, InstanceSig instance => instance.Generic.FullName, _ => "",
+                };
+                if (name == "UnityEngine.ISerializationCallbackReceiver") return true;
+            }
+            return false;
+        }
 
         // The fields of a class and of the classes it derives from, the most basic class first.
         // Returns whether a class of the chain overrides a state machine callback.
@@ -924,13 +952,19 @@ internal static class BehaviourLayouts
                     if (parent.FullName is "System.Object" or "System.ValueType") break;
                     throw new Unsupported($"type {Universe.FullName(type)} derives from {parent.FullName}");
                 }
-                if (!behaviour && next.Module.Engine && !PlainEngineType(parent.FullName))
+                // A class the engine stores in a form of its own does so for what derives from it.
+                bool native = EngineStructs.ContainsKey(parent.FullName) || EngineTypesRefused.Contains(parent.FullName)
+                    || (parent.Arguments.Length != 0 && !PlainEngineType(parent.FullName));
+                if (!behaviour && next.Module.Engine && native)
                     throw new Unsupported($"type {Universe.FullName(type)} derives from engine type {parent.FullName}");
                 if (parent.FullName.StartsWith("System.", StringComparison.Ordinal))
                     throw new Unsupported($"type {Universe.FullName(type)} derives from {parent.FullName}");
                 current = (next, parent.Arguments);
             }
             chain.Reverse();
+            foreach (var (member, _) in chain)
+                if (HasSerializationCallbacks(member))
+                    throw new Unsupported($"type {Universe.FullName(member)} has serialization callbacks, which a build runs");
             var names = new HashSet<string>(StringComparer.Ordinal);
             bool callbacks = false;
             var initials = construction.Of(type);
