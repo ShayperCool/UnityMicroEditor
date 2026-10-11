@@ -1,0 +1,8 @@
+{
+ "className": "SmbManaged2",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "unsupported": "field obj is a managed reference declared as object, which any class of the project may fill",
+ "fields": []
+}

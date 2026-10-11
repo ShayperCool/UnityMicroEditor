@@ -1,0 +1,541 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &-8903468104798877639
+MonoBehaviour:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 4c38f5ce6133c49719cdf06b8b608c70, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::SmbManaged3
+  before: 0
+  a:
+    rid: -2
+  shared1:
+    rid: -2
+  shared2:
+    rid: -2
+  nullRef:
+    rid: -2
+  arr: []
+  list: []
+  holder:
+    node:
+      rid: -2
+    x: 0
+  holders: []
+  concrete:
+    rid: -2
+  cyc:
+    rid: -2
+  after: 0
+  references:
+    version: 2
+    RefIds:
+    - rid: -2
+      type: {class: , ns: , asm: }
+--- !u!1102 &-7753755973519121975
+AnimatorState:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: Old
+  m_Speed: 1
+  m_CycleOffset: 0
+  m_Transitions: []
+  m_StateMachineBehaviours:
+  - {fileID: 953553605441377990}
+  m_Position: {x: 50, y: 50, z: 0}
+  m_IKOnFeet: 0
+  m_WriteDefaultValues: 1
+  m_Mirror: 0
+  m_SpeedParameterActive: 0
+  m_MirrorParameterActive: 0
+  m_CycleOffsetParameterActive: 0
+  m_TimeParameterActive: 0
+  m_Motion: {fileID: 0}
+  m_Tag: 
+  m_SpeedParameter: 
+  m_MirrorParameter: 
+  m_CycleOffsetParameter: 
+  m_TimeParameter: 
+--- !u!1102 &-3654645435029240800
+AnimatorState:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: Filled
+  m_Speed: 1
+  m_CycleOffset: 0
+  m_Transitions: []
+  m_StateMachineBehaviours:
+  - {fileID: 9193560423990888006}
+  m_Position: {x: 50, y: 50, z: 0}
+  m_IKOnFeet: 0
+  m_WriteDefaultValues: 1
+  m_Mirror: 0
+  m_SpeedParameterActive: 0
+  m_MirrorParameterActive: 0
+  m_CycleOffsetParameterActive: 0
+  m_TimeParameterActive: 0
+  m_Motion: {fileID: 0}
+  m_Tag: 
+  m_SpeedParameter: 
+  m_MirrorParameter: 
+  m_CycleOffsetParameter: 
+  m_TimeParameter: 
+--- !u!1102 &-3612333745361327547
+AnimatorState:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: OldCreated
+  m_Speed: 1
+  m_CycleOffset: 0
+  m_Transitions: []
+  m_StateMachineBehaviours:
+  - {fileID: 366841886411835452}
+  m_Position: {x: 50, y: 50, z: 0}
+  m_IKOnFeet: 0
+  m_WriteDefaultValues: 1
+  m_Mirror: 0
+  m_SpeedParameterActive: 0
+  m_MirrorParameterActive: 0
+  m_CycleOffsetParameterActive: 0
+  m_TimeParameterActive: 0
+  m_Motion: {fileID: 0}
+  m_Tag: 
+  m_SpeedParameter: 
+  m_MirrorParameter: 
+  m_CycleOffsetParameter: 
+  m_TimeParameter: 
+--- !u!1102 &-2386149364289801094
+AnimatorState:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: Created
+  m_Speed: 1
+  m_CycleOffset: 0
+  m_Transitions: []
+  m_StateMachineBehaviours:
+  - {fileID: -8903468104798877639}
+  m_Position: {x: 50, y: 50, z: 0}
+  m_IKOnFeet: 0
+  m_WriteDefaultValues: 1
+  m_Mirror: 0
+  m_SpeedParameterActive: 0
+  m_MirrorParameterActive: 0
+  m_CycleOffsetParameterActive: 0
+  m_TimeParameterActive: 0
+  m_Motion: {fileID: 0}
+  m_Tag: 
+  m_SpeedParameter: 
+  m_MirrorParameter: 
+  m_CycleOffsetParameter: 
+  m_TimeParameter: 
+--- !u!91 &9100000
+AnimatorController:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: N03_Typed
+  serializedVersion: 6
+  m_AnimatorParameters: []
+  m_AnimatorLayers:
+  - serializedVersion: 5
+    m_Name: Base Layer
+    m_StateMachine: {fileID: 6658258853406794648}
+    m_Mask: {fileID: 0}
+    m_Motions: []
+    m_Behaviours: []
+    m_BlendingMode: 0
+    m_SyncedLayerIndex: -1
+    m_DefaultWeight: 0
+    m_IKPass: 0
+    m_SyncedLayerAffectsTiming: 0
+    m_Controller: {fileID: 9100000}
+  m_EvaluateTransitionsOnStart: 1
+--- !u!114 &366841886411835452
+MonoBehaviour:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 3eed98410e11e958facba8847c4e54d6, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::SmbManaged
+  before: 0
+  shape:
+    rid: -2
+  shapes: []
+  none:
+    rid: -2
+  after: 0
+  references:
+    version: 2
+    RefIds:
+    - rid: -2
+      type: {class: , ns: , asm: }
+--- !u!1102 &526286062960001563
+AnimatorState:
+  serializedVersion: 6
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: Filled2
+  m_Speed: 1
+  m_CycleOffset: 0
+  m_Transitions: []
+  m_StateMachineBehaviours:
+  - {fileID: 1134751358503992859}
+  m_Position: {x: 50, y: 50, z: 0}
+  m_IKOnFeet: 0
+  m_WriteDefaultValues: 1
+  m_Mirror: 0
+  m_SpeedParameterActive: 0
+  m_MirrorParameterActive: 0
+  m_CycleOffsetParameterActive: 0
+  m_TimeParameterActive: 0
+  m_Motion: {fileID: 0}
+  m_Tag: 
+  m_SpeedParameter: 
+  m_MirrorParameter: 
+  m_CycleOffsetParameter: 
+  m_TimeParameter: 
+--- !u!114 &953553605441377990
+MonoBehaviour:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 3eed98410e11e958facba8847c4e54d6, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::SmbManaged
+  before: 1
+  shape:
+    rid: 5883427610413236224
+  shapes:
+  - rid: 5883427610413236225
+  - rid: -2
+  - rid: 5883427610413236224
+  none:
+    rid: -2
+  after: 2
+  references:
+    version: 2
+    RefIds:
+    - rid: -2
+      type: {class: , ns: , asm: }
+    - rid: 5883427610413236224
+      type: {class: Circle, ns: , asm: Assembly-CSharp}
+      data:
+        r: 2.5
+    - rid: 5883427610413236225
+      type: {class: Box, ns: , asm: Assembly-CSharp}
+      data:
+        size: {x: 1, y: 2}
+        label: box
+--- !u!114 &1134751358503992859
+MonoBehaviour:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 4c38f5ce6133c49719cdf06b8b608c70, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::SmbManaged3
+  before: 400
+  a:
+    rid: 5883427610413236226
+  shared1:
+    rid: 5883427610413236227
+  shared2:
+    rid: 5883427610413236227
+  nullRef:
+    rid: -2
+  arr: []
+  list: []
+  holder:
+    node:
+      rid: 5883427610413236227
+    x: 410
+  holders:
+  - node:
+      rid: 5883427610413236228
+    x: 1
+  - node:
+      rid: -2
+    x: 2
+  concrete:
+    rid: -2
+  cyc:
+    rid: 5883427610413236229
+  after: 401
+  references:
+    version: 2
+    RefIds:
+    - rid: -2
+      type: {class: , ns: , asm: }
+    - rid: 5883427610413236226
+      type: {class: Branch, ns: Gap.Man, asm: Assembly-CSharp}
+      data:
+        left:
+          rid: 5883427610413236230
+        right:
+          rid: 5883427610413236231
+        inline:
+          v: 404
+          s: inline
+        clip: {fileID: 0}
+        kids: []
+        tag: 405
+    - rid: 5883427610413236227
+      type: {class: Leaf, ns: Gap.Man, asm: Assembly-CSharp}
+      data:
+        v: 402
+        s: shared
+    - rid: 5883427610413236228
+      type: {class: Leaf, ns: Gap.Man, asm: Assembly-CSharp}
+      data:
+        v: 411
+        s: 
+    - rid: 5883427610413236229
+      type: {class: Branch, ns: Gap.Man, asm: Assembly-CSharp}
+      data:
+        left:
+          rid: 5883427610413236229
+        right:
+          rid: 5883427610413236230
+        inline:
+          v: 1
+          s: 
+        clip: {fileID: 0}
+        kids: []
+        tag: 414
+    - rid: 5883427610413236230
+      type: {class: Leaf, ns: Gap.Man, asm: Assembly-CSharp}
+      data:
+        v: 403
+        s: leaf
+    - rid: 5883427610413236231
+      type: {class: Branch, ns: Gap.Man, asm: Assembly-CSharp}
+      data:
+        left:
+          rid: 5883427610413236230
+        right:
+          rid: -2
+        inline:
+          v: 1
+          s: 
+        clip: {fileID: 0}
+        kids:
+        - rid: 5883427610413236232
+        - rid: -2
+        - rid: 5883427610413236233
+        tag: 408
+    - rid: 5883427610413236232
+      type: {class: Leaf, ns: Gap.Man, asm: Assembly-CSharp}
+      data:
+        v: 406
+        s: 
+    - rid: 5883427610413236233
+      type: {class: GlobalNode, ns: , asm: Assembly-CSharp}
+      data:
+        on: 0
+        b: 3
+--- !u!1107 &6658258853406794648
+AnimatorStateMachine:
+  serializedVersion: 7
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: Base Layer
+  m_ChildStates:
+  - serializedVersion: 1
+    m_State: {fileID: -3654645435029240800}
+    m_Position: {x: 200, y: 0, z: 0}
+  - serializedVersion: 1
+    m_State: {fileID: -2386149364289801094}
+    m_Position: {x: 235, y: 65, z: 0}
+  - serializedVersion: 1
+    m_State: {fileID: 526286062960001563}
+    m_Position: {x: 270, y: 130, z: 0}
+  - serializedVersion: 1
+    m_State: {fileID: -7753755973519121975}
+    m_Position: {x: 305, y: 195, z: 0}
+  - serializedVersion: 1
+    m_State: {fileID: -3612333745361327547}
+    m_Position: {x: 340, y: 260, z: 0}
+  m_ChildStateMachines: []
+  m_AnyStateTransitions: []
+  m_EntryTransitions: []
+  m_StateMachineTransitions: {}
+  m_StateMachineBehaviours: []
+  m_AnyStatePosition: {x: 50, y: 20, z: 0}
+  m_EntryPosition: {x: 50, y: 120, z: 0}
+  m_ExitPosition: {x: 800, y: 120, z: 0}
+  m_ParentStateMachinePosition: {x: 800, y: 20, z: 0}
+  m_DefaultState: {fileID: -3654645435029240800}
+--- !u!114 &9193560423990888006
+MonoBehaviour:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 4c38f5ce6133c49719cdf06b8b608c70, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::SmbManaged3
+  before: 300
+  a:
+    rid: 5883427610413236234
+  shared1:
+    rid: 5883427610413236235
+  shared2:
+    rid: 5883427610413236235
+  nullRef:
+    rid: -2
+  arr:
+  - rid: 5883427610413236236
+  - rid: 5883427610413236237
+  - rid: -2
+  - rid: 5883427610413236238
+  - rid: 5883427610413236239
+  - rid: 5883427610413236235
+  list: []
+  holder:
+    node:
+      rid: 5883427610413236235
+    x: 310
+  holders:
+  - node:
+      rid: 5883427610413236240
+    x: 1
+  - node:
+      rid: -2
+    x: 2
+  concrete:
+    rid: 5883427610413236241
+  cyc:
+    rid: 5883427610413236242
+  after: 301
+  references:
+    version: 2
+    RefIds:
+    - rid: -2
+      type: {class: , ns: , asm: }
+    - rid: 5883427610413236234
+      type: {class: Branch, ns: Gap.Man, asm: Assembly-CSharp}
+      data:
+        left:
+          rid: 5883427610413236243
+        right:
+          rid: 5883427610413236244
+        inline:
+          v: 304
+          s: inline
+        clip: {fileID: 7400000, guid: 219a6312c29f375719c3273b6b86ada8, type: 2}
+        kids: []
+        tag: 305
+    - rid: 5883427610413236235
+      type: {class: Leaf, ns: Gap.Man, asm: Assembly-CSharp}
+      data:
+        v: 302
+        s: shared
+    - rid: 5883427610413236236
+      type: {class: Outer/Inner, ns: Gap.Man, asm: Assembly-CSharp}
+      data:
+        f: 0.5
+    - rid: 5883427610413236237
+      type: {class: SNode, ns: Gap.Man, asm: Assembly-CSharp}
+      data:
+        a: 309
+    - rid: 5883427610413236238
+      type: {class: EmptyNode, ns: Gap.Man, asm: Assembly-CSharp}
+      data: 
+    - rid: 5883427610413236239
+      type: {class: GlobalNode, ns: , asm: Assembly-CSharp}
+      data:
+        on: 1
+        b: 7
+    - rid: 5883427610413236240
+      type: {class: Leaf, ns: Gap.Man, asm: Assembly-CSharp}
+      data:
+        v: 311
+        s: 
+    - rid: 5883427610413236241
+      type: {class: Leaf, ns: Gap.Man, asm: Assembly-CSharp}
+      data:
+        v: 313
+        s: concrete
+    - rid: 5883427610413236242
+      type: {class: Branch, ns: Gap.Man, asm: Assembly-CSharp}
+      data:
+        left:
+          rid: 5883427610413236242
+        right:
+          rid: 5883427610413236243
+        inline:
+          v: 1
+          s: 
+        clip: {fileID: 0}
+        kids: []
+        tag: 314
+    - rid: 5883427610413236243
+      type: {class: Leaf, ns: Gap.Man, asm: Assembly-CSharp}
+      data:
+        v: 303
+        s: leaf
+    - rid: 5883427610413236244
+      type: {class: Branch, ns: Gap.Man, asm: Assembly-CSharp}
+      data:
+        left:
+          rid: 5883427610413236243
+        right:
+          rid: -2
+        inline:
+          v: 1
+          s: 
+        clip: {fileID: 0}
+        kids:
+        - rid: 5883427610413236245
+        - rid: -2
+        - rid: 5883427610413236246
+        tag: 308
+    - rid: 5883427610413236245
+      type: {class: Leaf, ns: Gap.Man, asm: Assembly-CSharp}
+      data:
+        v: 306
+        s: 
+    - rid: 5883427610413236246
+      type: {class: GlobalNode, ns: , asm: Assembly-CSharp}
+      data:
+        on: 0
+        b: 3

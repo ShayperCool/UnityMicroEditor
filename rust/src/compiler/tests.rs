@@ -2969,8 +2969,8 @@ fn compiler_behaviour_layouts_sdk() {
         assert_eq!(layout, &expected[guid], "{}", layout.class_name);
     }
     // What grows past the reader's bound on its way down to the engine's
-    // depth limit, is stored through a registry or has callbacks a build
-    // runs is refused.
+    // depth limit, holds a managed reference that any class may fill or
+    // has callbacks a build runs is refused.
     let refused: BTreeSet<&str> = actual
         .values()
         .filter(|layout| !layout.unsupported.is_empty())
@@ -2978,7 +2978,7 @@ fn compiler_behaviour_layouts_sdk() {
         .collect();
     assert_eq!(
         refused,
-        BTreeSet::from(["SmbCallback", "SmbDeep", "SmbManaged"])
+        BTreeSet::from(["SmbCallback", "SmbDeep", "SmbManaged2"])
     );
     let callbacks: BTreeSet<&str> = actual
         .values()

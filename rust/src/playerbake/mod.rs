@@ -30,8 +30,8 @@ pub use controller::{
 };
 pub use freeform::{Freeform, precompute as precompute_freeform};
 pub use managed::{
-    DeferredBinding, DeferredReference, Encoded, Field, FieldType, ObjectReference, Pointer,
-    References, Resolution, ScriptLayout, ScriptType,
+    DeferredBinding, DeferredReference, Encoded, Field, FieldType, ManagedLayout, ManagedType,
+    ObjectReference, Pointer, References, Resolution, ScriptLayout, ScriptType,
 };
 pub use mask::{Mask, bake_mask, bake_mask_object, read_mask};
 pub use material::{PropertyKind, ShaderFacts, ShaderProperty, read_shader_facts};
@@ -40,7 +40,9 @@ pub use native::{
     native_class, native_tree,
 };
 pub use override_controller::{bake_override, bake_override_object};
-pub use serialized::{External, Object, Read, read as read_serialized, write};
+pub use serialized::{
+    External, Object, Read, ReferenceType, read as read_serialized, write, write_with_references,
+};
 pub use typetree::{TypeTree, Val};
 
 use anyhow::Result;

@@ -43,6 +43,27 @@ pub struct ScriptLayout {
     pub unsupported: String,
     #[serde(default)]
     pub fields: Vec<Field>,
+    /// The classes of the project an object held by a managed reference of
+    /// the class may be of.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub managed_types: Vec<ManagedLayout>,
+}
+
+/// The serialized fields of a class that is held by managed reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedLayout {
+    /// The class as text names it: a nested class after the classes around
+    /// it, `Outer/Inner`.
+    pub class_name: String,
+    #[serde(default)]
+    pub namespace: String,
+    pub assembly: String,
+    /// Why the fields of the class cannot be laid out; empty if they can.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub unsupported: String,
+    #[serde(default)]
+    pub fields: Vec<Field>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +124,13 @@ pub enum FieldType {
         element: Box<FieldType>,
         length: usize,
     },
+    /// A `[SerializeReference]` field: the ID of an object in the registry
+    /// that the object holding the field ends with. `name` is the declared
+    /// type, after which a list of such fields is named.
+    ManagedReference {
+        #[serde(default)]
+        name: String,
+    },
 }
 
 /// `ScriptLayout::base_kind` of a class the engine attaches to animator
@@ -123,6 +151,12 @@ const DONT_ANIMATE: u32 = 0x80_0000;
 const CHAR: u32 = 0x200_0000;
 const FIXED_BUFFER: u32 = 0x800_0000;
 
+// Type flags of the nodes that have to do with managed references. An array
+// has flag 1.
+const MANAGED_REFERENCE: u8 = 2;
+const REGISTRY: u8 = 4;
+const REFERENCE_ARRAY: u8 = 8;
+
 /// A node of a type tree before it is flattened. The byte size and the
 /// any-child-aligns flag of a parent follow from its children.
 #[derive(Debug, Clone)]
@@ -135,6 +169,8 @@ struct Node {
     version: u16,
     /// The `Array` node of a container.
     array: bool,
+    /// The type flags other than that of an array.
+    flags: u8,
     children: Vec<Node>,
 }
 
@@ -147,6 +183,7 @@ impl Node {
             meta,
             version: 1,
             array: false,
+            flags: 0,
             children: Vec::new(),
         }
     }
@@ -229,6 +266,67 @@ impl Node {
     fn element(&self) -> &Node {
         &self.children[0].children[1]
     }
+
+    /// The ID of an object held by managed reference.
+    fn reference(type_name: &str, name: &str) -> Self {
+        Node {
+            flags: MANAGED_REFERENCE,
+            ..Node::group(type_name, name, 0, vec![Node::leaf("SInt64", "rid", 8, 0)])
+        }
+    }
+
+    /// The registry an object ends with that holds others by managed
+    /// reference: each with its ID, its class and, in the object's bytes,
+    /// its data, which the tree of the class describes.
+    fn registry() -> Self {
+        let object = Node::group(
+            "ReferencedObject",
+            "data",
+            0,
+            vec![
+                Node::leaf("SInt64", "rid", 8, 0),
+                Node::group(
+                    "ReferencedManagedType",
+                    "type",
+                    FLOW,
+                    vec![
+                        Node::string("class", 0),
+                        Node::string("ns", 0),
+                        Node::string("asm", 0),
+                    ],
+                ),
+                Node::group("ReferencedObjectData", "data", 0, Vec::new()),
+            ],
+        );
+        Node {
+            flags: REGISTRY,
+            ..Node::group(
+                "ManagedReferencesRegistry",
+                REGISTRY_FIELD,
+                HIDE,
+                vec![
+                    Node::leaf("int", "version", 4, 0),
+                    Node::container("vector", "RefIds", 0, ALIGN, object),
+                ],
+            )
+        }
+    }
+}
+
+const REGISTRY_FIELD: &str = "references";
+
+/// Whether fields, or the classes stored inline in them, hold managed
+/// references.
+fn hold_references(fields: &[Field]) -> bool {
+    fn holds(kind: &FieldType) -> bool {
+        match kind {
+            FieldType::ManagedReference { .. } => true,
+            FieldType::Struct { fields, .. } => hold_references(fields),
+            FieldType::Array { element } | FieldType::FixedBuffer { element, .. } => holds(element),
+            _ => false,
+        }
+    }
+    fields.iter().any(|field| holds(&field.kind))
 }
 
 /// Node type, byte size and field meta flags of a C# primitive.
@@ -472,6 +570,7 @@ fn type_node(kind: &FieldType, name: &str) -> Result<Node> {
             0,
             DONT_ANIMATE | HIDE,
         ),
+        FieldType::ManagedReference { .. } => Node::reference("managedReference", name),
         FieldType::Array { element } | FieldType::FixedBuffer { element, .. } => {
             let fixed = matches!(kind, FieldType::FixedBuffer { .. });
             let mut data = type_node(element, "data")?;
@@ -486,6 +585,18 @@ fn type_node(kind: &FieldType, name: &str) -> Result<Node> {
                 FieldType::Array { .. } | FieldType::FixedBuffer { .. } => {
                     bail!("script layout holds an array of arrays")
                 }
+                // A list of managed references is named after the type it
+                // is declared with.
+                FieldType::ManagedReference { name: declared } => Node {
+                    flags: REFERENCE_ARRAY,
+                    ..Node::container(
+                        declared,
+                        name,
+                        0,
+                        0,
+                        Node::reference("managedRefArrayItem", "data"),
+                    )
+                },
                 // An array of an inline class is named after the class, and
                 // its `Array` does not align.
                 FieldType::Struct {
@@ -549,6 +660,15 @@ fn root(layout: &ScriptLayout) -> Result<Node> {
             )));
         }
         children.push(field_node(field)?);
+    }
+    if hold_references(&layout.fields) {
+        if children.iter().any(|known| known.name == REGISTRY_FIELD) {
+            return Err(unsupported(format!(
+                "script {} holds managed references and a field named {REGISTRY_FIELD}",
+                layout.class_name
+            )));
+        }
+        children.push(Node::registry());
     }
     Ok(Node::group("MonoBehaviour", "Base", 0, children))
 }
@@ -615,7 +735,7 @@ fn blob(nodes: &[Flat<'_>]) -> Vec<u8> {
     for (index, flat) in nodes.iter().enumerate() {
         records.extend_from_slice(&flat.node.version.to_le_bytes());
         records.push(flat.level);
-        records.push(flat.node.array as u8);
+        records.push(flat.node.array as u8 | flat.node.flags);
         records.extend_from_slice(&reference(flat.node.type_name.as_str()).to_le_bytes());
         records.extend_from_slice(&reference(flat.node.name.as_str()).to_le_bytes());
         records.extend_from_slice(&flat.size.to_le_bytes());
@@ -688,9 +808,93 @@ pub struct ScriptType {
     pub properties_hash: [u8; 16],
     fields: Vec<Field>,
     root: Node,
+    managed: Vec<ManagedType>,
+}
+
+/// A class of which script objects hold objects by managed reference.
+pub struct ManagedType {
+    /// The class as text names it, a nested class as `Outer/Inner`.
+    pub class_name: String,
+    pub namespace: String,
+    pub assembly: String,
+    /// The type tree of the class, as a file's table of such types holds it.
+    pub blob: Vec<u8>,
+    /// Why the class cannot be laid out; empty if it can.
+    unsupported: String,
+    fields: Vec<Field>,
+    /// The tree that the data of an object is written with: the fields
+    /// without the registry that the full tree of a class ends with if the
+    /// class holds managed references itself.
+    data: Option<(Node, TypeTree)>,
+}
+
+impl ManagedType {
+    fn new(layout: &ManagedLayout) -> Result<Self> {
+        let mut kind = Self {
+            class_name: layout.class_name.clone(),
+            namespace: layout.namespace.clone(),
+            assembly: layout.assembly.clone(),
+            blob: Vec::new(),
+            unsupported: layout.unsupported.clone(),
+            fields: layout.fields.clone(),
+            data: None,
+        };
+        if !kind.unsupported.is_empty() {
+            return Ok(kind);
+        }
+        let build = || -> Result<(Vec<u8>, Node, TypeTree)> {
+            // A nested class is named without the classes around it.
+            let name = layout.class_name.rsplit('/').next().unwrap_or_default();
+            let mut children = Vec::with_capacity(layout.fields.len());
+            for field in &layout.fields {
+                if children.iter().any(|known: &Node| known.name == field.name) {
+                    return Err(unsupported(format!(
+                        "two serialized fields named {}",
+                        field.name
+                    )));
+                }
+                children.push(field_node(field)?);
+            }
+            let data = Node::group(name, "Base", 0, children);
+            let mut full = data.clone();
+            if hold_references(&layout.fields) {
+                full.children.push(Node::registry());
+            }
+            let mut nodes = Vec::new();
+            flatten(&full, 0, &mut nodes)?;
+            let full = blob(&nodes);
+            let mut nodes = Vec::new();
+            flatten(&data, 0, &mut nodes)?;
+            let tree = blob(&nodes);
+            // An entry as the tree reader takes it, of no engine class.
+            let mut entry = Vec::with_capacity(tree.len() + 47);
+            entry.extend_from_slice(&(-1i32).to_le_bytes());
+            entry.extend_from_slice(&[0u8; 35]);
+            entry.extend_from_slice(&(tree.len() as u32).to_le_bytes());
+            entry.extend_from_slice(&tree);
+            entry.extend_from_slice(&0u32.to_le_bytes());
+            Ok((full, data, TypeTree::parse(entry)?))
+        };
+        match build() {
+            Ok((blob, root, tree)) => {
+                kind.blob = blob;
+                kind.data = Some((root, tree));
+            }
+            // A class that cannot be laid out is refused once an object
+            // holds one of it.
+            Err(error) => kind.unsupported = error.downcast::<super::Unsupported>()?.to_string(),
+        }
+        Ok(kind)
+    }
 }
 
 impl ScriptType {
+    /// The classes of which objects of the class may hold objects by managed
+    /// reference; `Encoded::managed` names the ones an object does hold.
+    pub fn managed_types(&self) -> &[ManagedType] {
+        &self.managed
+    }
+
     pub fn new(layout: &ScriptLayout) -> Result<Self> {
         let root = root(layout)?;
         let mut nodes = Vec::new();
@@ -706,7 +910,8 @@ impl ScriptType {
             identity.extend_from_slice(flat.node.type_name.as_bytes());
             identity.extend_from_slice(flat.node.name.as_bytes());
             identity.extend_from_slice(&flat.size.to_le_bytes());
-            identity.extend_from_slice(&(flat.node.array as i32).to_le_bytes());
+            let flags = flat.node.array as u8 | flat.node.flags;
+            identity.extend_from_slice(&(flags as i32).to_le_bytes());
             identity.extend_from_slice(&(flat.node.version as i32).to_le_bytes());
             identity.extend_from_slice(&(flat.meta & ALIGN).to_le_bytes());
         }
@@ -723,11 +928,17 @@ impl ScriptType {
         entry.extend_from_slice(&(blob.len() as u32).to_le_bytes());
         entry.extend_from_slice(&blob);
         entry.extend_from_slice(&0u32.to_le_bytes()); // No type dependencies.
+        let managed = layout
+            .managed_types
+            .iter()
+            .map(ManagedType::new)
+            .collect::<Result<_>>()?;
         Ok(Self {
             tree: TypeTree::parse(entry)?,
             properties_hash,
             fields: layout.fields.clone(),
             root,
+            managed,
         })
     }
 
@@ -765,6 +976,7 @@ impl ScriptType {
         let mut encoder = Encoder {
             references,
             deferred: Vec::new(),
+            held: Vec::new(),
         };
         for (field, node) in self.fields.iter().zip(nodes) {
             values.push((
@@ -772,9 +984,23 @@ impl ScriptType {
                 encoder.field(field, node, fields, "", true)?,
             ));
         }
+        let mut data = self.tree.encode(&Val::Map(values))?;
+        let mut managed = Vec::new();
+        if hold_references(&self.fields) {
+            // The tree ends in the registry, written empty so far: a
+            // version and a count. The data of an object of the registry is
+            // laid out by the tree of its class, which the tree of the
+            // registry leaves open.
+            let Some(start) = data.len().checked_sub(8) else {
+                bail!("script object is shorter than its registry");
+            };
+            data.truncate(start);
+            managed = encoder.registry(get(fields, REGISTRY_FIELD), &self.managed, &mut data)?;
+        }
         Ok(Encoded {
-            data: self.tree.encode(&Val::Map(values))?,
+            data,
             deferred: encoder.deferred,
+            managed,
         })
     }
 }
@@ -834,6 +1060,9 @@ pub struct Encoded {
     pub data: Vec<u8>,
     /// The references left null, in field order.
     pub deferred: Vec<DeferredReference>,
+    /// The classes of the objects it holds by managed reference, as
+    /// positions in `ScriptType::managed_types`.
+    pub managed: Vec<usize>,
 }
 
 /// Where the object behind a reference to another asset is at run time. This
@@ -899,6 +1128,22 @@ impl References for FileReferences<'_> {
 struct Encoder<'a> {
     references: &'a mut dyn References,
     deferred: Vec<DeferredReference>,
+    /// The IDs of the objects the fields read so far hold by managed
+    /// reference.
+    held: Vec<i64>,
+}
+
+/// The ID a managed reference holds: that of an object of the registry, or
+/// -2 for none.
+fn managed_id(value: &Value, path: &str) -> Result<i64> {
+    let Value::Object(reference) = value else {
+        return Err(mismatch(path, "a value"));
+    };
+    match scalar_text(get(reference, "rid"), path)?.parse::<i64>() {
+        Ok(id) if id >= -2 && id != -1 => Ok(id),
+        // -1 stands for an object whose class is gone.
+        _ => Err(mismatch(path, "a managed reference without an object")),
+    }
 }
 
 fn mismatch(path: &str, what: &str) -> anyhow::Error {
@@ -1161,6 +1406,13 @@ impl Encoder<'_> {
             }
             FieldType::String => Val::Str(field.initial.clone().unwrap_or_default()),
             FieldType::Object { .. } => Val::Zero,
+            // What a build makes of a reference the text lacks was not
+            // compared.
+            FieldType::ManagedReference { .. } => {
+                return Err(unsupported(format!(
+                    "behaviour field {path} is a managed reference that is not in the authored document"
+                )));
+            }
             FieldType::Array { .. } => Val::Seq(Vec::new()),
             FieldType::FixedBuffer { length, .. } => Val::Seq(vec![Val::Zero; *length]),
             // The engine constructs the object of an empty field itself.
@@ -1324,11 +1576,129 @@ impl Encoder<'_> {
                 }
                 Ok(Val::Map(values))
             }
+            FieldType::ManagedReference { .. } => {
+                let id = managed_id(value, path)?;
+                if !self.held.contains(&id) {
+                    self.held.push(id);
+                }
+                Ok(Val::map([("rid", Val::I(id))]))
+            }
             FieldType::Unity { .. } if node.type_name.starts_with("PPtr<") => {
                 self.pointer("", "", value, path)
             }
             FieldType::Unity { .. } => self.engine_struct(node, value, path, known),
         }
+    }
+
+    /// Appends the registry of the objects held by managed reference, as the
+    /// text lists them, and returns the positions of their classes in
+    /// `types`. A build was compared for a registry in the Editor's order,
+    /// the null entry first and the others by ID, that holds exactly the
+    /// objects the fields refer to.
+    fn registry(
+        &mut self,
+        value: &Value,
+        types: &[ManagedType],
+        out: &mut Vec<u8>,
+    ) -> Result<Vec<usize>> {
+        let path = REGISTRY_FIELD;
+        let Value::Object(registry) = value else {
+            return Err(unsupported(
+                "behaviour holds managed references and no registry of their objects",
+            ));
+        };
+        if scalar_text(get(registry, "version"), path)? != "2" {
+            return Err(unsupported(
+                "registry of managed references in another version",
+            ));
+        }
+        let entries: &[Value] = match get(registry, "RefIds") {
+            Value::Array(entries) => entries,
+            Value::Null => &[],
+            Value::String(text) if text.is_empty() => &[],
+            _ => return Err(mismatch(path, "a value")),
+        };
+        out.extend_from_slice(&2i32.to_le_bytes());
+        out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+        let (mut listed, mut used) = (Vec::new(), Vec::new());
+        let empty = Map::new();
+        for entry in entries {
+            let id = managed_id(entry, path)?;
+            let Value::Object(entry) = entry else {
+                return Err(mismatch(path, "a value"));
+            };
+            if listed.last().is_some_and(|last| *last >= id) {
+                return Err(unsupported(
+                    "registry of managed references that is not in the order of the IDs",
+                ));
+            }
+            listed.push(id);
+            let Value::Object(kind) = get(entry, "type") else {
+                return Err(mismatch(path, "an object without a class"));
+            };
+            let name = [
+                string(get(kind, "class"), path)?,
+                string(get(kind, "ns"), path)?,
+                string(get(kind, "asm"), path)?,
+            ];
+            out.extend_from_slice(&id.to_le_bytes());
+            for part in &name {
+                out.extend_from_slice(&(part.len() as u32).to_le_bytes());
+                out.extend_from_slice(part.as_bytes());
+                out.resize(out.len().next_multiple_of(4), 0);
+            }
+            let [class, namespace, assembly] = &name;
+            if id == -2 {
+                // The entry of the null reference has neither class nor data.
+                if name.iter().any(|part| !part.is_empty()) {
+                    return Err(mismatch(path, "a null reference with a class"));
+                }
+                continue;
+            }
+            let position = types.iter().position(|kind| {
+                kind.class_name == *class
+                    && kind.namespace == *namespace
+                    && kind.assembly == *assembly
+            });
+            let Some(position) = position else {
+                return Err(unsupported(format!(
+                    "managed reference to an object of {class}, a class the layout does not hold"
+                )));
+            };
+            let kind = &types[position];
+            let Some((root, tree)) = &kind.data else {
+                return Err(unsupported(format!(
+                    "managed reference to an object of {class}: {}",
+                    kind.unsupported
+                )));
+            };
+            let mapping = match get(entry, "data") {
+                Value::Object(mapping) => mapping,
+                Value::Null => &empty,
+                Value::String(text) if text.is_empty() => &empty,
+                _ => return Err(mismatch(path, "an object whose data is a value")),
+            };
+            let prefix = format!("managedReferences[{id}].");
+            let mut values = Vec::with_capacity(kind.fields.len());
+            for (field, node) in kind.fields.iter().zip(&root.children) {
+                values.push((
+                    Cow::Owned(field.name.clone()),
+                    self.field(field, node, mapping, &prefix, true)?,
+                ));
+            }
+            out.extend_from_slice(&tree.encode(&Val::Map(values))?);
+            if !used.contains(&position) {
+                used.push(position);
+            }
+        }
+        out.resize(out.len().next_multiple_of(4), 0);
+        self.held.sort_unstable();
+        if self.held != listed {
+            return Err(unsupported(
+                "registry of managed references that does not hold exactly the objects referred to",
+            ));
+        }
+        Ok(used)
     }
 
     /// A struct the engine serializes itself: the authored keys are the node

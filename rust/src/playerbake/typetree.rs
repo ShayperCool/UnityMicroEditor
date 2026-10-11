@@ -74,8 +74,15 @@ impl TypeTree {
         let Some(blob) = entry.get(at + 4..at + 4 + size) else {
             bail!("type tree blob exceeds its entry");
         };
-        if entry.len() != at + 4 + size + 4 || le32(entry, at + 4 + size) != 0 {
-            bail!("type table entry has unsupported dependencies");
+        // The entry ends in the types its objects hold by managed reference,
+        // as positions in a table of the file.
+        let tail = at + 4 + size;
+        let Some(held) = entry.get(tail..tail + 4) else {
+            bail!("type table entry is truncated");
+        };
+        let held = u32::from_le_bytes([held[0], held[1], held[2], held[3]]) as usize;
+        if entry.len() != tail + 4 + 4 * held {
+            bail!("type table entry bounds are invalid");
         }
         if size < 16 || le32(blob, 0) != 0x7474686d || le32(blob, 4) != 23 {
             bail!("unsupported type tree format");

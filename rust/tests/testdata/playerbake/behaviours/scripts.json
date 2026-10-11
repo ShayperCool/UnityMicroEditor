@@ -7,6 +7,10 @@
   "className": "OtherSO",
   "localId": -7664705898252597955
  },
+ "0519918561948a84cb2a7425cc244dc0": {
+  "className": "SmbManaged2",
+  "localId": -3181609813844466394
+ },
  "2100e3421ba4cd72f9bc05a32c4a6d97": {
   "className": "MySO",
   "localId": -1332065481928836478
@@ -54,6 +58,10 @@
  "4c255204db4b138a3a875a9ed10c2ff9": {
   "className": "SmbInit",
   "localId": -2479131561492519993
+ },
+ "4c38f5ce6133c49719cdf06b8b608c70": {
+  "className": "SmbManaged3",
+  "localId": -2807630122851796985
  },
  "4f06647f13723a652b2f25a873f37a47": {
   "className": "SmbHidden",

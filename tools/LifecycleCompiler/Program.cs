@@ -307,6 +307,8 @@ internal static class BehaviourLayouts
             return this;
         }
 
+        public IEnumerable<Module> Modules => modules.Values;
+
         public Sig Decode(Module module, FieldDefinition field)
         {
             current = module;
@@ -718,6 +720,10 @@ internal static class BehaviourLayouts
         private readonly Universe universe;
         private readonly Construction construction;
         private int count;
+        // The types the managed references of what was read are declared with.
+        public readonly List<TypeId> ManagedDeclared = new();
+        // Whether a type was read that the engine cuts off.
+        public bool Cut;
         public Reader(Universe universe) { this.universe = universe; construction = new Construction(universe); }
 
         // The serialized fields a class declares itself, in declaration order.
@@ -730,15 +736,14 @@ internal static class BehaviourLayouts
                 const FieldAttributes never = FieldAttributes.Static | FieldAttributes.Literal | FieldAttributes.InitOnly | NotSerialized;
                 if ((field.Attributes & never) != 0) continue;
                 string name = reader.GetString(field.Name);
-                bool attributed = false, hidden = false;
+                bool attributed = false, hidden = false, managed = false;
                 var former = new List<string>();
                 (string Element, int Length)? buffer = null;
                 foreach (var (attribute, value) in Attributes(type.Module, field.GetCustomAttributes()))
                 {
                     if (attribute == "UnityEngine.SerializeField") attributed = true;
                     else if (attribute == "UnityEngine.HideInInspector") hidden = true;
-                    else if (attribute == "UnityEngine.SerializeReference")
-                        throw new Unsupported($"field {name} is a managed reference");
+                    else if (attribute == "UnityEngine.SerializeReference") managed = true;
                     else if (attribute == "UnityEngine.Serialization.FormerlySerializedAsAttribute")
                     {
                         var blob = reader.GetBlobReader(value.Value);
@@ -754,8 +759,10 @@ internal static class BehaviourLayouts
                         buffer = (element.Split(',')[0].Trim(), blob.ReadInt32());
                     }
                 }
-                if ((field.Attributes & FieldAttributes.FieldAccessMask) != FieldAttributes.Public && !attributed) continue;
+                if ((field.Attributes & FieldAttributes.FieldAccessMask) != FieldAttributes.Public && !attributed && !managed) continue;
                 bool cut = depth > DepthLimit;
+                Cut |= cut;
+                if (managed && (cut || buffer is not null)) throw new Unsupported($"managed reference {name} at the engine's depth limit or in a fixed buffer");
                 if (cut && buffer is not null) throw new Unsupported($"fixed buffer {name} at the engine's depth limit");
                 Dictionary<string, object>? kind;
                 Sig? declared = null;
@@ -774,9 +781,9 @@ internal static class BehaviourLayouts
                 else
                 {
                     var sig = Substitute(universe.Decode(type.Module, field), arguments);
-                    declared = sig;
+                    declared = managed ? null : sig;
                     // Past the limit not even an enum is stored.
-                    kind = cut && sig is not PrimitiveSig ? null : Classify(sig, depth, attributed, type, false, name);
+                    kind = managed ? Managed(sig, name) : cut && sig is not PrimitiveSig ? null : Classify(sig, depth, attributed, type, false, name);
                 }
                 if (kind is null) continue;
                 if (!names.Add(name)) throw new Unsupported($"two serialized fields are named {name}");
@@ -802,6 +809,124 @@ internal static class BehaviourLayouts
         }
 
         private static Dictionary<string, object> Primitive(string keyword) => new() { ["kind"] = "primitive", ["name"] = keyword };
+
+        // A [SerializeReference] field: the object is stored in the registry of the object that
+        // holds the field, and the field holds its ID. A list stores an ID per element.
+        private Dictionary<string, object> Managed(Sig sig, string field)
+        {
+            var element = sig; bool list = false;
+            if (sig is ArraySig { Vector: true } array) { element = array.Element; list = true; }
+            else if (sig is InstanceSig { Generic.FullName: "System.Collections.Generic.List`1" } listed && listed.Arguments.Length == 1) { element = listed.Arguments[0]; list = true; }
+            string name;
+            switch (element)
+            {
+                case PrimitiveSig { Code: PrimitiveTypeCode.Object }:
+                    throw new Unsupported($"field {field} is a managed reference declared as object, which any class of the project may fill");
+                case NamedSig { Type: { } type } named:
+                    string root = Base(universe, type, ImmutableArray<Sig>.Empty)?.FullName ?? "";
+                    bool isInterface = (type.Definition.Attributes & TypeAttributes.Interface) != 0;
+                    if (root is "System.Enum" or "System.ValueType" or "System.MulticastDelegate" or "System.Delegate" || type.Module.Engine
+                        || named.FullName.StartsWith("System.", StringComparison.Ordinal) || type.Definition.GetGenericParameters().Count != 0
+                        || (!isInterface && DerivesFrom(universe, type, "UnityEngine", "Object")))
+                        throw new Unsupported($"field {field} is a managed reference of a type the reader does not lay out");
+                    name = type.Name; ManagedDeclared.Add(type); break;
+                default:
+                    throw new Unsupported($"field {field} is a managed reference of a type the reader does not lay out");
+            }
+            var reference = new Dictionary<string, object> { ["kind"] = "managedReference", ["name"] = name };
+            return list ? new() { ["kind"] = "array", ["element"] = reference } : reference;
+        }
+
+        // Whether an object of a type can be assigned to a field declared with another.
+        private bool Assignable(TypeId type, TypeId target)
+        {
+            TypeId? current = type;
+            for (int depth = 0; current is { } candidate && depth < 64; depth++)
+            {
+                if (candidate == target) return true;
+                var reader = candidate.Module.Reader;
+                foreach (var handle in candidate.Definition.GetInterfaceImplementations())
+                {
+                    var implemented = universe.Decode(candidate.Module, reader.GetInterfaceImplementation(handle).Interface) switch
+                    {
+                        NamedSig named => named.Type, InstanceSig instance => instance.Generic.Type, _ => null,
+                    };
+                    if (implemented == target) return true;
+                }
+                current = Base(universe, candidate, ImmutableArray<Sig>.Empty)?.Type;
+            }
+            return false;
+        }
+
+        private static bool Library(string assembly) => assembly is "mscorlib" or "netstandard" || assembly.StartsWith("System", StringComparison.Ordinal)
+            || assembly.StartsWith("Mono.", StringComparison.Ordinal) || assembly.StartsWith("Microsoft.", StringComparison.Ordinal);
+
+        // The layouts of the types of the project that the managed references read so far may
+        // hold: every serializable class or struct that can be assigned to one of the fields.
+        // Which of them an object holds is in its text, not in its class.
+        public List<object> ManagedTypes()
+        {
+            var found = new SortedDictionary<string, object>(StringComparer.Ordinal);
+            var seen = new HashSet<TypeId>();
+            var declared = new List<TypeId>(ManagedDeclared);
+            for (int from = 0; from < declared.Count;)
+            {
+                int until = declared.Count;
+                foreach (var module in universe.Modules)
+                {
+                    if (module.Engine || Library(module.Name)) continue;
+                    foreach (var handle in module.Reader.TypeDefinitions)
+                    {
+                        var type = new TypeId(module, handle);
+                        var definition = type.Definition;
+                        const TypeAttributes never = TypeAttributes.Interface | TypeAttributes.Abstract;
+                        if ((definition.Attributes & never) != 0 || (definition.Attributes & Serializable) == 0 || seen.Contains(type)) continue;
+                        bool generic = false;
+                        for (var outer = definition; ; outer = module.Reader.GetTypeDefinition(outer.GetDeclaringType()))
+                        {
+                            generic |= outer.GetGenericParameters().Count != 0;
+                            if (outer.GetDeclaringType().IsNil) break;
+                        }
+                        // An instance of a generic type is named by its arguments, which only the text has.
+                        if (generic) continue;
+                        string root = Base(universe, type, ImmutableArray<Sig>.Empty)?.FullName ?? "";
+                        if (root is "System.Enum" or "System.MulticastDelegate" or "System.Delegate" || DerivesFrom(universe, type, "UnityEngine", "Object")) continue;
+                        if (Attributes(module, definition.GetCustomAttributes()).Any(attribute => attribute.Name == "System.Runtime.CompilerServices.CompilerGeneratedAttribute")) continue;
+                        bool fits = false;
+                        for (int index = from; index < until && !fits; index++) fits = Assignable(type, declared[index]);
+                        if (!fits) continue;
+                        seen.Add(type);
+                        if (seen.Count > 256) throw new Unsupported("more types a managed reference may hold than the reader bounds");
+                        // The text names a nested type by the types around it.
+                        string name = type.Name;
+                        for (var outer = definition; !outer.GetDeclaringType().IsNil;)
+                        {
+                            outer = module.Reader.GetTypeDefinition(outer.GetDeclaringType());
+                            name = module.Reader.GetString(outer.Name) + "/" + name;
+                        }
+                        var layout = new Dictionary<string, object> { ["className"] = name, ["namespace"] = type.Namespace, ["assembly"] = module.Name };
+                        var reader = new Reader(universe);
+                        try
+                        {
+                            var fields = new List<object>();
+                            reader.Chain(type, ImmutableArray<Sig>.Empty, 0, fields, false);
+                            // Where the engine cuts a class off that is held this way was not compared.
+                            if (reader.Cut) throw new Unsupported("a managed type that nests serialized types up to the engine's depth limit");
+                            layout["fields"] = fields;
+                            declared.AddRange(reader.ManagedDeclared);
+                        }
+                        catch (Unsupported error)
+                        {
+                            layout["unsupported"] = error.Message;
+                            layout["fields"] = Array.Empty<object>();
+                        }
+                        found[module.Name + "\n" + type.Namespace + "\n" + name] = layout;
+                    }
+                }
+                from = until;
+            }
+            return found.Values.ToList();
+        }
 
         // How the engine stores a field of this type; null if it does not store it.
         private Dictionary<string, object>? Classify(Sig sig, int depth, bool attributed, TypeId declaring, bool element, string field)
@@ -1030,14 +1155,17 @@ internal static class BehaviourLayouts
                 }
                 layout["bases"] = bases;
                 var fields = new List<object>();
-                bool callbacks = new Reader(universe).Chain(type, ImmutableArray<Sig>.Empty, 0, fields, true, behaviour);
+                var reader = new Reader(universe);
+                bool callbacks = reader.Chain(type, ImmutableArray<Sig>.Empty, 0, fields, true, behaviour);
                 if (behaviour) layout["overridesStateMachineCallbacks"] = callbacks;
                 layout["fields"] = fields;
+                if (reader.ManagedDeclared.Count != 0) layout["managedTypes"] = reader.ManagedTypes();
             }
             catch (Unsupported error)
             {
                 layout.Remove("overridesStateMachineCallbacks");
                 layout.Remove("bases");
+                layout.Remove("managedTypes");
                 layout["unsupported"] = error.Message;
                 layout["fields"] = Array.Empty<object>();
             }

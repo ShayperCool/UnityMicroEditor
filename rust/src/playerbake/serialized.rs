@@ -22,7 +22,53 @@ pub struct External {
     pub guid: String,
 }
 
+/// A class of which objects of the file hold objects by managed reference:
+/// its name parts as the registry of such an object names it, and its type
+/// tree.
+#[derive(Clone, Copy)]
+pub struct ReferenceType<'a> {
+    pub class_name: &'a str,
+    pub namespace: &'a str,
+    pub assembly: &'a str,
+    pub blob: &'a [u8],
+}
+
+impl ReferenceType<'_> {
+    fn is(&self, other: &ReferenceType<'_>) -> bool {
+        (self.class_name, self.namespace, self.assembly)
+            == (other.class_name, other.namespace, other.assembly)
+    }
+
+    /// The type's entry of a file's table of such types, at a position.
+    pub fn entry(&self, position: i16) -> Vec<u8> {
+        let mut entry = Vec::with_capacity(self.blob.len() + 96);
+        entry.extend_from_slice(&(-1i32).to_le_bytes());
+        entry.push(0);
+        entry.extend_from_slice(&position.to_le_bytes());
+        // Neither a script nor a layout hash, as a build leaves them.
+        entry.extend_from_slice(&[0u8; 32]);
+        entry.extend_from_slice(&xxhash_rust::xxh3::xxh3_128(self.blob).to_le_bytes());
+        entry.extend_from_slice(&(self.blob.len() as u32).to_le_bytes());
+        entry.extend_from_slice(self.blob);
+        for part in [self.class_name, self.namespace, self.assembly] {
+            entry.extend_from_slice(part.as_bytes());
+            entry.push(0);
+        }
+        entry
+    }
+}
+
 pub fn write(objects: &[Object<'_>], externals: &[External]) -> Result<Vec<u8>> {
+    write_with_references(objects, externals, &[])
+}
+
+/// Writes a file whose objects hold others by managed reference: `held`
+/// lists, per object, the types of what it holds, and may end early.
+pub fn write_with_references(
+    objects: &[Object<'_>],
+    externals: &[External],
+    held: &[Vec<ReferenceType<'_>>],
+) -> Result<Vec<u8>> {
     if objects.is_empty() {
         bail!("a serialized file needs at least one object");
     }
@@ -51,15 +97,52 @@ pub fn write(objects: &[Object<'_>], externals: &[External]) -> Result<Vec<u8>> 
     if scripts.len() > i16::MAX as usize {
         bail!("a serialized file holds more script types than its format indexes");
     }
+    // The held types in order of first use, and for each type of the file
+    // the ones its objects hold.
+    let mut references: Vec<ReferenceType<'_>> = Vec::new();
+    let mut dependencies: Vec<Vec<u32>> = vec![Vec::new(); types.len()];
+    for (object, held) in objects.iter().zip(held) {
+        let index = types
+            .iter()
+            .position(|(tree, script)| {
+                tree.class_id == object.tree.class_id && *script == object.script
+            })
+            .unwrap();
+        for kind in held {
+            let position = match references.iter().position(|known| known.is(kind)) {
+                Some(position) => position,
+                None => {
+                    references.push(*kind);
+                    references.len() - 1
+                }
+            } as u32;
+            if !dependencies[index].contains(&position) {
+                dependencies[index].push(position);
+            }
+        }
+    }
+    if references.len() > i16::MAX as usize {
+        bail!("a serialized file holds more managed types than its format indexes");
+    }
     let mut meta = Vec::new();
     meta.extend_from_slice(crate::ENGINE_VERSION.as_bytes());
     meta.push(0);
     meta.extend_from_slice(&RUNTIME_TARGET.to_le_bytes());
     meta.push(1); // Inline type trees.
     meta.extend_from_slice(&(types.len() as u32).to_le_bytes());
-    for (tree, script) in &types {
+    for ((tree, script), held) in types.iter().zip(&mut dependencies) {
         let start = meta.len();
-        meta.extend_from_slice(&tree.entry);
+        // An entry ends in the count of the types its objects hold, zero as
+        // the tree's own entry has it.
+        let Some((body, [0, 0, 0, 0])) = tree.entry.split_last_chunk::<4>() else {
+            bail!("type table entry already names the types its objects hold");
+        };
+        meta.extend_from_slice(body);
+        held.sort_unstable();
+        meta.extend_from_slice(&(held.len() as u32).to_le_bytes());
+        for position in held.iter() {
+            meta.extend_from_slice(&position.to_le_bytes());
+        }
         if let Some(script) = script {
             let index = scripts.iter().position(|known| known == script).unwrap() as i16;
             meta[start + 5..start + 7].copy_from_slice(&index.to_le_bytes());
@@ -109,7 +192,10 @@ pub fn write(objects: &[Object<'_>], externals: &[External]) -> Result<Vec<u8>> 
         meta.extend_from_slice(&0u32.to_le_bytes());
         meta.push(0);
     }
-    meta.extend_from_slice(&0u32.to_le_bytes()); // Serialized reference types.
+    meta.extend_from_slice(&(references.len() as u32).to_le_bytes());
+    for (position, kind) in references.iter().enumerate() {
+        meta.extend_from_slice(&kind.entry(position as i16));
+    }
     meta.push(0); // User information.
     let mut data_offset = 48 + meta.len();
     while !data_offset.is_multiple_of(16) {
@@ -191,9 +277,12 @@ pub fn read(file: &[u8]) -> Result<Vec<Read>> {
         take(&mut at, if scripted { 48 } else { 32 })?;
         let blob = le32(&mut at)? as usize;
         take(&mut at, blob)?;
-        if le32(&mut at)? != 0 {
-            bail!("SerializedFile type has serialized reference dependencies");
+        // The types the objects of this type hold by managed reference.
+        let held = le32(&mut at)? as usize;
+        if held > 4096 {
+            bail!("SerializedFile type dependency count is invalid");
         }
+        take(&mut at, 4 * held)?;
         trees.push((
             std::sync::Arc::new(TypeTree::parse(file[start..at].to_vec())?),
             script,

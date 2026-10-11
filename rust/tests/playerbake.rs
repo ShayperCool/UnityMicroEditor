@@ -742,6 +742,14 @@ fn first_difference(actual: &str, expected: &str) -> String {
     )
 }
 
+/// The type table entry of a script class without what it ends in: the
+/// positions, in a table of their file, of the types that objects of the
+/// class hold by managed reference.
+fn class_entry(entry: &[u8]) -> &[u8] {
+    let size = u32::from_le_bytes(entry[55..59].try_into().unwrap()) as usize;
+    &entry[..59 + size]
+}
+
 /// A node as a type table entry holds it: the names the tree reader resolves
 /// and the version, level, flags, size and meta flags.
 type RawNode = (String, String, [u8; 12]);
@@ -897,8 +905,26 @@ fn compare_behaviours(root: &Path) -> (usize, usize, Vec<(String, String)>) {
                 label_references(&mut value, &mut Vec::new());
                 Some(value)
             };
+            // An object with a registry of managed references is not
+            // decoded by the tree of its class alone; it is encoded again
+            // with the bundle's numbering instead.
+            let renumbered = || {
+                let (script, layout) = &baked.scripts[behaviour.script];
+                let document = documents
+                    .iter()
+                    .find(|document| document.file_id == behaviour.file_id)?;
+                let object = layout.object(
+                    &document.data,
+                    script.local_id,
+                    &mut BundlePointers(&built, &fixtures.targets),
+                );
+                object.ok().map(|object| hex(&object.data))
+            };
             match built.objects.get(&behaviour.file_id) {
                 Some(expected) if *expected == actual => {}
+                Some(expected)
+                    if !behaviour.managed.is_empty() && renumbered().as_ref() == Some(expected) => {
+                }
                 Some(expected)
                     if relabelled(&unhex(expected))
                         .is_some_and(|engine| relabelled(&behaviour.data) == Some(engine)) => {}
@@ -916,7 +942,7 @@ fn compare_behaviours(root: &Path) -> (usize, usize, Vec<(String, String)>) {
         for (identity, script) in &baked.scripts {
             let entry = root.join(format!("types/{}.entry.bin", identity.class_name));
             let entry = fs::read(entry).unwrap();
-            if entry != *script.tree.entry {
+            if class_entry(&entry) != class_entry(&script.tree.entry) {
                 out.push(format!(
                     "type table entry of {}: {}",
                     identity.class_name,
@@ -982,7 +1008,7 @@ fn compare_behaviour_objects(root: &Path) -> (usize, usize, Vec<(String, String)
             // The engine's entry of the class, where the directory has it.
             let entry = fs::read(root.join(format!("types/{class}.entry.bin"))).ok();
             if let (Ok(layout), Some(entry)) = (&layout, &entry)
-                && *entry != *layout.tree.entry
+                && class_entry(entry) != class_entry(&layout.tree.entry)
                 && !mistyped.contains(class)
             {
                 mistyped.push(class.clone());
@@ -1047,22 +1073,23 @@ fn compare_behaviour_objects(root: &Path) -> (usize, usize, Vec<(String, String)
 /// limit, where it keeps the numbers and strings of a type and nothing else.
 /// `E02_Engine` holds engine types as fields: the ones the engine stores in
 /// a form of its own, among them an ID, a property name and a GUI style, and
-/// a choice of those it stores by their C# fields.
+/// a choice of those it stores by their C# fields. The behaviours of
+/// `N03_Typed` and `T01_Filled` hold objects by managed reference: in plain
+/// fields and lists, shared, null, in a cycle, from a class stored inline
+/// and from one another.
 #[test]
 fn behaviours_match_the_engine_build() {
     let (matched, failed, refused) = compare_behaviours(&fixture("behaviours"));
     assert_eq!(failed, 0);
-    assert_eq!(matched, 31);
-    // Two hold a class with managed references; the documents of the third
-    // lack fields that their classes construct in ways the reader does not
-    // follow; the class of the fourth has serialization callbacks, and its
-    // reference object shows that the build ran them: it holds what they
-    // set, not what the text holds.
+    assert_eq!(matched, 33);
+    // The documents of two lack fields that their classes construct in ways
+    // the reader does not follow; the class of the third has serialization
+    // callbacks, and its reference object shows that the build ran them: it
+    // holds what they set, not what the text holds.
     let reasons: Vec<(&str, &str)> = refused
         .iter()
         .map(|(name, reason)| {
             let known = [
-                "managed reference",
                 "what its class constructs it with is not known",
                 "has serialization callbacks",
             ];
@@ -1070,15 +1097,12 @@ fn behaviours_match_the_engine_build() {
             (name.as_str(), reason.unwrap_or("another reason"))
         })
         .collect();
+    let unknown = "what its class constructs it with is not known";
     assert_eq!(
         reasons,
         [
-            ("D01_Stripped", "managed reference"),
-            ("T01_Filled", "managed reference"),
-            (
-                "F02_Missing",
-                "what its class constructs it with is not known"
-            ),
+            ("D01_Stripped", unknown),
+            ("F02_Missing", unknown),
             ("E04_CallbackHand", "has serialization callbacks"),
         ],
         "{refused:#?}"
@@ -1097,20 +1121,18 @@ fn behaviours_match_the_engine_build() {
 fn behaviour_objects_match_the_engine_build() {
     let (matched, failed, refused) = compare_behaviour_objects(&fixture("behaviours"));
     assert_eq!(failed, 0);
-    assert_eq!(matched, 159);
+    assert_eq!(matched, 166);
     // The documents of `D01_Stripped` and `F02_Missing` lack fields their
     // classes serialize. Twelve of them are filled in with what the
     // constructors set; six lack a field set in a way the reader does not
-    // follow, such as an array with elements. Two classes cannot be laid
-    // out at all: one holds managed references, the other has serialization
-    // callbacks.
+    // follow, such as an array with elements. One class cannot be laid out
+    // at all: it has serialization callbacks.
     let reasons = [
         "what its class constructs it with is not known",
-        "managed reference",
         "has serialization callbacks",
     ];
     let count = |reason: &str| refused.iter().filter(|(_, r)| r.contains(reason)).count();
-    assert_eq!(reasons.map(count), [6, 2, 1], "{refused:#?}");
+    assert_eq!(reasons.map(count), [6, 1], "{refused:#?}");
 }
 
 #[test]
@@ -1406,6 +1428,101 @@ fn text_of_another_type_reads_as_the_engine_reads_it() {
     assert_eq!(made.field("i5"), Some(&Val::I(5)));
     assert_eq!(made.field("s"), Some(&Val::Str("hello".into())));
     assert_eq!(made.field("m_Enabled"), Some(&Val::U(1)));
+}
+
+/// A behaviour that holds objects by managed reference ends in a registry
+/// of them, and its file in a table of their classes, which the type of the
+/// behaviour names by position. The entries of that table are the engine's;
+/// the objects themselves are compared in `behaviours_match_the_engine_build`.
+#[test]
+fn managed_references_travel_with_their_classes() {
+    let root = fixture("behaviours");
+    let fixtures = BehaviourFixtures::open(root.clone());
+    let source = fs::read(root.join("Assets/GMan/N03_Typed.controller")).unwrap();
+    let documents = parse_unity_yaml_lexical(&source).unwrap();
+    let controller = playerbake::bake_controller_object(&documents, &fixtures).unwrap();
+    let file = playerbake::bake_controller(&source, &fixtures)
+        .unwrap()
+        .baked
+        .file;
+    let mut held = Vec::new();
+    for behaviour in &controller.behaviours {
+        let (_, layout) = &controller.scripts[behaviour.script];
+        for &position in &behaviour.managed {
+            let kind = &layout.managed_types()[position];
+            let name = (&kind.assembly, &kind.namespace, &kind.class_name);
+            if !held.contains(&name) {
+                held.push(name);
+            }
+            let reference = playerbake::ReferenceType {
+                class_name: &kind.class_name,
+                namespace: &kind.namespace,
+                assembly: &kind.assembly,
+                blob: &kind.blob,
+            };
+            let engine = root.join(format!(
+                "reftypes/{}.{}.{}.entry.bin",
+                kind.assembly,
+                kind.namespace,
+                kind.class_name.replace('/', "+")
+            ));
+            assert_eq!(
+                reference.entry(0),
+                fs::read(engine).unwrap(),
+                "{}",
+                kind.class_name
+            );
+            // The file holds the entry at some position of its table.
+            let written = (0..16).any(|position| {
+                let entry = reference.entry(position);
+                file.windows(entry.len()).any(|window| window == entry)
+            });
+            assert!(written, "{}", kind.class_name);
+        }
+    }
+    let mut names: Vec<String> = held
+        .iter()
+        .map(|(_, namespace, class)| format!("{namespace}.{class}"))
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            ".Box",
+            ".Circle",
+            ".GlobalNode",
+            "Gap.Man.Branch",
+            "Gap.Man.EmptyNode",
+            "Gap.Man.Leaf",
+            "Gap.Man.Outer/Inner",
+            "Gap.Man.SNode"
+        ]
+    );
+    // The file reads back with the objects it was written with.
+    let objects = playerbake::read_serialized(&file).unwrap();
+    for behaviour in &controller.behaviours {
+        let id: i64 = behaviour.file_id.parse().unwrap();
+        let object = objects.iter().find(|object| object.local_id == id).unwrap();
+        assert!(object.data == behaviour.data);
+    }
+    // A registry has to hold exactly the objects the fields refer to, and
+    // only objects of classes the layout knows.
+    let text = String::from_utf8(source).unwrap();
+    let refusal = |edited: String| {
+        assert_ne!(edited, text);
+        let error = playerbake::bake_controller(edited.as_bytes(), &fixtures)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(error.is::<Unsupported>(), "{error:#}");
+        error.to_string()
+    };
+    let dangling = refusal(text.replacen("  nullRef:\n    rid: -2", "  nullRef:\n    rid: 77", 1));
+    assert!(dangling.contains("does not hold exactly"), "{dangling}");
+    let unknown = refusal(text.replacen("class: EmptyNode,", "class: Missing,", 1));
+    assert!(
+        unknown.contains("a class the layout does not hold"),
+        "{unknown}"
+    );
 }
 
 /// A layer reads a mask stored inside the controller, which the baked file

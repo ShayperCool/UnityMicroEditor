@@ -1,0 +1,286 @@
+{
+ "className": "SmbManaged3",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "bases": [
+  "UnityEngine.StateMachineBehaviour",
+  "UnityEngine.ScriptableObject",
+  "UnityEngine.Object"
+ ],
+ "overridesStateMachineCallbacks": false,
+ "fields": [
+  {
+   "name": "before",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "a",
+   "type": {
+    "kind": "managedReference",
+    "name": "INode"
+   }
+  },
+  {
+   "name": "shared1",
+   "type": {
+    "kind": "managedReference",
+    "name": "INode"
+   }
+  },
+  {
+   "name": "shared2",
+   "type": {
+    "kind": "managedReference",
+    "name": "INode"
+   }
+  },
+  {
+   "name": "nullRef",
+   "type": {
+    "kind": "managedReference",
+    "name": "INode"
+   }
+  },
+  {
+   "name": "arr",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "managedReference",
+     "name": "INode"
+    }
+   }
+  },
+  {
+   "name": "list",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "managedReference",
+     "name": "INode"
+    }
+   }
+  },
+  {
+   "name": "holder",
+   "type": {
+    "kind": "struct",
+    "name": "Holder",
+    "fields": [
+     {
+      "name": "node",
+      "type": {
+       "kind": "managedReference",
+       "name": "INode"
+      }
+     },
+     {
+      "name": "x",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "holders",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "struct",
+     "name": "Holder",
+     "fields": [
+      {
+       "name": "node",
+       "type": {
+        "kind": "managedReference",
+        "name": "INode"
+       }
+      },
+      {
+       "name": "x",
+       "type": {
+        "kind": "primitive",
+        "name": "int"
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "concrete",
+   "type": {
+    "kind": "managedReference",
+    "name": "Leaf"
+   }
+  },
+  {
+   "name": "cyc",
+   "type": {
+    "kind": "managedReference",
+    "name": "INode"
+   }
+  },
+  {
+   "name": "after",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  }
+ ],
+ "managedTypes": [
+  {
+   "className": "GlobalNode",
+   "namespace": "",
+   "assembly": "Assembly-CSharp",
+   "fields": [
+    {
+     "name": "on",
+     "type": {
+      "kind": "primitive",
+      "name": "bool"
+     }
+    },
+    {
+     "name": "b",
+     "type": {
+      "kind": "primitive",
+      "name": "byte"
+     }
+    }
+   ]
+  },
+  {
+   "className": "Branch",
+   "namespace": "Gap.Man",
+   "assembly": "Assembly-CSharp",
+   "fields": [
+    {
+     "name": "left",
+     "type": {
+      "kind": "managedReference",
+      "name": "INode"
+     }
+    },
+    {
+     "name": "right",
+     "type": {
+      "kind": "managedReference",
+      "name": "INode"
+     }
+    },
+    {
+     "name": "inline",
+     "type": {
+      "kind": "struct",
+      "name": "Leaf",
+      "fields": [
+       {
+        "name": "v",
+        "initial": "1",
+        "type": {
+         "kind": "primitive",
+         "name": "int"
+        }
+       },
+       {
+        "name": "s",
+        "type": {
+         "kind": "string"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "name": "clip",
+     "type": {
+      "kind": "object",
+      "className": "AnimationClip",
+      "namespace": "UnityEngine"
+     }
+    },
+    {
+     "name": "kids",
+     "type": {
+      "kind": "array",
+      "element": {
+       "kind": "managedReference",
+       "name": "INode"
+      }
+     }
+    },
+    {
+     "name": "tag",
+     "type": {
+      "kind": "primitive",
+      "name": "int"
+     }
+    }
+   ]
+  },
+  {
+   "className": "EmptyNode",
+   "namespace": "Gap.Man",
+   "assembly": "Assembly-CSharp",
+   "fields": []
+  },
+  {
+   "className": "Leaf",
+   "namespace": "Gap.Man",
+   "assembly": "Assembly-CSharp",
+   "fields": [
+    {
+     "name": "v",
+     "initial": "1",
+     "type": {
+      "kind": "primitive",
+      "name": "int"
+     }
+    },
+    {
+     "name": "s",
+     "type": {
+      "kind": "string"
+     }
+    }
+   ]
+  },
+  {
+   "className": "Outer/Inner",
+   "namespace": "Gap.Man",
+   "assembly": "Assembly-CSharp",
+   "fields": [
+    {
+     "name": "f",
+     "type": {
+      "kind": "primitive",
+      "name": "float"
+     }
+    }
+   ]
+  },
+  {
+   "className": "SNode",
+   "namespace": "Gap.Man",
+   "assembly": "Assembly-CSharp",
+   "fields": [
+    {
+     "name": "a",
+     "type": {
+      "kind": "primitive",
+      "name": "int"
+     }
+    }
+   ]
+  }
+ ]
+}
