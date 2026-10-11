@@ -144,6 +144,16 @@ Limits of the path as a whole:
 - A controller is baked with the behaviour classes of the script assemblies current at that moment. When a compile changes the fields of a behaviour class, the session bakes the controllers it published with that class again, and a controller with behaviours baked by an earlier session is baked anew instead of being replayed. A controller held by the native catalog or baked into a baseline is baked as well once a compile during the session changes such a class; until then the Player reads its behaviours as it reads any content built before a script changed, by field name.
 - `auto-prepare` uses the same path when it publishes its baseline: a scene that refers to a clip or controller the native catalog lacks, or holds in an older form, is prepared without an Editor, and the baked files stay with the baseline. A source the baker refuses still needs a refreshed catalog.
 
+## Other native-format assets
+
+Some assets reach a Player as the fields their YAML holds. `rust/src/playerbake/native.rs` bakes them with one transcoder: it walks the Player type tree of the object's class, pinned from the reference build (`engine/type-<class>.bin`), and takes every field from the source by name. A source field the Player lacks is Editor-only and dropped, as the engine drops it. Object references become references to the same file or to another source, which `bake_native` returns in order of first use. Every object is published under its authored file ID.
+
+Nothing is guessed. A Player field the source lacks would take a default only the engine's constructor knows; a structure written in another serialized version than the pinned engine writes would be converted on load; a number spelled otherwise than the Editor spells one (`inf`, `.5`, a value beyond single precision) may be read differently. Each of these is refused.
+
+| Class | Source | Main file ID | Compared with the engine build |
+| --- | --- | --- | --- |
+| `AvatarMask` (319) | `.mask` | 31900000 | byte for byte, six masks: body parts, transform paths with weights, a shortened and an empty body part list |
+
 ## UI and fonts
 
 Unchanged UXML, USS and font assets are extracted from an existing Unity import cache rather than imported cold. See [UI_IMPORTS.md](UI_IMPORTS.md).

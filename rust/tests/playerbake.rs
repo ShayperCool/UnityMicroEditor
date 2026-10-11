@@ -1475,3 +1475,95 @@ fn model_clip_corpus_matches_the_engine_build() {
     assert_eq!(failed, 0);
     assert!(matched > 0);
 }
+
+/// Compares every `<source>` / `<source>.bin` pair of a directory: a
+/// native-format source and the object the engine built from it. References
+/// compare by identity, since a build numbers its objects its own way.
+/// Returns how many matched and the sources the baker refused.
+fn compare_native(root: &Path) -> (usize, Vec<String>) {
+    let (mut matched, mut refused) = (0, Vec::new());
+    let mut sources: Vec<PathBuf> = fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension != "bin"))
+        .collect();
+    sources.sort();
+    for source in sources {
+        let name = source.file_name().unwrap().to_string_lossy().into_owned();
+        let expected = fs::read(root.join(format!("{name}.bin"))).unwrap();
+        let baked = playerbake::bake_native_objects(
+            &fs::read(&source).unwrap(),
+            &playerbake::NoNativeSources,
+        );
+        let (objects, _) = match baked {
+            Ok(baked) => baked,
+            Err(error) if error.is::<Unsupported>() => {
+                refused.push(format!("{name}: {error}"));
+                continue;
+            }
+            Err(error) => panic!("{name}: {error:#}"),
+        };
+        let object = &objects[0];
+        if object.data != expected {
+            let layout = playerbake::native_tree(object.class_id as i64).unwrap();
+            let (mut actual, mut expected) = (
+                layout.decode(&object.data).unwrap(),
+                layout.decode(&expected).unwrap(),
+            );
+            label_references(&mut actual, &mut Vec::new());
+            label_references(&mut expected, &mut Vec::new());
+            let mut found = Vec::new();
+            differences("", &actual, &expected, &mut found);
+            assert!(
+                found.is_empty(),
+                "{name} differs from the engine build: {found:?}"
+            );
+        }
+        matched += 1;
+    }
+    (matched, refused)
+}
+
+#[test]
+fn native_assets_match_the_engine_build() {
+    let (matched, refused) = compare_native(&fixture("native"));
+    assert!(refused.is_empty(), "{refused:?}");
+    assert!(matched >= 6, "fixtures are missing");
+}
+
+/// `UNITY_PLAYERBAKE_NATIVE_CORPUS` names directories of such pairs.
+#[test]
+fn native_corpus_matches_the_engine_build() {
+    let Some(roots) = std::env::var("UNITY_PLAYERBAKE_NATIVE_CORPUS")
+        .ok()
+        .filter(|value| !value.is_empty())
+    else {
+        eprintln!("skipped: set UNITY_PLAYERBAKE_NATIVE_CORPUS");
+        return;
+    };
+    for root in roots.split(':') {
+        let (matched, refused) = compare_native(Path::new(root));
+        eprintln!("{root}: matched {matched}, refused {}", refused.len());
+        for reason in refused {
+            eprintln!("  {reason}");
+        }
+    }
+}
+
+#[test]
+fn baked_native_asset_keeps_its_identity() {
+    let source = fs::read(fixture("native/K_Upper.mask")).unwrap();
+    let baked = playerbake::bake_native(&source, &playerbake::NoNativeSources).unwrap();
+    assert_eq!(
+        baked.objects,
+        [("31900000".to_string(), "UnityEngine.AvatarMask".to_string())]
+    );
+    assert!(baked.externals.is_empty());
+    let objects = playerbake::read_serialized(&baked.file).unwrap();
+    assert_eq!(objects.len(), 1);
+    assert_eq!(objects[0].local_id, 31900000);
+    assert_eq!(
+        objects[0].data,
+        fs::read(fixture("native/K_Upper.mask.bin")).unwrap()
+    );
+}
