@@ -1,0 +1,52 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!21 &2100000
+Material:
+  serializedVersion: 8
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: R02_2
+  m_Shader: {fileID: 4800000, guid: 33333333aaaa4bbb8ccc0123456789ab, type: 3}
+  m_Parent: {fileID: 2100000, guid: 0a32c1713efd1f9b970504e249a8c30b, type: 2}
+  m_ModifiedSerializedProperties: 30
+  m_ValidKeywords:
+  - FOG_EXP
+  m_InvalidKeywords:
+  - _LOCAL_A
+  m_LightmapFlags: 4
+  m_EnableInstancingVariants: 1
+  m_DoubleSidedGI: 1
+  m_CustomRenderQueue: -1
+  stringTagMap: {}
+  disabledShaderPasses:
+  - SHADOWCASTER
+  - MAIN
+  m_LockedProperties: 
+  m_SavedProperties:
+    serializedVersion: 3
+    m_TexEnvs:
+    - _Num:
+        m_Texture: {fileID: 2800000, guid: aa28958a8deb55e7e8382014e6d05923, type: 3}
+        m_Scale: {x: 0.001, y: 0}
+        m_Offset: {x: 0.00001, y: -3.75}
+    - _None:
+        m_Texture: {fileID: 2800000, guid: 4459db655324dc581bdb480d2b420ea4, type: 3}
+        m_Scale: {x: 0, y: 0.73}
+        m_Offset: {x: 0.0011, y: 0.0009}
+    m_Ints: []
+    m_Floats:
+    - _Quality: -0.002
+    - _Old: 0.00001
+    - _Rough: 0.00001
+    - _GamF: -1
+    - _Pow: 1.9
+    - _Cube: 0.0009
+    m_Colors:
+    - _Dir: {r: 0.25, g: 0.5, b: -1, a: 0.73}
+    - _Tint: {r: -0.002, g: 1e+10, b: -0, a: -0}
+    - _Neg: {r: -3.75, g: 0.5, b: 1e+10, a: 0.25}
+    - _StaleC: {r: 0.5, g: 0.0009, b: 0.25, a: 2.5}
+  m_BuildTextureStacks: []
+  m_AllowLocking: 1

@@ -1,0 +1,74 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!21 &2100000
+Material:
+  serializedVersion: 8
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: VB_lit
+  m_Shader: {fileID: 4800000, guid: 73dcab8d6bcd67bd996f010a4f58f089, type: 3}
+  m_Parent: {fileID: 2100000, guid: 04f0e07bdd3fb731f96e2dfd96f31d5d, type: 2}
+  m_ModifiedSerializedProperties: 0
+  m_ValidKeywords:
+  - _FANCY
+  - _TOGKW
+  m_InvalidKeywords: []
+  m_LightmapFlags: 4
+  m_EnableInstancingVariants: 0
+  m_DoubleSidedGI: 0
+  m_CustomRenderQueue: -1
+  stringTagMap: {}
+  disabledShaderPasses: []
+  m_LockedProperties: 
+  m_SavedProperties:
+    serializedVersion: 3
+    m_TexEnvs:
+    - _Albedo:
+        m_Texture: {fileID: 2800000, guid: 4459db655324dc581bdb480d2b420ea4, type: 3}
+        m_Scale: {x: 0.0009, y: 0.001}
+        m_Offset: {x: -3.75, y: 0.0011}
+    - _Mask:
+        m_Texture: {fileID: 2800000, guid: aa28958a8deb55e7e8382014e6d05923, type: 3}
+        m_Scale: {x: 1, y: -0.002}
+        m_Offset: {x: 2.5, y: -1}
+    - _Cube:
+        m_Texture: {fileID: 2800000, guid: 4459db655324dc581bdb480d2b420ea4, type: 3}
+        m_Scale: {x: 0.5, y: 1}
+        m_Offset: {x: 0, y: 0.00001}
+    - _Bump:
+        m_Texture: {fileID: 2800000, guid: aa28958a8deb55e7e8382014e6d05923, type: 3}
+        m_Scale: {x: 0.2, y: 0.0009}
+        m_Offset: {x: 0.73, y: 0}
+    - _Hidden:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1.9, y: 1e+10}
+        m_Offset: {x: 0.001, y: 2.5}
+    - _MainTex:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 0.0011, y: 0}
+        m_Offset: {x: 1, y: -0}
+    - _Vol:
+        m_Texture: {fileID: 2800000, guid: aa28958a8deb55e7e8382014e6d05923, type: 3}
+        m_Scale: {x: -0.5, y: -0.5}
+        m_Offset: {x: 0.2, y: 2.5}
+    m_Ints: []
+    m_Floats:
+    - _Secret: -0
+    - _TogKw: 0.25
+    - _Fancy: -1
+    - _Value: -0.002
+    - _Legacy: 0.00001
+    - _Cull: 0.0009
+    - _Old: 0.73
+    - _Pow: -0
+    m_Colors:
+    - _Emission: {r: 1e+10, g: -3.75, b: -0, a: 0}
+    - _Neg: {r: 1, g: 1e+10, b: -1, a: 0.2}
+    - _ZzC: {r: 0.0011, g: 0.73, b: 2.5, a: 0}
+    - _GamCol: {r: 0.5, g: 0, b: 1e+10, a: -0}
+    - _Bright: {r: -0.002, g: -0.5, b: -0.002, a: 0}
+    - _Vec: {r: 0.0011, g: 0.25, b: 0.001, a: -0.5}
+  m_BuildTextureStacks: []
+  m_AllowLocking: 1

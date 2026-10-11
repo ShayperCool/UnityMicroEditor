@@ -49,6 +49,12 @@ pub trait NativeSources {
         None
     }
 
+    /// The source text of the material with a GUID, which a variant names
+    /// as its parent. `None` leaves the variant refused.
+    fn material(&self, _guid: &str) -> Option<Vec<u8>> {
+        None
+    }
+
     /// How the project spells a shader tag (a tag name, a tag value or a
     /// pass a material disables), when a build of it has written that tag.
     /// The engine finds a tag without regard to case and writes it the way
@@ -137,7 +143,7 @@ static CLASSES: [Class; 9] = [
 ];
 
 const MASK: i32 = 319;
-const MATERIAL: i64 = 21;
+pub(super) const MATERIAL: i64 = 21;
 const MONO_BEHAVIOUR: i64 = 114;
 
 fn class(id: i64) -> Option<&'static Class> {

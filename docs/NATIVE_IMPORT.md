@@ -193,7 +193,7 @@ The two project settings come from the caller (`NativeSources::linear_color_spac
 | `Flare` (121) | `.flare` | 12100000 | byte for byte, with elements and a texture |
 | `TerrainLayer` (1953259897) | `.terrainlayer` | 8574412962073106934 | byte for byte, with textures |
 | `LightingSettings` (850595691) | `.lighting` | 4890085278179872738 | byte for byte under pipelines lighting with both kinds of lightmap, with only baked, only realtime, and neither |
-| `Material` (21) | `.mat` | 2100000 | byte for byte in gamma and linear projects: hand-written sources in every state (stale, missing, misfiled, unsorted and repeated properties and keywords), and the materials of a game built with the universal pipeline |
+| `Material` (21) | `.mat` | 2100000 | byte for byte in gamma and linear projects: hand-written sources in every state (stale, missing, misfiled, unsorted and repeated properties and keywords), the materials of a game built with the universal pipeline, and variants: chains up to seven deep with overrides of every kind, locks, other shaders than the parent's and keyword drawers, and the 78 variants of that game with their 11 parents |
 
 Beyond the committed fixtures, randomized sources of each class (several hundred, with out-of-range values) were compared with builds of a gamma and a linear project.
 
@@ -214,9 +214,28 @@ A build derives a material from its shader (`rust/src/playerbake/material.rs`), 
 - Override tags and disabled passes: the engine finds a shader tag without regard to case and writes it the way it first met it. A tag the engine registers at start is written its way (`QUEUE`, `IGNOREPROJECTOR`, `SHADOWCASTER`, `MOTIONVECTORS`, `true`, ...). Any other is written as `NativeSources::tag_spelling` gives it, which a session answers from the tags of the materials a build of the project wrote. Without that answer the authored spelling is kept, which holds when no other asset of the project spells the tag otherwise; a tag that the shader or a late engine registration spells in another case is refused. Override tags are written sorted by name, and of two that differ only in case the later in byte order counts.
 - The Editor-only script objects a render pipeline keeps next to a material (hidden `MonoBehaviour` documents of its Editor assemblies) are left out: only the material is published.
 
+#### Material variants
+
+A variant (`m_Parent`) stores its overrides; a build writes it as a whole material, without a parent (`Material::MergeHierarchy`, then the drawers of the material inspector). The caller supplies the source of a parent by GUID (`NativeSources::material`), and the chain is followed up to the material without a parent:
+
+- The shader is that of the material at the top of the chain, whatever the variant's own `m_Shader` says. Its properties decide which textures are kept and which defaults are added, and its keywords which of the variant's are valid.
+- Saved properties: the parent's merged properties, then the variant's own entries over them. An entry whose name a parent above it locks (`m_LockedProperties`, names separated by spaces) is left out. A material's own locks bind its variants, not itself.
+- `m_LightmapFlags`, `m_EnableInstancingVariants`, `m_DoubleSidedGI` and `m_CustomRenderQueue` are the variant's only where `m_ModifiedSerializedProperties` has their bit (2, 4, 8, 16) and no parent locks them (`:m_LightmapFlags`, ... in `m_LockedProperties`); otherwise the parent's.
+- Keywords, override tags and disabled passes are the variant's own, not the parent's. Then the drawers of the shader's properties set keywords from the merged values, as `MaterialEditor.ApplyMaterialPropertyDrawers` does when the engine builds the properties of a variant: `[Toggle]` and `[ToggleOff]` turn `<NAME>_ON`, `<NAME>_OFF` or the keyword they name on or off (on above 0.001 in magnitude, an integer property when not zero), `[KeywordEnum(A,B)]` turns on `<NAME>_<A>` for the truncated value and the others off. A plain material gets none of this: its keywords stay as authored.
+
 Refused:
 
-- A material variant (`m_Parent`): a build writes it merged with its parents.
+- A variant whose parent the caller does not know, whose parent's source holds no material under the named file ID, or whose chain returns to itself (the Editor rewrites such sources) or is longer than 32.
+- A variant of a shader that names an inspector (`CustomEditor`, as every Shader Graph shader does): the inspector's `ValidateMaterial` runs on the variant as the project's code.
+- A variant of a shader with a property attribute that is not one of the engine's (`Toggle`, `ToggleOff`, `KeywordEnum`, `Enum`, `ToggleUI`, `Header`, `Space`, `PowerSlider`, `IntRange`), since a project can define drawers; with several keyword drawers on one property; or with drawer arguments that are not plain text.
+- A variant that inherits a texture held inside a parent's own source.
+
+Without its parent the engine writes a variant from its own overrides and its own defaults for the four settings; that is not reproduced, since whether the parent exists is the project's to say.
+
+A session answers `NativeSources::material` from the project's sources, so a bake reads the parent as it stands. Materials are not published by a session yet (above), so nothing re-bakes a variant when its parent changes; the publishing step has to add that, as it does for a controller's masks.
+
+Also refused:
+
 - A material whose shader the caller does not know, or without a shader: it is written without properties, and whether the shader exists is the project's to say.
 - A material of another serialized version than 8, or with texture stacks (virtual texturing).
 - A material of `Particles/Standard Unlit` or `Particles/Standard Surface`: a build rewrites their disabled passes.

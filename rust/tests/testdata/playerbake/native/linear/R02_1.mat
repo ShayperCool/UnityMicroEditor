@@ -1,0 +1,51 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!21 &2100000
+Material:
+  serializedVersion: 8
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: R02_1
+  m_Shader: {fileID: 4800000, guid: 44444444bbbb4ccc8ddd0123456789ab, type: 3}
+  m_Parent: {fileID: 2100000, guid: 0a32c1713efd1f9b970504e249a8c30b, type: 2}
+  m_ModifiedSerializedProperties: 0
+  m_ValidKeywords:
+  - _LOCAL_A
+  - _MT_ON
+  - _OFF_OFF
+  m_InvalidKeywords:
+  - _MODEI_B
+  m_LightmapFlags: 2
+  m_EnableInstancingVariants: 0
+  m_DoubleSidedGI: 1
+  m_CustomRenderQueue: -5
+  stringTagMap: {}
+  disabledShaderPasses:
+  - ALWAYS
+  m_LockedProperties: 
+  m_SavedProperties:
+    serializedVersion: 3
+    m_TexEnvs:
+    - _Albedo:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: -3.75, y: -1}
+        m_Offset: {x: 0.2, y: 1}
+    - _Mask:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 0}
+        m_Offset: {x: 1e+10, y: -3.75}
+    m_Ints: []
+    m_Floats:
+    - _GamCol: 0
+    - _Ir: 0.00001
+    - _Mode: 0.5
+    - _Mt: 1
+    - _En: 0.001
+    - _LegacyInt: 0.5
+    m_Colors:
+    - _ModeI: {r: 0.001, g: 0.73, b: 1, a: 0.25}
+    - _GamVec: {r: 2.5, g: 0.5, b: 0.25, a: -3.75}
+  m_BuildTextureStacks: []
+  m_AllowLocking: 1

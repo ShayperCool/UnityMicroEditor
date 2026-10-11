@@ -106,6 +106,17 @@ impl playerbake::NativeSources for ProjectSources<'_> {
             _ => None,
         }
     }
+
+    // A variant is written merged with the material it names as its parent.
+    fn material(&self, guid: &str) -> Option<Vec<u8>> {
+        let path = self.importer.source_path(guid).ok()?;
+        if lower_ext(&path) != ".mat" {
+            return None;
+        }
+        resolve_project_import_source(&self.importer.opts.project, &path)
+            .and_then(|source| read_file(&source))
+            .ok()
+    }
 }
 
 impl ControllerSources for ProjectSources<'_> {
