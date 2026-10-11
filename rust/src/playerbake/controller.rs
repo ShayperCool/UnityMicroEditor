@@ -7,7 +7,7 @@
 //! states, motions become blend tree node arrays over a clip list, and names
 //! become CRC-32 hashes with a hash-to-string table beside them.
 use super::{
-    controller_tree, crc32,
+    controller_tree, crc32, freeform,
     serialized::External,
     source::{flag, float, get, int, list, object, text},
     typetree::Val,
@@ -443,15 +443,12 @@ impl<'a> Builder<'a> {
         if !(0..=4).contains(&kind) {
             bail!("blend tree {file_id} has an unknown blend type");
         }
-        if kind == 2 || kind == 3 {
-            return Err(unsupported("freeform 2D blend tree"));
-        }
         let parameter = self.id(&text(get(fields, "m_BlendParameter"))?);
         let parameter_y = self.id(&text(get(fields, "m_BlendParameterY"))?);
         let own = nodes.len();
         nodes.push(Val::Zero);
         let (mut indices, mut thresholds, mut positions, mut direct) =
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            (Vec::new(), Vec::new(), Vec::<[f32; 2]>::new(), Vec::new());
         let mut looping = true;
         for child in list(get(fields, "m_Childs"), "m_Childs")? {
             let child = object(child, "m_Childs")?;
@@ -481,18 +478,49 @@ impl<'a> Builder<'a> {
                 "blend tree child",
             )?));
             let position = object(get(child, "m_Position"), "blend tree child position");
-            if kind == 1 {
+            if (1..=3).contains(&kind) {
                 let position = position?;
-                positions.push(Val::map([
-                    ("x", Val::F(float(get(position, "x"), "blend tree child")?)),
-                    ("y", Val::F(float(get(position, "y"), "blend tree child")?)),
-                ]));
+                positions.push([
+                    float(get(position, "x"), "blend tree child")?,
+                    float(get(position, "y"), "blend tree child")?,
+                ]);
             }
             if kind == 4 {
                 direct.push(Val::U(direct_id));
             }
         }
-        let planar = kind == 1;
+        let planar = (1..=3).contains(&kind);
+        let point = |[x, y]: [f32; 2]| Val::map([("x", Val::F(x)), ("y", Val::F(y))]);
+        let mut planar_data = vec![(
+            "m_ChildPositionArray",
+            Val::Seq(positions.iter().copied().map(point).collect()),
+        )];
+        if kind == 2 || kind == 3 {
+            let table = freeform::precompute(kind == 2, &positions);
+            planar_data.extend([
+                ("m_ChildMagnitudeArray", Val::floats(table.magnitudes)),
+                (
+                    "m_ChildPairVectorArray",
+                    Val::Seq(table.pair_vectors.into_iter().map(point).collect()),
+                ),
+                ("m_ChildPairAvgMagInvArray", Val::floats(table.pair_scales)),
+                (
+                    "m_ChildNeighborListArray",
+                    Val::Seq(
+                        table
+                            .neighbors
+                            .into_iter()
+                            .map(|list| {
+                                Val::map([(
+                                    "m_NeighborArray",
+                                    Val::Seq(list.into_iter().map(|i| Val::U(i as u64)).collect()),
+                                )])
+                            })
+                            .collect(),
+                    ),
+                ),
+            ]);
+        }
         nodes[own] = Val::map([
             ("m_BlendType", Val::I(kind)),
             (
@@ -513,7 +541,12 @@ impl<'a> Builder<'a> {
             ),
             (
                 "m_Blend2dData",
-                Val::map([("m_ChildPositionArray", Val::Seq(positions))]),
+                Val::Map(
+                    planar_data
+                        .into_iter()
+                        .map(|(name, value)| (name.into(), value))
+                        .collect(),
+                ),
             ),
             (
                 "m_BlendDirectData",

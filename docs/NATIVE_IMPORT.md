@@ -90,13 +90,12 @@ A `.controller` file holds Editor objects (state machines, states, transitions, 
 
 The comparison with Unity `6000.6.3f1` covers every field of the built object, with two deliberate differences. The hash-to-name table has no fixed order in the engine and is compared as a set. `m_ControllerSize`, the memory the Player reserves before reading the constant, is an upper bound rather than the engine's figure: it stays above it for every reference controller.
 
-Covered: layers with blending, weights, avatar masks and synced layers with their override motions; nested state machines with entry, exit and any-state transitions; conditions, mute and solo; parameters; 1D, simple directional and direct blend trees, nested.
+Covered: layers with blending, weights, avatar masks and synced layers with their override motions; nested state machines with entry, exit and any-state transitions; conditions, mute and solo; parameters; every kind of blend tree, nested. For a freeform 2D tree the tables of the engine's precompute are reproduced bit for bit against 202 blend spaces built by the Editor; its arc cosine comes from the system C library, as in the Editor, so a library that rounds differently can move an angle by one unit in the last place.
 
 An `.overrideController` is baked as well: its Player form holds the same references as the source, so it is published with the baked controller and clips it names, and baked again when one of them changes.
 
 Refused, never approximated:
 
-- freeform 2D blend trees;
 - state machine behaviours;
 - a clip stored inside a model, in a controller or as an override, and any clip the clip baker refuses;
 - an avatar mask stored inside the controller.

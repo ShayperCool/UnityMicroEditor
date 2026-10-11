@@ -112,9 +112,12 @@ only for package assemblies whose sources, DLLs and registrations were verified;
 private inherited callbacks are refused.
 
 Owned outputs are under the explicit project's `Library/UnityMicroEditor` and
-`Builds/UnityMicroEditor`. Automatic host builds run in an owned staging copy:
-package build processors, including Addressables, can change generated Assets
-only there. The same staging Editor exports the public Player graph, whose paths
+`Builds/UnityMicroEditor`. Automatic host builds run in the owned staging copy
+`Library/UnityMicroEditor/stage/project`: package build processors, including
+Addressables, can change generated Assets only there. Every preparation of the
+project reuses that copy and updates only the files that changed, so a host
+rebuild starts from the import, script and Player build caches of the build
+before it. The same staging Editor exports the public Player graph, whose paths
 are then mapped back to the target's authored roots and to the package roots our
 resolver verified. `hostEvidence` links the immutable source snapshot, Editor
 receipt, package profile and verified host artifacts. The target's authored
@@ -126,7 +129,9 @@ any, the preparation result lists it in `hostContent`:
 `StreamingAssets/aa`, which the session's Player copy contains) and
 `addressablesRemoteBuild` (remote groups, the staging copy's
 `ServerData/StandaloneLinux64`). It is not published into the target's
-`ServerData`, and it is as old as the host: content edits do not rebuild it. A
+`ServerData`, and content edits do not rebuild it: local groups are as old as
+their host, and the shared staging copy's `ServerData` holds the remote groups
+of the latest host build. A
 game that loads remote groups from a configurable location can be pointed at
 that directory through `gameArguments`.
 
@@ -135,10 +140,11 @@ package build processors. It is the one action that runs an Editor in the target
 project, and it needs the runtime package there. The tool does not add it:
 without a declaration in the target's own `Packages/manifest.json` the action
 fails with `runtime_package_missing` and names the dependency to add.
-A staging copy seeds its import cache from the target's `Library` when no Editor
-has the target open, or after an Editor the tool owned there has stopped; that
-is a warm cache copy, not a cold import measurement. A target that is open in an
-interactive Editor is never copied, so its stages import cold.
+The staging copy seeds its import cache once, when it is created, from the
+target's `Library` when no Editor has the target open, or after an Editor the
+tool owned there has stopped; that is a warm cache copy, not a cold import
+measurement. A target that is open in an interactive Editor is never copied, so
+its first stage imports cold.
 Existing native catalogs are not migrated or relabeled. Legacy project `Temp`
 outputs remain accepted, but Unity clears them on Editor restart. Do not move just
 `current.json` when its referenced artifacts still point into Temp. Parent
