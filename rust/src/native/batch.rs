@@ -37,8 +37,13 @@ pub fn cold_native_profile(logical: &str) -> bool {
 fn cold_runtime_profile(logical: &str) -> Option<&'static str> {
     match lower_ext(logical).as_str() {
         ".fbx" => Some("fbx"),
-        ".wav" => Some("wav"),
         _ if texture_source(logical) => Some("texture"),
+        extension if runtimeartifact::audio_profile(extension.trim_start_matches('.')) => {
+            Some("wav")
+        }
+        extension if runtimeartifact::text_profile(extension.trim_start_matches('.')) => {
+            Some("text")
+        }
         _ => None,
     }
 }

@@ -467,6 +467,39 @@ fn native_texture_replacement_covers_the_texture_importer_formats() {
 }
 
 #[test]
+fn native_replacement_covers_the_audio_and_text_importer_formats() {
+    let cases = [
+        ("wav", "8300000", "UnityEngine.AudioClip"),
+        ("ogg", "8300000", "UnityEngine.AudioClip"),
+        ("mp3", "8300000", "UnityEngine.AudioClip"),
+        ("aif", "8300000", "UnityEngine.AudioClip"),
+        ("aiff", "8300000", "UnityEngine.AudioClip"),
+        ("FLAC", "8300000", "UnityEngine.AudioClip"),
+        ("txt", "4900000", "UnityEngine.TextAsset"),
+        ("json", "4900000", "UnityEngine.TextAsset"),
+        ("bytes", "4900000", "UnityEngine.TextAsset"),
+        ("xml", "4900000", "UnityEngine.TextAsset"),
+        ("CSV", "4900000", "UnityEngine.TextAsset"),
+    ];
+    for (extension, id, type_name) in cases {
+        let (f, mut r) = new_native_texture_fixture_at(&format!("Assets/New.{extension}"));
+        // The object of another importer is not this source's.
+        let error = f.session.replace_native_content(&r).unwrap_err();
+        assert!(
+            message(&error).contains("missing, duplicated, or changed type"),
+            "{extension}: {}",
+            message(&error)
+        );
+        r.content.objects = List::from(vec![native_object(id, type_name)]);
+        let accepted = f.session.replace_native_content(&r);
+        assert!(accepted.is_ok(), "{extension}: {accepted:?}");
+    }
+    let (f, mut r) = new_native_texture_fixture_at("Assets/New.txt");
+    r.content.objects = List::from(vec![native_object("4900001", "UnityEngine.TextAsset")]);
+    assert!(f.session.replace_native_content(&r).is_err());
+}
+
+#[test]
 fn new_native_project_texture_publishes_without_mutating_baseline() {
     let (f, mut r) = new_native_texture_fixture();
     let baseline = f.session.lock().baseline.clone();

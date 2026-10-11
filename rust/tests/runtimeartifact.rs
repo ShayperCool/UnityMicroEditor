@@ -129,7 +129,7 @@ fn model_graph_preserves_authored_order_and_rejects_unsupported_layout() {
 }
 
 #[test]
-fn native_audio_rejects_streaming_and_unverified_compression() {
+fn native_audio_rejects_streaming_and_unknown_load_types() {
     let Some(root) = fixture("UNITY_WORKER_NATIVE_FIXTURES") else {
         return;
     };
@@ -139,7 +139,8 @@ fn native_audio_rejects_streaming_and_unverified_compression() {
     // Skip the Object header and the aligned name string.
     let name = le32(&input[start + 40..]) as usize;
     let load_offset = start + ((40 + 4 + name + 3) & !3);
-    for load_type in [1u32, 2, 3] {
+    // Streaming and anything past the known load types.
+    for load_type in [2u32, 3] {
         let mut changed = input.clone();
         put_le32(&mut changed[load_offset..], load_type);
         assert!(ra::adapt(&changed, "wav").is_err(), "load type {load_type}");

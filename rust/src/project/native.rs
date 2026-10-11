@@ -386,6 +386,8 @@ impl Inner {
         let new_model =
             profile == ".fbx" && self.models.get(&r.guid).is_none_or(|docs| docs.is_empty());
         let texture = crate::runtimeartifact::texture_profile(profile.trim_start_matches('.'));
+        let audio = crate::runtimeartifact::audio_profile(profile.trim_start_matches('.'));
+        let text = crate::runtimeartifact::text_profile(profile.trim_start_matches('.'));
         let ui = matches!(profile.as_str(), ".uss" | ".uxml" | ".ttf" | ".otf");
         let shader = profile == ".shader";
         // Baked by this tool from the authored source; see `playerbake`.
@@ -445,7 +447,8 @@ impl Inner {
                 );
             }
         }
-        if profile != ".wav"
+        if !audio
+            && !text
             && profile != ".fbx"
             && !texture
             && !ui
@@ -520,8 +523,10 @@ impl Inner {
                     r.guid
                 );
             }
-            if profile == ".wav" {
+            if audio {
                 expected.insert("8300000".into(), "UnityEngine.AudioClip".into());
+            } else if text {
+                expected.insert("4900000".into(), "UnityEngine.TextAsset".into());
             } else if texture {
                 expected.insert("2800000".into(), "UnityEngine.Texture2D".into());
             } else if shader {
@@ -565,12 +570,22 @@ impl Inner {
             }
             found.insert(&o.file_id);
         }
-        if profile == ".wav" {
+        if audio {
             if objects.len() != 1
                 || objects[0].type_name != "UnityEngine.AudioClip"
                 || !r.model_graph.is_empty()
             {
-                bail!("WAV replacement must contain one AudioClip");
+                bail!("audio replacement must contain one AudioClip");
+            }
+        } else if text {
+            if objects.len() != 1
+                || objects[0].file_id != "4900000"
+                || objects[0].type_name != "UnityEngine.TextAsset"
+                || !r.model_graph.is_empty()
+                || !r.content.resources.is_empty()
+                || !r.content.dependencies.is_empty()
+            {
+                bail!("text replacement must contain only TextAsset 4900000");
             }
         } else if texture {
             if objects.len() != 1

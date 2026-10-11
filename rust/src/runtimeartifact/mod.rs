@@ -16,7 +16,7 @@ mod unityfs_member;
 
 pub use adapt::{
     AudioMetadata, ExternalReference, Metadata, Object, RemovedObject, Resource, adapt,
-    read_native_audio_resource,
+    audio_profile, read_native_audio_resource, text_profile,
 };
 pub use builtin_lighting::{BuiltinLightingIdentity, inspect_builtin_lighting};
 pub use builtin_shader::{BuiltinShaderIdentity, ReadAt, inspect_builtin_shader};

@@ -117,14 +117,30 @@ pub(crate) struct ObjectEntry<'a> {
     pub row: &'a [u8],
 }
 
-/// Accepts only little-endian, inline-type-tree SerializedFile v23 native FBX
-/// or preloaded PCM/Vorbis WAV artifacts. Shader/script/other import profiles
-/// fail closed. Known importer/prefab/preview object table entries are removed;
+/// The source formats AudioImporter reads into one AudioClip, by lower-case
+/// extension. Their artifacts share the `wav` profile, which checks the clip
+/// and not the source format.
+pub fn audio_profile(profile: &str) -> bool {
+    matches!(profile, "wav" | "ogg" | "mp3" | "aif" | "aiff" | "flac")
+}
+
+/// The source formats TextScriptImporter reads into one TextAsset, by
+/// lower-case extension.
+pub fn text_profile(profile: &str) -> bool {
+    matches!(
+        profile,
+        "txt" | "json" | "bytes" | "xml" | "csv" | "html" | "htm" | "yaml" | "fnt"
+    )
+}
+
+/// Accepts only little-endian, inline-type-tree SerializedFile v23 native FBX,
+/// preloaded AudioClip or TextAsset artifacts. Shader/script/other import
+/// profiles fail closed. Known importer/prefab/preview object table entries are removed;
 /// local IDs and every retained object's data stay unchanged. Native import
 /// content hashes must be verified by the caller before using this projection.
 pub fn adapt(input: &[u8], profile: &str) -> Result<(Vec<u8>, Metadata)> {
     let mut result = Metadata::default();
-    if profile != "fbx" && profile != "wav" {
+    if !matches!(profile, "fbx" | "wav" | "text") {
         bail!("unsupported native runtime profile {profile:?}");
     }
     if input.len() < 64
@@ -241,7 +257,7 @@ pub fn adapt(input: &[u8], profile: &str) -> Result<(Vec<u8>, Metadata)> {
     req(
         r.u32(),
         |scripts| *scripts == 0,
-        "script type references are unsupported in native FBX/WAV profiles",
+        "script type references are unsupported in native FBX and audio profiles",
     )?;
     let externals = req(
         r.u32(),
@@ -287,6 +303,7 @@ pub fn adapt(input: &[u8], profile: &str) -> Result<(Vec<u8>, Metadata)> {
         let reason = if entry.class_id == 1001480554
             || profile == "fbx" && matches!(entry.class_id, 1041 | 1108 | 41386430)
             || profile == "wav" && entry.class_id == 1020
+            || profile == "text" && entry.class_id == 1031
         {
             "editor-only"
         } else if le32(&object[..4]) & 16 != 0 {
@@ -319,6 +336,12 @@ pub fn adapt(input: &[u8], profile: &str) -> Result<(Vec<u8>, Metadata)> {
                 result.resources.push(resource);
                 result.audio = Some(audio);
             }
+        } else if profile == "text" {
+            type_name = if entry.class_id == 49 {
+                "UnityEngine.TextAsset"
+            } else {
+                ""
+            };
         }
         if type_name.is_empty() {
             bail!(
@@ -351,8 +374,8 @@ pub fn adapt(input: &[u8], profile: &str) -> Result<(Vec<u8>, Metadata)> {
             Err(reason) => result.model_graph_unsupported_reason = reason,
         }
     }
-    if result.objects.is_empty() || profile == "wav" && result.objects.len() != 1 {
-        bail!("native runtime profile has no usable objects or unexpected audio objects");
+    if result.objects.is_empty() || profile != "fbx" && result.objects.len() != 1 {
+        bail!("native runtime profile has no usable objects or more than its one object");
     }
     let output = project_table(
         input,
@@ -413,7 +436,7 @@ pub fn read_native_audio_resource(object: &[u8]) -> Result<(Resource, AudioMetad
     let fields = req(
         r.take(24),
         |fields| le32(&fields[0..4]) <= 1 && le32(&fields[12..16]) == 16,
-        "native WAV runtime profile requires non-streaming PCM16 or preloaded Vorbis",
+        "native audio runtime profile requires 16-bit DecompressOnLoad or CompressedInMemory audio, not streaming",
     )?;
     let load_type = le32(&fields[0..4]);
     let channels = le32(&fields[4..8]);
@@ -427,37 +450,36 @@ pub fn read_native_audio_resource(object: &[u8]) -> Result<(Resource, AudioMetad
         || fields[20] != 0
         || fields[21] != 0
     {
-        bail!("native WAV channel/rate/duration or tracker/ambisonic layout is unsupported");
+        bail!("native audio channel/rate/duration or tracker/ambisonic layout is unsupported");
     }
     // Subsound index + preload/background/legacy3D flags + alignment.
     req(
         r.take(8),
         |options| le32(&options[..4]) == 0 && options[4] == 1 && options[5] == 0,
-        "native WAV runtime profile requires preloaded, synchronous single-subsound audio",
+        "native audio runtime profile requires preloaded, synchronous single-subsound audio",
     )?;
     let path = req(
         r.string(),
         |path| path.starts_with("VirtualArtifacts/Primary/") && path.ends_with(".resource"),
-        "native WAV resource path is outside the primary artifact namespace",
+        "native audio resource path is outside the primary artifact namespace",
     )?;
     let guid = path
         .strip_prefix("VirtualArtifacts/Primary/")
         .and_then(|rest| rest.strip_suffix(".resource"))
         .unwrap_or_default();
     if !lower_hex(guid, 32) {
-        bail!("native WAV resource GUID is invalid");
+        bail!("native audio resource GUID is invalid");
     }
     let stream = r.take(16)?;
     let (offset, size) = (le64(&stream[..8]), le64(&stream[8..]));
     req(
         r.u32(),
         |compression| {
-            (load_type == 0 && *compression == 0 || load_type == 1 && *compression == 1)
-                && offset == 0
+            *compression <= 2 && offset == 0
                 && size != 0
                 && size <= MAXIMUM_BYTES as u64
         },
-        "native WAV profile requires verified preloaded PCM/Vorbis combination and a bounded zero resource offset",
+        "native audio profile requires PCM, Vorbis or ADPCM data and a bounded zero resource offset",
     )
     .map(|compression| {
         (

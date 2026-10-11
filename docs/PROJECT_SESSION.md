@@ -78,7 +78,7 @@ object aliases, inherited IDs, scalar and object-reference overrides, array size
 added/removed components and GameObjects, prefab root naming and Unity 6 root
 ordering. Custom raw ScriptableObjects are reread from source. A new script type
 must be supplied by the compiler. A raw ScriptableObject must contain one class 114
-document. Existing WAV updates are accepted after native importer adaptation.
+document. Audio, texture and text asset updates are accepted after native importer adaptation.
 Existing FBX updates additionally require an independently verified reference
 graph and identical authored GameObject, Transform and renderer fields. Geometry
 may change while IDs, types and those fields remain stable. Skinned/Animator

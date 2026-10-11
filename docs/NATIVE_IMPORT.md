@@ -1,6 +1,6 @@
 # Native import
 
-Heavy content (models, audio, compressed textures) is imported by Unity's own AssetImportWorker, driven by this tool's coordinator. The main Editor process, its GUI and a pre-imported `Library` are not needed for a worker run. Scenes and authored prefabs do not go through this path; the runtime loader reads them from source.
+Heavy content (models, audio, textures, text assets) is imported by Unity's own AssetImportWorker, driven by this tool's coordinator. The main Editor process, its GUI and a pre-imported `Library` are not needed for a worker run. Scenes and authored prefabs do not go through this path; the runtime loader reads them from source.
 
 Only Unity `6000.6.3f1` on Linux x64 is supported. The coordinator starts `Unity` in AssetImportWorker mode and a separate `Unity.DataStore` from the installed engine. The importers themselves stay inside Unity's executable.
 
@@ -40,7 +40,7 @@ unity-micro-editor native-environment --project /absolute/project
 
 ## During a run
 
-Before expanding a scene, the runner walks the GUID references of the selected scene, its runtime prefabs and their authored dependencies. New or changed FBX and WAV files, and PNG files that need native resize or compression, are imported in batches of 32 assets per worker. An unchanged baseline or cache entry is skipped, as is a PNG in the supported raw profile.
+Before expanding a scene, the runner walks the GUID references of the selected scene, its runtime prefabs and their authored dependencies. New or changed models (FBX), audio files, textures and text assets are imported in batches of 32 assets per worker; the sections below list the source formats and the importer settings each covers. An unchanged baseline, catalog or cache entry is skipped, as is a PNG or JPEG in the supported raw profile.
 
 Each cache entry records an `environmentSha256`. The fingerprint covers the pinned protocol revision, the Unity path, the exact SHA-256 of `ProjectSettings.asset`, the parsed settings and the wire environment. An index with no fingerprint, or a different one, is skipped and its assets are imported again. Changing this environment while a runner is live requires restarting the runner.
 
@@ -60,7 +60,23 @@ For each linked file the coordinator checks length, storage bounds and the nativ
 
 TextureImporter receives the project's default texture compression format and an explicit record that no user overrides exist. DXTC is the verified default.
 
-Cold import is limited to ordinary uncompressed textures. A compressed PNG uses an exact warm artifact from an existing Unity import; a changed source or `.meta` without such an artifact is refused. For BC7, the compressor setting recorded in the artifact database is checked against `EditorSettings.asset`, and its hash is part of the cache key.
+Every source format TextureImporter reads goes through one route: `.png`, `.jpg`, `.jpeg`, `.tga`, `.tif`, `.tiff`, `.bmp`, `.psd`, `.gif`, `.exr` and `.hdr`. `.dds` and other container formats are not covered.
+
+A standalone worker imports an ordinary 2D texture (`textureType: 0`, `textureShape: 1`) whose selected platform uses the automatic format (`textureFormat: -1`) uncompressed or with normal or low quality compression, crunched or not, with the importer's resize and mip chain. For those settings the worker's artifact was compared with the artifact the Editor writes for the same source and `.meta` and is byte-identical: DXT1, DXT5, BC6H for the HDR formats, the crunched form, RGB24, a non-power-of-two source and a readable texture without mips. Each of the eleven formats was loaded in a Player as a new asset.
+
+High quality compression selects BC7, whose compressor the main Editor supplies as an import dependency; a standalone worker aborts on such an import. BC7, an explicit format, a platform override, and every other texture type or shape (sprites, normal maps, cubemaps) therefore use an exact warm artifact from an existing Unity import; a changed source or `.meta` without such an artifact is refused. For BC7, the compressor setting recorded in the artifact database is checked against `EditorSettings.asset`, and its hash is part of the cache key.
+
+A `.meta` that holds a GUID but no `TextureImporter` block is refused. The engine reads it as a version 1 importer and makes an 8x8 cubemap of the file, in the Editor as in a worker, so there is no Texture2D to deliver; the Editor writes the block when it first sees the file.
+
+## Audio
+
+AudioImporter sources share one route: `.wav`, `.ogg`, `.mp3`, `.aif`, `.aiff` and `.flac`. The check is on the imported AudioClip, not on the source format. Accepted: load type DecompressOnLoad or CompressedInMemory with PCM, Vorbis or ADPCM data, `preloadAudioData: 1`, `loadInBackground: 0`, 16 bits, one sub-sound, not ambisonic and not a tracker module. Each source format was loaded in a Player as DecompressOnLoad and as CompressedInMemory Vorbis, and WAV with all six combinations: a decompressed clip was read back with `AudioClip.GetData`, a compressed one was played and heard at the mixer output.
+
+Refused: Streaming, a clip that is not preloaded, and background loading. The Player's loader requires a loaded, preloaded clip of those two load types before it publishes the object, so these need a change of the runtime bridge, not of the importer path. Note that the `.meta` the pinned Editor writes for a new audio file has `preloadAudioData: 0`; such a file is refused until that setting is on.
+
+## Text assets
+
+TextScriptImporter sources are imported by the worker and delivered as the one TextAsset they yield: `.txt`, `.json`, `.bytes`, `.xml`, `.csv`, `.html`, `.htm`, `.yaml` and `.fnt`. A file of one of these extensions that another importer claims does not yield a TextAsset and is refused.
 
 ## Mesh colliders
 
@@ -214,7 +230,8 @@ Unchanged UXML, USS and font assets are extracted from an existing Unity import 
 ## Limits
 
 - The wire protocol, LMDB schema and DataStore layout were derived for one Unity version and are not a stable public API. A worker version mismatch is refused, and another engine version needs its own verification.
-- There is no proven general support for animation inside models, skinned meshes, complex model settings, arbitrary texture settings, other audio codecs, platform overrides, custom AssetPostprocessors or every dependency of an arbitrary project.
+- There is no proven general support for animation inside models, skinned meshes, complex model settings, arbitrary texture settings, streamed audio, platform overrides, custom AssetPostprocessors or every dependency of an arbitrary project.
+- Models other than FBX (`.obj`, `.dae`, `.blend`), video clips, `.inputactions` and other ScriptedImporter assets, sprite atlases and compute shaders are not imported; a scene that refers to a new one needs a catalog built by the Editor. A standalone worker has no script assemblies, so it runs no ScriptedImporter.
 - A shader can be imported, but the result has no platform GPU programs and cannot be delivered to a Player without a separate bake.
 - The store reader handles inline and concatenated storage, limits one file to 64 MiB and refuses other layouts. The LMDB reader targets the observed Linux x64 format.
 - A worker is started per import batch. A persistent native service is not used.
