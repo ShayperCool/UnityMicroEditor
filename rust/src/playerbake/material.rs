@@ -2,7 +2,9 @@
 //! sorts its keywords by whether the shader declares them, spells its tags
 //! the way the engine first met them, keeps a texture only for a property
 //! the shader has and adds every property the shader has and the source
-//! lacks. Each step is restated from the pinned Editor.
+//! lacks. A variant is written as a whole material: what it inherits from
+//! its parents is laid under its overrides, and the drawers of its shader
+//! set its keywords. Each step is restated from the pinned Editor.
 use super::{
     native::{NativeSources, References, scalar},
     source::{get, text},
@@ -11,7 +13,10 @@ use super::{
 };
 use anyhow::{Result, bail};
 use serde_json::{Map, Value};
-use std::{collections::BTreeMap, sync::LazyLock};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::LazyLock,
+};
 
 /// The kind of a shader property (`SerializedProperty::m_Type`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +38,9 @@ pub struct ShaderProperty {
     /// The default as the shader stores it. An integer keeps its bits in
     /// the first number.
     pub default: [f32; 4],
+    /// The attributes that name a drawer of the material inspector
+    /// (`Toggle(_KEYWORD)`, `KeywordEnum(A,B)`, ...), as authored.
+    pub attributes: Vec<String>,
 }
 
 /// What a material takes from its shader.
@@ -43,6 +51,9 @@ pub struct ShaderFacts {
     pub properties: Vec<ShaderProperty>,
     /// Every tag name and value of the subshaders and passes.
     pub tags: Vec<String>,
+    /// The inspector classes the shader names (`CustomEditor`), for every
+    /// render pipeline.
+    pub custom_editors: Vec<String>,
 }
 
 const FLAG_HDR: u32 = 16;
@@ -126,12 +137,29 @@ pub fn read_shader_facts(object: &[u8]) -> Result<ShaderFacts> {
                 _ => bail!("shader property default is not a number"),
             }
         }
+        let mut attributes = Vec::new();
+        for attribute in items(property, "m_Attributes")? {
+            match attribute {
+                Val::Str(attribute) => attributes.push(attribute.clone()),
+                _ => bail!("shader property attribute is not a string"),
+            }
+        }
         facts.properties.push(ShaderProperty {
             name: string(property, "m_Name")?,
             kind,
             flags: *flags as u32,
             default,
+            attributes,
         });
+    }
+    let editor = string(parsed, "m_CustomEditorName")?;
+    if !editor.is_empty() {
+        facts.custom_editors.push(editor);
+    }
+    for editor in items(parsed, "m_CustomEditorForRenderPipelines")? {
+        facts
+            .custom_editors
+            .push(string(editor, "customEditorName")?);
     }
     for subshader in items(parsed, "m_SubShaders")? {
         tags_of(subshader, &mut facts.tags)?;
@@ -367,12 +395,160 @@ fn version(fields: &Map<String, Value>) -> Result<String> {
     }
 }
 
-/// The value of a material as a build writes it.
-pub(super) fn bake(
+/// The GUID and file ID an object reference names in another source; `None`
+/// for a null reference.
+fn other_source(value: &Value, path: &str) -> Result<Option<(String, i64)>> {
+    let map = match value {
+        Value::Null => return Ok(None),
+        Value::Object(map) => map,
+        _ => bail!("{path} is not an object reference"),
+    };
+    let Ok(file_id) = text(get(map, "fileID"))?.parse::<i64>() else {
+        bail!("{path} has an invalid file ID");
+    };
+    if file_id == 0 {
+        return Ok(None);
+    }
+    let guid = text(get(map, "guid"))?.to_ascii_lowercase();
+    if guid.is_empty() {
+        return Err(unsupported(format!(
+            "{path} refers to an object of its own source"
+        )));
+    }
+    Ok(Some((guid, file_id)))
+}
+
+/// The saved properties of a material by name, each kind sorted the way a
+/// build writes it. A texture stays as authored until it is written, so the
+/// sources a material names keep their order of first use.
+#[derive(Default)]
+struct Saved {
+    textures: BTreeMap<String, Value>,
+    ints: BTreeMap<String, Val>,
+    floats: BTreeMap<String, Val>,
+    colors: BTreeMap<String, Val>,
+}
+
+impl Saved {
+    fn read(properties: &Map<String, Value>) -> Result<Saved> {
+        let mut sheet = Saved::default();
+        for (name, value) in saved(properties, "m_TexEnvs")? {
+            sheet.textures.insert(name.to_string(), value.clone());
+        }
+        for (name, value) in saved(properties, "m_Ints")? {
+            let Value::String(source) = value else {
+                bail!("integer property {name} is not a number");
+            };
+            sheet
+                .ints
+                .insert(name.to_string(), scalar("int", source, name)?);
+        }
+        for (name, value) in saved(properties, "m_Floats")? {
+            let Value::String(source) = value else {
+                bail!("float property {name} is not a number");
+            };
+            sheet
+                .floats
+                .insert(name.to_string(), scalar("float", source, name)?);
+        }
+        for (name, value) in saved(properties, "m_Colors")? {
+            sheet.colors.insert(
+                name.to_string(),
+                numbers(value, ["r", "g", "b", "a"], name)?,
+            );
+        }
+        Ok(sheet)
+    }
+
+    /// Lays the overrides of a variant over what it inherits. A property an
+    /// ancestor locks keeps the inherited value.
+    fn overlay(&mut self, overrides: Saved, locked: &BTreeSet<String>) {
+        fn lay<T>(
+            base: &mut BTreeMap<String, T>,
+            overrides: BTreeMap<String, T>,
+            locked: &BTreeSet<String>,
+        ) {
+            for (name, value) in overrides {
+                if !locked.contains(&name) {
+                    base.insert(name, value);
+                }
+            }
+        }
+        lay(&mut self.textures, overrides.textures, locked);
+        lay(&mut self.ints, overrides.ints, locked);
+        lay(&mut self.floats, overrides.floats, locked);
+        lay(&mut self.colors, overrides.colors, locked);
+    }
+}
+
+/// The four settings a variant overrides one by one, with the bit each has
+/// in `m_ModifiedSerializedProperties` and among the locks
+/// (`Material::MaterialSerializedProperty`).
+const SETTINGS: [(&str, &str, u32); 4] = [
+    ("m_LightmapFlags", "unsigned int", 1 << 1),
+    ("m_EnableInstancingVariants", "bool", 1 << 2),
+    ("m_DoubleSidedGI", "bool", 1 << 3),
+    ("m_CustomRenderQueue", "int", 1 << 4),
+];
+
+/// What a material locks for its variants (`m_LockedProperties`): names
+/// separated by spaces, a setting as its field name after a colon.
+#[derive(Default, Clone)]
+struct Locks {
+    settings: u32,
+    properties: BTreeSet<String>,
+}
+
+impl Locks {
+    fn read(fields: &Map<String, Value>) -> Result<Locks> {
+        let mut locks = Locks::default();
+        let listed = match get(fields, "m_LockedProperties") {
+            Value::Null => return Ok(locks),
+            Value::String(listed) => listed,
+            _ => bail!("m_LockedProperties is not a string"),
+        };
+        for name in listed.split(' ').filter(|name| !name.is_empty()) {
+            let setting = name
+                .strip_prefix(':')
+                .and_then(|field| SETTINGS.iter().find(|(known, ..)| *known == field));
+            match setting {
+                Some((.., bit)) => locks.settings |= bit,
+                None => {
+                    locks.properties.insert(name.to_string());
+                }
+            }
+        }
+        Ok(locks)
+    }
+
+    fn join(&mut self, other: &Locks) {
+        self.settings |= other.settings;
+        self.properties.extend(other.properties.iter().cloned());
+    }
+}
+
+/// A material with what it inherits from its parents laid under it
+/// (`Material::MergeHierarchy`).
+struct Merged {
+    /// The reference to the shader: that of the material without a parent.
+    shader: Value,
+    /// The settings in the order of `SETTINGS`.
+    settings: [Val; 4],
+    saved: Saved,
+    /// What the material locks itself, and what its ancestors lock for it.
+    locks: Locks,
+    inherited: Locks,
+    variant: bool,
+}
+
+/// How long a chain of parents is followed. The engine sets no limit.
+const DEEPEST_PARENT: usize = 32;
+
+fn merged(
     fields: &Map<String, Value>,
-    references: &mut References<'_>,
     sources: &dyn NativeSources,
-) -> Result<Val> {
+    ancestors: &mut Vec<(String, i64)>,
+) -> Result<Merged> {
     // The engine upgrades a source of an older layout on load.
     if version(fields)? != "8" {
         return Err(unsupported(format!(
@@ -389,17 +565,274 @@ pub(super) fn bake(
             version(properties)?
         )));
     }
-    // A variant is written merged with its parents.
-    if !matches!(
-        references.pointer(get(fields, "m_Parent"), "m_Parent")?,
-        Val::Zero
-    ) {
-        return Err(unsupported("material variant"));
-    }
     if !strings_or_empty(get(fields, "m_BuildTextureStacks")) {
         return Err(unsupported("material with texture stacks"));
     }
-    let shader = match get(fields, "m_Shader") {
+    let own = Saved::read(properties)?;
+    let locks = Locks::read(fields)?;
+    let mut settings = [Val::Zero, Val::Zero, Val::Zero, Val::Zero];
+    for (setting, (name, kind, _)) in settings.iter_mut().zip(SETTINGS) {
+        *setting = number(fields, kind, name)?;
+    }
+    let Some((guid, file_id)) = other_source(get(fields, "m_Parent"), "m_Parent")? else {
+        return Ok(Merged {
+            shader: get(fields, "m_Shader").clone(),
+            settings,
+            saved: own,
+            locks,
+            inherited: Locks::default(),
+            variant: false,
+        });
+    };
+    // The engine cuts a chain that returns to itself and reports it.
+    if ancestors.contains(&(guid.clone(), file_id)) {
+        return Err(unsupported(format!(
+            "material variant whose parents form a cycle through {guid}"
+        )));
+    }
+    if ancestors.len() >= DEEPEST_PARENT {
+        return Err(unsupported(format!(
+            "material variant with more than {DEEPEST_PARENT} parents"
+        )));
+    }
+    ancestors.push((guid.clone(), file_id));
+    // Without its parent a variant keeps its own overrides over defaults
+    // of the engine; whether the parent exists is the project's to say.
+    let Some(source) = sources.material(&guid) else {
+        return Err(unsupported(format!(
+            "material variant whose parent {guid} is not known"
+        )));
+    };
+    let documents = crate::yaml::parse_unity_yaml_lexical(&source)?;
+    let parent = documents.iter().find(|document| {
+        !document.stripped
+            && document.class_id == super::native::MATERIAL
+            && document.file_id.parse() == Ok(file_id)
+    });
+    let Some(parent) = parent else {
+        return Err(unsupported(format!(
+            "material variant whose parent {guid} holds no material {file_id}"
+        )));
+    };
+    let mut parent = merged(&parent.data, sources, ancestors)?;
+    // What the chain inherits is written into the variant; a texture that
+    // lives in a parent's own source cannot be named from here.
+    for (name, texture) in &parent.saved.textures {
+        if let Value::Object(texture) = texture {
+            other_source(get(texture, "m_Texture"), name)
+                .map_err(|error| error.context(format!("parent {guid}")))?;
+        }
+    }
+    // `Material::MergeSingle`: a parent passes on its own locks and those
+    // it is under; a locked or unmodified setting is the parent's.
+    let mut inherited = parent.inherited.clone();
+    inherited.join(&parent.locks);
+    let modified = match number(fields, "unsigned int", "m_ModifiedSerializedProperties")? {
+        Val::U(modified) => modified as u32,
+        _ => 0,
+    };
+    for (index, (.., bit)) in SETTINGS.iter().enumerate() {
+        if modified & bit == 0 || inherited.settings & bit != 0 {
+            settings[index] = parent.settings[index].clone();
+        }
+    }
+    parent.saved.overlay(own, &inherited.properties);
+    Ok(Merged {
+        shader: parent.shader,
+        settings,
+        saved: parent.saved,
+        locks,
+        inherited,
+        variant: true,
+    })
+}
+
+/// A drawer of the material inspector that turns keywords on and off with
+/// the value of its property (`MaterialToggleDrawer`,
+/// `MaterialToggleOffDrawer`, `MaterialKeywordEnumDrawer`).
+enum Drawer {
+    /// The keyword, and whether a value of zero turns it on.
+    Toggle(String, bool),
+    Enum(Vec<String>),
+}
+
+/// The attributes of the inspector that never touch a keyword.
+const PASSIVE_ATTRIBUTES: [&str; 6] = [
+    "Enum",
+    "Header",
+    "IntRange",
+    "PowerSlider",
+    "Space",
+    "ToggleUI",
+];
+
+/// Reads an attribute the way `MaterialPropertyHandler` does: a class name,
+/// then arguments in parentheses, separated by commas. `None` for an
+/// attribute that changes no keyword.
+fn drawer(property: &ShaderProperty, attribute: &str) -> Result<Option<Drawer>> {
+    let refused = |why: &str| {
+        unsupported(format!(
+            "material variant of a shader whose property {} has the attribute {attribute:?}: {why}",
+            property.name
+        ))
+    };
+    let word = |text: &str| {
+        !text.is_empty()
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    };
+    let (class, arguments) = match attribute.split_once('(') {
+        None => (attribute, None),
+        Some((class, rest)) => match rest.strip_suffix(')') {
+            Some(arguments) if !arguments.contains(['(', ')']) => {
+                (class.trim_end(), Some(arguments.trim()))
+            }
+            _ => return Err(refused("it is not a class with plain arguments")),
+        },
+    };
+    if !word(class) || !property.name.is_ascii() {
+        return Err(refused("it is not a class with plain arguments"));
+    }
+    // A class is found as `Toggle`, `MaterialToggle` or
+    // `MaterialToggleDrawer`.
+    let short = class
+        .strip_suffix("Drawer")
+        .and_then(|class| class.strip_prefix("Material"))
+        .or_else(|| class.strip_prefix("Material"))
+        .unwrap_or(class);
+    if PASSIVE_ATTRIBUTES.contains(&short)
+        || PASSIVE_ATTRIBUTES.contains(&short.strip_suffix("Decorator").unwrap_or(short))
+    {
+        return Ok(None);
+    }
+    if !matches!(short, "Toggle" | "ToggleOff" | "KeywordEnum") {
+        // A project can define drawers of its own, which run as its code.
+        return Err(refused("the inspector may run a drawer of the project"));
+    }
+    let arguments: Vec<&str> = match arguments {
+        None | Some("") => Vec::new(),
+        Some(arguments) => arguments.split(',').map(str::trim).collect(),
+    };
+    // The engine passes an argument that reads as a number as one, and
+    // these classes take text.
+    if arguments
+        .iter()
+        .any(|argument| !argument.is_ascii() || argument.parse::<f64>().is_ok())
+    {
+        return Err(refused("an argument is not plain text"));
+    }
+    if !matches!(
+        property.kind,
+        PropertyKind::Float | PropertyKind::Range | PropertyKind::Int
+    ) {
+        return Ok(None);
+    }
+    let name = property.name.to_ascii_uppercase();
+    Ok(Some(match (short, arguments.as_slice()) {
+        ("Toggle", []) => Drawer::Toggle(format!("{name}_ON"), false),
+        ("ToggleOff", []) => Drawer::Toggle(format!("{name}_OFF"), true),
+        ("Toggle", [keyword]) => Drawer::Toggle(keyword.to_string(), false),
+        ("ToggleOff", [keyword]) => Drawer::Toggle(keyword.to_string(), true),
+        ("KeywordEnum", [_, ..]) => Drawer::Enum(
+            arguments
+                .iter()
+                .map(|argument| {
+                    format!("{name}_{}", argument.replace(' ', "_").to_ascii_uppercase())
+                })
+                .collect(),
+        ),
+        _ => return Err(refused("the class takes other arguments")),
+    }))
+}
+
+/// A variant gets its keywords from the drawers of its shader when its
+/// properties are built (`Material::SetupKeywordsAndPasses`, which runs
+/// `MaterialEditor.ApplyMaterialPropertyDrawers` and the `ValidateMaterial`
+/// of the shader's inspector). `value` gives the merged value of a number
+/// property.
+fn apply_drawers(
+    shader: &ShaderFacts,
+    keywords: &mut Vec<String>,
+    value: &dyn Fn(&ShaderProperty) -> Result<Val>,
+) -> Result<()> {
+    // The inspector of a shader validates a material in its own code.
+    if let Some(editor) = shader.custom_editors.first() {
+        return Err(unsupported(format!(
+            "material variant of the shader {}, which {editor} validates",
+            shader.name
+        )));
+    }
+    for property in &shader.properties {
+        let mut drawers = Vec::new();
+        for attribute in &property.attributes {
+            drawers.extend(drawer(property, attribute)?);
+        }
+        let drawer = match drawers.len() {
+            0 => continue,
+            1 => drawers.remove(0),
+            _ => {
+                return Err(unsupported(format!(
+                    "material variant of a shader whose property {} has several drawers",
+                    property.name
+                )));
+            }
+        };
+        let value = value(property)?;
+        let mut set = |keyword: &str, on: bool| {
+            let listed = keywords.iter().any(|known| known == keyword);
+            if on && !listed {
+                keywords.push(keyword.to_string());
+            } else if !on {
+                keywords.retain(|known| known != keyword);
+            }
+        };
+        match drawer {
+            Drawer::Toggle(keyword, inverted) => {
+                let on = match value {
+                    Val::F(value) => value.abs() > 0.001,
+                    Val::I(value) => value != 0,
+                    _ => bail!("property {} is not a number", property.name),
+                };
+                set(&keyword, on != inverted);
+            }
+            Drawer::Enum(names) => {
+                let chosen = match value {
+                    // The engine truncates; what does not fit names nothing.
+                    Val::F(value) if value.is_finite() && value.abs() < 2e9 => value as i64,
+                    Val::F(_) => -1,
+                    Val::I(value) => value,
+                    _ => bail!("property {} is not a number", property.name),
+                };
+                for (index, keyword) in names.iter().enumerate() {
+                    set(keyword, chosen == index as i64);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The value of a material as a build writes it.
+pub(super) fn bake(
+    fields: &Map<String, Value>,
+    references: &mut References<'_>,
+    sources: &dyn NativeSources,
+) -> Result<Val> {
+    let Merged {
+        shader: shader_source,
+        settings,
+        saved:
+            Saved {
+                textures: authored,
+                mut ints,
+                mut floats,
+                mut colors,
+            },
+        variant,
+        ..
+    } = merged(fields, sources, &mut Vec::new())?;
+    let shader = match &shader_source {
         Value::Object(reference) => {
             let guid = text(get(reference, "guid"))?.to_ascii_lowercase();
             let file_id = text(get(reference, "fileID"))?.parse::<i64>().unwrap_or(0);
@@ -422,10 +855,63 @@ pub(super) fn bake(
         )));
     }
 
-    let shader_reference = references.pointer(get(fields, "m_Shader"), "m_Shader")?;
+    let shader_reference = references.pointer(&shader_source, "m_Shader")?;
+
+    // A property the shader has and the material lacks takes the shader's
+    // default.
+    for property in &shader.properties {
+        let name = property.name.as_str();
+        let gamma = property.flags & FLAG_GAMMA != 0
+            || (property.kind == PropertyKind::Color && property.flags & FLAG_HDR == 0);
+        let default = |index: usize| -> Result<f32> {
+            let value = property.default[index];
+            if gamma && index < 3 {
+                gamma_default(value, sources, name)
+            } else {
+                Ok(value)
+            }
+        };
+        match property.kind {
+            PropertyKind::Texture => {}
+            PropertyKind::Int => {
+                if !ints.contains_key(name) {
+                    let value = property.default[0].to_bits() as i32;
+                    ints.insert(name.to_string(), Val::I(value as i64));
+                }
+            }
+            PropertyKind::Float | PropertyKind::Range => {
+                if !floats.contains_key(name) {
+                    floats.insert(name.to_string(), Val::F(default(0)?));
+                }
+            }
+            PropertyKind::Color | PropertyKind::Vector => {
+                if !colors.contains_key(name) {
+                    let value = Val::map([
+                        ("r", Val::F(default(0)?)),
+                        ("g", Val::F(default(1)?)),
+                        ("b", Val::F(default(2)?)),
+                        ("a", Val::F(default(3)?)),
+                    ]);
+                    colors.insert(name.to_string(), value);
+                }
+            }
+        }
+    }
 
     let mut keywords = strings(fields, "m_ValidKeywords")?;
     keywords.extend(strings(fields, "m_InvalidKeywords")?);
+    if variant {
+        apply_drawers(&shader, &mut keywords, &|property| {
+            let sheet = match property.kind {
+                PropertyKind::Int => &ints,
+                _ => &floats,
+            };
+            match sheet.get(&property.name) {
+                Some(value) => Ok(value.clone()),
+                None => bail!("property {} has no value", property.name),
+            }
+        })?;
+    }
     keywords.sort();
     let (valid, invalid): (Vec<String>, Vec<String>) = keywords
         .into_iter()
@@ -458,15 +944,15 @@ pub(super) fn bake(
         passes.push(Val::Str(tags.spell(&pass)?));
     }
 
+    // A texture is kept only for a texture property the shader has.
     let mut textures: BTreeMap<&str, Val> = BTreeMap::new();
-    let authored = saved(properties, "m_TexEnvs")?;
     for property in &shader.properties {
         if property.kind != PropertyKind::Texture {
             continue;
         }
         let name = property.name.as_str();
-        let value = match authored.iter().find(|(known, _)| *known == name) {
-            Some((_, Value::Object(texture))) => Val::map([
+        let value = match authored.get(name) {
+            Some(Value::Object(texture)) => Val::map([
                 (
                     "m_Texture",
                     references.pointer(get(texture, "m_Texture"), name)?,
@@ -492,90 +978,25 @@ pub(super) fn bake(
         };
         textures.insert(name, value);
     }
-    let (mut ints, mut floats, mut colors) = (BTreeMap::new(), BTreeMap::new(), BTreeMap::new());
-    for (name, value) in saved(properties, "m_Ints")? {
-        let Value::String(source) = value else {
-            bail!("integer property {name} is not a number");
-        };
-        ints.insert(name, scalar("int", source, name)?);
-    }
-    for (name, value) in saved(properties, "m_Floats")? {
-        let Value::String(source) = value else {
-            bail!("float property {name} is not a number");
-        };
-        floats.insert(name, scalar("float", source, name)?);
-    }
-    for (name, value) in saved(properties, "m_Colors")? {
-        colors.insert(name, numbers(value, ["r", "g", "b", "a"], name)?);
-    }
-    for property in &shader.properties {
-        let name = property.name.as_str();
-        let gamma = property.flags & FLAG_GAMMA != 0
-            || (property.kind == PropertyKind::Color && property.flags & FLAG_HDR == 0);
-        let default = |index: usize| -> Result<f32> {
-            let value = property.default[index];
-            if gamma && index < 3 {
-                gamma_default(value, sources, name)
-            } else {
-                Ok(value)
-            }
-        };
-        match property.kind {
-            PropertyKind::Texture => {}
-            PropertyKind::Int => {
-                if !ints.contains_key(name) {
-                    let value = property.default[0].to_bits() as i32;
-                    ints.insert(name, Val::I(value as i64));
-                }
-            }
-            PropertyKind::Float | PropertyKind::Range => {
-                if !floats.contains_key(name) {
-                    floats.insert(name, Val::F(default(0)?));
-                }
-            }
-            PropertyKind::Color | PropertyKind::Vector => {
-                if !colors.contains_key(name) {
-                    let value = Val::map([
-                        ("r", Val::F(default(0)?)),
-                        ("g", Val::F(default(1)?)),
-                        ("b", Val::F(default(2)?)),
-                        ("a", Val::F(default(3)?)),
-                    ]);
-                    colors.insert(name, value);
-                }
-            }
-        }
-    }
-    let list = |entries: BTreeMap<&str, Val>| {
+    fn list<Name: AsRef<str>>(entries: BTreeMap<Name, Val>) -> Val {
         Val::Seq(
             entries
                 .into_iter()
-                .map(|(name, value)| pair(name, value))
+                .map(|(name, value)| pair(name.as_ref(), value))
                 .collect(),
         )
-    };
+    }
     let names = |names: Vec<String>| Val::Seq(names.into_iter().map(Val::Str).collect());
+    let [lightmap_flags, instancing, double_sided, render_queue] = settings;
     Ok(Val::map([
         ("m_Name", Val::Str(text(get(fields, "m_Name"))?)),
         ("m_Shader", shader_reference),
         ("m_ValidKeywords", names(valid)),
         ("m_InvalidKeywords", names(invalid)),
-        (
-            "m_LightmapFlags",
-            number(fields, "unsigned int", "m_LightmapFlags")?,
-        ),
-        (
-            "m_EnableInstancingVariants",
-            number(fields, "bool", "m_EnableInstancingVariants")?,
-        ),
-        (
-            "m_DoubleSidedGI",
-            number(fields, "bool", "m_DoubleSidedGI")?,
-        ),
-        (
-            "m_CustomRenderQueue",
-            number(fields, "int", "m_CustomRenderQueue")?,
-        ),
+        ("m_LightmapFlags", lightmap_flags),
+        ("m_EnableInstancingVariants", instancing),
+        ("m_DoubleSidedGI", double_sided),
+        ("m_CustomRenderQueue", render_queue),
         (
             "stringTagMap",
             Val::Seq(

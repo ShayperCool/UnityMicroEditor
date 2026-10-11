@@ -1,0 +1,58 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!21 &2100000
+Material:
+  serializedVersion: 8
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: R01_2
+  m_Shader: {fileID: 4800000, guid: 44444444bbbb4ccc8ddd0123456789ab, type: 3}
+  m_Parent: {fileID: 2100000, guid: f9a2a3c8a005a52ec829278a3fb1c087, type: 2}
+  m_ModifiedSerializedProperties: 4
+  m_ValidKeywords:
+  - _MT_ON
+  m_InvalidKeywords:
+  - _MODE_LOW
+  m_LightmapFlags: 255
+  m_EnableInstancingVariants: 0
+  m_DoubleSidedGI: 0
+  m_CustomRenderQueue: 3000
+  stringTagMap:
+    Custom: Transparent
+  disabledShaderPasses: []
+  m_LockedProperties: _Mode _ModeI _Und :m_CustomRenderQueue
+  m_SavedProperties:
+    serializedVersion: 3
+    m_TexEnvs:
+    - _Tex:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 0.2}
+        m_Offset: {x: 0, y: -1}
+    - _BumpMap:
+        m_Texture: {fileID: 2800000, guid: aa28958a8deb55e7e8382014e6d05923, type: 3}
+        m_Scale: {x: -3.75, y: 1.9}
+        m_Offset: {x: 0, y: -1}
+    - _Zz:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: -0, y: 1e+10}
+        m_Offset: {x: 2, y: -0.002}
+    m_Ints:
+    - _ModeI: 2147483647
+    m_Floats:
+    - _StaleF: 2.5
+    - _OffKw: -0
+    - _Dec: -3.75
+    - _Mt: 0.73
+    - _Ir: -0
+    - _Und: -0.5
+    - _ModeR: -1
+    - _Mode: -0
+    - _Thr: -3.75
+    - _Plain: 1.9
+    m_Colors:
+    - _Tex: {r: 2, g: 2, b: 0.0009, a: 1}
+    - _Mode: {r: 0.25, g: -0.002, b: 0.2, a: 0.73}
+  m_BuildTextureStacks: []
+  m_AllowLocking: 1

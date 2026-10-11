@@ -1885,6 +1885,8 @@ struct Project {
     shaders: Vec<((String, i64), playerbake::ShaderFacts)>,
     /// The spellings of shader tags in the materials the build wrote.
     tags: Vec<String>,
+    /// The material sources of the project by GUID.
+    materials: Vec<(String, PathBuf)>,
 }
 
 const LIT: playerbake::Lightmaps = playerbake::Lightmaps {
@@ -1899,11 +1901,13 @@ impl Project {
             lightmaps,
             shaders: Vec::new(),
             tags: Vec::new(),
+            materials: Vec::new(),
         }
     }
 
-    /// Reads `shaders/<guid>_<file ID>.bin` and the tags of the engine-built
-    /// materials of a directory, as a session reads its catalog.
+    /// Reads `shaders/<guid>_<file ID>.bin`, the tags of the engine-built
+    /// materials of a directory, as a session reads its catalog, and the
+    /// GUID of every material that has a `.meta`.
     fn read(mut self, root: &Path) -> Project {
         if let Ok(entries) = fs::read_dir(root.join("shaders")) {
             for entry in entries {
@@ -1918,6 +1922,14 @@ impl Project {
         let layout = playerbake::native_tree(21).unwrap();
         for entry in fs::read_dir(root).unwrap() {
             let path = entry.unwrap().path();
+            if let Some(source) = path.to_string_lossy().strip_suffix(".mat.meta") {
+                let meta = fs::read_to_string(&path).unwrap();
+                let guid = meta.lines().find_map(|line| line.strip_prefix("guid: "));
+                self.materials.push((
+                    guid.unwrap().trim().to_string(),
+                    PathBuf::from(format!("{source}.mat")),
+                ));
+            }
             if !path.to_string_lossy().ends_with(".mat.bin") {
                 continue;
             }
@@ -1963,6 +1975,11 @@ impl playerbake::NativeSources for Project {
             .find(|known| known.eq_ignore_ascii_case(tag))
             .cloned()
     }
+
+    fn material(&self, guid: &str) -> Option<Vec<u8>> {
+        let (_, path) = self.materials.iter().find(|(known, _)| known == guid)?;
+        fs::read(path).ok()
+    }
 }
 
 /// Compares every `<source>` / `<source>.bin` pair of a directory: a
@@ -1975,12 +1992,18 @@ fn compare_native(root: &Path, project: &Project) -> (usize, Vec<String>, Vec<St
     let mut sources: Vec<PathBuf> = fs::read_dir(root)
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|extension| extension != "bin"))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension != "bin" && extension != "meta")
+        })
         .collect();
     sources.sort();
     for source in sources {
         let name = source.file_name().unwrap().to_string_lossy().into_owned();
-        let expected = fs::read(root.join(format!("{name}.bin"))).unwrap();
+        // A parent the build did not write is there for its variants only.
+        let Ok(expected) = fs::read(root.join(format!("{name}.bin"))) else {
+            continue;
+        };
         let baked = playerbake::bake_native_objects(&fs::read(&source).unwrap(), project);
         let (objects, _) = match baked {
             Ok(baked) => baked,
@@ -2015,8 +2038,8 @@ fn compare_native(root: &Path, project: &Project) -> (usize, Vec<String>, Vec<St
 fn native_assets_match_the_engine_build() {
     let lit = |baked, realtime| playerbake::Lightmaps { baked, realtime };
     for (directory, linear, lightmaps, least) in [
-        ("native", false, lit(true, true), 84),
-        ("native/linear", true, lit(true, true), 49),
+        ("native", false, lit(true, true), 138),
+        ("native/linear", true, lit(true, true), 62),
         ("native/linear-baked", true, lit(true, false), 10),
         ("native/linear-realtime", true, lit(false, true), 10),
         ("native/gamma-mixed", false, lit(false, false), 10),
@@ -2144,7 +2167,10 @@ fn materials_beyond_the_baker_are_refused() {
         "m_Parent: {fileID: 0}",
         "m_Parent: {fileID: 2100000, guid: 7ce7eb525fddc12529a8908a725a914e, type: 2}",
     );
-    assert!(refused(&variant, &project).contains("variant"));
+    assert!(
+        refused(&variant, &project)
+            .contains("parent 7ce7eb525fddc12529a8908a725a914e is not known")
+    );
     let older = source.replace("  serializedVersion: 8\n", "  serializedVersion: 6\n");
     assert!(refused(&older, &project).contains("serialized version 6"));
     // The engine writes a tag the way it first met it. One it
@@ -2163,6 +2189,111 @@ fn materials_beyond_the_baker_are_refused() {
         objects.into_iter().next().unwrap().data
     };
     assert_eq!(bake(&engine_tag), bake(&source));
+}
+
+/// A variant is published as a whole material: its parent is read, not
+/// referred to, and the shader is the one at the top of the chain.
+#[test]
+fn baked_variant_stands_alone() {
+    let root = fixture("native");
+    let project = Project::new(false, LIT).read(&root);
+    let read = |name: &str| fs::read_to_string(root.join(name)).unwrap();
+    // The variant names another shader than its parent's parent.
+    let source = read("VA_othershader2.mat");
+    assert!(source.contains("guid: 33333333aaaa4bbb8ccc0123456789ab"));
+    let baked = playerbake::bake_native(source.as_bytes(), &project).unwrap();
+    assert_eq!(
+        baked.objects,
+        [("2100000".to_string(), "UnityEngine.Material".to_string())]
+    );
+    assert_eq!(baked.externals[0].guid, "73dcab8d6bcd67bd996f010a4f58f089");
+    let parents = ["VA_othershader.mat.meta", "VA_root.mat.meta"].map(|meta| {
+        let meta = read(meta);
+        let guid = meta.lines().find_map(|line| line.strip_prefix("guid: "));
+        guid.unwrap().trim().to_string()
+    });
+    for external in &baked.externals {
+        assert!(!parents.contains(&external.guid), "{}", external.guid);
+    }
+    // A change of the parent reaches the variant.
+    struct Edited<'a>(&'a Project, String, Vec<u8>);
+    impl playerbake::NativeSources for Edited<'_> {
+        fn linear_color_space(&self) -> Option<bool> {
+            self.0.linear_color_space()
+        }
+        fn shader(&self, guid: &str, file_id: i64) -> Option<playerbake::ShaderFacts> {
+            self.0.shader(guid, file_id)
+        }
+        fn tag_spelling(&self, tag: &str) -> Option<String> {
+            self.0.tag_spelling(tag)
+        }
+        fn material(&self, guid: &str) -> Option<Vec<u8>> {
+            if guid == self.1 {
+                Some(self.2.clone())
+            } else {
+                self.0.material(guid)
+            }
+        }
+    }
+    let bake = |sources: &dyn playerbake::NativeSources| {
+        let source = read("VA_plain.mat");
+        let (objects, _) = playerbake::bake_native_objects(source.as_bytes(), sources).unwrap();
+        objects.into_iter().next().unwrap().data
+    };
+    let parent = read("VA_root.mat");
+    let edited = parent.replace("m_CustomRenderQueue: 2450", "m_CustomRenderQueue: 2451");
+    assert_ne!(edited, parent);
+    let edited = Edited(&project, parents[1].clone(), edited.into_bytes());
+    assert_ne!(bake(&edited), bake(&project));
+}
+
+/// What a build does to a variant beyond the merge stays with the Editor.
+#[test]
+fn variants_beyond_the_baker_are_refused() {
+    let root = fixture("native");
+    let project = Project::new(false, LIT).read(&root);
+    let read = |name: &str| fs::read_to_string(root.join(name)).unwrap();
+    let refused = |source: &str, sources: &dyn playerbake::NativeSources| {
+        let error = playerbake::bake_native(source.as_bytes(), sources).unwrap_err();
+        assert!(error.is::<Unsupported>(), "{error:#}");
+        format!("{error:#}")
+    };
+    assert!(refused(&read("VD_orphan.mat"), &project).contains("is not known"));
+    assert!(refused(&read("VD_wrongid.mat"), &project).contains("holds no material 2100002"));
+    assert!(refused(&read("VA_plain.mat"), &playerbake::NoNativeSources).contains("is not known"));
+    // A chain that returns to itself.
+    let guid = |name: &str| {
+        let meta = read(&format!("{name}.meta"));
+        let guid = meta.lines().find_map(|line| line.strip_prefix("guid: "));
+        guid.unwrap().trim().to_string()
+    };
+    let own = guid("VA_plain.mat");
+    let itself = read("VA_plain.mat").replace(&guid("VA_root.mat"), &own);
+    struct Itself(Vec<u8>);
+    impl playerbake::NativeSources for Itself {
+        fn material(&self, _guid: &str) -> Option<Vec<u8>> {
+            Some(self.0.clone())
+        }
+    }
+    assert!(refused(&itself, &Itself(itself.clone().into_bytes())).contains("cycle"));
+    // The inspector a shader names validates a variant in its own code, and
+    // a drawer may be the project's.
+    let mut edited = Project::new(false, LIT).read(&root);
+    for (_, facts) in &mut edited.shaders {
+        facts.custom_editors.push("Some.ShaderGUI".to_string());
+    }
+    assert!(refused(&read("VA_plain.mat"), &edited).contains("Some.ShaderGUI validates"));
+    playerbake::bake_native(read("VA_root.mat").as_bytes(), &edited).unwrap();
+    let mut edited = Project::new(false, LIT).read(&root);
+    for (_, facts) in &mut edited.shaders {
+        for property in &mut facts.properties {
+            if property.name == "_Gloss" {
+                property.attributes.push("Fancy(1)".to_string());
+            }
+        }
+    }
+    assert!(refused(&read("VA_plain.mat"), &edited).contains("drawer of the project"));
+    playerbake::bake_native(read("VA_root.mat").as_bytes(), &edited).unwrap();
 }
 
 #[test]
