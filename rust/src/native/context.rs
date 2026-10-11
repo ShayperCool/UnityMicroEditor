@@ -1,6 +1,7 @@
 //! Owned import contexts: selected exact source/meta bytes copied into a new
 //! directory. No Editor runs and no SourceAssetDB/ArtifactDB, assemblies,
 //! imported Library contents or asset bundles are copied.
+use super::scripted::ScriptEnvironment;
 use super::support::{
     abs, check, eval_symlinks, mkdir, mkdir_all, os_error, read_file, wrap, write_file,
 };
@@ -416,17 +417,47 @@ pub fn create_project_import_context(
     output: &str,
     assets: &[String],
 ) -> (ProjectImportContext, Result<()>) {
+    create_scripted_import_context(ctx, source_project, output, assets, None)
+}
+
+/// The same with the compiled importers the selected assets need: their
+/// assemblies, and the scripts those were compiled from where the Editor
+/// compiled them.
+pub fn create_scripted_import_context(
+    ctx: &Context,
+    source_project: &str,
+    output: &str,
+    assets: &[String],
+    scripts: Option<&ScriptEnvironment>,
+) -> (ProjectImportContext, Result<()>) {
     let mut result = ProjectImportContext::default();
-    let outcome = create(ctx, source_project, output, assets, &mut result);
+    let outcome = create(ctx, source_project, output, assets, scripts, &mut result);
     (result, outcome)
 }
+
+/// A file of the project an importer's assemblies were compiled in.
+fn resolve_script_source(library: &str, relative: &str) -> Result<String> {
+    let canonical = eval_symlinks(&sysutil::join(&[library, relative]))
+        .map_err(|e| wrap(&format!("resolve importer source {relative}"), e))?;
+    if !within_directory(&canonical, library) {
+        bail!("importer source resolves outside its project: {relative}");
+    }
+    if !sysutil::stat(&canonical).is_ok_and(|info| info.is_regular() && info.size <= SOURCE_LIMIT) {
+        bail!("importer source is not a bounded regular file: {relative}");
+    }
+    Ok(canonical)
+}
+
 fn create(
     ctx: &Context,
     source_project: &str,
     output: &str,
     assets: &[String],
+    scripts: Option<&ScriptEnvironment>,
     result: &mut ProjectImportContext,
 ) -> Result<()> {
+    // Where the context holds a logical path, relative to its project.
+    let place = |logical: &str| scripts.map_or(logical.to_string(), |env| env.physical(logical));
     if assets.is_empty() || assets.len() > 4096 {
         bail!("project import requires a bounded nonempty asset set");
     }
@@ -469,13 +500,13 @@ fn create(
             path: asset.clone(),
             guid,
         });
-        source_files.insert(asset.clone(), filename);
-        source_files.insert(format!("{asset}.meta"), meta_name);
+        source_files.insert(place(asset), filename);
+        source_files.insert(place(&format!("{asset}.meta")), meta_name);
         let mut folder = logical_dir(asset);
         while folder != "Assets" && folder != "Packages" && folder != "." {
             match resolve_project_import_source(&source_project, &format!("{folder}.meta")) {
                 Ok(folder_meta) => {
-                    source_files.insert(format!("{folder}.meta"), folder_meta);
+                    source_files.insert(place(&format!("{folder}.meta")), folder_meta);
                 }
                 Err(error) if super::is_not_exist(&error) => {}
                 Err(error) => return Err(error),
@@ -503,6 +534,39 @@ fn create(
                 source_files.insert(meta, meta_name);
             }
             source_files.insert(file.path, file.source_path);
+        }
+    }
+    if let Some(environment) = scripts {
+        for script in &environment.scripts {
+            if project_registry_path(script).is_err() || script.ends_with(".meta") {
+                bail!("invalid importer source {script}");
+            }
+            let physical = environment.physical(script);
+            for name in [physical.clone(), format!("{physical}.meta")] {
+                let filename = resolve_script_source(&environment.library, &name)?;
+                source_files.entry(name).or_insert(filename);
+            }
+            let root = project_registry_path(script)?;
+            let mut folder = logical_dir(script);
+            while folder != root && folder != "." {
+                let name = environment.physical(&format!("{folder}.meta"));
+                if source_files.contains_key(&name) {
+                    break;
+                }
+                match resolve_script_source(&environment.library, &name) {
+                    Ok(filename) => {
+                        source_files.insert(name, filename);
+                    }
+                    Err(error) if super::is_not_exist(&error) => {}
+                    Err(error) => return Err(error),
+                }
+                folder = logical_dir(folder);
+            }
+        }
+        for assembly in &environment.assemblies {
+            let name = format!("Library/ScriptAssemblies/{assembly}.dll");
+            let filename = resolve_script_source(&environment.library, &name)?;
+            source_files.insert(name, filename);
         }
     }
     let version_path =

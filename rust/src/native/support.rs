@@ -205,6 +205,12 @@ pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &str) -> Result<T>
     let data = read_file(path)?;
     serde_json::from_slice(&data).map_err(|e| anyhow!("{e}"))
 }
+/// The same for a file whose numbers are hashed as written: `1.0` stays
+/// `1.0`.
+pub(crate) fn read_json_verbatim<T: serde::de::DeserializeOwned>(path: &str) -> Result<T> {
+    let data = read_file(path)?;
+    crate::project::value::decode_use_number(&String::from_utf8_lossy(&data))
+}
 /// Per-character simple lower-casing, without Unicode's context-sensitive
 /// special cases.
 pub(crate) fn rune_lower(text: &str) -> String {

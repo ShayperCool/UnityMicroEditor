@@ -4,6 +4,7 @@
 use serde_json::json;
 use std::{env, fs, path::Path};
 use unity_micro_editor::{
+    playerbake::{self, Val},
     runtimeartifact::{
         self as ra, BuiltinShaderOptions, MeshCpuProjection, Metadata, shader_sources,
     },
@@ -129,7 +130,7 @@ fn model_graph_preserves_authored_order_and_rejects_unsupported_layout() {
 }
 
 #[test]
-fn native_audio_rejects_streaming_and_unknown_load_types() {
+fn native_audio_rejects_unknown_load_types() {
     let Some(root) = fixture("UNITY_WORKER_NATIVE_FIXTURES") else {
         return;
     };
@@ -139,12 +140,14 @@ fn native_audio_rejects_streaming_and_unknown_load_types() {
     // Skip the Object header and the aligned name string.
     let name = le32(&input[start + 40..]) as usize;
     let load_offset = start + ((40 + 4 + name + 3) & !3);
-    // Streaming and anything past the known load types.
-    for load_type in [2u32, 3] {
-        let mut changed = input.clone();
-        put_le32(&mut changed[load_offset..], load_type);
-        assert!(ra::adapt(&changed, "wav").is_err(), "load type {load_type}");
-    }
+    // Streaming reads the same resource; anything past the known load types
+    // is refused.
+    let mut streaming = input.clone();
+    put_le32(&mut streaming[load_offset..], 2);
+    assert!(ra::adapt(&streaming, "wav").is_ok());
+    let mut changed = input.clone();
+    put_le32(&mut changed[load_offset..], 3);
+    assert!(ra::adapt(&changed, "wav").is_err());
 }
 
 #[test]
@@ -1054,4 +1057,138 @@ fn float32_report_members_use_shortest_round_trip_text() {
             audio
         );
     }
+}
+
+// ---- scripted importers and video --------------------------------------------
+
+/// A worker artifact kept with the tests; each is byte-identical to the one
+/// the Editor wrote for the same source.
+fn native_fixture(name: &str) -> Vec<u8> {
+    fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("rust/tests/testdata/native")
+            .join(name),
+    )
+    .unwrap()
+}
+
+fn pointer(value: &Val) -> (i64, i64) {
+    let number = |name: &str| match value.field(name) {
+        Some(Val::I(number)) => *number,
+        Some(Val::U(number)) => *number as i64,
+        _ => 0,
+    };
+    (number("m_FileID"), number("m_PathID"))
+}
+
+#[test]
+fn scripted_import_objects_point_at_scripts_of_their_own_file() {
+    let input = native_fixture("probe.inputactions.artifact");
+    let (output, metadata) = ra::adapt_scripted(&input).unwrap();
+    // The importer object stays behind; the asset and its two references to
+    // the one action keep the local IDs the Editor gave them.
+    assert_eq!(metadata.removed.len(), 1);
+    assert_eq!(metadata.removed[0].class_id, 2089858483);
+    let listed: Vec<(&str, &str)> = metadata
+        .objects
+        .iter()
+        .map(|object| (object.file_id.as_str(), object.type_name.as_str()))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            (
+                "-944628639613478452",
+                "UnityEngine.InputSystem.InputActionAsset"
+            ),
+            (
+                "1078111047217735087",
+                "UnityEngine.InputSystem.InputActionReference"
+            ),
+            (
+                "2019923273695298903",
+                "UnityEngine.InputSystem.InputActionReference"
+            ),
+        ]
+    );
+    assert_eq!(metadata.output_sha256, sha256(&output));
+    assert!(metadata.external_references.is_empty());
+    let written = playerbake::read_serialized(&output).unwrap();
+    // The scripts come first, one per class.
+    assert_eq!(written.len(), 5);
+    let mut classes = Vec::new();
+    for script in &written[..2] {
+        assert_eq!(script.tree.class_id, 115);
+        let value = script.tree.decode(&script.data).unwrap();
+        let text = |name: &str| match value.field(name) {
+            Some(Val::Str(text)) => text.clone(),
+            _ => String::new(),
+        };
+        assert_eq!(text("m_AssemblyName"), "Unity.InputSystem");
+        assert_eq!(text("m_Namespace"), "UnityEngine.InputSystem");
+        classes.push((script.local_id, text("m_ClassName")));
+    }
+    classes.sort_by(|a, b| a.1.cmp(&b.1));
+    assert_eq!(classes[0].1, "InputActionAsset");
+    assert_eq!(classes[1].1, "InputActionReference");
+    for object in &written[2..] {
+        assert_eq!(object.tree.class_id, 114);
+        let class = if object.local_id == -944628639613478452 {
+            classes[0].0
+        } else {
+            classes[1].0
+        };
+        assert_eq!(object.script, Some(class));
+        let value = object.tree.decode(&object.data).unwrap();
+        assert_eq!(pointer(value.field("m_Script").unwrap()), (0, class));
+        if object.local_id != -944628639613478452 {
+            assert_eq!(
+                pointer(value.field("m_Asset").unwrap()),
+                (0, -944628639613478452)
+            );
+        }
+    }
+    // The same artifact gives the same file.
+    assert_eq!(ra::adapt_scripted(&input).unwrap().0, output);
+    // The other profiles do not take script-backed objects.
+    assert!(ra::adapt(&input, "text").is_err());
+}
+
+#[test]
+fn video_clip_takes_its_frames_from_the_source_or_the_transcoded_resource() {
+    let guid = "3766e5c8770fec4a8ad750da9b84d09f";
+    let alias = format!("VirtualArtifacts/Primary/{guid}.resource");
+    for (name, from_source, size) in [
+        ("vp8.webm.artifact", true, 3337),
+        ("vp8-transcoded.webm.artifact", false, 1092),
+    ] {
+        let input = native_fixture(name);
+        let (output, metadata, source) = ra::adapt_video(&input, guid).unwrap();
+        assert_eq!(source, from_source, "{name}");
+        assert_eq!(metadata.objects.len(), 1);
+        assert_eq!(metadata.objects[0].file_id, "32900000");
+        assert_eq!(metadata.objects[0].type_name, "UnityEngine.Video.VideoClip");
+        assert_eq!(metadata.removed.len(), 1);
+        assert_eq!(metadata.removed[0].class_id, 1127);
+        assert_eq!(metadata.resources.len(), 1);
+        assert_eq!(metadata.resources[0].virtual_path, alias);
+        assert_eq!(
+            (metadata.resources[0].offset, metadata.resources[0].size),
+            (0, size)
+        );
+        let written = playerbake::read_serialized(&output).unwrap();
+        assert_eq!(written.len(), 1);
+        let value = written[0].tree.decode(&written[0].data).unwrap();
+        let resource = value.field("m_ExternalResources").unwrap();
+        assert_eq!(resource.field("m_Source"), Some(&Val::Str(alias.clone())));
+    }
+    // A transcoded clip names the resource of its own GUID and no other.
+    let transcoded = native_fixture("vp8-transcoded.webm.artifact");
+    assert!(ra::adapt_video(&transcoded, "00000000000000000000000000000001").is_err());
+    // An artifact without a clip is what the engine leaves of a video it
+    // cannot read.
+    let error = ra::adapt_video(&native_fixture("probe.inputactions.artifact"), guid).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("SerializedFile") || format!("{error:#}").contains("VP8")
+    );
 }

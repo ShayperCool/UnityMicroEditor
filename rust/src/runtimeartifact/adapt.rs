@@ -435,8 +435,8 @@ pub fn read_native_audio_resource(object: &[u8]) -> Result<(Resource, AudioMetad
     r.string_bytes()?;
     let fields = req(
         r.take(24),
-        |fields| le32(&fields[0..4]) <= 1 && le32(&fields[12..16]) == 16,
-        "native audio runtime profile requires 16-bit DecompressOnLoad or CompressedInMemory audio, not streaming",
+        |fields| le32(&fields[0..4]) <= 2 && le32(&fields[12..16]) == 16,
+        "native audio runtime profile requires 16-bit DecompressOnLoad, CompressedInMemory or Streaming audio",
     )?;
     let load_type = le32(&fields[0..4]);
     let channels = le32(&fields[4..8]);
@@ -452,11 +452,13 @@ pub fn read_native_audio_resource(object: &[u8]) -> Result<(Resource, AudioMetad
     {
         bail!("native audio channel/rate/duration or tracker/ambisonic layout is unsupported");
     }
-    // Subsound index + preload/background/legacy3D flags + alignment.
+    // Subsound index + preload/background/legacy3D flags + alignment. A clip
+    // that is not preloaded, or loads in the background, reads the same
+    // resource later.
     req(
         r.take(8),
-        |options| le32(&options[..4]) == 0 && options[4] == 1 && options[5] == 0,
-        "native audio runtime profile requires preloaded, synchronous single-subsound audio",
+        |options| le32(&options[..4]) == 0 && options[4] <= 1 && options[5] <= 1,
+        "native audio runtime profile requires single-subsound audio",
     )?;
     let path = req(
         r.string(),

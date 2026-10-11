@@ -7,6 +7,7 @@ use super::{
     import::run_project_import,
     mesh_cpu::retain_native_model_mesh_cpu,
     resolve_project_import_source,
+    scripted::{generated_material_profile, script_environment_identity, scripted_profile},
     support::{Event, check, join, lower_ext, mkdir_all, read_file, wrap, write_file},
     texture_profile::{native_texture_needs_warm, texture_source, warm_texture_configuration},
 };
@@ -37,6 +38,7 @@ pub fn cold_native_profile(logical: &str) -> bool {
 fn cold_runtime_profile(logical: &str) -> Option<&'static str> {
     match lower_ext(logical).as_str() {
         ".fbx" => Some("fbx"),
+        extension if generated_material_profile(extension) => Some("fbx"),
         _ if texture_source(logical) => Some("texture"),
         extension if runtimeartifact::audio_profile(extension.trim_start_matches('.')) => {
             Some("wav")
@@ -44,7 +46,23 @@ fn cold_runtime_profile(logical: &str) -> Option<&'static str> {
         extension if runtimeartifact::text_profile(extension.trim_start_matches('.')) => {
             Some("text")
         }
+        extension if scripted_profile(extension) => Some("scripted"),
+        // The one container the engine reads video from on Linux.
+        ".webm" => Some("video"),
         _ => None,
+    }
+}
+
+/// What a source's import context holds beyond the sources: nothing, the
+/// Editor's shader name table, or compiled importers.
+fn context_kind(logical: &str) -> u8 {
+    let extension = lower_ext(logical);
+    if scripted_profile(&extension) {
+        2
+    } else if generated_material_profile(&extension) {
+        1
+    } else {
+        0
     }
 }
 
@@ -70,9 +88,15 @@ pub(crate) fn cold_input(
     let meta = read_file(&format!("{source}.meta"))?;
     let guid = meta_guid(&meta)?;
     let meta_sha = sha256(&meta);
-    let signature = sha256(
-        format!("native-runtime-v3\0{environment_sha256}\0{logical}\0{sha}\0{meta_sha}").as_bytes(),
-    );
+    let mut identity =
+        format!("native-runtime-v3\0{environment_sha256}\0{logical}\0{sha}\0{meta_sha}");
+    if cold_runtime_profile(logical) == Some("scripted") {
+        // The importer is compiled code of the project: another compilation
+        // may import the same source differently.
+        identity.push('\0');
+        identity.push_str(&script_environment_identity(&opts.project));
+    }
+    let signature = sha256(identity.as_bytes());
     Ok(NativeColdInput {
         path: logical.into(),
         guid,
@@ -141,10 +165,19 @@ impl NativeProjectImporter {
                 cold.push(logical);
             }
         }
+        // Imports that need more of the Editor in their context run apart
+        // from the others, so that what an asset is imported with does not
+        // depend on what changed along with it.
+        cold.sort_by_key(|logical| context_kind(logical));
         self.pending_native_paths = cold.clone();
         let mut paths = &cold[..];
         while !paths.is_empty() {
-            let count = NATIVE_IMPORT_BATCH_SIZE.min(paths.len());
+            let kind = context_kind(&paths[0]);
+            let count = paths
+                .iter()
+                .take(NATIVE_IMPORT_BATCH_SIZE)
+                .take_while(|logical| context_kind(logical) == kind)
+                .count();
             self.import_cold_batch(ctx, &paths[..count])?;
             paths = &paths[count..];
             self.pending_native_paths = paths.to_vec();
@@ -303,17 +336,24 @@ pub(crate) fn adapt_cold_asset(
         _ => bail!("native primary artifact changed"),
     };
     let extension = lower_ext(&input.path);
+    let mut source_resource = false;
     let adapted = match cold_runtime_profile(&input.path) {
+        Some("video") => {
+            runtimeartifact::adapt_video(&data, &asset.guid).map(|(output, metadata, source)| {
+                source_resource = source;
+                (output, metadata)
+            })
+        }
         Some("texture") => {
             runtimeartifact::adapt_texture(&data, extension.strip_prefix('.').unwrap_or(&extension))
         }
+        Some("scripted") => runtimeartifact::adapt_scripted(&data),
         Some(profile) => runtimeartifact::adapt(&data, profile),
         None => bail!("unsupported native cold profile: {}", input.path),
     };
-    let profile = extension.strip_prefix('.').unwrap_or(&extension);
     let (output, metadata) =
         adapted.map_err(|e| wrap(&format!("adapt native {}", input.path), e))?;
-    if profile == "fbx" && asset.files.len() != 1 {
+    if cold_runtime_profile(&input.path) == Some("fbx") && asset.files.len() != 1 {
         bail!("streamed FBX resources are not supported by the runtime adapter");
     }
     mkdir_all(&sysutil::dir(filename), 0o700)?;
@@ -348,6 +388,26 @@ pub(crate) fn adapt_cold_asset(
     for resource in &metadata.resources {
         if resource.virtual_path != format!("VirtualArtifacts/Primary/{}.resource", asset.guid) {
             bail!("native resource alias differs from source GUID");
+        }
+        if source_resource {
+            // The clip's frames are the source file: keep the revision the
+            // clip was imported from next to the clip.
+            let source = resolve_project_import_source(&opts.project, &input.path)?;
+            let contents = read_file(&source)?;
+            if sha256(&contents) != input.source_sha
+                || resource.offset != 0
+                || resource.size != contents.len() as u64
+            {
+                bail!("video source differs from the imported clip");
+            }
+            let path = format!("{}.source.resource", filename.trim_end_matches(".bin"));
+            write_file(&path, &contents, 0o600)?;
+            result.content.resources.push(NativeContentResource {
+                path,
+                virtual_path: resource.virtual_path.clone(),
+                sha256: input.source_sha.clone(),
+            });
+            continue;
         }
         let mut found: Option<&ProjectImportedFile> = None;
         for file in &asset.files {
@@ -384,7 +444,9 @@ pub(crate) fn adapt_cold_asset(
         model_graph: List<NativeModelGraphObject>,
     }
     let encoded = serde_json::to_string(&metadata)?;
-    let graph: Graph = crate::project::value::decode(&encoded)?;
+    // The graph's hash covers its numbers as written: `1.0` must not come
+    // back as `1`.
+    let graph: Graph = crate::project::value::decode_use_number(&encoded)?;
     result.model_graph = graph.model_graph;
     result.model_graph_sha256 = metadata.model_topology_sha256.clone();
     retain_native_model_mesh_cpu(opts, result)

@@ -164,7 +164,7 @@ pub(crate) fn project_references(project: &str) -> Result<References> {
 /// Authored content or settings that only the native
 /// importer can provide.
 pub(crate) fn may_need_native(project: &str) -> Result<bool> {
-    const NATIVE: [&str; 34] = [
+    const NATIVE: [&str; 35] = [
         ".fbx",
         ".obj",
         ".dae",
@@ -183,6 +183,7 @@ pub(crate) fn may_need_native(project: &str) -> Result<bool> {
         ".shadergraph",
         ".compute",
         ".inputactions",
+        ".webm",
         ".ttf",
         ".otf",
         ".mixer",

@@ -600,7 +600,7 @@ impl Inner {
         }
         let extension = lexpath::lower_ext(logical);
         if extension != ".unity" && extension != ".prefab" {
-            if extension == ".fbx" {
+            if super::native::model_profile(&extension) {
                 return Err(needs_import(logical));
             }
             bail!("native catalog lacks model graph: {logical}");

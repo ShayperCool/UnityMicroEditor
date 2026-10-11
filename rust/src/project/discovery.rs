@@ -607,7 +607,7 @@ impl Inner {
         }
         let current =
             self.critical_of(logical) == source_sha && self.critical_of(&meta_logical) == meta_sha;
-        if lexpath::equal_fold(lexpath::ext(logical), ".fbx") {
+        if super::native::model_profile(&lexpath::lower_ext(logical)) {
             return Ok(!current || self.models.get(&guid).is_none_or(|d| d.is_empty()));
         }
         // An unchanged source the session or the catalog already serves stays
@@ -660,7 +660,7 @@ impl Inner {
                 bail!("authored native dependency closure exceeds supported source bound");
             }
             match lexpath::lower_ext(&logical).as_str() {
-                ".fbx" => {
+                extension if super::native::model_profile(extension) => {
                     heavy.insert(logical);
                     continue;
                 }

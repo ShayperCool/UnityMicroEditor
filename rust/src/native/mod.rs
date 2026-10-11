@@ -13,6 +13,7 @@ mod import;
 mod importer;
 mod mesh_cpu;
 mod probe;
+mod scripted;
 mod shader_cache;
 mod shader_compiler;
 mod support;

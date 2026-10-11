@@ -30,6 +30,10 @@ pub struct Asset {
     pub guid: String,
     #[serde(default)]
     pub directory: bool,
+    /// A script or assembly definition the importer's own code was compiled
+    /// from. The worker builds its `MonoScript` objects from these.
+    #[serde(default)]
+    pub script: bool,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +42,14 @@ pub struct Input {
     #[serde(default)]
     pub unity_version: String,
     pub assets: Vec<Asset>,
+    /// Package roots that are not at their logical place in the context:
+    /// `Packages/<name>` to a directory relative to the project.
+    #[serde(default)]
+    pub roots: BTreeMap<String, String>,
+    /// Serialized Editor singletons the worker reads from the database
+    /// instead of `Library`, by file name such as `Library/ScriptMapper`.
+    #[serde(default)]
+    pub singletons: BTreeMap<String, Vec<u8>>,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -64,6 +76,7 @@ struct Entry {
     wire: [u8; 16],
     directory: bool,
     meta: Vec<u8>,
+    script: bool,
 }
 struct FileHash {
     hash: [u8; 16],
@@ -396,7 +409,7 @@ fn types() -> Vec<Record> {
         })
         .collect()
 }
-fn root_folder(wire: &[u8; 16], logical: &str, project: &Path) -> Vec<u8> {
+fn root_folder(wire: &[u8; 16], logical: &str, physical: &Path) -> Vec<u8> {
     if logical == "Assets" {
         let mut data = wire.to_vec();
         data.extend_from_slice(&[0, 0, 0, 0, 12, 0, 0, 0, 8, 0, 0, 0, 4, 0, 0, 0, 0]);
@@ -408,7 +421,7 @@ fn root_folder(wire: &[u8; 16], logical: &str, project: &Path) -> Vec<u8> {
     for (i, text) in [
         "Packages".to_string(),
         logical[9..].to_string(),
-        project.join(logical).to_string_lossy().into_owned(),
+        physical.to_string_lossy().into_owned(),
     ]
     .iter()
     .enumerate()
@@ -423,20 +436,27 @@ fn root_folder(wire: &[u8; 16], logical: &str, project: &Path) -> Vec<u8> {
 }
 struct Inventory<'a> {
     project: &'a Path,
+    roots: &'a BTreeMap<String, String>,
     entries: BTreeMap<String, Entry>,
     cases: HashMap<String, String>,
     hashes: BTreeMap<String, FileHash>,
     buffer: Vec<u8>,
 }
 impl Inventory<'_> {
+    /// Where the context holds a logical path, relative to the project.
+    fn physical(&self, logical: &str) -> Result<String> {
+        let root = root_path(logical)?;
+        Ok(match self.roots.get(root) {
+            Some(directory) => format!("{directory}{}", &logical[root.len()..]),
+            None => logical.to_string(),
+        })
+    }
     fn add(&mut self, asset: &Asset) -> Result<()> {
         let root = root_path(&asset.path)?.to_string();
+        let physical = self.physical(&asset.path)?;
         for (supplied, expected) in [
-            (&asset.source, self.project.join(&asset.path)),
-            (
-                &asset.meta,
-                self.project.join(format!("{}.meta", asset.path)),
-            ),
+            (&asset.source, self.project.join(&physical)),
+            (&asset.meta, self.project.join(format!("{physical}.meta"))),
         ] {
             if !supplied.is_empty() {
                 ensure!(
@@ -461,9 +481,12 @@ impl Inventory<'_> {
                 "conflicting source registry entry: {}",
                 asset.path
             );
+            if asset.script {
+                self.entries.get_mut(&asset.path).unwrap().script = true;
+            }
             return Ok(());
         }
-        let filename = expected_file(self.project, &asset.path, &asset.source, asset.directory)?;
+        let filename = expected_file(self.project, &physical, &asset.source, asset.directory)?;
         let meta_name = PathBuf::from(format!("{}.meta", filename.display()));
         let (wire, guid, meta) = if asset.path == "Assets" {
             let mut wire = [0; 16];
@@ -479,7 +502,7 @@ impl Inventory<'_> {
         } else {
             expected_file(
                 self.project,
-                &format!("{}.meta", asset.path),
+                &format!("{physical}.meta"),
                 &asset.meta,
                 false,
             )?;
@@ -511,6 +534,7 @@ impl Inventory<'_> {
                 wire,
                 directory: asset.directory,
                 meta,
+                script: asset.script && !asset.directory,
             },
         );
         self.cases.insert(lower, asset.path.clone());
@@ -525,6 +549,7 @@ impl Inventory<'_> {
                 meta: String::new(),
                 guid: String::new(),
                 directory: true,
+                script: false,
             })?;
         }
         Ok(())
@@ -587,8 +612,18 @@ pub fn write(input: Input) -> Result<Report> {
         !database.try_exists()? && fs::symlink_metadata(&database).is_err(),
         "refusing to replace an existing source database; use a new stopped context revision"
     );
+    for (root, directory) in &input.roots {
+        ensure!(
+            root != "Assets"
+                && root_path(root).is_ok_and(|parsed| parsed == root)
+                && logical_path(directory).is_ok()
+                && directory.starts_with("Library/PackageCache/"),
+            "registry package root must map a named package into Library/PackageCache: {root}"
+        );
+    }
     let mut inventory = Inventory {
         project: &project,
+        roots: &input.roots,
         entries: BTreeMap::new(),
         cases: HashMap::new(),
         hashes: BTreeMap::new(),
@@ -621,6 +656,28 @@ pub fn write(input: Input) -> Result<Report> {
         key: b"Version\0".to_vec(),
         value: vec![0xe1, 0xdc, 0xee, 0x6c],
     });
+    if !input.roots.is_empty() {
+        // The worker reads the root folders again, and with them where a
+        // package lies, only when the database states another refresh than
+        // the one it started with.
+        tables.get_mut("Misc").unwrap().push(Record {
+            key: b"refreshVersion\0".to_vec(),
+            value: 1u32.to_le_bytes().to_vec(),
+        });
+    }
+    for (name, data) in &input.singletons {
+        ensure!(
+            logical_path(name).is_ok() && name.starts_with("Library/") && !data.is_empty(),
+            "registry singleton must be a serialized Library file: {name}"
+        );
+        tables
+            .get_mut("SerializedSingletons")
+            .unwrap()
+            .push(Record {
+                key: format!("mem://{name}\0").into_bytes(),
+                value: data.clone(),
+            });
+    }
     tables.insert("PropertyIDToType".into(), types());
     let mut guid_paths = BTreeMap::new();
     let mut children: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -665,6 +722,12 @@ pub fn write(input: Input) -> Result<Report> {
         );
         let mut props = properties(&entry.meta).with_context(|| name.clone())?;
         props.insert("assetPath".into(), format!("{name}\0").into_bytes());
+        if entry.script {
+            props.insert(
+                "scriptCompilationAssetPath".into(),
+                format!("{name}\0").into_bytes(),
+            );
+        }
         for (name, value) in props {
             let mut key = name.into_bytes();
             key.extend_from_slice(&entry.wire);
@@ -675,7 +738,11 @@ pub fn write(input: Input) -> Result<Report> {
             add(
                 "RootFolders",
                 format!("{root}\0").into_bytes(),
-                root_folder(&entry.wire, root, &project),
+                root_folder(
+                    &entry.wire,
+                    root,
+                    &project.join(input.roots.get(root).map_or(root, String::as_str)),
+                ),
             );
         } else {
             children

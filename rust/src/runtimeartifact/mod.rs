@@ -8,11 +8,13 @@ mod files;
 mod mesh_cpu;
 mod model_graph;
 mod player_shader;
+mod scripted;
 mod shader_extract;
 pub mod shader_sources;
 mod texture;
 mod ui;
 mod unityfs_member;
+mod video;
 
 pub use adapt::{
     AudioMetadata, ExternalReference, Metadata, Object, RemovedObject, Resource, adapt,
@@ -28,10 +30,12 @@ pub use model_graph::{
 pub use player_shader::{
     PlayerShaderMetadata, extract_builtin_player_shader, extract_player_shader, read_player_shader,
 };
+pub use scripted::adapt_scripted;
 pub use shader_extract::{shader_extract, shader_extract_command};
 pub use texture::{TextureMetadata, read_texture_resources};
 pub use ui::{adapt_shader, adapt_texture, adapt_ui, texture_profile};
 pub use unityfs_member::{unpack_unityfs_block, verify_unityfs_member};
+pub use video::adapt_video;
 
 use anyhow::{Result, bail};
 

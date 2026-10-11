@@ -522,7 +522,10 @@ fn project_context_copies_source_identity_without_seeding_library() {
             meta: String::new(),
             guid: String::new(),
             directory: false,
+            script: false,
         }],
+        roots: Default::default(),
+        singletons: Default::default(),
     })
     .unwrap();
     assert_eq!(
