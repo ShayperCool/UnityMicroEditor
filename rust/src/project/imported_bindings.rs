@@ -160,6 +160,40 @@ impl ImportedBindingClosure {
         Ok(())
     }
 
+    /// Points a property of a catalog object at an object loaded from its
+    /// authored text: the catalog's own pointer still leads to the copy the
+    /// catalog was built with.
+    pub fn rebind(
+        &mut self,
+        owner: (&str, &str),
+        property: &str,
+        target: (&str, &str, &str),
+    ) -> Result<()> {
+        if !binding_property(property) {
+            bail!(
+                "catalog object {}/{} refers to an edited ScriptableObject through unsupported property {property}",
+                owner.0,
+                owner.1
+            );
+        }
+        let key = format!("{}\0{property}", asset_key(owner.0, owner.1));
+        self.selected.insert(
+            key,
+            value::map([
+                ("ownerGuid", owner.0.into()),
+                ("ownerFileId", owner.1.into()),
+                ("propertyPath", property.into()),
+                ("targetGuid", target.0.into()),
+                ("targetFileId", target.1.into()),
+                ("targetPath", target.2.into()),
+            ]),
+        );
+        if self.selected.len() > 32768 {
+            bail!("imported binding dependency closure exceeds supported bound");
+        }
+        Ok(())
+    }
+
     pub fn result(&self, assets: &BTreeMap<String, Map>) -> Result<Vec<Value>> {
         for binding in self.selected.values() {
             let (guid, id) = (

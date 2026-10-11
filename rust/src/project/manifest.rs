@@ -348,6 +348,7 @@ impl Inner {
         scene_objects: &[Expanded],
     ) -> Result<AssetPreparation> {
         let mut bindings = self.imported_binding_closure();
+        self.authored_scriptables.clear();
         let mut assets: BTreeMap<String, Map> = self.assets.clone();
         let catalog_assets: HashMap<String, Map> = self
             .catalog
@@ -415,12 +416,20 @@ impl Inner {
             let Some(mut a) = assets.remove(&key) else {
                 continue;
             };
+            if value::text(&a, "kind") == "imported"
+                && self.authored_scriptable(&value::text(&a, "path"))?
+            {
+                // Found again below, from its authored text.
+                pending.add_identity(&value::text(&a, "guid"), &value::text(&a, "fileId"))?;
+                continue;
+            }
             self.refresh_asset(&mut a)?;
             let current = asset_key(&value::text(&a, "guid"), &value::text(&a, "fileId"));
             if current != key && assets.contains_key(&current) {
                 bail!("refreshed asset identity collides with another descriptor: {current}");
             }
             bindings.queue(self, &a, &mut pending)?;
+            self.rebind_authored_scriptables(&a, &mut bindings, &mut pending)?;
             let imported = self.imported_source_references(&a, &catalog_assets)?;
             pending.add_all(&imported)?;
             queue_descriptor_references(&a, &mut pending)?;
@@ -438,13 +447,18 @@ impl Inner {
             {
                 continue;
             }
-            if let Some(native) = catalog_assets.get(&key) {
+            let native = match catalog_assets.get(&key) {
+                Some(native) if self.authored_scriptable(&value::text(native, "path"))? => None,
+                other => other,
+            };
+            if let Some(native) = native {
                 let mut a = native.clone();
                 a.insert("kind".into(), "imported".into());
                 let path = value::text(&a, "path").into_owned();
                 assets.insert(key.clone(), a.clone());
                 self.depend(&path)?;
                 bindings.queue(self, &a, &mut pending)?;
+                self.rebind_authored_scriptables(&a, &mut bindings, &mut pending)?;
                 let imported = self.imported_source_references(&a, &catalog_assets)?;
                 pending.add_all(&imported)?;
                 continue;
@@ -519,6 +533,26 @@ impl Inner {
             assets: list.into_iter().map(Value::Object).collect(),
             imported_bindings,
         })
+    }
+
+    fn rebind_authored_scriptables(
+        &mut self,
+        owner: &Map,
+        bindings: &mut super::imported_bindings::ImportedBindingClosure,
+        pending: &mut AssetReferenceWorklist,
+    ) -> Result<()> {
+        let guid = value::text(owner, "guid");
+        for pointer in self.authored_scriptable_references(owner)? {
+            bindings.rebind(
+                (&guid, &pointer.owner),
+                &pointer.property,
+                (&pointer.target, &pointer.target_id, &pointer.target_path),
+            )?;
+            // The Player resolves both ends by their published identities.
+            pending.add_identity(&guid, &pointer.owner)?;
+            pending.add_identity(&pointer.target, &pointer.target_id)?;
+        }
+        Ok(())
     }
 
     /// Runtime prefab descriptors and custom ScriptableObjects remain raw and are

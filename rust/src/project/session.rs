@@ -230,6 +230,9 @@ pub(crate) struct Inner {
     /// model, published under a GUID that no source owns.
     pub derived_native: BTreeMap<String, super::NativeContentFile>,
     pub changed_clip_models: Vec<String>,
+    /// Catalog ScriptableObject sources edited since the catalog was built,
+    /// each with whether it is loaded from its authored text instead.
+    pub authored_scriptables: HashMap<String, bool>,
     pub extra_assets: Vec<String>,
     pub ignored_diagnostics: Vec<PrefabOverrideDiagnostic>,
 }
@@ -339,6 +342,7 @@ impl Inner {
             native_overlays: BTreeMap::new(),
             derived_native: BTreeMap::new(),
             changed_clip_models: Vec::new(),
+            authored_scriptables: HashMap::new(),
             extra_assets: Vec::new(),
             ignored_diagnostics: Vec::new(),
         }
@@ -570,10 +574,11 @@ impl Inner {
             } else {
                 path
             };
-            let stale = self
-                .critical
-                .get(&name)
-                .is_some_and(|expected| !expected.is_empty() && *expected != hash);
+            let stale = self.authored_scriptables.get(logical) != Some(&true)
+                && self
+                    .critical
+                    .get(&name)
+                    .is_some_and(|expected| !expected.is_empty() && *expected != hash);
             self.dependencies.insert(
                 name.clone(),
                 Dependency {

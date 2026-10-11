@@ -602,7 +602,7 @@ fn imported_scriptable_source_keeps_opaque_native_debug_references_in_native_pac
 }
 
 #[test]
-fn imported_scriptable_source_rejects_changed_indirect_native_owner() {
+fn imported_scriptable_source_reads_changed_indirect_native_owner_as_authored() {
     let f = binding_fixture();
     write_fixture_file(
         format!("{}/Assets/OwnerA.asset", f.project),
@@ -630,11 +630,10 @@ fn imported_scriptable_source_rejects_changed_indirect_native_owner() {
     let error = f.session.prepare(&f.output).expect_err(
         "indirect imported owner used a changed source hidden by baseline critical hashes",
     );
-    assert_eq!(
-        error
-            .downcast_ref::<NeedsImportError>()
-            .map(|e| e.path.as_str()),
-        Some("Assets/OwnerB.asset"),
+    // The changed source is read as authored text, where this one lacks a script.
+    assert!(
+        error.downcast_ref::<NeedsImportError>().is_none()
+            && message(&error).contains("raw ScriptableObject Assets/OwnerB.asset"),
         "{}",
         message(&error)
     );
