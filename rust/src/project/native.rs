@@ -385,7 +385,7 @@ impl Inner {
         }
         let new_model =
             profile == ".fbx" && self.models.get(&r.guid).is_none_or(|docs| docs.is_empty());
-        let texture = matches!(profile.as_str(), ".png" | ".jpg" | ".jpeg");
+        let texture = crate::runtimeartifact::texture_profile(profile.trim_start_matches('.'));
         let ui = matches!(profile.as_str(), ".uss" | ".uxml" | ".ttf" | ".otf");
         let shader = profile == ".shader";
         // Baked by this tool from the authored source; see `playerbake`.

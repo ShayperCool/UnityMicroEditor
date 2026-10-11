@@ -9,7 +9,7 @@ use super::{
     support::{
         Event, is_not_exist, lower_ext, mkdir_all, read_file, read_json, text, wrap, write_file,
     },
-    texture_profile::{native_png_needs_warm, validate_native_configuration},
+    texture_profile::{native_texture_needs_warm, validate_native_configuration},
 };
 use crate::{
     cancel::Context,
@@ -278,10 +278,10 @@ impl NativeProjectImporter {
         self.require_current_environment()?;
         let extension = lower_ext(logical);
         let profile = extension.strip_prefix('.').unwrap_or(&extension);
-        if matches!(profile, "uxml" | "uss" | "ttf" | "otf" | "jpg" | "jpeg") {
+        if matches!(profile, "uxml" | "uss" | "ttf" | "otf") {
             return self.import_warm_ui(ctx, logical, &mut HashSet::new());
         }
-        if profile == "png" && native_png_needs_warm(&self.opts.project, logical)? {
+        if native_texture_needs_warm(&self.opts.project, logical)? {
             return self.import_warm_ui(ctx, logical, &mut HashSet::new());
         }
         if matches!(

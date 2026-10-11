@@ -1335,7 +1335,9 @@ fn native_legacy_refresh_candidates_require_exact_source_guid_and_metadata() {
             && cold_native_profile("Assets/Audio.wav")
             && !cold_native_profile("Assets/UI.uxml")
             && !cold_native_profile("Assets/Uncompiled.shader")
-            && !cold_native_profile("Assets/Unverified.jpg")
+            && cold_native_profile("Assets/Photo.JPG")
+            && cold_native_profile("Assets/Scan.tiff")
+            && !cold_native_profile("Assets/Unverified.dds")
     );
 }
 
@@ -1607,12 +1609,12 @@ fn native_texture_profile_preserves_effective_platform_settings_and_compressor_g
     let project = Temp::new();
     let meta = project.path("Assets/Texture.png.meta");
     write(&meta, NATIVE_TEXTURE_PROFILE);
-    assert!(!native_png_needs_warm(&project.1, "Assets/Texture.png").unwrap());
+    assert!(!native_texture_needs_warm(&project.1, "Assets/Texture.png").unwrap());
     write(
         &meta,
         NATIVE_TEXTURE_PROFILE.replacen("overridden: 0", "overridden: 1", 1),
     );
-    assert!(native_png_needs_warm(&project.1, "Assets/Texture.png").unwrap());
+    assert!(native_texture_needs_warm(&project.1, "Assets/Texture.png").unwrap());
     let settings = project.path("ProjectSettings/EditorSettings.asset");
     let data = "--- !u!159 &1\nEditorSettings:\n  m_Bc7TextureCompressor: 0\n";
     write(&settings, data);
@@ -1629,6 +1631,60 @@ fn native_texture_profile_preserves_effective_platform_settings_and_compressor_g
     assert!(
         validate_native_configuration(&project.1, "Assets/Texture.png", &configuration).is_err()
     );
+}
+
+#[test]
+fn native_texture_profile_covers_every_texture_source_and_keeps_bc7_warm() {
+    let project = Temp::new();
+    let profile = |compression: &str, format: &str, crunched: &str| {
+        format!(
+            "guid: 22222222222222222222222222222222\nTextureImporter:\n  textureType: 0\n  textureShape: 1\n  platformSettings:\n  - buildTarget: DefaultTexturePlatform\n    textureCompression: {compression}\n    textureFormat: {format}\n    crunchedCompression: {crunched}\n"
+        )
+    };
+    for name in [
+        "a.png", "a.jpg", "a.JPEG", "a.tga", "a.tif", "a.tiff", "a.bmp", "a.psd", "a.gif", "a.exr",
+        "a.hdr",
+    ] {
+        let logical = format!("Assets/{name}");
+        let meta = project.path(&format!("{logical}.meta"));
+        // Uncompressed, normal and low quality in the automatic format are
+        // imported by a standalone worker, crunched or not.
+        for (compression, crunched) in [("0", "0"), ("1", "0"), ("3", "0"), ("1", "1")] {
+            write(&meta, profile(compression, "-1", crunched));
+            assert!(
+                !native_texture_needs_warm(&project.1, &logical).unwrap(),
+                "{name} {compression} {crunched}"
+            );
+        }
+        // High quality selects BC7; an explicit format may.
+        for (compression, format) in [("2", "-1"), ("1", "25"), ("0", "4")] {
+            write(&meta, profile(compression, format, "0"));
+            assert!(
+                native_texture_needs_warm(&project.1, &logical).unwrap(),
+                "{name} {compression} {format}"
+            );
+        }
+        write(
+            &meta,
+            profile("1", "-1", "0").replacen("textureType: 0", "textureType: 8", 1),
+        );
+        assert!(native_texture_needs_warm(&project.1, &logical).unwrap());
+        // Without importer settings the engine makes a cubemap of the file.
+        write(
+            &meta,
+            "fileFormatVersion: 2\nguid: 22222222222222222222222222222222\n",
+        );
+        let error = native_texture_needs_warm(&project.1, &logical).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("holds no TextureImporter settings")
+        );
+    }
+    // Other sources are not asked for texture metadata.
+    for name in ["a.dds", "a.wav", "a.fbx", "a.uxml"] {
+        assert!(!native_texture_needs_warm(&project.1, &format!("Assets/{name}")).unwrap());
+    }
 }
 
 #[test]

@@ -416,8 +416,11 @@ fn native_replacement_rejects_cross_overlay_dependency_cycle() {
 }
 
 fn new_native_texture_fixture() -> (Fixture, NativeReplacement) {
+    new_native_texture_fixture_at("Assets/NewTexture.png")
+}
+
+fn new_native_texture_fixture_at(logical: &str) -> (Fixture, NativeReplacement) {
     let fixture = fixture_session();
-    let logical = "Assets/NewTexture.png";
     let source = format!("{}/{logical}", fixture.project);
     write_fixture_file(&source, "native texture source bytes");
     write_fixture_file(
@@ -443,6 +446,24 @@ fn new_native_texture_fixture() -> (Fixture, NativeReplacement) {
         ..NativeReplacement::default()
     };
     (fixture, r)
+}
+
+#[test]
+fn native_texture_replacement_covers_the_texture_importer_formats() {
+    for extension in [
+        "jpg", "jpeg", "tga", "tif", "tiff", "bmp", "psd", "gif", "exr", "hdr", "TGA",
+    ] {
+        let (f, r) = new_native_texture_fixture_at(&format!("Assets/NewTexture.{extension}"));
+        let accepted = f.session.replace_native_content(&r);
+        assert!(accepted.is_ok(), "{extension}: {accepted:?}");
+    }
+    let (f, r) = new_native_texture_fixture_at("Assets/NewTexture.dds");
+    let error = f.session.replace_native_content(&r).unwrap_err();
+    assert!(
+        message(&error).contains("native replacement profile is unsupported"),
+        "{}",
+        message(&error)
+    );
 }
 
 #[test]

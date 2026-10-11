@@ -17,10 +17,18 @@ pub fn adapt_ui(input: &[u8], profile: &str) -> Result<(Vec<u8>, Metadata)> {
     adapt_warm_builtin(input, profile)
 }
 
+/// The source formats TextureImporter reads, by lower-case extension.
+pub fn texture_profile(profile: &str) -> bool {
+    matches!(
+        profile,
+        "png" | "jpg" | "jpeg" | "tga" | "tif" | "tiff" | "bmp" | "psd" | "gif" | "exr" | "hdr"
+    )
+}
+
 /// Retains Unity's imported Texture2D, including its chosen native pixel
 /// format and mip chain. It never resizes or recompresses source pixels.
 pub fn adapt_texture(input: &[u8], profile: &str) -> Result<(Vec<u8>, Metadata)> {
-    if !matches!(profile, "png" | "jpg" | "jpeg") {
+    if !texture_profile(profile) {
         bail!("unsupported texture runtime profile {profile:?}");
     }
     adapt_warm_builtin(input, profile)
@@ -34,7 +42,7 @@ pub fn adapt_shader(_input: &[u8]) -> Result<(Vec<u8>, Metadata)> {
 
 fn adapt_warm_builtin(input: &[u8], profile: &str) -> Result<(Vec<u8>, Metadata)> {
     let mut result = Metadata::default();
-    let texture = matches!(profile, "png" | "jpg" | "jpeg");
+    let texture = texture_profile(profile);
     let font = matches!(profile, "ttf" | "otf");
     if input.len() < 64
         || input.len() > MAXIMUM_BYTES

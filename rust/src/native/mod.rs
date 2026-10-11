@@ -46,7 +46,7 @@ pub use probe::{
 pub use shader_cache::verify_compiled_shader_cache;
 pub use support::{JsonF64, is_canceled, is_not_exist};
 pub use texture_profile::{
-    native_png_needs_warm, validate_native_configuration, warm_texture_configuration,
+    native_texture_needs_warm, validate_native_configuration, warm_texture_configuration,
 };
 pub use ui::parse_native_ui_bindings;
 pub use warm::{WarmNativeArtifact, extract_warm_native_ui};
