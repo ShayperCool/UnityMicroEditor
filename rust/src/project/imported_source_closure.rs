@@ -45,8 +45,13 @@ impl Inner {
             .filter(|asset| value::text(asset, "path") == path)
             .map(|asset| number(get(asset, "classId")) == 114)
             .peekable();
+        // A baseline that already reads the source as authored text does not
+        // track it among the native sources.
+        let raw = array(get(&self.baseline, "assets")).iter().any(|asset| {
+            str(asset.field("path")) == path && str(asset.field("kind")) == "scriptableObject"
+        });
         let mut authored = lexpath::equal_fold(lexpath::ext(path), ".asset")
-            && self.critical.contains_key(path)
+            && (raw || self.critical.contains_key(path))
             && held.peek().is_some()
             && held.all(|scriptable| scriptable);
         if authored {
@@ -179,11 +184,11 @@ impl Inner {
             if target_path.is_empty() || !self.authored_scriptable(&target_path)? {
                 continue;
             }
-            // A behaviour the catalog does not publish cannot be reached; its
-            // controller has to be baked with the pointer left to the Player.
-            if !self.catalog.assets.iter().any(|known| {
-                value::text(known, "guid") == guid && value::text(known, "fileId") == owner
-            }) {
+            // The Animator runs copies of the behaviours the controller holds,
+            // not of the objects the catalog publishes: a pointer set on a
+            // published behaviour never reaches a running one. The controller
+            // has to be baked with the pointer left to the Player.
+            if controller {
                 return Err(needs_import(&path));
             }
             result.push(AuthoredPointer {
