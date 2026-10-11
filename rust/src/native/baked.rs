@@ -687,6 +687,7 @@ impl NativeProjectImporter {
             ".physicmaterial" | ".physicsmaterial2d" | ".rendertexture" | ".mixer" => {
                 playerbake::bake_native(&data, &ProjectSources { importer: self })
             }
+            ".shader" => self.bake_shader_source(ctx, logical, &guid, &mut ingredients),
             _ => bail!("no baker for {logical}"),
         };
         // Keeps the cause, so a refusal can be told from a failure.
@@ -781,6 +782,163 @@ impl NativeProjectImporter {
             .seconds("elapsedSeconds", started.elapsed().as_secs_f64())
             .emit();
         Ok(guid)
+    }
+}
+
+/// The hash of every file a baked shader was made from beside its own source,
+/// and the keyword sets of its materials.
+type ShaderIngredients = (BTreeMap<String, String>, Vec<Vec<String>>);
+
+/// The keywords a material source enables.
+fn material_keywords(source: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(source);
+    let mut keywords = Vec::new();
+    let mut listing = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed
+            .strip_prefix("m_ValidKeywords:")
+            .or_else(|| trimmed.strip_prefix("m_InvalidKeywords:"))
+        {
+            listing = rest.trim().is_empty();
+        } else if let (true, Some(keyword)) = (listing, trimmed.strip_prefix("- ")) {
+            keywords.push(keyword.trim().to_string());
+        } else {
+            listing = false;
+        }
+    }
+    keywords.sort();
+    keywords.dedup();
+    keywords
+}
+
+impl NativeProjectImporter {
+    /// What a baked shader was made from beside its own source: the files it
+    /// includes and the materials that use it, each with its hash.
+    fn shader_ingredients(&self, logical: &str, guid: &str) -> Result<ShaderIngredients> {
+        let mut ingredients = BTreeMap::new();
+        let (included, _) =
+            crate::project::collect_shader_source_requirements(&self.opts.project, logical)
+                .map_err(|error| Unsupported(format!("{error:#}")))?;
+        for file in included {
+            if file.path != logical {
+                ingredients.insert(file.path, file.sha256);
+            }
+        }
+        let mut usage = Vec::new();
+        for material in self.session.shader_materials(guid)? {
+            usage.push(material_keywords(&material.source));
+            ingredients.insert(material.path, material.sha256);
+        }
+        usage.sort();
+        usage.dedup();
+        Ok((ingredients, usage))
+    }
+
+    /// Imports a shader with the worker, which parses it, and compiles its
+    /// programs with the engine's shader compiler.
+    fn bake_shader_source(
+        &self,
+        ctx: &Context,
+        logical: &str,
+        guid: &str,
+        ingredients: &mut BTreeMap<String, String>,
+    ) -> Result<Baked> {
+        let (guards, materials) = self.shader_ingredients(logical, guid)?;
+        *ingredients = guards;
+        let environment = super::read_worker_environment(&self.opts.project)?;
+        // The compiler numbers the graphics APIs its own way.
+        let mut platforms = Vec::new();
+        for (renderer, platform) in [(17, 15), (21, 18)] {
+            if environment.graphics_api_mask & (1 << renderer) != 0 {
+                platforms.push(platform);
+            }
+        }
+        let project = playerbake::ShaderProject {
+            platforms,
+            linear: environment.color_space == 1,
+            materials,
+        };
+        let root = sysutil::join(&[&self.opts.output, "native/imports", &random_id()]);
+        mkdir_all(&sysutil::dir(&root), 0o700)?;
+        let import_context = ctx.with_timeout(Duration::from_secs(45));
+        let (report, error) = run_project_import(
+            &import_context,
+            ProbeOptions {
+                project: self.opts.project.clone(),
+                editor: self.opts.editor.clone(),
+                output: root.clone(),
+                timeout: Duration::from_secs(45),
+                ..Default::default()
+            },
+            &[logical.to_string()],
+        );
+        import_context.cancel();
+        if let Some(error) = error {
+            return Err(error);
+        }
+        let primary = report
+            .as_ref()
+            .and_then(|report| report.content.as_ref())
+            .filter(|content| content.source_unchanged && content.assets.len() == 1)
+            .and_then(|content| {
+                content.assets[0]
+                    .files
+                    .iter()
+                    .find(|file| file.name.is_empty())
+            });
+        let Some(primary) = primary else {
+            bail!("native worker produced no artifact for {logical}");
+        };
+        let artifact = match read_file(&primary.path) {
+            Ok(data) if sha256(&data) == primary.sha256 => data,
+            _ => bail!("native artifact of {logical} changed"),
+        };
+        let compile_context = ctx.with_timeout(Duration::from_secs(300));
+        let mut compiler = super::ShaderCompiler::start(
+            &compile_context,
+            &self.opts.editor,
+            &self.opts.project,
+            &sysutil::join(&[&root, "logs"]),
+        )?;
+        let baked = playerbake::bake_shader(&artifact, &project, &mut compiler);
+        drop(compiler);
+        compile_context.cancel();
+        baked
+    }
+
+    /// Bakes again the shaders whose includes or materials have changed
+    /// since they were baked.
+    pub(crate) fn refresh_shaders(&mut self, ctx: &Context) -> Result<()> {
+        let shaders: Vec<(String, String, BTreeMap<String, String>)> = self
+            .entries
+            .values()
+            .filter(|entry| lower_ext(&entry.source_path) == ".shader")
+            .map(|entry| {
+                (
+                    entry.guid.clone(),
+                    entry.source_path.clone(),
+                    entry.ingredient_sha256.clone(),
+                )
+            })
+            .collect();
+        for (guid, logical, baked_from) in shaders {
+            match self.shader_ingredients(&logical, &guid) {
+                Ok((current, _)) if current == baked_from => continue,
+                _ => {}
+            }
+            match self.publish_baked(ctx, &logical, 0) {
+                Ok(_) => {}
+                Err(error) if error.chain().any(|cause| cause.is::<Unsupported>()) => {
+                    Event::new("native-bake-refused")
+                        .with("path", &logical)
+                        .with("reason", &format!("{error:#}"))
+                        .emit();
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 }
 

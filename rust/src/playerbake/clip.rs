@@ -1624,6 +1624,8 @@ fn authored(value: &Val) -> Value {
             number.to_string()
         }),
         Val::Str(text) => Value::String(text.clone()),
+        // A name that is not text reads as the engine's text reader has it.
+        Val::Bytes(bytes) => Value::String(String::from_utf8_lossy(bytes).into_owned()),
         Val::Seq(items) => Value::Array(items.iter().map(authored).collect()),
         Val::Map(fields) => {
             // An object pointer; only an empty one has an authored form here.

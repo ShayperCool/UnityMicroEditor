@@ -433,10 +433,14 @@ impl Inner {
         }
         for (logical, expected) in &r.ingredient_sha256 {
             let source = logical.strip_suffix(".meta").unwrap_or(logical);
-            if profile != ".controller"
-                || !lexpath::equal_fold(lexpath::ext(source), ".mask")
-                || !valid_native_hex(expected, 64)
-            {
+            let guarded = match profile.as_str() {
+                ".controller" => lexpath::equal_fold(lexpath::ext(source), ".mask"),
+                // A baked shader holds the files it includes and the
+                // keywords of the materials that use it.
+                ".shader" => source == logical,
+                _ => false,
+            };
+            if !guarded || !valid_native_hex(expected, 64) {
                 bail!("native ingredient guard is unsupported: {logical}");
             }
             let physical = self.source(logical)?;
@@ -444,7 +448,7 @@ impl Inner {
                 .read(&physical, logical.ends_with(".meta"))
                 .is_ok_and(|(_, actual)| actual == *expected)
             {
-                bail!("avatar mask changed after its controller was baked: {logical}");
+                bail!("{logical} changed after {path} was baked from it");
             }
         }
         for (logical, expected) in &r.config_source_sha256 {

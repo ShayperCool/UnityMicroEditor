@@ -221,7 +221,12 @@ impl TypeTree {
         } else if let Some((array, element)) = self.element(index) {
             let count = u32::from_le_bytes(take(4)?.try_into()?) as usize;
             let value = if node.type_name == "string" {
-                Val::Str(String::from_utf8_lossy(take(count)?).into_owned())
+                // A string that is not text keeps its bytes.
+                let bytes = take(count)?;
+                match std::str::from_utf8(bytes) {
+                    Ok(text) => Val::Str(text.to_string()),
+                    Err(_) => Val::Bytes(bytes.to_vec()),
+                }
             } else {
                 if count > data.len() {
                     bail!("sequence length exceeds its object");
@@ -281,6 +286,14 @@ impl TypeTree {
                     for item in items {
                         self.write(element, item, out)?;
                     }
+                }
+                // Bytes stand for a string that need not be text and for a
+                // sequence of one-byte numbers.
+                Val::Bytes(bytes)
+                    if self.children(element).is_empty() && self.nodes[element].size == 1 =>
+                {
+                    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    out.extend_from_slice(bytes);
                 }
                 _ => return Err(fail("value is not a sequence")),
             }
@@ -388,6 +401,8 @@ pub enum Val {
     F(f32),
     D(f64),
     Str(String),
+    /// The elements of a string or of a sequence of one-byte numbers.
+    Bytes(Vec<u8>),
     Seq(Vec<Val>),
     Map(Vec<(Cow<'static, str>, Val)>),
 }

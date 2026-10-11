@@ -22,6 +22,7 @@ pub mod prepare;
 mod scriptable;
 mod session;
 mod shader_sources;
+mod shader_usage;
 pub mod strconv;
 mod texture;
 mod types;
@@ -39,6 +40,7 @@ pub use expand::{apply_authored_override, resolve_authored_graph};
 pub use native_model::native_model_graph_sha256;
 pub use session::{NeedsImportError, Options, Prepared, Session, manifest_json};
 pub use shader_sources::{collect_shader_source_requirements, validate_shader_source_requirements};
+pub use shader_usage::ShaderMaterial;
 pub use types::{
     AuthoredDependency, AuthoredGraph, AuthoredGraphObject, AuthoredIdentity,
     CompiledShaderSnapshot, Document, List, NativeContentDependency, NativeContentFile,

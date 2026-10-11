@@ -294,6 +294,7 @@ impl NativeProjectImporter {
                 | "physicsmaterial2d"
                 | "rendertexture"
                 | "mixer"
+                | "shader"
         ) {
             return self.import_baked(ctx, logical);
         }
