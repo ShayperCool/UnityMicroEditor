@@ -2319,9 +2319,27 @@ fn baked_native_asset_keeps_its_identity() {
 /// file ID (64 bits), class and length (32 bits each) and bytes, with the
 /// references a build renumbers written back as authored file IDs. Returns
 /// how many objects matched, the sources the baker refused and the ones it
-/// baked differently.
-fn compare_mixers(root: &Path) -> (usize, Vec<String>, Vec<String>) {
+/// baked differently, and how many values a build leaves undefined were
+/// passed over.
+///
+/// A build writes memory nothing has set for a parameter its effect declares
+/// but does not keep. Exactly those values, which the baker names, compare
+/// as equal whatever the build wrote; every other byte has to match.
+fn compare_mixers(root: &Path) -> (usize, Vec<String>, Vec<String>, usize) {
     let (mut matched, mut refused, mut differing) = (0, Vec::new(), Vec::new());
+    let mut passed_over = 0;
+    fn value(mixer: &mut Val, snapshot: usize, index: usize) -> &mut Val {
+        let snapshots = mixer
+            .field_mut("m_MixerConstant")
+            .and_then(|constant| constant.field_mut("snapshots"));
+        let Some(Val::Seq(snapshots)) = snapshots else {
+            panic!("the mixer has no snapshots");
+        };
+        match snapshots[snapshot].field_mut("values") {
+            Some(Val::Seq(values)) => &mut values[index],
+            _ => panic!("the snapshot has no values"),
+        }
+    }
     let mut sources: Vec<PathBuf> = fs::read_dir(root)
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -2340,7 +2358,7 @@ fn compare_mixers(root: &Path) -> (usize, Vec<String>, Vec<String>) {
             let id = i64::from_le_bytes(packed[at..at + 8].try_into().unwrap());
             let class = i32::from_le_bytes(packed[at + 8..at + 12].try_into().unwrap());
             let length = u32::from_le_bytes(packed[at + 12..at + 16].try_into().unwrap()) as usize;
-            expected.push((id, class, &packed[at + 16..at + 16 + length]));
+            expected.push((id, class, packed[at + 16..at + 16 + length].to_vec()));
             at += 16 + length;
         }
         let baked = playerbake::bake_native_objects(
@@ -2356,13 +2374,28 @@ fn compare_mixers(root: &Path) -> (usize, Vec<String>, Vec<String>) {
             Err(error) => panic!("{name}: {error:#}"),
         };
         objects.sort_by_key(|object| object.file_id.parse::<i64>().unwrap());
+        let undefined = playerbake::mixer_undefined_values(&fs::read(&source).unwrap()).unwrap();
+        if !undefined.is_empty() {
+            let layout = playerbake::native_tree(241).unwrap();
+            let baked = objects.iter().find(|object| object.class_id == 241);
+            let mut baked = layout.decode(&baked.unwrap().data).unwrap();
+            let built = expected.iter_mut().find(|object| object.1 == 241).unwrap();
+            let mut decoded = layout.decode(&built.2).unwrap();
+            // Rewriting the object changes nothing but the values set here.
+            assert_eq!(layout.encode(&decoded).unwrap(), built.2, "{name}");
+            for &(snapshot, index) in &undefined {
+                *value(&mut decoded, snapshot, index) = value(&mut baked, snapshot, index).clone();
+            }
+            built.2 = layout.encode(&decoded).unwrap();
+            passed_over += undefined.len();
+        }
         let same = objects.len() == expected.len()
             && objects.iter().zip(&expected).all(|(object, expected)| {
                 (
                     object.file_id.parse::<i64>().unwrap(),
                     object.class_id,
-                    object.data.as_slice(),
-                ) == *expected
+                    &object.data,
+                ) == (expected.0, expected.1, &expected.2)
             });
         if !same {
             let mut found = Vec::new();
@@ -2372,7 +2405,7 @@ fn compare_mixers(root: &Path) -> (usize, Vec<String>, Vec<String>) {
                     differences(
                         &object.file_id,
                         &layout.decode(&object.data).unwrap(),
-                        &layout.decode(expected.2).unwrap(),
+                        &layout.decode(&expected.2).unwrap(),
                         &mut found,
                     );
                 }
@@ -2386,7 +2419,7 @@ fn compare_mixers(root: &Path) -> (usize, Vec<String>, Vec<String>) {
         }
         matched += objects.len();
     }
-    (matched, refused, differing)
+    (matched, refused, differing, passed_over)
 }
 
 /// Mixers authored through the Editor (groups several deep, every built-in
@@ -2395,10 +2428,12 @@ fn compare_mixers(root: &Path) -> (usize, Vec<String>, Vec<String>) {
 /// author, each with the objects of an engine build.
 #[test]
 fn mixers_match_the_engine_build() {
-    let (matched, refused, differing) = compare_mixers(&fixture("mixers"));
+    let (matched, refused, differing, passed_over) = compare_mixers(&fixture("mixers"));
     assert!(refused.is_empty(), "{refused:?}");
     assert!(differing.is_empty(), "{differing:?}");
-    assert!(matched >= 224, "mixer fixtures are missing: {matched}");
+    assert!(matched >= 272, "mixer fixtures are missing: {matched}");
+    // Three of them hold a chorus with its feedback left to the default.
+    assert_eq!(passed_over, 5);
 }
 
 /// `UNITY_PLAYERBAKE_MIXER_CORPUS` names directories of such pairs.
@@ -2413,9 +2448,9 @@ fn mixer_corpus_matches_the_engine_build() {
     };
     let mut failed = 0;
     for root in roots.split(':') {
-        let (matched, refused, differing) = compare_mixers(Path::new(root));
+        let (matched, refused, differing, passed_over) = compare_mixers(Path::new(root));
         eprintln!(
-            "{root}: matched {matched} objects, refused {}, differing {}",
+            "{root}: matched {matched} objects, refused {}, differing {}, undefined values passed over {passed_over}",
             refused.len(),
             differing.len()
         );
@@ -2445,9 +2480,46 @@ fn mixers_the_engine_builds_otherwise_are_refused() {
     let default = read("mixers/A_Default.mixer");
     let flags = read("mixers/X_06AttFlags.mixer");
 
-    // The engine leaves the default feedback of a chorus uninitialized.
+    // A build leaves the feedback of a chorus undefined in a snapshot that
+    // does not store it. That is baked, as the default the effect declares.
+    assert!(
+        playerbake::mixer_undefined_values(flags.as_bytes())
+            .unwrap()
+            .is_empty()
+    );
     let unstored = changed(&flags, "    52c0599e41537ce330924f84d9b78c99: -0.25\n", "");
-    assert!(refused(&unstored).contains("\"Feedback\" of a Chorus effect"));
+    let undefined = playerbake::mixer_undefined_values(unstored.as_bytes()).unwrap();
+    let [(snapshot, index)] = undefined[..] else {
+        panic!("one value is undefined: {undefined:?}");
+    };
+    let (objects, _) =
+        playerbake::bake_native_objects(unstored.as_bytes(), &playerbake::NoNativeSources).unwrap();
+    let mixer = objects
+        .iter()
+        .find(|object| object.class_id == 241)
+        .unwrap();
+    let mixer = playerbake::native_tree(241)
+        .unwrap()
+        .decode(&mixer.data)
+        .unwrap();
+    let values = |snapshot: usize| {
+        let snapshots = mixer
+            .field("m_MixerConstant")
+            .and_then(|constant| constant.field("snapshots"));
+        match snapshots {
+            Some(Val::Seq(snapshots)) => snapshots[snapshot].field("values").cloned(),
+            _ => None,
+        }
+    };
+    let Some(Val::Seq(baked)) = values(snapshot) else {
+        panic!("the snapshot has no values");
+    };
+    assert_eq!(baked[index], Val::F(0.0));
+    // The other snapshot still stores its own.
+    let Some(Val::Seq(other)) = values(1 - snapshot) else {
+        panic!("the snapshot has no values");
+    };
+    assert_eq!(other[index], Val::F(0.5));
     // An effect of a native plugin.
     let plugin = changed(
         &flags,
