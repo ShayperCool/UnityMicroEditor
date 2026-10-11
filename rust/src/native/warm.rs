@@ -297,8 +297,12 @@ pub fn extract_warm_native_ui(
     if !absent(output) {
         bail!("warm native UI output must be new");
     }
+    // The tool's own directory in Library is no part of the Editor's database;
+    // a session writes its output there.
+    let library = sysutil::join(&[project, "Library"]);
     if !canonical_destination(output).is_ok_and(|canonical| canonical == output)
-        || within_directory(output, &sysutil::join(&[project, "Library"]))
+        || within_directory(output, &library)
+            && !within_directory(output, &sysutil::join(&[&library, "UnityMicroEditor"]))
     {
         bail!("warm UI output must be independent of Library without symlink ancestors");
     }
