@@ -39,6 +39,7 @@ pub use discovery::ControllerMask;
 pub use expand::{apply_authored_override, resolve_authored_graph};
 pub use native_model::native_model_graph_sha256;
 pub use session::{NeedsImportError, Options, Prepared, Session, manifest_json};
+pub(crate) use shader_sources::shader_without_comments;
 pub use shader_sources::{collect_shader_source_requirements, validate_shader_source_requirements};
 pub use shader_usage::ShaderMaterial;
 pub use types::{
