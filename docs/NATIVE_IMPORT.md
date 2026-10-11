@@ -197,6 +197,16 @@ Refused:
 
 Not covered: a dedicated server build writes a material without its shader reference. A YAML mapping with a repeated key (`stringTagMap`) is read by this tool's parser before the baker sees it.
 
+### Audio mixers
+
+A `.mixer` is not baked; a source holding one is refused. Its Player form is a derivation, not its fields. Of the four classes of the source, three reach a Player and the effects (`AudioMixerEffectController`, 244) do not:
+
+- `AudioMixerGroupController` (243) keeps its name, its mixer, its GUID as four integers and its children.
+- `AudioMixerSnapshotController` (245) keeps its name, its mixer and its GUID. Its values move into the mixer.
+- `AudioMixerController` (241) keeps the output group, master group, snapshots, start snapshot, suspend threshold and update mode, and gains an `AudioMixerConstant`: the groups in a flat list (parent index, the indices of volume and pitch among the snapshot values, mute, solo, bypass), the effects (type, group index, send target, wet mix index, previous effect, bypass, parameter indices), the count of side-chain buffers, each snapshot as a name hash with one value per index plus transition types and indices, the GUIDs of groups, effects and snapshots, three name buffers, and the exposed parameters as name hashes with value indices.
+
+What is not derived: the order in which values get their indices, the effect types and their chaining (the attenuation effect of a default group leaves no effect entry), the defaults of values a snapshot does not store, the transition lists, and the two hashes. One engine-built mixer (a default one) is at hand, which fixes none of these.
+
 ## UI and fonts
 
 Unchanged UXML, USS and font assets are extracted from an existing Unity import cache rather than imported cold. See [UI_IMPORTS.md](UI_IMPORTS.md).
