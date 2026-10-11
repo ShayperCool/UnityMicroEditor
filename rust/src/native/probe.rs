@@ -12,12 +12,14 @@ use super::{
 use crate::{
     ENGINE_VERSION,
     cancel::{self, Canceled, Context, Flag, Source},
+    lmdb::{self, Record},
     protocol::{
-        ArtifactMetadata, Frame, artifact_metadata, handshake, import_address, import_request,
-        import_response, initialize, prepare, read_frame, shutdown, validate_handshake,
-        worker_hello, worker_log, write_frame,
+        ArtifactMetadata, Frame, ImportAddress, artifact_metadata, handshake, import_address,
+        import_request, import_response, initialize, prepare, read_frame, shutdown,
+        validate_handshake, worker_hello, worker_log, write_frame,
     },
-    registry, sha256, sysutil,
+    registry::{self, native_hash},
+    sha256, sysutil,
 };
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -143,6 +145,72 @@ pub struct ProbeOptions {
 pub struct NativeImportJob {
     pub guid: String,
     pub importer: i32,
+    /// The import reads artifacts of other jobs of the run (a sprite atlas
+    /// packs the sprites of its textures). It is given to a second worker,
+    /// started once the results of the first are in the context's ArtifactDB.
+    pub dependent: bool,
+}
+
+/// What a worker returned for one import, as the Editor keeps it in its
+/// ArtifactDB: the address, the result ID and the dependency, metadata and
+/// statistics blobs.
+pub(crate) struct ImportRecord {
+    pub address: ImportAddress,
+    pub result: [u8; 16],
+    pub blobs: Vec<Vec<u8>>,
+}
+
+/// Writes the results of a stopped worker into the ArtifactDB that worker
+/// left in the context, as the Editor commits them: each address gets its
+/// result as the current revision. The next worker resolves an artifact
+/// dependency through these tables and reads the files from the DataStore.
+pub(crate) fn commit_import_results(project: &str, records: &[ImportRecord]) -> Result<()> {
+    let path = sysutil::join(&[project, "Library/ArtifactDB"]);
+    let data = std::fs::read(&path).map_err(|e| os_error("read", &path, &e))?;
+    let mut tables = lmdb::Image::open(&data)?.tables()?;
+    let names = [
+        "CurrentRevisions",
+        "ImportAddressToImportResultIDs",
+        "ImportResultIDToArtifactDependencies",
+        "ImportResultIDToArtifactMetaInfo",
+        "ImportResultIDToImportStats",
+    ];
+    if names.iter().any(|name| !tables.contains_key(*name)) || !tables.contains_key("DBVersion") {
+        bail!("worker ArtifactDB lacks the pinned tables");
+    }
+    for record in records {
+        // `ArtifactDBWriteTxn::SetCurrentRevision`: XXH3-128 of the GUID,
+        // the importer ID and the importer hash.
+        let address = &record.address;
+        let key =
+            native_hash(&[&address[..16], &address[16..20], &address[24..40]].concat()).to_vec();
+        let mut current = address[..40].to_vec();
+        current.extend_from_slice(&record.result);
+        let mut history = address[..40].to_vec();
+        history.extend_from_slice(&8u32.to_le_bytes());
+        history.extend_from_slice(&1u32.to_le_bytes());
+        history.extend_from_slice(&record.result);
+        let values = [current, history]
+            .into_iter()
+            .map(|value| (key.clone(), value))
+            .chain(
+                record
+                    .blobs
+                    .iter()
+                    .map(|blob| (record.result.to_vec(), blob.clone())),
+            );
+        for (name, (key, value)) in names.iter().zip(values) {
+            let table = tables.get_mut(*name).unwrap();
+            table.retain(|existing| existing.key != key);
+            table.push(Record { key, value });
+        }
+    }
+    for table in tables.values_mut() {
+        table.sort_by(|a, b| a.key.cmp(&b.key));
+    }
+    let image = lmdb::build(&tables)?;
+    std::fs::write(&path, image).map_err(|e| os_error("write", &path, &e))?;
+    Ok(())
 }
 
 /// The worker connection with socket error texts such as "i/o timeout". The context
@@ -278,6 +346,14 @@ impl Drop for Watcher {
     }
 }
 
+/// What every worker of one run shares.
+struct Pass<'a> {
+    listener: &'a Arc<TcpListener>,
+    service: &'a DataStoreService,
+    initialize: &'a [u8],
+    prepare: &'a [u8],
+}
+
 struct Probe<'a> {
     ctx: &'a Context,
     opts: &'a ProbeOptions,
@@ -368,7 +444,13 @@ impl Probe<'_> {
         report
             .stages
             .insert("dataStoreReady".into(), Self::seconds(stage));
-        let result = self.with_worker(report, &listener, &service, &initialize, &prepare);
+        let run = Pass {
+            listener: &listener,
+            service: &service,
+            initialize: &initialize,
+            prepare: &prepare,
+        };
+        let result = self.with_workers(report, &run);
         report.data_store_rss_kib = rss_kib(i64::from(service.pid));
         let result = join([result.err(), service.stop().err()]);
         if let Ok(status) = service.status() {
@@ -377,15 +459,42 @@ impl Probe<'_> {
         result.map_or(Ok(()), Err)
     }
 
+    /// One worker for the jobs that stand alone, then one for those that read
+    /// their artifacts.
+    fn with_workers(&self, report: &mut ProbeReport, run: &Pass) -> Result<()> {
+        if self.opts.jobs.is_empty() {
+            bail!("native import context has no source asset jobs");
+        }
+        let (dependent, first): (Vec<_>, Vec<_>) =
+            self.opts.jobs.iter().partition(|job| job.dependent);
+        let mut records = Vec::new();
+        if dependent.is_empty() {
+            return self.with_worker(report, run, "worker", &first, &mut records);
+        }
+        if first.is_empty() {
+            bail!("a dependent native import has no job to depend on");
+        }
+        self.with_worker(report, run, "worker", &first, &mut records)?;
+        commit_import_results(self.project, &records)?;
+        self.with_worker(report, run, "worker-dependent", &dependent, &mut records)
+    }
+
     fn with_worker(
         &self,
         report: &mut ProbeReport,
-        listener: &Arc<TcpListener>,
-        service: &DataStoreService,
-        initialize: &[u8],
-        prepare: &[u8],
+        run: &Pass,
+        name: &str,
+        jobs: &[&NativeImportJob],
+        records: &mut Vec<ImportRecord>,
     ) -> Result<()> {
-        let stdout = create_new(&sysutil::join(&[&self.logs, "worker-stdout.log"]), 0o600)?;
+        let Pass {
+            listener, service, ..
+        } = *run;
+        let log = sysutil::join(&[&self.logs, &format!("{name}.log")]);
+        let stdout = create_new(
+            &sysutil::join(&[&self.logs, &format!("{name}-stdout.log")]),
+            0o600,
+        )?;
         let port = listener
             .local_addr()
             .map_err(|e| anyhow!("{}", sysutil::errno_text(&e)))?
@@ -401,7 +510,7 @@ impl Probe<'_> {
                 "-projectPath",
                 self.project,
                 "-logFile",
-                &sysutil::join(&[&self.logs, "worker.log"]),
+                &log,
                 "-srvPort",
                 &port.to_string(),
                 "-parentPid",
@@ -430,14 +539,7 @@ impl Probe<'_> {
         let worker = Waiter::new(child);
         report.worker_pid = i64::from(worker.pid);
         let mut connection = None;
-        let result = self.converse(
-            report,
-            listener,
-            &mut connection,
-            stage,
-            initialize,
-            prepare,
-        );
+        let result = self.converse(report, run, &mut connection, stage, &log, jobs, records);
         let mut error = result.err();
         report.worker_rss_kib = rss_kib(i64::from(worker.pid));
         if let Some(connection) = &mut connection {
@@ -481,15 +583,23 @@ impl Probe<'_> {
         error.map_or(Ok(()), Err)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn converse(
         &self,
         report: &mut ProbeReport,
-        listener: &Arc<TcpListener>,
+        run: &Pass,
         slot: &mut Option<Connection>,
         mut stage: Instant,
-        initialize: &[u8],
-        prepare: &[u8],
+        log: &str,
+        jobs: &[&NativeImportJob],
+        records: &mut Vec<ImportRecord>,
     ) -> Result<()> {
+        let Pass {
+            listener,
+            initialize,
+            prepare,
+            ..
+        } = *run;
         // Context cancellation also releases Accept and reads before their deadline.
         let watcher = Watcher::new(self.ctx, listener);
         let local = listener
@@ -520,7 +630,7 @@ impl Probe<'_> {
             .insert("workerHandshake".into(), Self::seconds(stage));
         let frame = capture_frame(connection, &self.output, report)?;
         report.worker_name = worker_hello(&frame.payload)?;
-        validate_worker_version(&sysutil::join(&[&self.logs, "worker.log"]))?;
+        validate_worker_version(log)?;
         stage = Instant::now();
         let application = |payload: &[u8]| Frame {
             kind: 1,
@@ -538,10 +648,7 @@ impl Probe<'_> {
         report
             .stages
             .insert("workerReadyTotal".into(), Self::seconds(self.started));
-        if self.opts.jobs.is_empty() {
-            bail!("native import context has no source asset jobs");
-        }
-        for job in &self.opts.jobs {
+        for job in jobs {
             stage = Instant::now();
             write_frame(connection, &application(prepare))?;
             let frame = receive_message(connection, &self.output, report, WORKER_PREPARED)?;
@@ -585,6 +692,11 @@ impl Probe<'_> {
                 bail!("artifact metadata address differs from request");
             }
             report.imports.last_mut().unwrap().metadata = metadata;
+            records.push(ImportRecord {
+                address,
+                result: frame.payload[56..72].try_into()?,
+                blobs: response.artifact_blobs,
+            });
         }
         report.stage = "native-imports-completed".into();
         drop(watcher);

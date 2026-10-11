@@ -20,12 +20,16 @@ use std::{
 /// The model formats a native import serves, by lower-case extension with
 /// its dot.
 pub(crate) fn model_profile(extension: &str) -> bool {
-    matches!(extension, ".fbx" | ".obj" | ".dae")
+    matches!(extension, ".fbx" | ".obj" | ".dae" | ".blend")
 }
 
 pub(crate) fn native_content_class(type_name: &str) -> i32 {
     match type_name {
         "UnityEngine.Texture2D" => 28,
+        "UnityEngine.Cubemap" => 89,
+        "UnityEngine.Texture3D" => 117,
+        "UnityEngine.Texture2DArray" => 187,
+        "UnityEngine.Sprite" => 213,
         "UnityEngine.AudioClip" => 83,
         "UnityEngine.GameObject" => 1,
         "UnityEngine.Transform" => 4,
@@ -544,6 +548,16 @@ impl Inner {
                 }
             }
         }
+        if texture && !expected.is_empty() {
+            // The sprites of a texture come and go with its importer
+            // settings, and so does its shape.
+            expected = r
+                .content
+                .objects
+                .iter()
+                .map(|o| (o.file_id.clone(), o.type_name.clone()))
+                .collect();
+        }
         if mixer && !expected.is_empty() {
             // The groups and snapshots of a mixer come and go with its
             // source; what stays is the mixer itself.
@@ -579,7 +593,9 @@ impl Inner {
             } else if text {
                 expected.insert("4900000".into(), "UnityEngine.TextAsset".into());
             } else if texture {
-                expected.insert("2800000".into(), "UnityEngine.Texture2D".into());
+                for value in r.content.objects.iter() {
+                    expected.insert(value.file_id.clone(), value.type_name.clone());
+                }
             } else if shader {
                 expected.insert("4800000".into(), "UnityEngine.Shader".into());
             } else if ui {
@@ -641,12 +657,25 @@ impl Inner {
                 bail!("text replacement must contain only TextAsset 4900000");
             }
         } else if texture {
-            if objects.len() != 1
-                || objects[0].file_id != "2800000"
-                || objects[0].type_name != "UnityEngine.Texture2D"
+            // The texture under the main local ID of its class, and the
+            // sprites TextureImporter made of it.
+            let mut textures = objects
+                .iter()
+                .filter(|o| o.type_name != "UnityEngine.Sprite");
+            let main = textures.next();
+            if textures.next().is_some()
+                || !main.is_some_and(|o| {
+                    matches!(
+                        (o.file_id.as_str(), o.type_name.as_str()),
+                        ("2800000", "UnityEngine.Texture2D")
+                            | ("8900000", "UnityEngine.Cubemap")
+                            | ("18700000", "UnityEngine.Texture2DArray")
+                            | ("11700000", "UnityEngine.Texture3D")
+                    )
+                })
                 || !r.model_graph.is_empty()
             {
-                bail!("texture replacement must contain one Texture2D");
+                bail!("texture replacement must contain one texture and its sprites");
             }
         } else if shader {
             if objects.len() != 1
@@ -872,7 +901,11 @@ impl Inner {
         // A source may be outside the baseline closure while still being a genuine
         // project asset. Publish its verified runtime identities alongside the
         // native descriptor so raw references can resolve it.
-        if new_source || lexpath::equal_fold(lexpath::ext(&owned.source_path), ".mixer") {
+        let extension = lexpath::ext(&owned.source_path).to_ascii_lowercase();
+        if new_source
+            || extension == ".mixer"
+            || crate::runtimeartifact::texture_profile(extension.trim_start_matches('.'))
+        {
             for value in owned.content.objects.iter() {
                 self.assets
                     .entry(asset_key(&owned.guid, &value.file_id))

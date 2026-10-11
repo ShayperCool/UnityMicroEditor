@@ -51,7 +51,7 @@ unity-micro-editor native-environment --project /absolute/project
 
 ## During a run
 
-Before expanding a scene, the runner walks the GUID references of the selected scene, its runtime prefabs and their authored dependencies. New or changed models (FBX, OBJ, COLLADA), audio files, VP8 video, textures, text assets and `.inputactions` files are imported in batches of up to 32 assets per worker; the sections below list the source formats and the importer settings each covers. An unchanged baseline, catalog or cache entry is skipped, as is a PNG or JPEG in the supported raw profile.
+Before expanding a scene, the runner walks the GUID references of the selected scene, its runtime prefabs and their authored dependencies. New or changed models (FBX, OBJ, COLLADA, Blender), audio files, VP8 video, textures, text assets and `.inputactions` files are imported in batches of up to 32 assets per worker; the sections below list the source formats and the importer settings each covers. An unchanged baseline, catalog or cache entry is skipped, as is a PNG or JPEG in the supported raw profile.
 
 Each cache entry records an `environmentSha256`. The fingerprint covers the pinned protocol revision, the Unity path, the exact SHA-256 of `ProjectSettings.asset`, the parsed settings and the wire environment. An index with no fingerprint, or a different one, is skipped and its assets are imported again. Changing this environment while a runner is live requires restarting the runner.
 
@@ -65,6 +65,28 @@ Each cache entry records an `environmentSha256`. The fingerprint covers the pinn
 
 Worker parameters come from an exact copy of `ProjectSettings.asset`: color space, shader precision and the Linux graphics API override. The profile is limited to the Linux standalone target, with OpenGLCore and Vulkan as the verified automatic API set. Unsupported or ambiguous settings are refused. The applied values and the settings hash are written to `environment` in the report.
 
+### What an importer asks of the project
+
+An importer does not read project settings itself. It asks its import context for a named value, a *custom dependency*, and the Editor registers those values when it refreshes its database (`RefreshInternalV2`) and sends them to each worker with `Initialize` and `Prepare`. A worker has only what it was sent, and an importer that asks for a key the message lacks ends the worker with `std::bad_optional_access`. That is why a standalone worker used to abort on BC7: `CompressorGlobalSettingsProviderFromImportContext::GetBc7Compressor` asks for `graphics/bc7-compressor`. Nothing outside the Editor binary is involved; the BC7 compressors (`libcompress_bc7e.so`, `libispc_texcomp.so`) are libraries the worker loads like the Editor does.
+
+The coordinator sends the keys a texture, model or sprite atlas import asks for, each with the value the pinned Editor registers. The values were read back from an Editor's ArtifactDB, through a scripted importer that depends on every key:
+
+| Key | Value | From |
+| --- | --- | --- |
+| `graphics/shader-precision-model` | setting + 1 | `shaderPrecisionModel` |
+| `graphics/metal-needs-renderpass-fbfetch-fallback` | 1 | not on Linux |
+| `graphics/texture-import-overrides` | 1 | no size or compression override |
+| `graphics/default-texture-compression-format` | format + 1 | DXTC is the verified default |
+| `graphics/texture-platform-settings` | 1 | the Linux standalone target |
+| `graphics/active-color-space` | color space + 2 | `m_ActiveColorSpace` |
+| `graphics/normal-map-encoding` | 2 | DXT5nm, the standalone default |
+| `graphics/lightmap-encoding` | 3 | high quality, the standalone default |
+| `graphics/hdr-cubemap-encoding` | 3 | high quality, the standalone default |
+| `graphics/bc7-compressor` | 1, then the compressor | `m_Bc7TextureCompressor` of `EditorSettings.asset`; the default is ISPC (2) |
+| `2d/spriteatlas-import-mode` | 1, or 2 for importer-based atlases | `m_SpritePackerMode` of `EditorSettings.asset` is 5 |
+
+A project without `EditorSettings.asset` gets the values the Editor writes into a new one. A project that sets a normal map, lightmap or HDR cubemap encoding for the standalone target is refused, because no artifact was compared under such a setting; an entry for another target is ignored. The file's hash is part of the environment fingerprint.
+
 For each linked file the coordinator checks length, storage bounds and the native XXH3-128 content key, and records SHA-256. Serialized files are inspected with Unity's standalone `binary2text`, which does not start an Editor. Checked files are saved in `<output>/artifacts`, wire payloads in `<output>/frame-*.bin` and process logs in `<output>/logs`.
 
 ## Textures
@@ -73,9 +95,19 @@ TextureImporter receives the project's default texture compression format and an
 
 Every source format TextureImporter reads goes through one route: `.png`, `.jpg`, `.jpeg`, `.tga`, `.tif`, `.tiff`, `.bmp`, `.psd`, `.gif`, `.exr` and `.hdr`. `.dds` and other container formats are not covered.
 
-A standalone worker imports an ordinary 2D texture (`textureType: 0`, `textureShape: 1`) whose selected platform uses the automatic format (`textureFormat: -1`) uncompressed or with normal or low quality compression, crunched or not, with the importer's resize and mip chain. For those settings the worker's artifact was compared with the artifact the Editor writes for the same source and `.meta` and is byte-identical: DXT1, DXT5, BC6H for the HDR formats, the crunched form, RGB24 and a readable texture without mips. Each of the eleven formats was loaded in a Player as a new asset.
+A standalone worker imports a texture with the importer's resize and mip chain under the settings below. For each of them the worker's artifact was compared with the artifact the Editor writes for the same source and `.meta`, and is byte-identical (54 fixtures, written through the Editor's own importer API):
 
-High quality compression selects BC7, whose compressor the main Editor supplies as an import dependency; a standalone worker aborts on such an import. BC7, an explicit format, a platform override, and every other texture type or shape (sprites, normal maps, cubemaps) therefore use an exact warm artifact from an existing Unity import; a changed source or `.meta` without such an artifact is refused. For BC7, the compressor setting recorded in the artifact database is checked against `EditorSettings.asset`, and its hash is part of the cache key.
+- The automatic format (`textureFormat: -1`) at every compression quality, crunched or not: uncompressed, normal and low quality (DXT1, DXT5, BC6H for the HDR formats) and high quality, which selects BC7.
+- An explicit format: Alpha8, ARGB16, RGB24, RGBA32, RGB16, R16, RG16, R8, RGBA64, RGBAHalf, RGBAFloat, RGB9E5, DXT1, DXT5, their crunched forms, BC4, BC5, BC6H and BC7. A format of another platform family (ETC, ASTC, PVRTC) was not compared.
+- A `Standalone` platform override of size, format or quality. An override for another platform is ignored, as the engine ignores it.
+- The texture types Default, NormalMap (from a normal map and from a height map), GUI, Cursor, Cookie, Lightmap, DirectionalLightmap, Shadowmask, SingleChannel and Sprite.
+- The shapes 2D, Cube (automatic and cylindrical mapping, with and without specular or diffuse convolution, LDR and HDR), 2D array and 3D.
+
+A sprite texture yields its Texture2D and one Sprite per sprite, single or multiple, under the local IDs the Editor gives them (`21300000`, or the IDs of the `.meta`'s `nameFileIdTable`); a cube, an array or a volume yields a Cubemap (`8900000`), a Texture2DArray (`18700000`) or a Texture3D (`11700000`) in place of the Texture2D. The adapter keeps these objects as imported and drops the importer.
+
+Loaded in a Player as new assets, with pixels read back: BC7 from the automatic format, from an explicit format and from a platform override, RGBA64, BC6H, a resized DXT5 override, normal maps in DXT5 and BC7, a lightmap, a single channel texture, a cubemap in DXT1 and one in BC6H (a face copied out), a texture array (a slice copied out) and a volume. Sprites, single, with a custom pivot and border, and one of a multiple sheet, were each drawn by a `SpriteRenderer` through a camera.
+
+A setting outside this list keeps to an exact warm artifact from an existing Unity import; a changed source or `.meta` without such an artifact is refused. For a warm BC7 artifact, the compressor setting recorded in the artifact database is checked against `EditorSettings.asset`, and its hash is part of the cache key.
 
 A `.meta` that holds a GUID but no `TextureImporter` block is refused. The engine reads it as a version 1 importer and makes an 8x8 cubemap of the file, in the Editor as in a worker, so there is no Texture2D to deliver; the Editor writes the block when it first sees the file.
 
@@ -95,7 +127,17 @@ A model without a material of its own gets one from the importer, which looks up
 
 Both were loaded in a Player as new assets: hierarchy, mesh and, for `.obj`, the generated material under the Editor's local ID. That material refers to the built-in `Standard` shader; it renders only in a host that holds that shader, and shows the error shader otherwise.
 
-`.blend` is not imported: the importer starts Blender to convert the file, and without Blender on `PATH` it leaves an asset with an import log and no model.
+### Blender files
+
+The model importer does not read a `.blend`. `FBXImporter::ConvertToFBXFile` starts Blender, and imports the FBX it exports:
+
+```
+blender -b <project>/Assets/.../file.blend -P <Editor>/Data/Tools/Unity-BlenderToFBX.py -- <project>/Temp/FBXExport/<guid>.fbx
+```
+
+The program is found through `PATH` (`execvp`), in the Editor as in a worker; the script is the Editor's own and runs inside Blender. A worker started by this tool inherits the tool's `PATH`, so nothing else is needed on a machine that has Blender, and the artifact is byte-identical to the Editor's with the shader name table above (compared with Blender 5.2.2). Without a `blender` on `PATH` the importer leaves an asset with an import log and no model, so the tool refuses the import before starting a worker and names the missing program. A sandbox that hides the program from the worker has the same effect: a snap-packaged Blender does not start inside `bwrap`, for one.
+
+Loaded in a Player as a new asset: a mesh with its material. A `.blend` with a camera or a light yields those components, which the static model profile refuses, as it does for an FBX.
 
 ## Video
 
@@ -409,9 +451,9 @@ Unchanged UXML, USS and font assets are extracted from an existing Unity import 
 ## Limits
 
 - The wire protocol, LMDB schema and DataStore layout were derived for one Unity version and are not a stable public API. A worker version mismatch is refused, and another engine version needs its own verification.
-- There is no proven general support for animation inside models, skinned meshes, complex model settings, arbitrary texture settings, platform overrides, custom AssetPostprocessors or every dependency of an arbitrary project.
-- `.blend` models, video other than VP8 `.webm`, ScriptedImporter assets other than `.inputactions`, sprite atlases and compute shaders are not imported; a scene that refers to a new one needs a catalog built by the Editor.
-- `.obj`, `.dae` and `.inputactions` need files of an Editor run of the project (the shader name table, the script assemblies); a project that was only ever prepared with a reused host and never opened in an Editor has none, and such an import is refused with that reason.
+- There is no proven general support for animation inside models, skinned meshes, complex model settings, texture formats of other platform families, custom AssetPostprocessors or every dependency of an arbitrary project. A project with an `AssetPostprocessor` for textures imports them in the Editor through that script; a standalone worker has no script assemblies and does not run it.
+- Video other than VP8 `.webm`, ScriptedImporter assets other than `.inputactions` and compute shaders are not imported; a scene that refers to a new one needs a catalog built by the Editor.
+- `.obj`, `.dae`, `.blend` and `.inputactions` need files of an Editor run of the project (the shader name table, the script assemblies); a project that was only ever prepared with a reused host and never opened in an Editor has none, and such an import is refused with that reason.
 - A model's generated material uses the built-in `Standard` shader and depends on the host holding it.
 - A shader is delivered only in the cases listed under [Shaders](#shaders); a shader of a project with a scriptable render pipeline and a compute shader still need a catalog built by the Editor.
 - The store reader handles inline and concatenated storage, limits one file to 64 MiB and refuses other layouts. The LMDB reader targets the observed Linux x64 format.

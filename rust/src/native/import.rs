@@ -241,6 +241,11 @@ pub fn run_project_import_with(
             .unwrap_or_default(),
         singletons: Default::default(),
     };
+    if assets.iter().any(|asset| lower_ext(asset) == ".blend")
+        && let Err(error) = super::scripted::require_blender()
+    {
+        return (None, Some(error));
+    }
     if assets
         .iter()
         .any(|asset| generated_material_profile(&lower_ext(asset)))
@@ -268,6 +273,7 @@ pub fn run_project_import_with(
         opts.jobs.push(NativeImportJob {
             guid: asset.guid.clone(),
             importer: -1,
+            dependent: lower_ext(&asset.path) == ".spriteatlasv2",
         });
     }
     // The importers' own sources are registered, not imported.
