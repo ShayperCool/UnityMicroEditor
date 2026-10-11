@@ -2313,3 +2313,224 @@ fn baked_native_asset_keeps_its_identity() {
         fs::read(fixture("native/K_Upper.mask.bin")).unwrap()
     );
 }
+
+/// Compares every `<name>.mixer` / `<name>.mixer.bin` pair of a directory.
+/// The second holds the objects the engine built from the first, each as
+/// file ID (64 bits), class and length (32 bits each) and bytes, with the
+/// references a build renumbers written back as authored file IDs. Returns
+/// how many objects matched, the sources the baker refused and the ones it
+/// baked differently.
+fn compare_mixers(root: &Path) -> (usize, Vec<String>, Vec<String>) {
+    let (mut matched, mut refused, mut differing) = (0, Vec::new(), Vec::new());
+    let mut sources: Vec<PathBuf> = fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "mixer")
+        })
+        .collect();
+    sources.sort();
+    for source in sources {
+        let name = source.file_name().unwrap().to_string_lossy().into_owned();
+        let packed = fs::read(root.join(format!("{name}.bin"))).unwrap();
+        let mut expected = Vec::new();
+        let mut at = 0;
+        while at < packed.len() {
+            let id = i64::from_le_bytes(packed[at..at + 8].try_into().unwrap());
+            let class = i32::from_le_bytes(packed[at + 8..at + 12].try_into().unwrap());
+            let length = u32::from_le_bytes(packed[at + 12..at + 16].try_into().unwrap()) as usize;
+            expected.push((id, class, &packed[at + 16..at + 16 + length]));
+            at += 16 + length;
+        }
+        let baked = playerbake::bake_native_objects(
+            &fs::read(&source).unwrap(),
+            &playerbake::NoNativeSources,
+        );
+        let (mut objects, _) = match baked {
+            Ok(baked) => baked,
+            Err(error) if error.is::<Unsupported>() => {
+                refused.push(format!("{name}: {error}"));
+                continue;
+            }
+            Err(error) => panic!("{name}: {error:#}"),
+        };
+        objects.sort_by_key(|object| object.file_id.parse::<i64>().unwrap());
+        let same = objects.len() == expected.len()
+            && objects.iter().zip(&expected).all(|(object, expected)| {
+                (
+                    object.file_id.parse::<i64>().unwrap(),
+                    object.class_id,
+                    object.data.as_slice(),
+                ) == *expected
+            });
+        if !same {
+            let mut found = Vec::new();
+            for (object, expected) in objects.iter().zip(&expected) {
+                if object.class_id == expected.1 && object.data != expected.2 {
+                    let layout = playerbake::native_tree(object.class_id as i64).unwrap();
+                    differences(
+                        &object.file_id,
+                        &layout.decode(&object.data).unwrap(),
+                        &layout.decode(expected.2).unwrap(),
+                        &mut found,
+                    );
+                }
+            }
+            differing.push(format!(
+                "{name}: {} objects for {} {found:?}",
+                objects.len(),
+                expected.len()
+            ));
+            continue;
+        }
+        matched += objects.len();
+    }
+    (matched, refused, differing)
+}
+
+/// Mixers authored through the Editor (groups several deep, every built-in
+/// effect, sends and ducking, snapshots, transitions, exposed parameters, a
+/// mixer playing into another) and hand-written ones the Editor would not
+/// author, each with the objects of an engine build.
+#[test]
+fn mixers_match_the_engine_build() {
+    let (matched, refused, differing) = compare_mixers(&fixture("mixers"));
+    assert!(refused.is_empty(), "{refused:?}");
+    assert!(differing.is_empty(), "{differing:?}");
+    assert!(matched >= 224, "mixer fixtures are missing: {matched}");
+}
+
+/// `UNITY_PLAYERBAKE_MIXER_CORPUS` names directories of such pairs.
+#[test]
+fn mixer_corpus_matches_the_engine_build() {
+    let Some(roots) = std::env::var("UNITY_PLAYERBAKE_MIXER_CORPUS")
+        .ok()
+        .filter(|value| !value.is_empty())
+    else {
+        eprintln!("skipped: set UNITY_PLAYERBAKE_MIXER_CORPUS");
+        return;
+    };
+    let mut failed = 0;
+    for root in roots.split(':') {
+        let (matched, refused, differing) = compare_mixers(Path::new(root));
+        eprintln!(
+            "{root}: matched {matched} objects, refused {}, differing {}",
+            refused.len(),
+            differing.len()
+        );
+        for reason in refused.iter().chain(&differing) {
+            eprintln!("  {reason}");
+        }
+        failed += differing.len();
+    }
+    assert_eq!(failed, 0);
+}
+
+/// What a build cannot be followed in is refused with its reason.
+#[test]
+fn mixers_the_engine_builds_otherwise_are_refused() {
+    let read = |name: &str| fs::read_to_string(fixture(name)).unwrap();
+    let refused = |source: &str| {
+        let error = playerbake::bake_native(source.as_bytes(), &playerbake::NoNativeSources)
+            .expect_err("the mixer is refused");
+        assert!(error.is::<Unsupported>(), "{error:#}");
+        error.to_string()
+    };
+    let changed = |source: &str, from: &str, to: &str| {
+        let changed = source.replacen(from, to, 1);
+        assert_ne!(changed, source, "{from:?} is not in the fixture");
+        changed
+    };
+    let default = read("mixers/A_Default.mixer");
+    let flags = read("mixers/X_06AttFlags.mixer");
+
+    // The engine leaves the default feedback of a chorus uninitialized.
+    let unstored = changed(&flags, "    52c0599e41537ce330924f84d9b78c99: -0.25\n", "");
+    assert!(refused(&unstored).contains("\"Feedback\" of a Chorus effect"));
+    // An effect of a native plugin.
+    let plugin = changed(
+        &flags,
+        "m_EffectName: Lowpass",
+        "m_EffectName: Vendor Limiter",
+    );
+    assert!(refused(&plugin).contains("not built into the engine"));
+    // A parameter list of another engine.
+    let renamed = changed(
+        &flags,
+        "m_ParameterName: Resonance",
+        "m_ParameterName: Slope",
+    );
+    assert!(refused(&renamed).contains("without its parameter \"Resonance\""));
+    // The engine reads a transition type it does not know as another.
+    let transition = changed(
+        &default,
+        "m_TransitionOverrides: {}",
+        "m_TransitionOverrides:\n    9a9afe3e66bd4a56a990dc8ce370365b: 9",
+    );
+    assert!(refused(&transition).contains("unknown transition type"));
+    let silent = changed(
+        &default,
+        "m_Snapshots:\n  - {fileID: 24500006}",
+        "m_Snapshots: []",
+    );
+    assert!(refused(&silent).contains("without snapshots"));
+    let shared = changed(
+        &default,
+        "m_Pitch: ad25f5b2c33c36863b09448c27423b56",
+        "m_Pitch: 9a9afe3e66bd4a56a990dc8ce370365b",
+    );
+    assert!(refused(&shared).contains("shares its GUID"));
+    let foreign = format!("{default}--- !u!21 &5\nMaterial:\n  m_Name: Stray\n");
+    assert!(refused(&foreign).contains("object of class 21"));
+    // A group without its mixer.
+    let alone = changed(
+        &default,
+        "--- !u!241 &24100000\nAudioMixerController:",
+        "--- !u!243 &24100000\nAudioMixerGroupController:",
+    );
+    assert!(refused(&alone).contains("object of class 244"));
+}
+
+/// A baked mixer publishes the mixer, its groups and its snapshots under
+/// their authored file IDs, and names the mixer it plays into.
+#[test]
+fn baked_mixer_keeps_its_identities() {
+    let bake = |name: &str| {
+        playerbake::bake_native(
+            &fs::read(fixture(name)).unwrap(),
+            &playerbake::NoNativeSources,
+        )
+        .unwrap()
+    };
+    let parent = bake("mixers/I_Parent.mixer");
+    assert!(parent.externals.is_empty());
+    let mut types: Vec<&str> = parent
+        .objects
+        .iter()
+        .map(|(_, name)| name.as_str())
+        .collect();
+    types.sort();
+    assert_eq!(
+        types,
+        [
+            "UnityEngine.Audio.AudioMixer",
+            "UnityEngine.Audio.AudioMixerGroup",
+            "UnityEngine.Audio.AudioMixerGroup",
+            "UnityEngine.Audio.AudioMixerSnapshot",
+        ]
+    );
+    assert!(
+        parent
+            .objects
+            .contains(&("24100000".to_string(), types[0].to_string()))
+    );
+    let objects = playerbake::read_serialized(&parent.file).unwrap();
+    assert_eq!(objects.len(), parent.objects.len());
+    assert!(objects.iter().any(|object| object.local_id == 24100000));
+
+    let child = bake("mixers/J_Child.mixer");
+    assert_eq!(child.externals.len(), 1);
+    let source = fs::read_to_string(fixture("mixers/J_Child.mixer")).unwrap();
+    assert!(source.contains(&format!("guid: {}", child.externals[0].guid)));
+}

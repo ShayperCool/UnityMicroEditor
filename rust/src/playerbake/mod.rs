@@ -11,6 +11,7 @@ mod humanoid;
 mod managed;
 mod mask;
 mod material;
+mod mixer;
 mod native;
 mod override_controller;
 mod serialized;

@@ -9,6 +9,7 @@ use super::{
     mask::bake_mask_object,
     mask_tree,
     material::{self, ShaderFacts},
+    mixer,
     serialized::{self, External, Object},
     settle::{self, Settle},
     source::{get, text},
@@ -85,6 +86,8 @@ enum How {
     Material,
     /// `mask.rs`, which controllers read masks with as well.
     Mask,
+    /// `mixer.rs`, which bakes the objects of a mixer source together.
+    Mixer,
 }
 
 macro_rules! class {
@@ -101,7 +104,7 @@ macro_rules! class {
     };
 }
 
-static CLASSES: [Class; 9] = [
+static CLASSES: [Class; 12] = [
     Class {
         id: MASK,
         managed: "UnityEngine.AvatarMask",
@@ -140,6 +143,9 @@ static CLASSES: [Class; 9] = [
         How::Fields(settle::lighting_settings)
     ),
     class!(21, "UnityEngine.Material", How::Material),
+    class!(241, "UnityEngine.Audio.AudioMixer", How::Mixer),
+    class!(243, "UnityEngine.Audio.AudioMixerGroup", How::Mixer),
+    class!(245, "UnityEngine.Audio.AudioMixerSnapshot", How::Mixer),
 ];
 
 const MASK: i32 = 319;
@@ -174,7 +180,18 @@ pub(super) struct References<'a> {
     externals: Vec<External>,
 }
 
-impl References<'_> {
+impl<'a> References<'a> {
+    pub(super) fn new(locals: &'a [i64]) -> Self {
+        References {
+            locals,
+            externals: Vec::new(),
+        }
+    }
+
+    pub(super) fn into_externals(self) -> Vec<External> {
+        self.externals
+    }
+
     pub(super) fn pointer(&mut self, value: &Value, path: &str) -> Result<Val> {
         let map = match value {
             Value::Null => return Ok(Val::Zero),
@@ -457,6 +474,21 @@ pub fn bake_native_objects(
     {
         documents.retain(|document| document.stripped || document.class_id != MONO_BEHAVIOUR);
     }
+    // A mixer source holds effect objects no Player has, and its objects are
+    // derived together.
+    if documents
+        .iter()
+        .any(|document| document.class_id == mixer::MIXER)
+    {
+        return mixer::bake(
+            &documents,
+            [
+                native_tree(mixer::MIXER)?,
+                native_tree(mixer::GROUP)?,
+                native_tree(mixer::SNAPSHOT)?,
+            ],
+        );
+    }
     let mut locals = Vec::new();
     for document in &documents {
         if document.stripped || class(document.class_id).is_none() {
@@ -490,6 +522,12 @@ pub fn bake_native_objects(
                 tree.encode(&material::bake(&document.data, &mut references, sources)?)?
             }
             How::Mask => bake_mask_object(&document.data)?,
+            How::Mixer => {
+                return Err(unsupported(format!(
+                    "{} outside a mixer source",
+                    document.type_name
+                )));
+            }
         };
         objects.push(NativeObject {
             file_id: document.file_id.clone(),
