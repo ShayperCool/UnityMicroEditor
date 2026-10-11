@@ -354,6 +354,21 @@ impl Inner {
         path: &str,
         size: u64,
     ) -> Result<LargeNativeDiscoveryProof> {
+        // A clip baked in this session is proven by the revision it was baked
+        // from, whatever the catalog was built with.
+        let baked = self.native_overlays.values().find(|overlay| {
+            lexpath::equal_fold(lexpath::ext(&overlay.source_path), ".anim")
+                && self.source(&overlay.source_path).ok().as_deref() == Some(path)
+        });
+        if let Some(baked) = baked
+            && size <= MAX_COOKED_NATIVE_DISCOVERY_BYTES
+        {
+            return Ok(LargeNativeDiscoveryProof {
+                logical: baked.source_path.clone(),
+                source_sha: baked.source_sha256.clone(),
+                observed: HashMap::new(),
+            });
+        }
         let catalog = &self.catalog;
         if size > MAX_COOKED_NATIVE_DISCOVERY_BYTES
             || !lexpath::equal_fold(lexpath::ext(path), ".anim")
@@ -397,13 +412,14 @@ impl Inner {
         let (mut source_sha, mut meta_sha) = (String::new(), String::new());
         for dependency in &self.catalog.source_dependencies {
             if dependency.path == logical {
-                if dependency.bytes != size as i64
-                    || !valid_native_hex(&dependency.sha256, 64)
+                if !valid_native_hex(&dependency.sha256, 64)
                     || !source_sha.is_empty() && source_sha != dependency.sha256
                 {
-                    bail!(
-                        "oversized native discovery source revision/size differs from its cooked catalog: {logical}"
-                    );
+                    bail!("oversized native discovery source proof is invalid: {logical}");
+                }
+                // Another size is another revision, like another hash.
+                if dependency.bytes != size as i64 {
+                    return Err(needs_import(&logical));
                 }
                 source_sha = dependency.sha256.clone();
             } else if dependency.path == meta_logical {
