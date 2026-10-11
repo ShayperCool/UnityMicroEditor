@@ -1164,7 +1164,10 @@ fn baked_controller_carries_its_behaviours_and_their_scripts() {
     assert_eq!(classes.iter().filter(|&&class| class == 91).count(), 1);
     assert_eq!(classes.iter().filter(|&&class| class == 114).count(), 3);
     assert_eq!(classes.iter().filter(|&&class| class == 115).count(), 2);
-    assert!(objects.is_sorted_by_key(|object| object.local_id));
+    // The scripts lead, so the Player has read the script of a behaviour
+    // before the behaviour, wherever its ID sorts: one of these is negative.
+    assert!(objects.is_sorted_by_key(|object| (object.tree.class_id != 115, object.local_id)));
+    assert!(objects.iter().any(|object| object.local_id < 0));
     for object in &objects {
         // The Player finds the class of a behaviour through the script type
         // table, which has to name a `MonoScript` object of the file.
