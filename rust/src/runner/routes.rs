@@ -212,6 +212,7 @@ pub fn prepare_content_routes(
     compiled: Option<&CompileUpdate>,
     initializers: &Value,
     script_types: &BTreeMap<String, String>,
+    root: Option<&NativeProjectImporter>,
     importers: &mut ContentImporters,
     changed_paths: &[String],
     failed: &mut String,
@@ -275,6 +276,15 @@ pub fn prepare_content_routes(
             apply_compiled_bindings(&session, compiled, script_types);
         }
         apply_builtin_shaders(&session, &opts.builtin_shaders)?;
+        // What the root session knows of the script assemblies serves the
+        // clips and controllers a content scene bakes too.
+        if let Some(root) = root {
+            cached.importer.script_assemblies = root.script_assemblies.clone();
+            cached
+                .importer
+                .set_behaviour_layouts(ctx, root.behaviour_layouts.clone())
+                .map_err(|e| wrap(&format!("prepare content scene {scene}"), e))?;
+        }
         let prepared = cached
             .importer
             .prepare(ctx)

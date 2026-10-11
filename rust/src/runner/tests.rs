@@ -602,6 +602,7 @@ SceneRoots:
             None,
             &Value::Null,
             &none,
+            None,
             cache,
             changed,
             &mut String::new(),
