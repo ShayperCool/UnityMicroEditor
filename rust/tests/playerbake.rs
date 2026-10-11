@@ -418,10 +418,6 @@ impl playerbake::ControllerSources for Tree {
 /// Puts the parts of a controller that have no fixed order or identity into
 /// a comparable form: the name table by hash, clip references by first use.
 fn normalize(mut value: Val) -> Val {
-    // Compared separately: the baker reserves an upper bound.
-    if let Some(size) = value.field_mut("m_ControllerSize") {
-        *size = Val::Zero;
-    }
     if let Some(Val::Seq(names)) = value.field_mut("m_TOS") {
         names.sort_by_key(|pair| match pair.field("first") {
             Some(Val::U(hash)) => *hash,
@@ -493,20 +489,7 @@ fn compare_controllers(roots: &[PathBuf], tree: &Tree) -> (usize, Vec<String>) {
                         layout.decode(&actual).unwrap(),
                         layout.decode(&expected).unwrap(),
                     );
-                    let size = |value: &Val| match value.field("m_ControllerSize") {
-                        Some(Val::U(size)) => *size,
-                        _ => panic!("controller has no size"),
-                    };
                     let mut out = Vec::new();
-                    if size(&actual) < size(&expected)
-                        || (size(&expected) == 0) != (size(&actual) == 0)
-                    {
-                        out.push(format!(
-                            "reserves {}, engine needs {}",
-                            size(&actual),
-                            size(&expected)
-                        ));
-                    }
                     let (actual, expected) = (normalize(actual), normalize(expected));
                     differences("", &actual, &expected, &mut out);
                     if out.is_empty() {
@@ -533,7 +516,7 @@ fn compare_controllers(roots: &[PathBuf], tree: &Tree) -> (usize, Vec<String>) {
 }
 
 /// Controllers authored through the Editor API and built by the engine. The
-/// name table and the reserved size are compared as described in `normalize`.
+/// name table is compared as described in `normalize`.
 #[test]
 fn controllers_match_the_engine_build() {
     let assets = fixture("controllers/Assets");
