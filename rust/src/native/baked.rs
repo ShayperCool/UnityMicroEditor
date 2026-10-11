@@ -10,7 +10,8 @@ use super::{
 use crate::{
     cancel::Context,
     playerbake::{
-        self, Baked, ClipFacts, ClipSources, ControllerSources, Mask, ScriptIdentity, Unsupported,
+        self, Baked, BehaviourScript, ClipFacts, ClipSources, ControllerSources, Mask,
+        ScriptIdentity, ScriptLayout, Unsupported,
     },
     project::{NativeContentDependency, NativeContentFile, NativeContentObject, NativeReplacement},
     registry::meta_guid,
@@ -90,6 +91,38 @@ impl ControllerSources for ProjectSources<'_> {
         let source = resolve_project_import_source(&self.importer.opts.project, &path)?;
         playerbake::read_mask(&read_file(&source)?)
     }
+    fn behaviour(&self, guid: &str) -> Result<Option<BehaviourScript>> {
+        // The engine drops a behaviour whose script the project lacks. A
+        // script this session does not know may still exist for the engine,
+        // so it is refused here rather than dropped.
+        let Some(layout) = self.importer.behaviour_layouts.get(guid) else {
+            return Err(Unsupported(format!(
+                "state machine behaviour of script {guid}, whose class is unknown or not a behaviour"
+            ))
+            .into());
+        };
+        let identity = self.script(guid)?;
+        if (
+            &identity.class_name,
+            &identity.namespace,
+            &identity.assembly,
+        ) != (&layout.class_name, &layout.namespace, &layout.assembly)
+        {
+            return Err(Unsupported(format!(
+                "state machine behaviour of script {guid}, whose class changed since its fields were read"
+            ))
+            .into());
+        }
+        Ok(Some(BehaviourScript {
+            identity,
+            layout: layout.clone(),
+        }))
+    }
+}
+
+/// Whether a controller source holds state machine behaviours.
+pub(super) fn holds_behaviours(source: &[u8]) -> bool {
+    contains(source, b"--- !u!114 ")
 }
 
 /// The baked clips of one imported model, published as derived content.
@@ -271,6 +304,55 @@ impl NativeProjectImporter {
         let mut session = self.session.lock();
         session.index_guids()?;
         Ok(session.path_of(guid).to_string())
+    }
+
+    /// Takes the field layouts of the current script assemblies. A published
+    /// controller whose behaviours were laid out differently is baked again.
+    pub fn set_behaviour_layouts(
+        &mut self,
+        ctx: &Context,
+        layouts: BTreeMap<String, ScriptLayout>,
+    ) -> Result<()> {
+        let changed: Vec<String> = layouts
+            .iter()
+            .filter(|(guid, layout)| self.behaviour_layouts.get(*guid) != Some(layout))
+            .map(|(guid, _)| guid.clone())
+            .chain(
+                self.behaviour_layouts
+                    .keys()
+                    .filter(|guid| !layouts.contains_key(*guid))
+                    .cloned(),
+            )
+            .collect();
+        self.behaviour_layouts = layouts;
+        let controllers: Vec<String> = self
+            .entries
+            .values()
+            .filter(|entry| lower_ext(&entry.source_path) == ".controller")
+            .map(|entry| entry.source_path.clone())
+            .collect();
+        for logical in controllers {
+            let Ok(source) = resolve_project_import_source(&self.opts.project, &logical) else {
+                continue;
+            };
+            if !read_file(&source).is_ok_and(|data| {
+                holds_behaviours(&data)
+                    && changed.iter().any(|guid| contains(&data, guid.as_bytes()))
+            }) {
+                continue;
+            }
+            match self.publish_baked(ctx, &logical, 0) {
+                Ok(guid) => self.refresh_dependents(ctx, &guid, &logical, 1)?,
+                Err(error) if error.chain().any(|cause| cause.is::<Unsupported>()) => {
+                    Event::new("native-bake-refused")
+                        .with("path", &logical)
+                        .with("reason", &format!("{error:#}"))
+                        .emit();
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     /// Bakes an authored animation source and publishes it as native content,
