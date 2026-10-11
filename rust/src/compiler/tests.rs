@@ -2968,16 +2968,14 @@ fn compiler_behaviour_layouts_sdk() {
     for (guid, layout) in &actual {
         assert_eq!(layout, &expected[guid], "{}", layout.class_name);
     }
-    // What the engine cuts off or stores through a registry is refused.
+    // What grows past the reader's bound on its way down to the engine's
+    // depth limit, or is stored through a registry, is refused.
     let refused: BTreeSet<&str> = actual
         .values()
         .filter(|layout| !layout.unsupported.is_empty())
         .map(|layout| layout.class_name.as_str())
         .collect();
-    assert_eq!(
-        refused,
-        BTreeSet::from(["SmbDeep", "SmbDeep2", "SmbDepth", "SmbManaged"])
-    );
+    assert_eq!(refused, BTreeSet::from(["SmbDeep", "SmbManaged"]));
     let callbacks: BTreeSet<&str> = actual
         .values()
         .filter(|layout| layout.overrides_state_machine_callbacks)
