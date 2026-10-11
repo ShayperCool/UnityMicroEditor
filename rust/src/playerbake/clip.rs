@@ -791,3 +791,110 @@ pub fn bake_clip(yaml: &[u8], sources: &dyn ClipSources) -> Result<Baked> {
         externals: Vec::new(),
     })
 }
+
+/// Turns a decoded editor-form clip into the mapping an authored `.anim`
+/// parses to. Both come from the same serialization, so the field names
+/// agree; scalars become the text Unity would have written.
+fn authored(value: &Val) -> Value {
+    match value {
+        Val::Zero => Value::Null,
+        Val::Bool(flag) => Value::String((*flag as u8).to_string()),
+        Val::I(number) => Value::String(number.to_string()),
+        Val::U(number) => Value::String(number.to_string()),
+        // The shortest text that reads back as the same single.
+        Val::F(number) => Value::String(if number.is_infinite() {
+            if *number > 0.0 {
+                "Infinity"
+            } else {
+                "-Infinity"
+            }
+            .to_string()
+        } else {
+            number.to_string()
+        }),
+        Val::Str(text) => Value::String(text.clone()),
+        Val::Seq(items) => Value::Array(items.iter().map(authored).collect()),
+        Val::Map(fields) => {
+            // An object pointer; only an empty one has an authored form here.
+            if let (Some(file), Some(path)) = (value.field("m_FileID"), value.field("m_PathID")) {
+                let null = matches!((file, path), (Val::I(0), Val::I(0)));
+                let id = if null { "0" } else { "1" };
+                return Value::Object(Map::from_iter([(
+                    "fileID".to_string(),
+                    Value::String(id.to_string()),
+                )]));
+            }
+            Value::Object(
+                fields
+                    .iter()
+                    .map(|(name, field)| (name.to_string(), authored(field)))
+                    .collect(),
+            )
+        }
+    }
+}
+
+/// The clips of an imported model, baked from the import worker's artifact.
+pub struct ModelClips {
+    /// One ContentFile holding every clip that could be baked.
+    pub baked: Option<Baked>,
+    /// Name and loop setting of each baked clip, by local file ID.
+    pub facts: Vec<(String, String, bool)>,
+    /// Local file ID and reason of each clip the baker refuses.
+    pub refused: Vec<(String, String)>,
+}
+
+/// Bakes the animation clips an imported model holds. The worker leaves them
+/// in the Editor's form, which is the form an authored `.anim` has.
+pub fn bake_model_clips(artifact: &[u8]) -> Result<ModelClips> {
+    let mut result = ModelClips {
+        baked: None,
+        facts: Vec::new(),
+        refused: Vec::new(),
+    };
+    let mut objects = Vec::new();
+    let mut identities = Vec::new();
+    for object in serialized::read(artifact)? {
+        if object.tree.class_id != 74 {
+            continue;
+        }
+        let decoded = object.tree.decode(&object.data)?;
+        let Value::Object(fields) = authored(&decoded) else {
+            bail!("model animation clip is not a structure");
+        };
+        let file_id = object.local_id.to_string();
+        let mut scripts = Scripts {
+            sources: &NoScripts,
+            used: Vec::new(),
+        };
+        match clip_object(&fields, &mut scripts) {
+            Ok(data) => {
+                let looping = match get(&fields, "m_AnimationClipSettings") {
+                    Value::Object(settings) => flag(get(settings, "m_LoopTime"), "clip")?,
+                    _ => false,
+                };
+                result
+                    .facts
+                    .push((file_id.clone(), text(get(&fields, "m_Name"))?, looping));
+                identities.push((file_id, "UnityEngine.AnimationClip".to_string()));
+                objects.push(Object {
+                    local_id: object.local_id,
+                    tree: clip_tree()?,
+                    data,
+                });
+            }
+            Err(error) if error.is::<super::Unsupported>() => {
+                result.refused.push((file_id, error.to_string()));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    if !objects.is_empty() {
+        result.baked = Some(Baked {
+            file: serialized::write(&objects, &[])?,
+            objects: identities,
+            externals: Vec::new(),
+        });
+    }
+    Ok(result)
+}

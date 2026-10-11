@@ -12,8 +12,8 @@ mod source;
 mod typetree;
 
 pub use clip::{
-    ClipSources, MAX_SOURCE_BYTES, NoScripts, ScriptIdentity, bake_clip, bake_clip_object,
-    script_local_id,
+    ClipSources, MAX_SOURCE_BYTES, ModelClips, NoScripts, ScriptIdentity, bake_clip,
+    bake_clip_object, bake_model_clips, script_local_id,
 };
 pub use controller::{
     ClipFacts, ControllerSources, Mask, bake_controller, bake_controller_object, read_clip_facts,
@@ -21,14 +21,14 @@ pub use controller::{
 };
 pub use freeform::{Freeform, precompute as precompute_freeform};
 pub use override_controller::{bake_override, bake_override_object};
-pub use serialized::{External, Object, write};
+pub use serialized::{External, Object, Read, read as read_serialized, write};
 pub use typetree::{TypeTree, Val};
 
 use anyhow::Result;
 use std::sync::LazyLock;
 
 static CLIP_TREE: LazyLock<Result<TypeTree, String>> = LazyLock::new(|| {
-    TypeTree::parse(include_bytes!("engine/type-74.bin")).map_err(|error| error.to_string())
+    TypeTree::parse(&include_bytes!("engine/type-74.bin")[..]).map_err(|error| error.to_string())
 });
 
 /// The Player layout of `AnimationClip` in the pinned engine.
@@ -39,7 +39,7 @@ pub fn clip_tree() -> Result<&'static TypeTree> {
 }
 
 static SCRIPT_TREE: LazyLock<Result<TypeTree, String>> = LazyLock::new(|| {
-    TypeTree::parse(include_bytes!("engine/type-115.bin")).map_err(|error| error.to_string())
+    TypeTree::parse(&include_bytes!("engine/type-115.bin")[..]).map_err(|error| error.to_string())
 });
 
 /// The Player layout of `MonoScript` in the pinned engine.
@@ -50,7 +50,7 @@ pub fn script_tree() -> Result<&'static TypeTree> {
 }
 
 static CONTROLLER_TREE: LazyLock<Result<TypeTree, String>> = LazyLock::new(|| {
-    TypeTree::parse(include_bytes!("engine/type-91.bin")).map_err(|error| error.to_string())
+    TypeTree::parse(&include_bytes!("engine/type-91.bin")[..]).map_err(|error| error.to_string())
 });
 
 /// The Player layout of `AnimatorController` in the pinned engine.
@@ -61,7 +61,7 @@ pub fn controller_tree() -> Result<&'static TypeTree> {
 }
 
 static OVERRIDE_TREE: LazyLock<Result<TypeTree, String>> = LazyLock::new(|| {
-    TypeTree::parse(include_bytes!("engine/type-221.bin")).map_err(|error| error.to_string())
+    TypeTree::parse(&include_bytes!("engine/type-221.bin")[..]).map_err(|error| error.to_string())
 });
 
 /// The Player layout of `AnimatorOverrideController` in the pinned engine.
