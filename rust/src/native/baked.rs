@@ -75,6 +75,13 @@ impl ClipSources for ProjectSources<'_> {
             local_id: playerbake::script_local_id(guid),
         })
     }
+    // The clip taking its pose from this one is baked again when this one
+    // changes; see `refresh_dependents`.
+    fn clip(&self, guid: &str) -> Result<Vec<u8>> {
+        let path = self.path(guid, ".anim", "additive reference clip")?;
+        let source = resolve_project_import_source(&self.importer.opts.project, &path)?;
+        read_file(&source)
+    }
 }
 
 impl ControllerSources for ProjectSources<'_> {
@@ -324,13 +331,19 @@ impl NativeProjectImporter {
                     .cloned(),
             )
             .collect();
+        // The first layouts of a session are the ones the catalog was built
+        // with; later ones also outdate the catalog's controllers.
+        let first = self.behaviour_layouts.is_empty();
         self.behaviour_layouts = layouts;
-        let controllers: Vec<String> = self
+        let mut controllers: BTreeSet<String> = self
             .entries
             .values()
             .filter(|entry| lower_ext(&entry.source_path) == ".controller")
             .map(|entry| entry.source_path.clone())
             .collect();
+        if !first {
+            controllers.extend(self.session.lock().native_asset_paths(".controller"));
+        }
         for logical in controllers {
             let Ok(source) = resolve_project_import_source(&self.opts.project, &logical) else {
                 continue;
@@ -377,6 +390,9 @@ impl NativeProjectImporter {
             return Ok(());
         }
         let mut dependents = BTreeSet::new();
+        if lower_ext(logical) == ".anim" {
+            dependents.extend(self.additive_dependents(guid)?);
+        }
         {
             let session = self.session.lock();
             for extension in [".controller", ".overrideController"] {
@@ -415,6 +431,33 @@ impl NativeProjectImporter {
         Ok(())
     }
 
+    /// The clips whose additive reference pose is taken from a clip.
+    fn additive_dependents(&mut self, guid: &str) -> Result<Vec<String>> {
+        let mut clips: BTreeSet<String> = self.session.lock().native_asset_paths(".anim");
+        clips.extend(
+            self.entries
+                .values()
+                .filter(|entry| lower_ext(&entry.source_path) == ".anim")
+                .map(|entry| entry.source_path.clone()),
+        );
+        for logical in clips {
+            if self.additive_references.contains_key(&logical) {
+                continue;
+            }
+            let reference = resolve_project_import_source(&self.opts.project, &logical)
+                .and_then(|source| read_file(&source))
+                .map(|data| additive_reference(&data))
+                .unwrap_or_default();
+            self.additive_references.insert(logical, reference);
+        }
+        Ok(self
+            .additive_references
+            .iter()
+            .filter(|(_, reference)| reference.as_str() == guid)
+            .map(|(logical, _)| logical.clone())
+            .collect())
+    }
+
     /// Bakes one source and the baked sources it refers to; returns its GUID.
     fn publish_baked(&mut self, ctx: &Context, logical: &str, depth: usize) -> Result<String> {
         if depth > 4 {
@@ -427,6 +470,10 @@ impl NativeProjectImporter {
         let guid = meta_guid(&meta)?;
         let source_sha = sha256(&data);
         let meta_sha = sha256(&meta);
+        if lower_ext(logical) == ".anim" {
+            self.additive_references
+                .insert(logical.to_string(), additive_reference(&data));
+        }
         // The clips a controller takes from models are baked first: its own
         // bake reads their facts.
         let mut model_references = Vec::new();
@@ -522,6 +569,20 @@ impl NativeProjectImporter {
             .emit();
         Ok(guid)
     }
+}
+
+/// The GUID of the clip an authored clip takes its additive reference pose
+/// from; empty if it names none.
+fn additive_reference(data: &[u8]) -> String {
+    static PATTERN: std::sync::LazyLock<regex::bytes::Regex> = std::sync::LazyLock::new(|| {
+        regex::bytes::Regex::new(
+            r"m_AdditiveReferencePoseClip:\s*\{fileID:\s*-?[0-9]+,\s*guid:\s*([0-9a-fA-F]{32})",
+        )
+        .unwrap()
+    });
+    PATTERN.captures(data).map_or_else(String::new, |found| {
+        String::from_utf8_lossy(&found[1]).to_ascii_lowercase()
+    })
 }
 
 fn contains(data: &[u8], needle: &[u8]) -> bool {
