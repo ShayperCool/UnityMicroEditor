@@ -161,7 +161,7 @@ The two project settings come from the caller (`NativeSources::linear_color_spac
 
 | Class | Source | Main file ID | Compared with the engine build |
 | --- | --- | --- | --- |
-| `AvatarMask` (319) | `.mask` | 31900000 | byte for byte, six masks: body parts, transform paths with weights, a shortened and an empty body part list |
+| `AvatarMask` (319) | `.mask` | 31900000 | written by the mask baker above (`mask.rs`), which `bake_native` calls for this class; six more masks byte for byte, among them a shortened and an empty body part list |
 | `PhysicsMaterial` (134) | `.physicMaterial` | 13400000 | byte for byte, including out-of-range values |
 | `PhysicsMaterial2D` (62) | `.physicsMaterial2D` | 6200000 | byte for byte, including out-of-range values |
 | `RenderTexture` (84) | `.renderTexture` | 8400000 | byte for byte in gamma and linear projects; every color format, marked sRGB and not |

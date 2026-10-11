@@ -6,6 +6,8 @@
 //! the engine corrects after reading a source is restated per class.
 use super::{
     Baked,
+    mask::bake_mask_object,
+    mask_tree,
     material::{self, ShaderFacts},
     serialized::{self, External, Object},
     settle::{self, Settle},
@@ -64,7 +66,8 @@ struct Class {
     id: i32,
     /// The managed type a session publishes the object as.
     managed: &'static str,
-    tree: LazyLock<Result<TypeTree, String>>,
+    /// `None` for a class whose layout another baker pins.
+    tree: Option<LazyLock<Result<TypeTree, String>>>,
     how: How,
 }
 
@@ -74,6 +77,8 @@ enum How {
     /// source.
     Fields(Settle),
     Material,
+    /// `mask.rs`, which controllers read masks with as well.
+    Mask,
 }
 
 macro_rules! class {
@@ -81,21 +86,22 @@ macro_rules! class {
         Class {
             id: $id,
             managed: $managed,
-            tree: LazyLock::new(|| {
+            tree: Some(LazyLock::new(|| {
                 TypeTree::parse(&include_bytes!(concat!("engine/type-", $id, ".bin"))[..])
                     .map_err(|error| error.to_string())
-            }),
+            })),
             how: $how,
         }
     };
 }
 
 static CLASSES: [Class; 9] = [
-    class!(
-        319,
-        "UnityEngine.AvatarMask",
-        How::Fields(settle::as_authored)
-    ),
+    Class {
+        id: MASK,
+        managed: "UnityEngine.AvatarMask",
+        tree: None,
+        how: How::Mask,
+    },
     class!(
         134,
         "UnityEngine.PhysicsMaterial",
@@ -130,6 +136,7 @@ static CLASSES: [Class; 9] = [
     class!(21, "UnityEngine.Material", How::Material),
 ];
 
+const MASK: i32 = 319;
 const MATERIAL: i64 = 21;
 const MONO_BEHAVIOUR: i64 = 114;
 
@@ -147,10 +154,12 @@ pub fn native_tree(class_id: i64) -> Result<&'static TypeTree> {
     let Some(class) = class(class_id) else {
         bail!("class {class_id} is not a baked native class");
     };
-    class
-        .tree
-        .as_ref()
-        .map_err(|error| anyhow::anyhow!("pinned type tree of class {class_id}: {error}"))
+    match &class.tree {
+        Some(tree) => tree
+            .as_ref()
+            .map_err(|error| anyhow::anyhow!("pinned type tree of class {class_id}: {error}")),
+        None => mask_tree(),
+    }
 }
 
 /// The objects a source can refer to and the other sources it has named.
@@ -463,20 +472,23 @@ pub fn bake_native_objects(
     for document in &documents {
         let class = class(document.class_id).unwrap();
         let tree = native_tree(document.class_id)?;
-        let value = match class.how {
+        let data = match class.how {
             How::Fields(settle) => {
                 let mut transcoder = Transcoder { tree, references };
                 let mut value = transcoder.structure(0, &document.data, "")?;
                 references = transcoder.references;
                 settle(&document.data, &mut value, sources)?;
-                value
+                tree.encode(&value)?
             }
-            How::Material => material::bake(&document.data, &mut references, sources)?,
+            How::Material => {
+                tree.encode(&material::bake(&document.data, &mut references, sources)?)?
+            }
+            How::Mask => bake_mask_object(&document.data)?,
         };
         objects.push(NativeObject {
             file_id: document.file_id.clone(),
             class_id: class.id,
-            data: tree.encode(&value)?,
+            data,
         });
     }
     Ok((objects, references.externals))
