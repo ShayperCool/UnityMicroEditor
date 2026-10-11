@@ -929,6 +929,79 @@ fn behaviour_corpus_matches_the_engine_build() {
     }
 }
 
+/// Bakes every `<name>.mask` of a directory and compares the object with the
+/// engine's `<name>.mask.bin`. Returns how many matched.
+fn compare_masks(root: &Path) -> usize {
+    let (mut matched, mut failed) = (0, 0);
+    let mut sources: Vec<PathBuf> = fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "mask")
+        })
+        .collect();
+    sources.sort();
+    for source in sources {
+        let name = source.file_stem().unwrap().to_string_lossy().into_owned();
+        let baked = match playerbake::bake_mask(&fs::read(&source).unwrap()) {
+            Ok(baked) => baked,
+            Err(error) => {
+                failed += 1;
+                eprintln!("ERROR {name}: {error:#}");
+                continue;
+            }
+        };
+        assert_eq!(
+            baked.objects,
+            [("31900000".to_string(), "UnityEngine.AvatarMask".to_string())]
+        );
+        assert!(baked.externals.is_empty());
+        let objects = playerbake::read_serialized(&baked.file).unwrap();
+        let [object] = objects.as_slice() else {
+            panic!("{name}: a baked mask is one object");
+        };
+        assert_eq!((object.local_id, object.tree.class_id), (31900000, 319));
+        let expected = fs::read(source.with_extension("mask.bin")).unwrap();
+        if object.data == expected {
+            matched += 1;
+        } else {
+            failed += 1;
+            eprintln!(
+                "MISMATCH {name}: {}",
+                first_difference(&hex(&object.data), &hex(&expected))
+            );
+        }
+    }
+    assert_eq!(failed, 0);
+    matched
+}
+
+/// Avatar masks built by the engine: body parts alone, transform paths with
+/// their weights, and a mask as the Editor creates it.
+#[test]
+fn masks_match_the_engine_build() {
+    assert_eq!(compare_masks(&fixture("masks")), 3);
+}
+
+/// Compares the masks of the directories in `UNITY_PLAYERBAKE_MASK_CORPUS`.
+#[test]
+fn mask_corpus_matches_the_engine_build() {
+    let Some(roots) = std::env::var("UNITY_PLAYERBAKE_MASK_CORPUS")
+        .ok()
+        .filter(|value| !value.is_empty())
+    else {
+        eprintln!("skipped: set UNITY_PLAYERBAKE_MASK_CORPUS");
+        return;
+    };
+    let matched: usize = roots
+        .split(':')
+        .map(|root| compare_masks(Path::new(root)))
+        .sum();
+    eprintln!("matched {matched}");
+    assert!(matched > 0);
+}
+
 /// Replaces each object reference with the order of its first appearance, so
 /// references of two builds compare by which objects are the same.
 fn label_references(value: &mut Val, seen: &mut Vec<Val>) {
