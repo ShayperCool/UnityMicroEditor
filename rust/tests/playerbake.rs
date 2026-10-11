@@ -949,11 +949,12 @@ fn compare_behaviour_objects(root: &Path) -> (usize, Vec<(String, String)>) {
 /// metadata reader reports for the classes under `Scripts`. The controllers
 /// of `GRef` refer to objects of another bundle, of their own file and, in
 /// the one edited by hand, to objects that are missing or of another class
-/// than the field, which the engine leaves null.
+/// than the field, which the engine leaves null. Two layers of
+/// `M01_Embedded` take their masks from the controller's own file.
 #[test]
 fn behaviours_match_the_engine_build() {
     let (matched, refused) = compare_behaviours(&fixture("behaviours"));
-    assert_eq!(matched, 23);
+    assert_eq!(matched, 24);
     // Both hold a class that nests itself up to the engine's depth limit.
     let names: Vec<&str> = refused.iter().map(|(name, _)| name.as_str()).collect();
     assert_eq!(names, ["D01_Stripped", "T01_Filled"]);
@@ -1152,6 +1153,32 @@ fn behaviour_references_are_held_or_deferred() {
         Some(("d4a7b458bb74ee61684a4cf8f427d00f", 11400000, 2))
     );
     assert_eq!(binding(nested, "hl[0].so"), Some(scriptable));
+}
+
+/// A layer reads a mask stored inside the controller, which the baked file
+/// does not hold. A behaviour field that refers to such a mask would need
+/// the object itself.
+#[test]
+fn mask_inside_the_controller_is_read_but_not_referred_to() {
+    let root = fixture("behaviours");
+    let fixtures = BehaviourFixtures::open(root.clone());
+    let source = fs::read(root.join("Assets/GRef/R03_Local.controller")).unwrap();
+    let source = String::from_utf8(source).unwrap();
+    assert!(playerbake::bake_controller(source.as_bytes(), &fixtures).is_ok());
+    let mask =
+        "--- !u!319 &777\nAvatarMask:\n  m_Name: Inside\n  m_Mask: 01000000u\n  m_Elements: []\n";
+    let referred = source.replacen("avatarMask: {fileID: 0}", "avatarMask: {fileID: 777}", 1);
+    assert_ne!(referred, source);
+    let refused = playerbake::bake_controller(format!("{referred}{mask}").as_bytes(), &fixtures)
+        .map(|_| ())
+        .unwrap_err();
+    assert!(refused.is::<Unsupported>());
+    assert!(
+        refused
+            .to_string()
+            .contains("avatarMask refers to an avatar mask stored inside the controller"),
+        "{refused}"
+    );
 }
 
 /// The Editor writes `Attack #2` without quotes and the engine reads it back
