@@ -28,6 +28,9 @@ pub struct Node {
     pub align: bool,
     /// The byte size the tree declares; negative when it varies.
     pub size: i32,
+    /// The serialized version of the type, which a source states for its
+    /// own layout when it is not 1.
+    pub version: u16,
 }
 
 /// One class of a SerializedFile type table: the verbatim entry and its nodes.
@@ -100,6 +103,7 @@ impl TypeTree {
                 array: node[3] & 1 != 0,
                 align: le32(node, 20) & 0x4000 != 0,
                 size: le32(node, 12) as i32,
+                version: u16::from_le_bytes([node[0], node[1]]),
             });
         }
         if nodes[0].level != 0 {
