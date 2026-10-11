@@ -16,6 +16,7 @@ mod native;
 mod override_controller;
 mod serialized;
 mod settle;
+mod shader;
 mod source;
 mod typetree;
 mod weighted;
@@ -44,6 +45,10 @@ pub use native::{
 pub use override_controller::{bake_override, bake_override_object};
 pub use serialized::{
     External, Object, Read, ReferenceType, read as read_serialized, write, write_with_references,
+};
+pub use shader::{
+    SHADER_LOCAL_ID, ShaderProject, SnippetCompiler, SnippetReply, SnippetRequest, bake_shader,
+    bake_shader_object, read_shader_artifact, shader_tree,
 };
 pub use typetree::{TypeTree, Val};
 

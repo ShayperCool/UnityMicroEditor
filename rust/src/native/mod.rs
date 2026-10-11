@@ -14,6 +14,7 @@ mod importer;
 mod mesh_cpu;
 mod probe;
 mod shader_cache;
+mod shader_compiler;
 mod support;
 mod texture_profile;
 mod ui;
@@ -44,6 +45,7 @@ pub use probe::{
     receive_message, rss_kib, run_probe, validate_worker_version,
 };
 pub use shader_cache::verify_compiled_shader_cache;
+pub use shader_compiler::ShaderCompiler;
 pub use support::{JsonF64, is_canceled, is_not_exist};
 pub use texture_profile::{
     native_texture_needs_warm, validate_native_configuration, warm_texture_configuration,

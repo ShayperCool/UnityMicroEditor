@@ -120,6 +120,7 @@ impl NativeProjectImporter {
         for mask in self.session.controller_masks()? {
             self.refresh_mask_dependents(ctx, &mask)?;
         }
+        self.refresh_shaders(ctx)?;
         let unique: BTreeSet<String> = self
             .pending_native_paths
             .iter()

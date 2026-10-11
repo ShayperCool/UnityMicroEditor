@@ -486,6 +486,25 @@ fn create(
             folder = logical_dir(folder);
         }
     }
+    // The importer reads the files a shader includes: `#include_with_pragmas`
+    // declares keywords, and the hash of the includes is part of the result.
+    for asset in assets {
+        if !asset.starts_with("Assets/") || !asset.to_ascii_lowercase().ends_with(".shader") {
+            continue;
+        }
+        let (included, _) =
+            crate::project::collect_shader_source_requirements(&source_project, asset)?;
+        for file in included {
+            if !file.path.starts_with("Assets/") || source_files.contains_key(&file.path) {
+                continue;
+            }
+            let meta = format!("{}.meta", file.path);
+            if let Ok(meta_name) = resolve_project_import_source(&source_project, &meta) {
+                source_files.insert(meta, meta_name);
+            }
+            source_files.insert(file.path, file.source_path);
+        }
+    }
     let version_path =
         resolve_project_import_source(&source_project, "ProjectSettings/ProjectVersion.txt")?;
     if !sysutil::stat(&version_path).is_ok_and(|info| info.size <= 64 * 1024) {
