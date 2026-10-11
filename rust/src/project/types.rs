@@ -191,6 +191,16 @@ wire_struct! {
     }
 }
 wire_struct! {
+    /// A reference of a baked object to an object no ContentFile holds: the
+    /// field is null in the file and is bound when the scene loads.
+    pub struct NativeDeferredBinding {
+        pub owner_file_id: String,
+        pub property_path: String,
+        pub target_guid: String,
+        pub target_file_id: String,
+    }
+}
+wire_struct! {
     pub struct NativeReplacement {
         pub guid: String,
         pub source_path: String,
@@ -200,7 +210,13 @@ wire_struct! {
         pub environment_sha256: String,
         #[serde(skip_serializing_if = "BTreeMap::is_empty")]
         pub config_source_sha256: BTreeMap<String, String>,
+        /// The other sources the content was made from, each with the hash it
+        /// had: the avatar masks a controller's layers were baked with.
+        #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+        pub ingredient_sha256: BTreeMap<String, String>,
         pub content: NativeContentFile,
+        #[serde(skip_serializing_if = "List::is_empty_list")]
+        pub deferred_bindings: List<NativeDeferredBinding>,
         #[serde(skip_serializing_if = "List::is_empty_list")]
         pub model_graph: List<NativeModelGraphObject>,
         #[serde(skip_serializing_if = "blank")]

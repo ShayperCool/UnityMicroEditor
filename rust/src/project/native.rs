@@ -32,6 +32,7 @@ pub(crate) fn native_content_class(type_name: &str) -> i32 {
         "UnityEngine.AnimationClip" => 74,
         "UnityEngine.RuntimeAnimatorController" => 91,
         "UnityEngine.AnimatorOverrideController" => 221,
+        "UnityEngine.AvatarMask" => 319,
         "UnityEngine.UIElements.StyleSheet" | "UnityEngine.UIElements.VisualTreeAsset" => 114,
         _ => 0,
     }
@@ -390,6 +391,43 @@ impl Inner {
         // Baked by this tool from the authored source; see `playerbake`.
         let clip = profile == ".anim";
         let controller = profile == ".controller" || profile == ".overridecontroller";
+        let mask = profile == ".mask";
+        for binding in r.deferred_bindings.iter() {
+            // Only a behaviour of a baked controller is bound after loading.
+            let owner = r.content.objects.iter().find(|object| {
+                object.file_id == binding.owner_file_id
+                    && !object.type_name.starts_with("UnityEngine.")
+            });
+            if profile != ".controller"
+                || owner.is_none()
+                || !super::imported_bindings::binding_property(&binding.property_path)
+                || !valid_native_guid(&binding.target_guid)
+                || !valid_native_id(&binding.target_file_id)
+                || binding.target_guid == r.guid
+            {
+                bail!(
+                    "native deferred binding is invalid: {path} {}.{}",
+                    binding.owner_file_id,
+                    binding.property_path
+                );
+            }
+        }
+        for (logical, expected) in &r.ingredient_sha256 {
+            let source = logical.strip_suffix(".meta").unwrap_or(logical);
+            if profile != ".controller"
+                || !lexpath::equal_fold(lexpath::ext(source), ".mask")
+                || !valid_native_hex(expected, 64)
+            {
+                bail!("native ingredient guard is unsupported: {logical}");
+            }
+            let physical = self.source(logical)?;
+            if !self
+                .read(&physical, logical.ends_with(".meta"))
+                .is_ok_and(|(_, actual)| actual == *expected)
+            {
+                bail!("avatar mask changed after its controller was baked: {logical}");
+            }
+        }
         for (logical, expected) in &r.config_source_sha256 {
             if !texture
                 || logical != "ProjectSettings/EditorSettings.asset"
@@ -414,6 +452,7 @@ impl Inner {
             && !shader
             && !clip
             && !controller
+            && !mask
         {
             bail!("native replacement profile is unsupported: {path}");
         }
@@ -492,7 +531,7 @@ impl Inner {
                 for value in r.content.objects.iter() {
                     expected.insert(value.file_id.clone(), value.type_name.clone());
                 }
-            } else if clip || controller {
+            } else if clip || controller || mask {
                 for value in r.content.objects.iter() {
                     expected.insert(value.file_id.clone(), value.type_name.clone());
                 }
@@ -564,6 +603,19 @@ impl Inner {
             {
                 bail!(
                     "animation replacement must contain one AnimationClip without native dependencies"
+                );
+            }
+        } else if mask {
+            if objects.len() != 1
+                || objects[0].file_id != "31900000"
+                || objects[0].type_name != "UnityEngine.AvatarMask"
+                || !r.model_graph.is_empty()
+                || !r.model_graph_sha256.is_empty()
+                || !r.content.resources.is_empty()
+                || !r.content.dependencies.is_empty()
+            {
+                bail!(
+                    "avatar mask replacement must contain one AvatarMask without native dependencies"
                 );
             }
         } else if controller {
@@ -766,6 +818,12 @@ impl Inner {
             self.verify_native_artifacts(&r.content)?;
             // Re-check fresh source expectations even if this GUID is not currently used.
             self.depend(&r.source_path)?;
+            // A change of what the content was made from has to be seen too.
+            for ingredient in r.ingredient_sha256.keys() {
+                if !ingredient.ends_with(".meta") {
+                    self.depend(ingredient)?;
+                }
+            }
             self.publish_compiled_shader_snapshot(&r, over)?;
             files.insert(guid, r.content);
         }

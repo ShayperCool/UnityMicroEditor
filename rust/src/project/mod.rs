@@ -34,6 +34,7 @@ mod tests;
 pub use crate::cache::CacheStats;
 pub use builtin_shader::BUILTIN_RESOURCE_GUID;
 pub use cache_paths::is_owned_cache_path;
+pub use discovery::ControllerMask;
 pub use expand::{apply_authored_override, resolve_authored_graph};
 pub use native_model::native_model_graph_sha256;
 pub use session::{NeedsImportError, Options, Prepared, Session, manifest_json};
@@ -41,10 +42,10 @@ pub use shader_sources::{collect_shader_source_requirements, validate_shader_sou
 pub use types::{
     AuthoredDependency, AuthoredGraph, AuthoredGraphObject, AuthoredIdentity,
     CompiledShaderSnapshot, Document, List, NativeContentDependency, NativeContentFile,
-    NativeContentObject, NativeContentResource, NativeMeshCPUProjection, NativeMeshCPURetention,
-    NativeModelGraphObject, NativeModelGraphReference, NativeModelGraphTarget, NativeReplacement,
-    NativeUIBinding, NativeUIBindingProof, PrefabOverrideDiagnostic, RetainedBuiltinShader,
-    ShaderSourceRequirement,
+    NativeContentObject, NativeContentResource, NativeDeferredBinding, NativeMeshCPUProjection,
+    NativeMeshCPURetention, NativeModelGraphObject, NativeModelGraphReference,
+    NativeModelGraphTarget, NativeReplacement, NativeUIBinding, NativeUIBindingProof,
+    PrefabOverrideDiagnostic, RetainedBuiltinShader, ShaderSourceRequirement,
 };
 pub use value::{Map, Value};
 

@@ -627,6 +627,8 @@ impl Inner {
         // clips are baked for the controller, and the model is imported only
         // if something else needs it.
         let mut clip_models = BTreeSet::new();
+        // A mask is baked into the layers of its controllers.
+        let mut masks = BTreeSet::new();
         while let Some(logical) = queue.pop_front() {
             if !seen.insert(logical.clone()) {
                 continue;
@@ -660,6 +662,8 @@ impl Inner {
                 }
                 if plays_clips && lexpath::lower_ext(source) == ".fbx" {
                     clip_models.insert(source.to_string());
+                } else if plays_clips && lexpath::lower_ext(source) == ".mask" {
+                    masks.insert(source.to_string());
                 } else if !seen.contains(source) {
                     queue.push_back(source.to_string());
                 }
@@ -672,6 +676,7 @@ impl Inner {
             }
         }
         self.changed_clip_models = changed_clip_models;
+        self.controller_masks = masks.into_iter().collect();
         let mut pending = Vec::new();
         for logical in heavy {
             if self.needs_native_import(&logical)? {
@@ -680,6 +685,15 @@ impl Inner {
         }
         Ok(pending)
     }
+}
+
+/// An avatar mask a controller refers to, as it is now.
+pub struct ControllerMask {
+    pub guid: String,
+    pub path: String,
+    pub source_sha256: String,
+    pub meta_sha256: String,
+    pub in_catalog: bool,
 }
 
 impl Session {
@@ -706,5 +720,41 @@ impl Session {
             .iter()
             .map(|path| (s.guid_of(path).to_string(), path.clone()))
             .collect()
+    }
+
+    /// The avatar masks the controllers of the last walk refer to: GUID, path,
+    /// the current hashes of the source and of its metadata, and whether the
+    /// catalog was built from these.
+    pub fn controller_masks(&self) -> Result<Vec<ControllerMask>> {
+        let mut s = self.lock();
+        let observed = std::mem::take(&mut s.cache.observed);
+        let stats = std::mem::take(&mut s.cache.stats);
+        let result = s.current_controller_masks();
+        s.cache.observed = observed;
+        s.cache.stats = stats;
+        result
+    }
+}
+
+impl Inner {
+    fn current_controller_masks(&mut self) -> Result<Vec<ControllerMask>> {
+        let s = self;
+        let mut masks = Vec::new();
+        for path in s.controller_masks.clone() {
+            let meta_path = format!("{path}.meta");
+            let physical = s.source(&path)?;
+            let (_, source_sha256) = s.read(&physical, false)?;
+            let physical = s.source(&meta_path)?;
+            let (_, meta_sha256) = s.read(&physical, true)?;
+            masks.push(ControllerMask {
+                guid: s.guid_of(&path).to_string(),
+                in_catalog: s.native_catalog_source_matches(&path, &source_sha256)
+                    && s.native_catalog_source_matches(&meta_path, &meta_sha256),
+                path,
+                source_sha256,
+                meta_sha256,
+            });
+        }
+        Ok(masks)
     }
 }
