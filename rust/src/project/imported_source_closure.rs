@@ -21,7 +21,130 @@ fn trim_space(bytes: &[u8]) -> &[u8] {
     }
 }
 
+/// A pointer of a catalog object to an object loaded from its authored text.
+pub(crate) struct AuthoredPointer {
+    pub owner: String,
+    pub property: String,
+    pub target: String,
+    pub target_id: String,
+    pub target_path: String,
+}
+
 impl Inner {
+    /// Whether a ScriptableObject source the catalog holds has been edited
+    /// since and is therefore loaded from its authored text, like one the
+    /// catalog never held. Sources the engine itself loads stay native.
+    pub(crate) fn authored_scriptable(&mut self, path: &str) -> Result<bool> {
+        if let Some(known) = self.authored_scriptables.get(path) {
+            return Ok(*known);
+        }
+        let mut held = self
+            .catalog
+            .assets
+            .iter()
+            .filter(|asset| value::text(asset, "path") == path)
+            .map(|asset| number(get(asset, "classId")) == 114)
+            .peekable();
+        let mut authored = lexpath::equal_fold(lexpath::ext(path), ".asset")
+            && self.critical.contains_key(path)
+            && held.peek().is_some()
+            && held.all(|scriptable| scriptable);
+        if authored {
+            let guid = self.guid_of(path).to_string();
+            let engine_loaded = ["preloadedAssets", "renderPipelineGlobalSettings"]
+                .iter()
+                .flat_map(|collection| value::array(get(&self.baseline, collection)))
+                .any(|item| value::str(item.field("guid")) == guid)
+                || self.baseline_text("renderPipelineGuid") == guid;
+            authored = !guid.is_empty() && !engine_loaded;
+        }
+        if authored {
+            let physical = self.source(path)?;
+            let (_, source_sha) = self.read_text(&physical)?;
+            let meta = self.source(&format!("{path}.meta"))?;
+            let (_, meta_sha) = self.read_text(&meta)?;
+            let meta_path = format!("{path}.meta");
+            let stale = |known: &str, current: &str| !known.is_empty() && known != current;
+            authored = stale(self.critical_of(path), &source_sha)
+                || stale(self.critical_of(&meta_path), &meta_sha)
+                || !self.native_catalog_source_matches(path, &source_sha)
+                || !self.native_catalog_source_matches(&meta_path, &meta_sha);
+        }
+        if authored {
+            let physical = self.source(path)?;
+            authored = self
+                .parse(&physical)
+                .is_ok_and(|documents| documents.iter().all(|d| d.class_id == 114 && !d.stripped));
+        }
+        self.authored_scriptables.insert(path.to_string(), authored);
+        Ok(authored)
+    }
+
+    /// The pointers of a catalog ScriptableObject, or of the state machine
+    /// behaviours of a catalog controller, to objects now loaded from their
+    /// authored text: owner file ID, property path and target.
+    pub(crate) fn authored_scriptable_references(
+        &mut self,
+        asset: &Map,
+    ) -> Result<Vec<AuthoredPointer>> {
+        let path = value::text(asset, "path").into_owned();
+        let class = number(get(asset, "classId"));
+        let controller = class == 91 && lexpath::equal_fold(lexpath::ext(&path), ".controller");
+        let scriptable = class == 114 && lexpath::equal_fold(lexpath::ext(&path), ".asset");
+        if value::text(asset, "kind") != "imported" || !(controller || scriptable) {
+            return Ok(Vec::new());
+        }
+        let (guid, id) = (
+            value::text(asset, "guid").into_owned(),
+            value::text(asset, "fileId").into_owned(),
+        );
+        // Content baked in this session names its own deferred pointers.
+        if self.native_overlays.contains_key(&guid) {
+            return Ok(Vec::new());
+        }
+        let physical = self.source(&path)?;
+        let (content, _) = self.read_text(&physical)?;
+        if !trim_space(&content).starts_with(b"%YAML") {
+            return Ok(Vec::new());
+        }
+        let documents = self.parse(&physical)?;
+        let mut pointers = Vec::new();
+        for owner in documents.iter() {
+            if owner.class_id != 114 || !(controller || owner.file_id == id) {
+                continue;
+            }
+            visit_map(owner.fields(), "", &mut |property, reference| {
+                let target = value::text(reference, "guid").into_owned();
+                let local = map_file_id(reference).into_owned();
+                if local != "0" && !target.is_empty() && target != guid {
+                    pointers.push((owner.file_id.clone(), property.to_string(), target, local));
+                }
+            });
+        }
+        let mut result = Vec::new();
+        for (owner, property, target, local) in pointers {
+            let target_path = self.path_of(&target).to_string();
+            if target_path.is_empty() || !self.authored_scriptable(&target_path)? {
+                continue;
+            }
+            // A behaviour the catalog does not publish cannot be reached; its
+            // controller has to be baked with the pointer left to the Player.
+            if !self.catalog.assets.iter().any(|known| {
+                value::text(known, "guid") == guid && value::text(known, "fileId") == owner
+            }) {
+                return Err(needs_import(&path));
+            }
+            result.push(AuthoredPointer {
+                owner,
+                property,
+                target,
+                target_id: local,
+                target_path,
+            });
+        }
+        Ok(result)
+    }
+
     /// Imported ScriptableObjects retain their native representation. Their
     /// authored PPtrs still define the dependency closure, including prefab
     /// pointers omitted from native packs and signed same-file subasset identities.
