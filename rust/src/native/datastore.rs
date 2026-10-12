@@ -345,7 +345,37 @@ impl DataStoreService {
         };
         let result = self.stop_process(&done);
         self.stdout = None;
+        if result.is_ok() {
+            self.release_shared_memory();
+        }
         result
+    }
+
+    /// Removes the shared memory of the stopped service. The service is
+    /// ended by a signal and leaves its segments in `/dev/shm`, some 180 MB
+    /// a run, until later workers die of a bus error on a full file system.
+    /// The names hold this service's own random namespace.
+    fn release_shared_memory(&self) {
+        if self.namespace.len() != 32
+            || !self.namespace.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir("/dev/shm") else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            let rest = name.strip_prefix("sem.").unwrap_or(&name);
+            if rest
+                .strip_prefix("udsMem")
+                .is_some_and(|rest| rest.starts_with(&self.namespace))
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
     }
     fn stop_process(&mut self, done: &Flag) -> Result<()> {
         if let Err(error) = self.signal_group(libc::SIGTERM) {
