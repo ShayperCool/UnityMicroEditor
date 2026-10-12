@@ -8,6 +8,7 @@ mod atlas;
 mod baked;
 mod batch;
 mod build_settings;
+mod built_store;
 mod builtin_shader;
 mod context;
 mod datastore;

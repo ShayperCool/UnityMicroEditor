@@ -526,6 +526,22 @@ pub fn parse_proc_stat(data: &[u8]) -> std::result::Result<(String, i64), &'stat
 pub fn os_str(bytes: &[u8]) -> &OsStr {
     OsStr::from_bytes(bytes)
 }
+/// Gives a process the default handling of the signals it is stopped with.
+/// For the child between fork and exec: a tool that was started in the
+/// background of a shell without job control (`nohup tool &` in a script)
+/// inherits SIGINT and SIGQUIT ignored, and an ignored signal stays ignored
+/// across exec, where a shell script cannot even trap it. Such a child would
+/// be stopped only by the escalation that follows the grace period.
+///
+/// # Safety
+/// Async-signal-safe; changes the dispositions of the calling process.
+pub unsafe fn default_stop_signals() {
+    for signal in [libc::SIGINT, libc::SIGQUIT, libc::SIGTERM] {
+        // SAFETY: `signal` with `SIG_DFL` installs no handler.
+        unsafe { libc::signal(signal, libc::SIG_DFL) };
+    }
+}
+
 /// Sends a signal; a PID outside the kernel's range names no process.
 pub fn kill(pid: i64, signal: libc::c_int) -> io::Result<()> {
     let pid = libc::pid_t::try_from(pid).map_err(|_| io::Error::from_raw_os_error(libc::ESRCH))?;
@@ -698,6 +714,31 @@ pub(crate) mod testing {
     /// Command line that re-executes this test binary as one helper test.
     pub fn helper_arguments(test: &str) -> [String; 5] {
         ["--exact", test, "--nocapture", "--test-threads=1", "--"].map(String::from)
+    }
+    /// Runs one test of this binary in a process that ignores SIGINT and
+    /// SIGQUIT, as one started in the background of a script does, and
+    /// panics unless it passes. Returns how long it took.
+    pub fn pass_ignoring_interrupts(test: &str) -> std::time::Duration {
+        use std::os::unix::process::CommandExt;
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args(helper_arguments(test));
+        // SAFETY: `signal` is async-signal-safe.
+        unsafe {
+            command.pre_exec(|| {
+                libc::signal(libc::SIGINT, libc::SIG_IGN);
+                libc::signal(libc::SIGQUIT, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+        let started = std::time::Instant::now();
+        let output = command.output().unwrap();
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && text.contains("1 passed"),
+            "{text}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        started.elapsed()
     }
     /// A fresh symlink-free directory.
     pub fn temp_dir() -> (tempfile::TempDir, String) {

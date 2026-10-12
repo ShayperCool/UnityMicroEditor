@@ -1084,7 +1084,9 @@ fn fake_player_becomes_ready_reports_and_stops_on_interrupt() {
     let wake = Wake::new();
     let ctx = Context::background();
     let mut player = launch(&root, &player, &wake);
-    player.wait_ready(&ctx, Duration::from_secs(10)).unwrap();
+    player
+        .wait_ready(&ctx, ReadyBudget::fixed(Duration::from_secs(10)))
+        .unwrap();
     assert!(alive(player.pid()));
     // The Player leads its own process group and runs in its run directory.
     assert_eq!(unsafe { libc::getpgid(player.pid()) }, player.pid());
@@ -1112,7 +1114,10 @@ fn fake_player_stop_escalates_to_terminate() {
     let wake = Wake::new();
     let mut player = launch(&root, &player, &wake);
     player
-        .wait_ready(&Context::background(), Duration::from_secs(10))
+        .wait_ready(
+            &Context::background(),
+            ReadyBudget::fixed(Duration::from_secs(10)),
+        )
         .unwrap();
     let started = Instant::now();
     player.stop();
@@ -1132,12 +1137,12 @@ fn fake_player_readiness_failures() {
     // Exit before the report exists.
     let mut player = launch(&root, &fake_player(&root, "", "exit 3"), &wake);
     assert_eq!(
-        failure(player.wait_ready(&ctx, Duration::from_secs(10))),
+        failure(player.wait_ready(&ctx, ReadyBudget::fixed(Duration::from_secs(10)))),
         "Player exited before ready: exit status 3"
     );
     let mut player = launch(&root, &fake_player(&root, "", "exit 0"), &wake);
     assert_eq!(
-        failure(player.wait_ready(&ctx, Duration::from_secs(10))),
+        failure(player.wait_ready(&ctx, ReadyBudget::fixed(Duration::from_secs(10)))),
         "Player exited before ready: <nil>"
     );
     // A report of another process, with errors, or from a software renderer.
@@ -1164,23 +1169,112 @@ fn fake_player_readiness_failures() {
         ),
     ] {
         let mut player = launch(&root, &fake_player(&root, &ready, keep), &wake);
-        let error = failure(player.wait_ready(&ctx, Duration::from_secs(10)));
+        let error = failure(player.wait_ready(&ctx, ReadyBudget::fixed(Duration::from_secs(10))));
         assert!(error.ends_with(&expected), "{error}");
         player.stop();
     }
     // Timeout and cancellation.
     let mut player = launch(&root, &fake_player(&root, "", keep), &wake);
-    assert_eq!(
-        failure(player.wait_ready(&ctx, Duration::from_millis(150))),
-        format!("Player readiness timeout; see {}", player.report)
+    let error = failure(player.wait_ready(&ctx, ReadyBudget::fixed(Duration::from_secs(1))));
+    assert!(
+        error.starts_with("Player start: not ready within its 1s budget (it had 0.")
+            && error.ends_with(&format!("s of processor time); see {}", player.report)),
+        "{error}"
     );
     let canceled = Context::background().with_cancel();
     canceled.cancel();
     assert_eq!(
-        failure(player.wait_ready(&canceled, Duration::from_secs(10))),
+        failure(player.wait_ready(&canceled, ReadyBudget::fixed(Duration::from_secs(10)))),
         "canceled"
     );
     player.stop();
+}
+
+#[test]
+fn readiness_budget_extends_only_for_a_player_that_hardly_ran() {
+    let seconds = Duration::from_secs;
+    let budget = ReadyBudget {
+        budget: seconds(45),
+        limit: seconds(300),
+        ran: seconds(30),
+    };
+    // Within the budget nothing is decided, whatever the Player used.
+    assert_eq!(budget.verdict(seconds(44), Some(seconds(400))), None);
+    // A Player that ran has its budget and no more.
+    assert_eq!(
+        budget.verdict(seconds(45), Some(seconds(30))).unwrap(),
+        "Player start: not ready within its 45s budget (it had 30.0s of processor time)"
+    );
+    // So has one whose processor time cannot be read.
+    assert_eq!(
+        budget.verdict(seconds(45), None).unwrap(),
+        "Player start: not ready within its 45s budget (it had an unknown amount of processor time)"
+    );
+    // One that hardly ran is waited for, until it has run or the limit.
+    assert_eq!(
+        budget.verdict(seconds(45), Some(Duration::from_millis(400))),
+        None
+    );
+    assert_eq!(budget.verdict(seconds(299), Some(seconds(29))), None);
+    assert!(budget.verdict(seconds(120), Some(seconds(31))).is_some());
+    assert_eq!(
+        budget
+            .verdict(seconds(300), Some(Duration::from_millis(400)))
+            .unwrap(),
+        "Player start: not ready within 300s, the limit for a Player that hardly gets to run (budget 45s; it had 0.4s of processor time)"
+    );
+    // A fixed budget never extends.
+    let fixed = ReadyBudget::fixed(seconds(10));
+    assert_eq!(fixed.verdict(seconds(9), Some(Duration::ZERO)), None);
+    assert_eq!(
+        fixed.verdict(seconds(10), Some(Duration::ZERO)).unwrap(),
+        "Player start: not ready within its 10s budget (it had 0.0s of processor time)"
+    );
+}
+
+#[test]
+fn fake_player_that_hardly_runs_is_waited_for_beyond_its_budget() {
+    let (_guard, root) = temp_dir();
+    let wake = Wake::new();
+    let ctx = Context::background();
+    let budget = ReadyBudget {
+        budget: Duration::from_millis(200),
+        limit: Duration::from_secs(20),
+        ran: Duration::from_secs(5),
+    };
+    // Asleep for longer than the budget, as a Player a busy machine does
+    // not run, then ready.
+    let script = fake_player(&root, &format!("sleep 1.5\n{READY}"), "exec sleep 30");
+    let mut player = launch(&root, &script, &wake);
+    let started = Instant::now();
+    player.wait_ready(&ctx, budget).unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(1400));
+    player.stop();
+    // One that never is ready is given up at the limit, which is named.
+    let limited = ReadyBudget {
+        limit: Duration::from_millis(1500),
+        ..budget
+    };
+    let mut player = launch(&root, &fake_player(&root, "", "exec sleep 30"), &wake);
+    let started = Instant::now();
+    let error = failure(player.wait_ready(&ctx, limited));
+    assert!(started.elapsed() >= Duration::from_millis(1500));
+    assert!(
+        error.starts_with(
+            "Player start: not ready within 1s, the limit for a Player that hardly gets to run (budget 0s; it had 0.0s of processor time); see "
+        ),
+        "{error}"
+    );
+    player.stop();
+}
+
+/// A shell that was started with SIGINT ignored cannot trap it, and a tool
+/// started in the background of a script has it ignored.
+#[test]
+fn fake_player_is_interrupted_when_the_tool_ignores_interrupts() {
+    crate::sysutil::testing::pass_ignoring_interrupts(
+        "runner::tests::fake_player_becomes_ready_reports_and_stops_on_interrupt",
+    );
 }
 
 #[test]

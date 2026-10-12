@@ -4,7 +4,7 @@ use super::{
     NativeOptions, NativeProjectImporter, ProbeOptions, ProbeReport, ProjectImportedAsset,
     ProjectImportedFile,
     environment::read_worker_environment,
-    import::run_project_import,
+    import::{IMPORT_BUDGET, run_bounded_import, run_project_import},
     mesh_cpu::retain_native_model_mesh_cpu,
     resolve_project_import_source,
     scripted::{generated_material_profile, script_environment_identity, scripted_profile},
@@ -25,7 +25,7 @@ use anyhow::{Result, bail};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 pub const NATIVE_IMPORT_BATCH_SIZE: usize = 32;
@@ -211,25 +211,39 @@ impl NativeProjectImporter {
             }
             inputs.insert(logical.clone(), input);
         }
-        let root = sysutil::join(&[&self.opts.output, "native/imports", &random_id()]);
-        mkdir_all(&sysutil::dir(&root), 0o700)?;
-        let import_context = ctx.with_timeout(Duration::from_secs(45));
-        let (report, error) = run_project_import(
-            &import_context,
-            ProbeOptions {
-                project: self.opts.project.clone(),
-                editor: self.opts.editor.clone(),
-                output: root.clone(),
-                timeout: Duration::from_secs(45),
-                ..Default::default()
-            },
-            logicals,
-        );
-        import_context.cancel();
+        let imports = sysutil::join(&[&self.opts.output, "native/imports"]);
+        mkdir_all(&imports, 0o700)?;
+        let what = match logicals {
+            [one] => format!("native import of {one}"),
+            [first, ..] => format!(
+                "native import of {} sources from {first} on",
+                logicals.len()
+            ),
+            [] => unreachable!("an empty batch was refused"),
+        };
+        // Every run of the worker writes into a directory of its own, and
+        // leaves its report there.
+        let (mut root, mut written) = (String::new(), None);
+        let (report, error) = run_bounded_import(ctx, &what, IMPORT_BUDGET, |bounded, budget| {
+            root = sysutil::join(&[&imports, &random_id()]);
+            let (report, error) = run_project_import(
+                bounded,
+                ProbeOptions {
+                    project: self.opts.project.clone(),
+                    editor: self.opts.editor.clone(),
+                    output: root.clone(),
+                    timeout: budget,
+                    ..Default::default()
+                },
+                logicals,
+            );
+            written = report.as_ref().and_then(|report| {
+                atomic_json(&sysutil::join(&[&root, "result.json"]), report).err()
+            });
+            (report, error)
+        });
         let report_path = sysutil::join(&[&root, "result.json"]);
-        if let Some(report) = &report
-            && let Err(write) = atomic_json(&report_path, report)
-        {
+        if let Some(write) = written {
             return Err(join([error, Some(write)]).unwrap());
         }
         if let Some(error) = error {

@@ -13,11 +13,15 @@ use super::{
         selected_environment, shader_name_registry,
     },
     support::{
-        check, context_error, join, lower_ext, mkdir, nul, read_file, text, wrap, write_file,
+        Event, check, context_error, join, lower_ext, mkdir, nul, read_file, text, wrap, write_file,
     },
     verify_project_import_sources,
 };
-use crate::{cancel::Context, flags::FlagSet, jsondoc, registry, sysutil, util};
+use crate::{
+    cancel::{Canceled, Context},
+    flags::FlagSet,
+    jsondoc, registry, sysutil, util,
+};
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -92,6 +96,77 @@ pub(crate) fn signal_context() -> Result<Context> {
         cancel.cancel();
     });
     Ok(ctx)
+}
+
+/// The time one run of the import worker has in a session: its context,
+/// the imports, the stop of its services, the extraction of the artifacts
+/// and the check that the sources did not change meanwhile. A batch of 32
+/// models takes some 7 s.
+pub(crate) const IMPORT_BUDGET: Duration = Duration::from_secs(45);
+
+/// Whether a failed run of the worker is worth repeating: it ran out of its
+/// own budget while the caller's context is live, or its store had to be
+/// killed and may not have written what it holds. Both happen to a sound
+/// import on a machine that is busy with something else.
+pub(crate) fn import_repeatable(
+    caller: Option<Canceled>,
+    bounded: Option<Canceled>,
+    store_killed: bool,
+) -> bool {
+    caller.is_none() && (bounded == Some(Canceled::DeadlineExceeded) || store_killed)
+}
+
+/// Runs the worker within `budget`, and once more with twice that when the
+/// first run is repeatable. `run` gets the bounded context and its budget,
+/// and makes an output directory of its own for each run. An import that
+/// ran out of its budget fails as `what`, with the budget named.
+pub(crate) fn run_bounded_import(
+    ctx: &Context,
+    what: &str,
+    mut budget: Duration,
+    mut run: impl FnMut(&Context, Duration) -> (Option<ProbeReport>, Option<anyhow::Error>),
+) -> (Option<ProbeReport>, Option<anyhow::Error>) {
+    for repeated in [false, true] {
+        let bounded = ctx.with_timeout(budget);
+        let (report, error) = run(&bounded, budget);
+        let ended = bounded.error();
+        bounded.cancel();
+        let Some(error) = error else {
+            return (report, None);
+        };
+        let killed = report
+            .as_ref()
+            .and_then(|report| report.data_store.as_ref())
+            .is_some_and(|store| store.forced_stop);
+        if !repeated && import_repeatable(ctx.error(), ended, killed) {
+            Event::new("native-import-repeated")
+                .with("import", what)
+                .with("reason", &text(&error))
+                .seconds("budgetSeconds", budget.as_secs_f64())
+                .seconds("nextBudgetSeconds", (budget * 2).as_secs_f64())
+                .emit();
+            budget *= 2;
+            continue;
+        }
+        let expired = ctx.error().is_none() && ended == Some(Canceled::DeadlineExceeded);
+        let error = match expired {
+            true => wrap(
+                &format!(
+                    "{what}: the import ran out of its {}s budget{}",
+                    budget.as_secs_f64(),
+                    if repeated {
+                        ", twice that of a first run that failed too"
+                    } else {
+                        ""
+                    }
+                ),
+                error,
+            ),
+            false => error,
+        };
+        return (report, Some(error));
+    }
+    unreachable!("the second run returns")
 }
 
 fn asset_flag(assets: &[String], _: &str) -> Result<(), String> {
@@ -452,6 +527,8 @@ fn import(
                 .data_store
                 .as_ref()
                 .is_some_and(|store| store.forced_stop);
+            // An extraction that ran out of time says so itself.
+            let killed = killed && ctx.error().is_none();
             extracted.err().map(|error| {
                 if killed {
                     wrap(
@@ -542,4 +619,97 @@ fn extract(
     verify_project_import_sources(ctx, prepared)?;
     content.source_unchanged = true;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::native::DataStoreStatus;
+
+    fn report(store_killed: bool) -> Option<ProbeReport> {
+        Some(ProbeReport {
+            data_store: Some(DataStoreStatus {
+                forced_stop: store_killed,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn only_a_run_out_budget_or_a_killed_store_is_repeated() {
+        use Canceled::{Canceled as Stopped, DeadlineExceeded as Late};
+        assert!(import_repeatable(None, Some(Late), false));
+        assert!(import_repeatable(None, None, true));
+        // An import that failed for a reason of its own fails again.
+        assert!(!import_repeatable(None, None, false));
+        // The caller's own end is not the import's.
+        assert!(!import_repeatable(Some(Stopped), Some(Stopped), true));
+        assert!(!import_repeatable(Some(Late), Some(Late), false));
+    }
+
+    #[test]
+    fn an_import_that_runs_out_of_its_budget_is_repeated_once_with_twice_as_much() {
+        let ctx = Context::background();
+        let budget = Duration::from_millis(60);
+        // The first run is late, the second is in time.
+        let mut budgets = Vec::new();
+        let (_, error) =
+            run_bounded_import(&ctx, "native import of A.fbx", budget, |bounded, budget| {
+                budgets.push(budget);
+                if budgets.len() == 1 {
+                    assert_eq!(bounded.wait(), Canceled::DeadlineExceeded);
+                    return (report(false), context_error(bounded));
+                }
+                assert!(bounded.error().is_none());
+                (report(false), None)
+            });
+        assert!(error.is_none());
+        assert_eq!(budgets, [budget, budget * 2]);
+        // A store that had to be killed is a reason too, with time left.
+        let mut runs = 0;
+        let (_, error) = run_bounded_import(&ctx, "native import of A.fbx", budget, |_, _| {
+            runs += 1;
+            match runs {
+                1 => (report(true), Some(anyhow!("no index"))),
+                _ => (report(false), None),
+            }
+        });
+        assert!(error.is_none() && runs == 2);
+        // Late twice: the step and the budget it ran out of are named.
+        let mut runs = 0;
+        let (_, error) =
+            run_bounded_import(&ctx, "native import of A.fbx", budget, |bounded, _| {
+                runs += 1;
+                bounded.wait();
+                (report(false), context_error(bounded))
+            });
+        assert_eq!(runs, 2);
+        assert_eq!(
+            text(&error.unwrap()),
+            "native import of A.fbx: the import ran out of its 0.12s budget, twice that of a first run that failed too: deadline exceeded"
+        );
+    }
+
+    #[test]
+    fn an_import_that_fails_by_itself_or_is_cancelled_is_not_repeated() {
+        let ctx = Context::background().with_cancel();
+        let mut runs = 0;
+        let (_, error) = run_bounded_import(&ctx, "import", Duration::from_secs(5), |_, _| {
+            runs += 1;
+            (report(false), Some(anyhow!("native importer error 3")))
+        });
+        assert_eq!(
+            (runs, text(&error.unwrap()).as_str()),
+            (1, "native importer error 3")
+        );
+        let mut runs = 0;
+        let (_, error) =
+            run_bounded_import(&ctx, "import", Duration::from_secs(5), |bounded, _| {
+                runs += 1;
+                ctx.cancel();
+                (report(true), context_error(bounded))
+            });
+        assert_eq!((runs, text(&error.unwrap()).as_str()), (1, "canceled"));
+    }
 }
