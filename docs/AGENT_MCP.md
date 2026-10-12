@@ -450,6 +450,11 @@ ready, and follows resets and Player replacements by itself.
 | Argument | Default | Meaning |
 | --- | --- | --- |
 | `listen` | `127.0.0.1:0` | Literal IP and port of the HTTP listener; port `0` picks a free one. |
+| `transport` | `websocket` | How viewers get the video: `websocket` or `webrtc`, see below. |
+| `webrtcAddress` | listener's IP | `webrtc`: local IP its UDP socket binds and announces. With a listener on every interface the default is this machine's outbound address. |
+| `webrtcPort` | `0` | `webrtc`: UDP port; `0` picks a free one. |
+| `publish` | none | Command that publishes the listener, see below. `off` disables the server's default. |
+| `publishPattern` | none | Regular expression whose first group is the public address in the command's output. |
 | `fps` | `60` | Capture rate, 1-60. The Player's own frame cap (`mcp --fps`, default 30) bounds it. |
 | `maxWidth` | `1920` | Widest encoded picture; a wider viewport is scaled down. |
 | `bitrateKbps` | `12000` | Constant video bitrate. |
@@ -462,17 +467,53 @@ the public `ScreenCapture` API, reads it back asynchronously and sends the raw
 frame over a loopback connection that only it can open (the port and a secret
 travel through the control directory). The server encodes H.264 on the GPU
 through the NVIDIA driver's encoder (NVENC: ultra-low-latency tuning, no
-B-frames, keyframes only on request) and sends each frame to the viewers over
-one WebSocket as soon as it is encoded. The page decodes with WebCodecs, which
-uses the browser's hardware decoder. Nothing is captured or encoded while
-nobody watches.
+B-frames, keyframes only on request) and hands each frame to the viewers as
+soon as it is encoded. Nothing is captured or encoded while nobody watches.
 
-Making the address reachable from another machine is the caller's step: an
-SSH forward, a reverse proxy or a tunnel to the listener, or `listen` on
-another interface. Everything is one HTTP port (the page and a WebSocket
-beneath the same secret path). The secret in the address is the only access
-control and the listener speaks plain HTTP, so terminate TLS in front of it
-when it leaves the machine.
+The two transports carry the same stream and the same input:
+
+- `websocket` sends the frames over the page's WebSocket and the page decodes
+  them with WebCodecs. Everything is one HTTP port, which any reverse proxy or
+  tunnel forwards. Browsers offer WebCodecs only in a secure context, so the
+  page must be opened on `localhost`/`127.0.0.1` or through HTTPS.
+- `webrtc` sends the video as an RTP track that the browser's own media
+  pipeline plays, so the page also works on plain `http://<lan-ip>`. The video
+  travels over UDP to `webrtcAddress`, reported by `status`, which the viewer
+  must reach directly: an HTTP proxy or tunnel carries the page and the input
+  but not the video. Signalling and input stay on the WebSocket. The server
+  announces that single local address and uses no STUN or TURN server, so it
+  cannot sit behind address translation.
+
+### Publish the address with a command
+
+`publish` names a command that the session starts after its listener and stops
+with it, typically a tunnel client:
+
+```json
+{"name": "remote_session", "arguments": {"action": "start", "publish": "zrok share public {url} --headless"}}
+```
+
+`{url}` becomes the listener's `http://host:port`, `{address}` its `host:port`,
+`{host}` and `{port}` its parts. The command is split into words (quotes group,
+a backslash keeps the next character) and run directly, without a shell; use
+`sh -c '...'` for pipes. The first http(s) address in its output that does not
+point at this machine is taken as the public one, or the first group of
+`publishPattern` when the command prints several. The reply's `publicUrl` is
+that address with the session's secret path; `publish` holds the command, the
+tail of its output and whether it still runs. `start` waits up to 20 seconds
+for the address; one announced later appears in `status`. A command that cannot
+be started fails the `start`; one that exits or stays silent leaves the session
+running locally with `publicUrl: null`.
+
+`mcp --remote-publish '<command>'`, or `UNITY_MICRO_EDITOR_REMOTE_PUBLISH`, sets
+the command for every `start` that names none, so agents get a public address
+without knowing the tunnel.
+
+Beyond the publish command, making the address reachable from another machine
+is the caller's step: an SSH forward, a reverse proxy or a tunnel to the
+listener, or `listen` on another interface. The secret in the address is the
+only access control and the listener speaks plain HTTP, so terminate TLS in
+front of it when it leaves the machine.
 
 Limits:
 
@@ -483,10 +524,11 @@ Limits:
   software encoder. `UNITY_MICRO_EDITOR_NVENC_DEVICE` selects the GPU by CUDA
   ordinal. The driver limits concurrent encode sessions per machine; each
   remote session with a viewer uses one.
-- Viewing needs a browser with WebCodecs H.264 decoding (current Chrome, Edge,
-  Safari, Firefox). Browsers offer WebCodecs only in a secure context:
-  `localhost`/`127.0.0.1` or HTTPS. A plain `http://<lan-ip>` address shows an
-  explanation instead of the picture.
+- `websocket` viewing needs a browser with WebCodecs H.264 decoding (current
+  Chrome, Edge, Safari, Firefox) in a secure context; a plain `http://<lan-ip>`
+  address shows an explanation instead of the picture. `webrtc` viewing needs
+  H.264 in the browser's WebRTC stack. The stream is High profile; both
+  transports are verified in Chrome only.
 - Keyboard and mouse use the same virtual Input System devices as
   `runtime_command(input)`, so they need the target's Input System profile
   (`activeInputHandler` 1 or 2). A legacy-Input project is shown but cannot be

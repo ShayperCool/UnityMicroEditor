@@ -229,7 +229,7 @@ fn session_links_the_player_encodes_for_viewers_and_returns_their_input() {
     assert_eq!(session.status()["video"]["frames"], 0);
 
     let mut video = shared.video.subscribe();
-    shared.viewer_joined();
+    let viewer = shared.viewer_joined();
     assert_eq!(received.recv().unwrap(), json!({"viewers": 1}));
     let first = video.blocking_recv().unwrap();
     assert!(first.keyframe);
@@ -255,7 +255,7 @@ fn session_links_the_player_encodes_for_viewers_and_returns_their_input() {
     );
     shared.viewer_message("not json");
     shared.viewer_message(r#"{"e":[{"t":"k","c":"Bogus","down":true}]}"#);
-    shared.viewer_left();
+    shared.viewer_left(viewer);
     assert_eq!(received.recv().unwrap(), json!({"viewers": 0}));
 
     let status = session.status();
@@ -370,4 +370,153 @@ fn nvenc_encodes_complete_access_units() {
     let forced = encoder.encode(&frame, true, 33_333).unwrap();
     assert!(forced.keyframe && codec_string(&forced.data).is_some());
     assert!(encoder.encode(&frame[1..], false, 0).is_err());
+}
+
+#[test]
+fn publish_commands_split_expand_and_find_the_public_address() {
+    assert_eq!(
+        split_words(r#"zrok share  public "a b" 'c "d"' e\ f """#).unwrap(),
+        ["zrok", "share", "public", "a b", "c \"d\"", "e f", ""]
+    );
+    assert!(split_words("tunnel 'open").is_err() && split_words("tunnel \\").is_err());
+    let address: SocketAddr = "127.0.0.1:4100".parse().unwrap();
+    assert_eq!(
+        expand("ngrok http {port} --target={url} {address} {host}", address).unwrap(),
+        [
+            "ngrok",
+            "http",
+            "4100",
+            "--target=http://127.0.0.1:4100",
+            "127.0.0.1:4100",
+            "127.0.0.1"
+        ]
+    );
+    assert!(expand("  ", address).is_err());
+
+    let found = |line: &str| find_url(line, None);
+    assert_eq!(
+        found("forwarding http://127.0.0.1:4100 -> https://abc.share.zrok.io."),
+        Some("https://abc.share.zrok.io".into())
+    );
+    assert_eq!(
+        found(
+            r#"lvl=info msg="started tunnel" addr=http://localhost:4100 url=https://x.ngrok-free.app"#
+        ),
+        Some("https://x.ngrok-free.app".into())
+    );
+    assert_eq!(
+        found("listening on http://0.0.0.0:80 and http://[::1]:80/"),
+        None
+    );
+    let pattern = regex::Regex::new(r"public=(\S+)").unwrap();
+    assert_eq!(
+        find_url(
+            "see https://docs.example public=https://mine.example",
+            Some(&pattern)
+        ),
+        Some("https://mine.example".into())
+    );
+    assert_eq!(find_url("see https://docs.example", Some(&pattern)), None);
+}
+
+#[test]
+fn published_session_reports_the_public_url_and_stops_its_command() {
+    let directory = tempfile::tempdir().unwrap();
+    let pid_file = directory.path().join("pid");
+    let player = Arc::new(FakePlayer {
+        lines: mpsc::channel().0,
+        requests: Mutex::default(),
+    });
+    let options = Options {
+        publish: format!(
+            "sh -c 'echo $$ > {}; echo tunnel for {{url}} is https://tunnel.example/; exec sleep 60'",
+            pid_file.display()
+        ),
+        ..Options::default()
+    };
+    let session = Session::start(player.clone(), options, fake_encoders()).unwrap();
+    let status = session.status();
+    let local = session.url();
+    let secret = local.trim_end_matches('/').rsplit('/').next().unwrap();
+    assert_eq!(
+        status["publicUrl"],
+        format!("https://tunnel.example/{secret}/")
+    );
+    assert_eq!(status["publish"]["running"], true);
+    let listener = local
+        .rsplit_once('/')
+        .unwrap()
+        .0
+        .rsplit_once('/')
+        .unwrap()
+        .0;
+    assert!(
+        status["publish"]["output"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("tunnel for {listener} is")),
+        "{status}"
+    );
+    let pid = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .to_string();
+    assert!(std::path::Path::new(&format!("/proc/{pid}")).exists());
+    drop(session);
+    wait_for("the publish command to stop", || {
+        !std::path::Path::new(&format!("/proc/{pid}")).exists()
+    });
+
+    let missing = Options {
+        publish: "/nonexistent/tunnel {url}".into(),
+        ..Options::default()
+    };
+    assert!(Session::start(player.clone(), missing, fake_encoders()).is_err());
+    // A command that ends without an address leaves the session usable locally.
+    let silent = Options {
+        publish: "true".into(),
+        ..Options::default()
+    };
+    let session = Session::start(player, silent, fake_encoders()).unwrap();
+    assert_eq!(session.status()["publicUrl"], Value::Null);
+    wait_for("the command's exit", || {
+        session.status()["publish"]["running"] == false
+    });
+}
+
+#[test]
+fn webrtc_session_binds_a_media_port_and_answers_only_valid_offers() {
+    let player = Arc::new(FakePlayer {
+        lines: mpsc::channel().0,
+        requests: Mutex::default(),
+    });
+    let unknown = Options {
+        transport: "quic".into(),
+        ..Options::default()
+    };
+    assert!(Session::start(player.clone(), unknown, fake_encoders()).is_err());
+    let options = Options {
+        transport: "webrtc".into(),
+        ..Options::default()
+    };
+    let session = Session::start(player, options, fake_encoders()).unwrap();
+    let status = session.status();
+    assert_eq!(status["transport"], "webrtc");
+    let media: SocketAddr = status["webrtcAddress"].as_str().unwrap().parse().unwrap();
+    assert!(media.ip().is_loopback() && media.port() != 0, "{media}");
+    assert!(
+        session
+            .shared
+            .state_json()
+            .contains(r#""transport":"webrtc""#)
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let reply = runtime.block_on(
+        session
+            .shared
+            .viewer_offer(1, json!({"type": "offer", "sdp": "not a description"})),
+    );
+    assert!(reply.contains("rtcError"), "{reply}");
 }

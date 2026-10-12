@@ -76,6 +76,11 @@ pub fn run_mcp_cli(arguments: Vec<String>) -> Result<()> {
         "forbid main Editor execution; require prepared native profiles/defaults/imports",
     );
     flags.int("fps", 30, "runtime frame cap");
+    flags.string(
+        "remote-publish",
+        &std::env::var("UNITY_MICRO_EDITOR_REMOTE_PUBLISH").unwrap_or_default(),
+        "command every remote session runs to publish its listener, with {url}, {address}, {host} or {port}",
+    );
     flags.parse(arguments)?;
     if !flags.args().is_empty() || flags.get_string("project").is_empty() {
         bail!("mcp requires an explicit --project");
@@ -114,6 +119,7 @@ pub fn run_mcp_cli(arguments: Vec<String>) -> Result<()> {
         engine_profile_path: flags.get_string("engine-profile"),
         no_editor,
         asynchronous: true,
+        remote_publish: flags.get_string("remote-publish"),
         controller: Some(controller),
         lifetime: Some(ctx.clone()),
     });

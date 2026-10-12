@@ -11,9 +11,14 @@ use std::sync::Arc;
 struct Input {
     action: String,
     listen: String,
+    transport: String,
+    webrtc_address: String,
+    webrtc_port: u16,
     fps: u32,
     max_width: u32,
     bitrate_kbps: u32,
+    publish: String,
+    publish_pattern: String,
 }
 
 impl Service {
@@ -22,13 +27,24 @@ impl Service {
         let mut current = self.0.remote.lock().unwrap();
         let reply = match input.action.as_str() {
             "start" => {
-                let requested = remote::Options {
+                let mut requested = remote::Options {
                     listen: input.listen,
+                    transport: input.transport,
+                    webrtc_address: input.webrtc_address,
+                    webrtc_port: input.webrtc_port,
                     fps: input.fps,
                     max_width: input.max_width,
                     bitrate_kbps: input.bitrate_kbps,
+                    publish: input.publish,
+                    publish_pattern: input.publish_pattern,
                 };
                 let unspecified = requested == remote::Options::default();
+                // The server's own publish command applies unless the call names one or says "off".
+                match requested.publish.as_str() {
+                    "" => requested.publish.clone_from(&self.0.remote_publish),
+                    "off" => requested.publish.clear(),
+                    _ => {}
+                }
                 let options = requested
                     .normalized()
                     .map_err(|error| fail("invalid_request", error))?;

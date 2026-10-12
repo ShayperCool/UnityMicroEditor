@@ -95,24 +95,25 @@ async fn socket(
         .on_upgrade(move |socket| viewer(shared, socket))
 }
 
-struct Viewing(Arc<Shared>);
+struct Viewing(Arc<Shared>, u64);
 impl Drop for Viewing {
     fn drop(&mut self) {
-        self.0.viewer_left();
+        self.0.viewer_left(self.1);
     }
 }
 
 async fn viewer(shared: Arc<Shared>, mut socket: WebSocket) {
     let mut video = shared.video.subscribe();
     let mut changed = shared.changed.subscribe();
-    shared.viewer_joined();
-    let _viewing = Viewing(shared.clone());
+    let viewing = Viewing(shared.clone(), shared.viewer_joined());
+    // With WebRTC the video is a media track; this socket carries state, signalling and input.
+    let frames = !shared.uses_webrtc();
     // A viewer starts, and restarts after falling behind, at a keyframe.
     let mut waiting = true;
     let mut keepalive = tokio::time::interval(Duration::from_secs(5));
     loop {
         let outgoing = tokio::select! {
-            packet = video.recv() => match packet {
+            packet = video.recv(), if frames => match packet {
                 Ok(packet) if waiting && !packet.keyframe => continue,
                 Ok(packet) => {
                     waiting = false;
@@ -132,8 +133,14 @@ async fn viewer(shared: Arc<Shared>, mut socket: WebSocket) {
             _ = keepalive.tick() => Message::Text(shared.state_json().into()),
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Text(text))) => {
-                    shared.viewer_message(text.as_str());
-                    continue;
+                    let message = serde_json::from_str::<serde_json::Value>(text.as_str()).ok();
+                    match message.and_then(|mut message| message.get_mut("offer").map(serde_json::Value::take)) {
+                        Some(offer) => Message::Text(shared.viewer_offer(viewing.1, offer).await.into()),
+                        None => {
+                            shared.viewer_message(text.as_str());
+                            continue;
+                        }
+                    }
                 }
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                 Some(Ok(_)) => continue,

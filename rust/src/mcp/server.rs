@@ -180,9 +180,14 @@ pub struct RuntimeInput {
 struct RemoteInput {
     action: String,
     listen: String,
+    transport: String,
+    webrtc_address: String,
+    webrtc_port: i64,
     fps: i64,
     max_width: i64,
     bitrate_kbps: i64,
+    publish: String,
+    publish_pattern: String,
 }
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -360,9 +365,14 @@ impl RemoteInput {
         let mut out = Encoder::new();
         out.text("action", &self.action);
         out.text_omitempty("listen", &self.listen);
+        out.text_omitempty("transport", &self.transport);
+        out.text_omitempty("webrtcAddress", &self.webrtc_address);
+        out.int_omitempty("webrtcPort", self.webrtc_port);
         out.int_omitempty("fps", self.fps);
         out.int_omitempty("maxWidth", self.max_width);
         out.int_omitempty("bitrateKbps", self.bitrate_kbps);
+        out.text_omitempty("publish", &self.publish);
+        out.text_omitempty("publishPattern", &self.publish_pattern);
         out.finish()
     }
 }
@@ -1081,7 +1091,7 @@ fn runtime_tools() -> Vec<StaticTool> {
         static_tool(
             write_tool(
                 "remote_session",
-                "Serve the Player's picture and input to a browser: start, stop, status. start binds an HTTP listener of its own (default 127.0.0.1 and a free port, so every editor gets a distinct address) and returns url, which carries the session's secret; open it in a browser to watch the game as hardware-encoded H.264 and play it with keyboard and mouse. It can be started before the Player: the page waits and follows Player restarts. Encoding needs an NVIDIA GPU; viewing needs a browser with WebCodecs on localhost or HTTPS. Exposing the address beyond this machine is the caller's step.",
+                "Serve the Player's picture and input to a browser: start, stop, status. start binds an HTTP listener of its own (default 127.0.0.1 and a free port, so every editor gets a distinct address) and returns url, which carries the session's secret; open it in a browser to watch the game as hardware-encoded H.264 and play it with keyboard and mouse. It can be started before the Player: the page waits and follows Player restarts. Encoding needs an NVIDIA GPU. transport websocket (default) uses one HTTP port and needs a WebCodecs browser on localhost or HTTPS; transport webrtc also works on a plain-HTTP page but sends the video over a UDP port. publish runs a command for the session's lifetime (a tunnel client, for example) and the reply's publicUrl is the address it announced.",
                 false,
                 object(&[
                     ("action", string("start,stop,status"), true),
@@ -1089,6 +1099,37 @@ fn runtime_tools() -> Vec<StaticTool> {
                         "listen",
                         string(
                             "start: literal IP and port of the HTTP listener, default 127.0.0.1:0",
+                        ),
+                        false,
+                    ),
+                    (
+                        "transport",
+                        string("start: websocket (default) or webrtc"),
+                        false,
+                    ),
+                    (
+                        "webrtcAddress",
+                        string(
+                            "start, webrtc: local IP of the UDP socket; default the listener's, or the outbound one",
+                        ),
+                        false,
+                    ),
+                    (
+                        "webrtcPort",
+                        integer("start, webrtc: UDP port, default a free one"),
+                        false,
+                    ),
+                    (
+                        "publish",
+                        string(
+                            "start: command with {url}, {address}, {host} or {port} of the listener, e.g. a tunnel client; off disables the server's default",
+                        ),
+                        false,
+                    ),
+                    (
+                        "publishPattern",
+                        string(
+                            "start: regular expression whose first group is the public address in the command's output; default the first non-local http(s) URL",
                         ),
                         false,
                     ),
