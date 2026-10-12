@@ -1,0 +1,34 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!21 &2100000
+Material:
+  serializedVersion: 8
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: IV_Emission
+  m_Shader: {fileID: 4800000, guid: 55555555cccc4ddd8eee0123456789ab, type: 3}
+  m_Parent: {fileID: 2100000, guid: 209e31d957c413e2868c88da6c48d23c, type: 2}
+  m_ModifiedSerializedProperties: 2
+  m_ValidKeywords:
+  - _EMISSION
+  m_InvalidKeywords: []
+  m_LightmapFlags: 2
+  m_EnableInstancingVariants: 0
+  m_DoubleSidedGI: 0
+  m_CustomRenderQueue: -1
+  stringTagMap:
+    RenderType: Opaque
+  disabledShaderPasses: []
+  m_LockedProperties: 
+  m_SavedProperties:
+    serializedVersion: 3
+    m_TexEnvs: []
+    m_Ints: []
+    m_Floats: []
+    m_Colors:
+    - _Color: {r: 0.19999996, g: 0.39999998, b: 0.6, a: 0.5}
+    - _EmissionColor: {r: 2, g: 1, b: 0.5, a: 1}
+  m_BuildTextureStacks: []
+  m_AllowLocking: 1

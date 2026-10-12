@@ -32,6 +32,17 @@ unity-micro-editor native-adopt \
 
 `native-adopt` checks source, metadata and GUID again, along with every copied dependency, the current import environment and the native XXH3-128 and SHA-256 of each artifact. A report without a complete environment record is refused.
 
+Run the inspectors of material variants in a standalone worker and write what the engine leaves of each ([below](#variants-of-a-shader-with-an-inspector)):
+
+```bash
+unity-micro-editor material-inspect \
+  --project /absolute/project \
+  --output /absolute/project/Library/UnityMicroEditor/inspections/manual-01 \
+  --material Assets/Materials/Glass_Variant.mat
+```
+
+`--material` can be repeated, and `--list` names a file with one variant a line. The two documents of each variant are `<output>/inspected/<guid>.a.mat` and `.b.mat`; `<output>/result.json` names the inspector that ran, or the reason a variant has no result.
+
 Print the current import environment fingerprint without starting any Unity process:
 
 ```bash
@@ -260,9 +271,33 @@ A variant (`m_Parent`) stores its overrides; a build writes it as a whole materi
 Refused:
 
 - A variant whose parent the caller does not know, whose parent's source holds no material under the named file ID, or whose chain returns to itself (the Editor rewrites such sources) or is longer than 32.
-- A variant of a shader that names an inspector (`CustomEditor`, as every Shader Graph shader does): the inspector's `ValidateMaterial` runs on the variant as the project's code.
+- A variant of a shader that names an inspector (`CustomEditor`, as every Shader Graph shader does), baked from its source alone: the inspector's `ValidateMaterial` runs on the variant as the project's code. With the documents an inspection leaves it is baked ([below](#variants-of-a-shader-with-an-inspector)).
 - A variant of a shader with a property attribute that is not one of the engine's (`Toggle`, `ToggleOff`, `KeywordEnum`, `Enum`, `ToggleUI`, `Header`, `Space`, `PowerSlider`, `IntRange`), since a project can define drawers; with several keyword drawers on one property; or with drawer arguments that are not plain text.
 - A variant that inherits a texture held inside a parent's own source.
+
+##### Variants of a shader with an inspector
+
+Building the properties of a variant also runs the `ValidateMaterial` of the shader's inspector, which is C# of a package or the project. URP's inspectors set the surface and blend keywords, the render queue, the `RenderType` tag, the disabled passes (`DepthOnly`, `SHADOWCASTER`, `MOTIONVECTORS`), `_SrcBlend`, `_DstBlend`, `_ZWrite`, `_AlphaToMask`, the copies `_MainTex` and `_Color`, the emission flag and the keywords of the maps a material sets. A plain material gets none of it in a build: one whose source is stale is written stale. This was compared on 104 plain materials of URP's shaders and Shader Graph shaders in both color spaces.
+
+None of that code is restated. `native::inspect_material_variants` (`rust/src/native/inspector.rs`, command `material-inspect`) has the engine run the project's own compiled inspector in a standalone worker:
+
+1. A first worker run imports the shaders the chains name, with the engine's shader importer.
+2. A second run gets a context that holds the materials of each chain, each shader as the first run wrote it, a texture of one pixel for every texture a chain names, the render pipeline asset the project settings name, the assemblies of the inspectors from an Editor compilation of the project (as for [scripted importers](#scripted-importers), with the precompiled assemblies they name next to them) and an importer of this tool (`tools/MaterialInspector`, compiled with the compiler of the Unity installation). That importer sets the project's color space and render pipeline, reads each variant from its source, queries a property, which makes the engine build the properties and run the drawers and the inspector, and saves the material as text.
+
+A standalone worker has no artifact database. It finds an asset only where a source file holds the object itself, so the shaders and textures lie in the context as native assets under their own GUIDs and the references in the context's copies of the materials are typed to match; the documents that come back carry the authored types and file ID again. An asset the project lacks stays missing. The worker starts in gamma space whatever the project settings say, and the engine converts the colors an inspector reads and sets by that space, so the importer sets it.
+
+`playerbake::bake_inspected_variant` bakes a variant from those documents: it merges them as above, without running the drawers again, since the engine has. A build builds the properties of a material when it first needs them, and an inspector decides by the values the parents have at that moment. For a variant of a variant a build may get there before or after the parent's own inspector has run, and it may merge the two at yet another moment; Editor builds of the same sources were measured to do each. The inspection therefore saves every variant twice, over parents as they were read and after the variants among its parents were built, and the baker bakes three states: both of those, and the first document over parents each built alone. A variant they disagree on is refused. That happens only where a parent's source is not as its inspector leaves it and the variant turns back what the parent's inspector would derive; a source the Editor saved is already as its inspector leaves it.
+
+Compared with Editor builds, object for object, in gamma and linear space, with URP 17.6.0: 603 variants of `Lit`, `Complex Lit`, `Unlit`, `Simple Lit`, `Baked Lit`, `Particles/Lit` and `Particles/Unlit` (hand-written cases of surface type, blend mode, alpha clipping, emission, normal and other maps, shadows, culling, queue offset and render queue, locked properties, stale keywords, tags and passes, plus random ones, 88 of them variants of variants). 591 are equal and 12 are refused for the order; none differs. The repository's fixtures use a shader of the reference project that names URP's `LitShader`.
+
+Refused, each with its reason:
+
+- A variant of a Shader Graph shader. URP's inspectors decide the motion vector pass by the graph's metadata, which they read through the asset database (`AssetDatabase.GetAssetPath`, `AssetImporter.GetAtPath`, `LoadAllAssetsAtPath`); a standalone worker answers none of these, and the inspector then silently leaves `MOTIONVECTORS` enabled. In a trial with the graphs imported by the worker, 288 of the 295 Shader Graph variants of the comparison differed from the Editor's, 283 of them in the disabled passes alone. The worker does import a graph with the package's own importer when the packages lie whole in its context; making the result loadable needs the artifact database the main Editor writes.
+- An inspector other than `BakedLitShader`, `LitShader`, `ParticlesLitShader`, `ParticlesUnlitShader`, `SimpleLitShader` and `UnlitShader` of `UnityEditor.Rendering.Universal.ShaderGUI`, or those of another package version than `com.unity.render-pipelines.universal@0ffb3d4f1461` (17.6.0): an inspector that asks the asset database gets no answer and no error, so only inspectors compared with the Editor are accepted.
+- A chain with a material outside `Assets`, a reference to an asset other than a shader source or a `Texture2D` (file ID 2800000), or a project whose quality levels name different render pipeline assets.
+- A project without an Editor compilation, or whose inspector is not compiled from an immutable package.
+
+Limits: a one-pixel texture stands for every texture, which is right for an inspector that asks only whether a texture is set, as the accepted ones do. Both worker runs are made on every call; nothing is cached. A session does not publish materials yet (above), so nothing calls the inspection during a run; `NativeSources::inspected_material` is what a publishing step answers for the parents.
 
 Without its parent the engine writes a variant from its own overrides and its own defaults for the four settings; that is not reproduced, since whether the parent exists is the project's to say.
 

@@ -39,7 +39,8 @@ pub use mask::{Mask, bake_mask, bake_mask_object, read_mask};
 pub use material::{PropertyKind, ShaderFacts, ShaderProperty, read_shader_facts};
 pub use mixer::mixer_undefined_values;
 pub use native::{
-    Lightmaps, NativeObject, NativeSources, NoNativeSources, bake_native, bake_native_objects,
+    InspectedVariant, Lightmaps, NativeObject, NativeSources, NoNativeSources,
+    bake_inspected_variant, bake_inspected_variant_objects, bake_native, bake_native_objects,
     native_class, native_tree,
 };
 pub use override_controller::{bake_override, bake_override_object};

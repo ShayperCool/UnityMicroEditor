@@ -116,7 +116,7 @@ Preparation and sessions do not need the package in the game project. To use the
 - `engine-profile.json`: the pinned engine profile embedded in the executable.
 - `Packages/com.unitymicroeditor.runtime/`: the Unity package with the loader, runtime bridge and Editor utilities.
 - `HostProject/`: the minimal host project.
-- `tools/`: C# helpers run through the SDK: lifecycle instrumentation and Netcode post-processing.
+- `tools/`: C# helpers run through the SDK: lifecycle instrumentation, Netcode post-processing and the importer that saves material variants as their inspector leaves them.
 - `tests/`: standalone C# regression projects. Rust unit tests sit next to their code, integration tests in `rust/tests/`.
 - `Samples/RawProject/`: a small authored project used as a fixture.
 - `Integrations/EditorParity/`: an isolated Unity Editor reference and the `parity-*` commands for comparing it with the Player.
