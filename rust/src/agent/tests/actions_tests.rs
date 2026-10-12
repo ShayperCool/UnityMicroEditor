@@ -512,6 +512,17 @@ fn runtime_start_cannot_interleave_preparation_activation() {
     }
 }
 
+/// The controller interrupts its runner before it terminates it. With the
+/// interrupt ignored each of the fifteen shutdowns of the test below waited
+/// out the 12 s grace period.
+#[test]
+fn runner_is_interrupted_when_the_tool_ignores_interrupts() {
+    let elapsed = crate::sysutil::testing::pass_ignoring_interrupts(
+        "agent::tests::actions_tests::cached_preparation_validates_identity_and_baseline_before_activation",
+    );
+    assert!(elapsed < std::time::Duration::from_secs(90), "{elapsed:?}");
+}
+
 #[test]
 fn cached_preparation_validates_identity_and_baseline_before_activation() {
     for changed in [

@@ -519,6 +519,8 @@ impl Controller {
         // async-signal-safe system calls without allocating.
         unsafe {
             command.pre_exec(move || {
+                // A shutdown interrupts the runner first.
+                sysutil::default_stop_signals();
                 if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong) != 0 {
                     return Err(io::Error::last_os_error());
                 }

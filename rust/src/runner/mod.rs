@@ -22,8 +22,8 @@ pub use patch::{
     patch_value_equal,
 };
 pub use player::{
-    Player, ReloadAck, require_hardware_graphics, require_player_report, start_player,
-    wait_reload_ack,
+    Player, READY_BUDGET, ReadyBudget, ReloadAck, process_cpu, require_hardware_graphics,
+    require_player_report, start_player, wait_reload_ack,
 };
 pub use prepared::{
     PreparedCompiler, PreparedDependency, PreparedFile, PreparedLaunch, PreparedNativeContent,
@@ -733,7 +733,7 @@ fn run_session(
             owned.0.as_mut().expect("owned Player")
         };
     }
-    player!().wait_ready(ctx, Duration::from_secs(45))?;
+    player!().wait_ready(ctx, READY_BUDGET)?;
     Event::new("ready")
         .with("pid", &player!().pid())
         .with("manifest", &prepared.manifest)
@@ -928,7 +928,7 @@ fn run_session(
                 &run_directory,
                 &request,
             )?);
-            player!().wait_ready(ctx, Duration::from_secs(45))?;
+            player!().wait_ready(ctx, READY_BUDGET)?;
             let mut event = Event::new("content-updated")
                 .with("paths", &paths)
                 .with("manifest", &next.manifest)

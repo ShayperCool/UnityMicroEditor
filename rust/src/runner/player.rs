@@ -117,6 +117,8 @@ pub fn start_player(
     let parent = unsafe { libc::getpid() };
     unsafe {
         command.pre_exec(move || {
+            // `stop` interrupts the Player first.
+            sysutil::default_stop_signals();
             if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -234,9 +236,10 @@ impl Player {
 
     /// Polls the ready report every 20 ms. When several outcomes are due at once
     /// the order is cancellation, Player exit, timeout, report.
-    pub fn wait_ready(&mut self, ctx: &Context, timeout: Duration) -> Result<()> {
+    pub fn wait_ready(&mut self, ctx: &Context, budget: ReadyBudget) -> Result<()> {
         const TICK: Duration = Duration::from_millis(20);
-        let limit = Instant::now() + timeout;
+        let started = Instant::now();
+        let mut limit = started + budget.budget;
         let mut tick = Instant::now() + TICK;
         loop {
             let seen = self.wake.seen();
@@ -252,7 +255,14 @@ impl Player {
             }
             let now = Instant::now();
             if now >= limit {
-                bail!("Player readiness timeout; see {}", self.report);
+                let ran = process_cpu(self.pid);
+                match budget.verdict(now - started, ran) {
+                    Some(reason) => bail!("{reason}; see {}", self.report),
+                    // The Player has hardly run yet: the machine is busy
+                    // with something else.
+                    None => limit = (now + READY_RECHECK).min(started + budget.limit),
+                }
+                continue;
             }
             if now < tick {
                 self.wake.wait(seen, Some(tick.min(limit)));
@@ -311,6 +321,80 @@ impl Player {
         let _ = sysutil::kill(group, libc::SIGKILL);
         self.wait_done(Duration::from_secs(1));
     }
+}
+
+/// How long a started Player may take to report that it is ready.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReadyBudget {
+    /// The time a Player that gets to run has.
+    pub budget: Duration,
+    /// The time a Player has on a machine too busy to run it: one that has
+    /// had less than `ran` of processor time when `budget` is over keeps
+    /// waiting, until it has had that much or this limit is reached.
+    pub limit: Duration,
+    pub ran: Duration,
+}
+
+/// A Player is ready some 5 s after its start, having used about as much
+/// processor time. On a machine that swaps, the same start has been seen
+/// to write not even its log within 45 s.
+pub const READY_BUDGET: ReadyBudget = ReadyBudget {
+    budget: Duration::from_secs(45),
+    limit: Duration::from_secs(300),
+    ran: Duration::from_secs(30),
+};
+
+/// How often a Player that is waited for beyond its budget is looked at again.
+const READY_RECHECK: Duration = Duration::from_secs(1);
+
+impl ReadyBudget {
+    /// One fixed time, however little the Player got to run.
+    pub fn fixed(budget: Duration) -> Self {
+        Self {
+            budget,
+            limit: budget,
+            ran: Duration::ZERO,
+        }
+    }
+
+    /// Why a Player that is not ready `elapsed` after its start is given up,
+    /// having had `ran` of processor time (`None` when that is unknown);
+    /// `None` while it is waited for.
+    pub fn verdict(&self, elapsed: Duration, ran: Option<Duration>) -> Option<String> {
+        if elapsed < self.budget {
+            return None;
+        }
+        let had = match ran {
+            Some(ran) => format!("{:.1}s", ran.as_secs_f64()),
+            None => "an unknown amount".into(),
+        };
+        if elapsed >= self.limit && self.limit > self.budget {
+            return Some(format!(
+                "Player start: not ready within {}s, the limit for a Player that hardly gets to run (budget {}s; it had {had} of processor time)",
+                self.limit.as_secs(),
+                self.budget.as_secs(),
+            ));
+        }
+        if elapsed >= self.limit || ran.is_none_or(|ran| ran >= self.ran) {
+            return Some(format!(
+                "Player start: not ready within its {}s budget (it had {had} of processor time)",
+                self.budget.as_secs(),
+            ));
+        }
+        None
+    }
+}
+
+/// The processor time a process has used, in user and kernel mode.
+pub fn process_cpu(pid: i32) -> Option<Duration> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name may hold spaces and parentheses; the fields after
+    // it start with the state, the third field of the line.
+    let mut fields = stat.rsplit_once(')')?.1.split_ascii_whitespace().skip(11);
+    let ticks = fields.next()?.parse::<u64>().ok()? + fields.next()?.parse::<u64>().ok()?;
+    // SAFETY: `sysconf` reads a constant of the system.
+    let per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    (per_second > 0).then(|| Duration::from_secs_f64(ticks as f64 / per_second as f64))
 }
 
 /// A Player must render on a real GPU.
