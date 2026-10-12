@@ -2097,6 +2097,28 @@ impl Project {
                     .push(((guid.to_string(), file_id.parse().unwrap()), facts));
             }
         }
+        // `shaders-imported/<guid>.bin`: the same shaders as an import
+        // worker left them. A session has only these; what a material
+        // takes from its shader has to be the same either way.
+        if let Ok(entries) = fs::read_dir(root.join("shaders-imported")) {
+            for entry in entries {
+                let path = entry.unwrap().path();
+                let guid = path.file_stem().unwrap().to_string_lossy().into_owned();
+                let imported =
+                    playerbake::read_imported_shader_facts(&fs::read(&path).unwrap()).unwrap();
+                let built = self
+                    .shaders
+                    .iter_mut()
+                    .find(|((known, _), _)| *known == guid)
+                    .unwrap_or_else(|| panic!("no built shader {guid}"));
+                if std::env::var_os("UNITY_PLAYERBAKE_IMPORTED_SHADERS").is_some() {
+                    built.1 = imported;
+                } else {
+                    assert_eq!(imported.properties, built.1.properties, "{guid}");
+                    assert_eq!(imported.name, built.1.name, "{guid}");
+                }
+            }
+        }
         let layout = playerbake::native_tree(21).unwrap();
         for entry in fs::read_dir(root).unwrap() {
             let path = entry.unwrap().path();

@@ -399,7 +399,7 @@ fn linked_shaders(sources: &Sources, target: &str, text: &[u8]) -> Result<Vec<St
 /// Whether a file is a source of the project itself, which can change. A
 /// file of a cached package cannot: its directory is named after its
 /// content, and the package files of the project stand for it.
-fn authored(sources: &Sources, project: &str, logical: &str) -> bool {
+pub(super) fn authored(sources: &Sources, project: &str, logical: &str) -> bool {
     sources.physical(logical).is_some_and(|physical| {
         ["Assets", "ProjectSettings", "Packages"]
             .iter()
@@ -607,7 +607,7 @@ fn read_reload_list(sources: &Sources, path: &str) -> Vec<String> {
 /// The texts of a graph's generated shader, read from the artifact of its
 /// import: the program sources, and a line per shader it names in the form
 /// a `.shader` source has.
-fn artifact_texts(artifact: &[u8]) -> Result<Vec<u8>> {
+pub(super) fn artifact_texts(artifact: &[u8]) -> Result<Vec<u8>> {
     let shaders = playerbake::read_serialized_of_class(artifact, 48)?;
     if shaders.is_empty() {
         bail!("the artifact of the shader graph holds no Shader");
@@ -752,6 +752,7 @@ fn run(
             environment: &environment,
             files,
             shader_cache: &build.shader_cache,
+            extras: None,
         },
     );
     import_context.cancel();
@@ -825,6 +826,13 @@ pub fn plan_source(
 /// the graph. Its importer leaves out an include whose file is not an asset
 /// of the context and notes the path instead, so the graph is imported
 /// again with those files until nothing is left out.
+/// The includes a graph's importer left out of the shader it wrote, as it
+/// notes them in the shader's text.
+pub(super) static MISSING: std::sync::LazyLock<regex::bytes::Regex> =
+    std::sync::LazyLock::new(|| {
+        regex::bytes::Regex::new(r"(?m-u)missing include file: ([^\r\n()]*[^\r\n() ])").unwrap()
+    });
+
 fn graph_text(
     ctx: &Context,
     build: &Build,
@@ -832,9 +840,6 @@ fn graph_text(
     graph: &[String],
     templates: &[String],
 ) -> Result<Vec<u8>> {
-    static MISSING: std::sync::LazyLock<regex::bytes::Regex> = std::sync::LazyLock::new(|| {
-        regex::bytes::Regex::new(r"(?m-u)missing include file: ([^\r\n()]*[^\r\n() ])").unwrap()
-    });
     let mut known: Vec<String> = Vec::new();
     for round in 0..4 {
         // The known files as a text that includes them, to follow what

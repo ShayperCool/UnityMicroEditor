@@ -39,6 +39,9 @@ pub struct ScriptEnvironment {
     /// inspectors, of any place for a build. The worker's runtime finds one
     /// that lies next to the assembly that names it.
     pub plugins: Vec<String>,
+    /// The package (`Packages/<name>`) each assembly is compiled from, by
+    /// assembly name.
+    pub assembly_roots: BTreeMap<String, String>,
     /// Identifies the assemblies' contents.
     pub sha256: String,
 }
@@ -279,6 +282,9 @@ enum Purpose {
     /// A build of Player objects: the classes of the given scripts, and
     /// every class a build calls for a shader.
     Build,
+    /// The inspectors of material variants and the importers of the shaders
+    /// they are inspected with.
+    Inspectors,
 }
 
 /// The interfaces of the callbacks a build runs on shaders. An assembly
@@ -305,6 +311,20 @@ pub fn build_environment(project: &str, scripts: &BTreeSet<String>) -> Result<Sc
         ..Default::default()
     };
     environment(project, &selection, Purpose::Build)
+}
+
+/// The environment in which the inspectors of materials run: the assemblies
+/// of the scripts named by file (the inspectors; one no package compiles is
+/// left out, and the engine then finds no class of that name), those of the
+/// given scripts (the importers of the shaders) and every assembly of an
+/// immutable package that refers to one of the latter, since the targets and
+/// nodes of a shader graph are classes of such assemblies. Files of any
+/// immutable package can be placed in its context.
+pub fn inspection_environment(
+    project: &str,
+    selection: &ScriptSelection,
+) -> Result<ScriptEnvironment> {
+    environment(project, selection, Purpose::Inspectors)
 }
 
 /// Where the Editor compilation of a project found each package, as
@@ -365,10 +385,12 @@ fn environment(
                 failure = match (purpose, failure) {
                     // A project that has no staging clone fails by its own
                     // Library.
-                    (Purpose::Importers, Some(first)) if !super::is_not_exist(&first) => {
+                    (Purpose::Importers | Purpose::Inspectors, Some(first))
+                        if !super::is_not_exist(&first) =>
+                    {
                         Some(first)
                     }
-                    (Purpose::Importers, _) => Some(error),
+                    (Purpose::Importers | Purpose::Inspectors, _) => Some(error),
                     // The staging clone is tried first; what the project's
                     // own `Library` lacks is the more telling reason.
                     (Purpose::Build, Some(first)) => Some(anyhow!("{first:#}; {error:#}")),
@@ -381,6 +403,9 @@ fn environment(
         match purpose {
             Purpose::Importers => {
                 "a scripted importer runs on the script assemblies of an Editor compilation of the project, which a preparation that builds its host leaves in the staging clone"
+            }
+            Purpose::Inspectors => {
+                "a material inspector runs on the script assemblies of an Editor compilation of the project, which a preparation that builds its host leaves in the staging clone"
             }
             Purpose::Build => {
                 "the Editor's build code runs on the script assemblies of an Editor compilation of the project, which a preparation that builds its host leaves in the staging clone"
@@ -403,6 +428,7 @@ fn read_environment(
     // The assembly of each importer: the one compiled from its script.
     let mut wanted: BTreeSet<&str> = importers.iter().map(String::as_str).collect();
     let mut selected = BTreeSet::new();
+    let mut of_scripts = BTreeSet::new();
     let mut files: BTreeSet<&str> = selection.files.iter().map(String::as_str).collect();
     for (index, assembly) in assemblies.iter().enumerate() {
         for source in &assembly.source_files {
@@ -413,7 +439,9 @@ fn read_environment(
             }
         }
     }
-    if let Some(missing) = files.first() {
+    if let Some(missing) = files.first()
+        && purpose != Purpose::Inspectors
+    {
         bail!("no compiled package assembly is made from a script {missing}");
     }
     'search: for (index, assembly) in assemblies.iter().enumerate() {
@@ -436,6 +464,7 @@ fn read_environment(
                 && wanted.remove(guid.as_str())
             {
                 selected.insert(index);
+                of_scripts.insert(index);
                 if wanted.is_empty() {
                     break 'search;
                 }
@@ -444,6 +473,31 @@ fn read_environment(
     }
     if let Some(missing) = wanted.first() {
         bail!("no compiled package assembly defines the importer script {missing}");
+    }
+    if purpose == Purpose::Inspectors {
+        let immutable = |source: &String| {
+            package_root(source)
+                .and_then(|root| packages.get(root))
+                .is_some_and(|directory| directory.starts_with("Library/PackageCache/"))
+        };
+        for (index, assembly) in assemblies.iter().enumerate() {
+            if !selected.contains(&index)
+                && !assembly.name.contains(['/', '\\', '\0'])
+                && assembly
+                    .references
+                    .iter()
+                    .any(|reference| of_scripts.contains(reference))
+                && assembly.source_files.iter().all(immutable)
+                && stat(&sysutil::join(&[
+                    &library,
+                    "Library/ScriptAssemblies",
+                    &format!("{}.dll", assembly.name),
+                ]))
+                .is_ok()
+            {
+                selected.insert(index);
+            }
+        }
     }
     if purpose == Purpose::Build {
         for (index, assembly) in assemblies.iter().enumerate() {
@@ -514,12 +568,12 @@ fn read_environment(
                     format!("{directory}{}", &plugin[root.len()..])
                 }
                 (Purpose::Build, None) => plugin.clone(),
-                (Purpose::Importers, Some((root, directory)))
+                (Purpose::Importers | Purpose::Inspectors, Some((root, directory)))
                     if selection.plugins && directory.starts_with("Library/PackageCache/") =>
                 {
                     format!("{directory}{}", &plugin[root.len()..])
                 }
-                (Purpose::Importers, _) => bail!(
+                (Purpose::Importers | Purpose::Inspectors, _) => bail!(
                     "importer assembly {} needs the precompiled assembly {plugin}, which a standalone worker does not load",
                     assembly.name
                 ),
@@ -546,6 +600,10 @@ fn read_environment(
             environment
                 .roots
                 .insert(root.to_string(), directory.to_string());
+            environment
+                .assembly_roots
+                .entry(assembly.name.clone())
+                .or_insert_with(|| root.to_string());
             scripts.insert(source.clone());
         }
         identity.push_str(&format!("{}\0{}\0", assembly.name, sha256(&data)));
@@ -556,7 +614,7 @@ fn read_environment(
     }
     // A build reads files of any package: what a shader includes, what the
     // settings refer to.
-    if purpose == Purpose::Build {
+    if purpose != Purpose::Importers {
         for (root, directory) in &packages {
             if directory.starts_with("Library/PackageCache/") {
                 environment.roots.insert(root.clone(), directory.clone());
