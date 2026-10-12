@@ -16,6 +16,7 @@ mod host_shaders;
 mod import;
 mod importer;
 mod inspector;
+mod material_variant;
 mod mesh_cpu;
 mod player_objects;
 mod probe;
@@ -49,8 +50,8 @@ pub use importer::{
     NativeOptions, NativeProjectImporter, stage_native_resources, valid_native_guid,
 };
 pub use inspector::{
-    InspectedMaterial, InspectionOptions, MaterialInspection, VERIFIED_INSPECTORS,
-    inspect_material_variants, project_asset_paths, run_material_inspect_cli,
+    InspectedMaterial, Inspection, InspectionOptions, MaterialInspection, VERIFIED_GRAPH_PACKAGE,
+    VERIFIED_INSPECTORS, inspect_material_variants, inspection_cache, run_material_inspect_cli,
 };
 pub use player_objects::{
     Build as PlayerBuild, ExternalObject as PlayerExternalObject, Plan as PlayerBuildPlan,

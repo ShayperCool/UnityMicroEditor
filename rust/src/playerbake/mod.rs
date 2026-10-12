@@ -6,6 +6,7 @@
 mod binding;
 mod clip;
 mod controller;
+mod flat_material;
 mod freeform;
 mod humanoid;
 mod managed;
@@ -30,13 +31,16 @@ pub use controller::{
     BakedObjects, Behaviour, BehaviourScript, ClipFacts, Controller, ControllerSources,
     bake_controller, bake_controller_object, read_clip_facts,
 };
+pub use flat_material::flatten_inspected_variant;
 pub use freeform::{Freeform, precompute as precompute_freeform};
 pub use managed::{
     DeferredBinding, DeferredReference, Encoded, Field, FieldType, ManagedLayout, ManagedType,
     ObjectReference, Pointer, References, Resolution, ScriptLayout, ScriptType,
 };
 pub use mask::{Mask, bake_mask, bake_mask_object, read_mask};
-pub use material::{PropertyKind, ShaderFacts, ShaderProperty, read_shader_facts};
+pub use material::{
+    PropertyKind, ShaderFacts, ShaderProperty, read_imported_shader_facts, read_shader_facts,
+};
 pub use mixer::mixer_undefined_values;
 pub use native::{
     InspectedVariant, Lightmaps, NativeObject, NativeSources, NoNativeSources,

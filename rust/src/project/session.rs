@@ -226,6 +226,9 @@ pub(crate) struct Inner {
     pub index_dirty: bool,
     pub explicit_sources: HashMap<String, String>,
     pub native_overlays: BTreeMap<String, NativeReplacement>,
+    /// The material variants of shaders with an inspector as a build
+    /// writes them, by GUID, each with its fields.
+    pub inspected_materials: BTreeMap<String, (super::InspectedMaterial, Map)>,
     /// Content derived from part of a source, such as the baked clips of a
     /// model, published under a GUID that no source owns.
     pub derived_native: BTreeMap<String, super::NativeContentFile>,
@@ -344,6 +347,7 @@ impl Inner {
             index_dirty: true,
             explicit_sources: HashMap::new(),
             native_overlays: BTreeMap::new(),
+            inspected_materials: BTreeMap::new(),
             derived_native: BTreeMap::new(),
             changed_clip_models: Vec::new(),
             controller_masks: Vec::new(),

@@ -106,7 +106,22 @@ pub fn read_shader_facts(object: &[u8]) -> Result<ShaderFacts> {
         .map_err(|error| anyhow::anyhow!("pinned Shader type tree: {error}"))?;
     // The parsed form is the second field; compiled programs follow it.
     let shader = tree.decode_leading(object, 2)?;
-    let parsed = field(&shader, "m_ParsedForm")?;
+    parsed_facts(field(&shader, "m_ParsedForm")?)
+}
+
+/// Reads the same from the artifact an import worker leaves of a shader
+/// source or a shader graph: the `Shader` object as the Editor holds it,
+/// laid out by the type tree the artifact carries. Its parsed form has the
+/// fields of the Player's.
+pub fn read_imported_shader_facts(artifact: &[u8]) -> Result<ShaderFacts> {
+    let shaders = super::serialized::read_of_class(artifact, 48)?;
+    let [shader] = &shaders[..] else {
+        bail!("import artifact holds {} shaders, not one", shaders.len());
+    };
+    parsed_facts(field(&shader.tree.decode(&shader.data)?, "m_ParsedForm")?)
+}
+
+fn parsed_facts(parsed: &Val) -> Result<ShaderFacts> {
     let mut facts = ShaderFacts {
         name: string(parsed, "m_Name")?,
         ..ShaderFacts::default()
