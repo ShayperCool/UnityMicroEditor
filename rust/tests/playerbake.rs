@@ -2097,6 +2097,28 @@ impl Project {
                     .push(((guid.to_string(), file_id.parse().unwrap()), facts));
             }
         }
+        // `shaders-imported/<guid>.bin`: the same shaders as an import
+        // worker left them. A session has only these; what a material
+        // takes from its shader has to be the same either way.
+        if let Ok(entries) = fs::read_dir(root.join("shaders-imported")) {
+            for entry in entries {
+                let path = entry.unwrap().path();
+                let guid = path.file_stem().unwrap().to_string_lossy().into_owned();
+                let imported =
+                    playerbake::read_imported_shader_facts(&fs::read(&path).unwrap()).unwrap();
+                let built = self
+                    .shaders
+                    .iter_mut()
+                    .find(|((known, _), _)| *known == guid)
+                    .unwrap_or_else(|| panic!("no built shader {guid}"));
+                if std::env::var_os("UNITY_PLAYERBAKE_IMPORTED_SHADERS").is_some() {
+                    built.1 = imported;
+                } else {
+                    assert_eq!(imported.properties, built.1.properties, "{guid}");
+                    assert_eq!(imported.name, built.1.name, "{guid}");
+                }
+            }
+        }
         let layout = playerbake::native_tree(21).unwrap();
         for entry in fs::read_dir(root).unwrap() {
             let path = entry.unwrap().path();
@@ -2364,6 +2386,88 @@ fn inspected_variants_match_the_engine_build() {
             assert!(order[0].contains("depends on the order"), "{order:?}");
         }
     }
+}
+
+/// A session loads a material from authored fields, so an inspected variant
+/// is handed over as the fields of the object a build writes: the same
+/// values under the names of a `.mat` source, without a parent, and the
+/// keywords as one list.
+#[test]
+fn inspected_variant_reads_back_as_authored_fields() {
+    let root = fixture("inspected/gamma");
+    let project = Project::new(false, LIT).read(&root);
+    let read = |name: &str| fs::read(root.join(name)).unwrap();
+    let inspected = playerbake::InspectedVariant {
+        over_authored: &read("IV_Transparent.mat.a"),
+        over_inspected: &read("IV_Transparent.mat.b"),
+    };
+    let (objects, externals) =
+        playerbake::bake_inspected_variant_objects(&inspected, &project).unwrap();
+    let baked = playerbake::native_tree(21)
+        .unwrap()
+        .decode(&objects[0].data)
+        .unwrap();
+    let text =
+        playerbake::flatten_inspected_variant(&inspected, &project, &|_, _| Some(3)).unwrap();
+    let fields: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(fields["m_Parent"], serde_json::json!({ "fileID": 0 }));
+    assert_eq!(fields["serializedVersion"], 8);
+    let strings = |name: &str| -> Vec<String> {
+        match baked.field(name) {
+            Some(Val::Seq(items)) => items
+                .iter()
+                .map(|item| match item {
+                    Val::Str(text) => text.clone(),
+                    other => panic!("{other:?}"),
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    let mut keywords = strings("m_ValidKeywords");
+    keywords.extend(strings("m_InvalidKeywords"));
+    keywords.sort();
+    assert!(keywords.contains(&"_SURFACE_TYPE_TRANSPARENT".to_string()));
+    assert_eq!(fields["m_ValidKeywords"], serde_json::json!(keywords));
+    assert_eq!(fields["m_InvalidKeywords"], serde_json::json!([]));
+    assert_eq!(fields["m_CustomRenderQueue"], 3000);
+    assert_eq!(fields["stringTagMap"]["RenderType"], "Transparent");
+    assert_eq!(
+        fields["disabledShaderPasses"],
+        serde_json::json!(strings("disabledShaderPasses"))
+    );
+    // The shader is named as the sources name it.
+    assert_eq!(fields["m_Shader"]["guid"], externals[0].guid.as_str());
+    assert_eq!(fields["m_Shader"]["type"], 3);
+    // Every saved value of the object is there, one entry a name.
+    let saved = baked.field("m_SavedProperties").unwrap();
+    for list in ["m_TexEnvs", "m_Ints", "m_Floats", "m_Colors"] {
+        let count = match saved.field(list) {
+            Some(Val::Seq(items)) => items.len(),
+            _ => 0,
+        };
+        let entries = fields["m_SavedProperties"][list].as_array().unwrap();
+        assert_eq!(entries.len(), count, "{list}");
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.as_object().unwrap().len() == 1)
+        );
+    }
+    let surface = fields["m_SavedProperties"]["m_Floats"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|entry| entry.get("_Surface"))
+        .unwrap();
+    assert_eq!(surface.as_f64(), Some(1.0));
+    // Without a stated type a reference cannot be written.
+    let error =
+        playerbake::flatten_inspected_variant(&inspected, &project, &|_, _| None).unwrap_err();
+    assert!(
+        error.to_string().contains("states the reference"),
+        "{error:#}"
+    );
 }
 
 #[test]

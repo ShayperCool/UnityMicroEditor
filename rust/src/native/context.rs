@@ -496,6 +496,7 @@ pub fn create_build_import_context(
     assets: &[String],
     scripts: &ScriptEnvironment,
     build: &BuildFiles,
+    extras: &ContextExtras,
 ) -> (ProjectImportContext, Result<()>) {
     let mut result = ProjectImportContext::default();
     let outcome = create(
@@ -504,7 +505,7 @@ pub fn create_build_import_context(
         output,
         assets,
         Some(scripts),
-        &ContextExtras::default(),
+        extras,
         Some(build),
         &mut result,
     );
