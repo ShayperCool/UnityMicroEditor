@@ -47,6 +47,7 @@ fn cold_runtime_profile(logical: &str) -> Option<&'static str> {
             Some("text")
         }
         extension if scripted_profile(extension) => Some("scripted"),
+        super::atlas::ATLAS_EXTENSION => Some("atlas"),
         // The one container the engine reads video from on Linux.
         ".webm" => Some("video"),
         _ => None,
@@ -75,10 +76,13 @@ pub(crate) struct NativeColdInput {
     pub cache_path: String,
 }
 
+/// `binding` is what the import depends on beyond its source and metadata:
+/// for a texture the atlas that packs it, for an atlas its textures.
 pub(crate) fn cold_input(
     opts: &NativeOptions,
     environment_sha256: &str,
     logical: &str,
+    binding: &str,
 ) -> Result<NativeColdInput> {
     if !cold_native_profile(logical) {
         bail!("unsupported native cold profile: {logical}");
@@ -95,6 +99,10 @@ pub(crate) fn cold_input(
         // may import the same source differently.
         identity.push('\0');
         identity.push_str(&script_environment_identity(&opts.project));
+    }
+    if !binding.is_empty() {
+        identity.push('\0');
+        identity.push_str(binding);
     }
     let signature = sha256(identity.as_bytes());
     Ok(NativeColdInput {
@@ -151,7 +159,7 @@ impl NativeProjectImporter {
             .cloned()
             .chain(discovered)
             .collect();
-        let paths: Vec<String> = unique.into_iter().collect();
+        let (paths, atlas_batches) = self.atlas_batches(unique.into_iter().collect())?;
         self.pending_native_paths = paths.clone();
         Event::new("native-discovery")
             .with("assetCount", &paths.len())
@@ -181,6 +189,9 @@ impl NativeProjectImporter {
             self.import_cold_batch(ctx, &paths[..count])?;
             paths = &paths[count..];
             self.pending_native_paths = paths.to_vec();
+        }
+        for batch in atlas_batches {
+            self.import_cold_batch(ctx, &batch)?;
         }
         Ok(())
     }
@@ -260,17 +271,64 @@ impl NativeProjectImporter {
             _ => bail!("native worker produced no complete validated project batch"),
         };
         let mut replacements = Vec::new();
+        // The atlas of the batch first: the textures it packs are bound to it.
+        let mut atlas: Option<(NativeReplacement, runtimeartifact::PackedAtlas)> = None;
+        for asset in &content.assets {
+            if lower_ext(&asset.path) != super::atlas::ATLAS_EXTENSION {
+                continue;
+            }
+            let Some(input) = inputs
+                .get(&asset.path)
+                .filter(|input| asset.guid == input.guid)
+            else {
+                bail!("native cold batch result differs from its source path/GUID");
+            };
+            if atlas.is_some() {
+                bail!("native cold batch holds more than one sprite atlas");
+            }
+            let filename = sysutil::join(&[root, "runtime", &format!("{}.bin", asset.guid)]);
+            let mut ingredients = BTreeMap::new();
+            for member in inputs.values().filter(|member| member.path != input.path) {
+                ingredients.insert(member.path.clone(), member.source_sha.clone());
+                ingredients.insert(format!("{}.meta", member.path), member.meta_sha.clone());
+            }
+            atlas = Some(adapt_cold_atlas(
+                &self.environment_sha256,
+                asset,
+                input,
+                &filename,
+                ingredients,
+            )?);
+        }
         for asset in &content.assets {
             let input = match inputs.remove(&asset.path) {
                 Some(input) if asset.guid == input.guid => input,
                 _ => bail!("native cold batch result differs from its source path/GUID"),
             };
+            if lower_ext(&asset.path) == super::atlas::ATLAS_EXTENSION {
+                continue;
+            }
+            if atlas.is_none() && self.atlas_identity.contains_key(&asset.path) {
+                bail!(
+                    "{} is packed by a sprite atlas and has to be imported with it",
+                    asset.path
+                );
+            }
             let filename = sysutil::join(&[root, "runtime", &format!("{}.bin", asset.guid)]);
-            replacements.push(self.adapt_cold_asset(asset, &input, &filename)?);
+            let binding = atlas.as_ref().map(|(atlas, packed)| (atlas, packed));
+            replacements.push(adapt_cold_asset(
+                &self.opts,
+                &self.environment_sha256,
+                asset,
+                &input,
+                &filename,
+                binding,
+            )?);
         }
         if !inputs.is_empty() {
             bail!("native cold batch omitted an input asset");
         }
+        replacements.extend(atlas.map(|(atlas, _)| atlas));
         self.require_current_environment()?;
         let ordered = order_native_batch(replacements, &self.entries)?;
         let count = ordered.len();
@@ -300,25 +358,11 @@ impl NativeProjectImporter {
             .emit();
         Ok(())
     }
-
-    fn adapt_cold_asset(
-        &self,
-        asset: &ProjectImportedAsset,
-        input: &NativeColdInput,
-        filename: &str,
-    ) -> Result<NativeReplacement> {
-        adapt_cold_asset(&self.opts, &self.environment_sha256, asset, input, filename)
-    }
 }
 
-/// Projects one imported asset to its runtime artifact and descriptor.
-pub(crate) fn adapt_cold_asset(
-    opts: &NativeOptions,
-    environment_sha256: &str,
-    asset: &ProjectImportedAsset,
-    input: &NativeColdInput,
-    filename: &str,
-) -> Result<NativeReplacement> {
+/// The one serialized output of an imported asset, checked against the hash
+/// its import recorded.
+fn primary_artifact(asset: &ProjectImportedAsset) -> Result<Vec<u8>> {
     let mut primary: Option<&ProjectImportedFile> = None;
     for file in &asset.files {
         if file.name.is_empty() {
@@ -331,10 +375,64 @@ pub(crate) fn adapt_cold_asset(
     let Some(primary) = primary else {
         bail!("native asset has no serialized primary output");
     };
-    let data = match read_file(&primary.path) {
-        Ok(data) if sha256(&data) == primary.sha256 => data,
+    match read_file(&primary.path) {
+        Ok(data) if sha256(&data) == primary.sha256 => Ok(data),
         _ => bail!("native primary artifact changed"),
+    }
+}
+
+/// Projects an imported sprite atlas to the atlas a Player loads. Its
+/// ingredients are the textures it was packed from.
+fn adapt_cold_atlas(
+    environment_sha256: &str,
+    asset: &ProjectImportedAsset,
+    input: &NativeColdInput,
+    filename: &str,
+    ingredients: BTreeMap<String, String>,
+) -> Result<(NativeReplacement, runtimeartifact::PackedAtlas)> {
+    if asset.files.len() != 1 {
+        bail!("a sprite atlas with streamed resources is not supported");
+    }
+    let (output, metadata, packed) = runtimeartifact::adapt_sprite_atlas(&primary_artifact(asset)?)
+        .map_err(|e| wrap(&format!("adapt native {}", input.path), e))?;
+    mkdir_all(&sysutil::dir(filename), 0o700)?;
+    write_file(filename, &output, 0o600)?;
+    let mut result = NativeReplacement {
+        guid: asset.guid.clone(),
+        source_path: input.path.clone(),
+        source_sha256: input.source_sha.clone(),
+        meta_sha256: input.meta_sha.clone(),
+        environment_sha256: environment_sha256.to_string(),
+        ingredient_sha256: ingredients,
+        content: NativeContentFile {
+            guid: asset.guid.clone(),
+            path: filename.into(),
+            sha256: metadata.output_sha256.clone(),
+            ..Default::default()
+        },
+        ..Default::default()
     };
+    for object in &metadata.objects {
+        result.content.objects.push(NativeContentObject {
+            file_id: object.file_id.clone(),
+            type_name: object.type_name.clone(),
+        });
+    }
+    Ok((result, packed))
+}
+
+/// Projects one imported asset to its runtime artifact and descriptor.
+/// `atlas` is the sprite atlas imported with it, if any: a texture whose
+/// sprites the atlas packs is bound to it.
+pub(crate) fn adapt_cold_asset(
+    opts: &NativeOptions,
+    environment_sha256: &str,
+    asset: &ProjectImportedAsset,
+    input: &NativeColdInput,
+    filename: &str,
+    atlas: Option<(&NativeReplacement, &runtimeartifact::PackedAtlas)>,
+) -> Result<NativeReplacement> {
+    let data = primary_artifact(asset)?;
     let extension = lower_ext(&input.path);
     let mut source_resource = false;
     let adapted = match cold_runtime_profile(&input.path) {
@@ -351,8 +449,22 @@ pub(crate) fn adapt_cold_asset(
         Some(profile) => runtimeartifact::adapt(&data, profile),
         None => bail!("unsupported native cold profile: {}", input.path),
     };
-    let (output, metadata) =
+    let (mut output, mut metadata) =
         adapted.map_err(|e| wrap(&format!("adapt native {}", input.path), e))?;
+    let packed = atlas.filter(|(_, packed)| {
+        cold_runtime_profile(&input.path) == Some("texture")
+            && packed.sprites.iter().any(|(guid, _)| *guid == asset.guid)
+    });
+    if let Some((atlas, packed)) = packed {
+        output = runtimeartifact::bind_packed_sprites(
+            &output,
+            &mut metadata,
+            &asset.guid,
+            &atlas.guid,
+            packed,
+        )
+        .map_err(|e| wrap(&format!("bind {} to its sprite atlas", input.path), e))?;
+    }
     if cold_runtime_profile(&input.path) == Some("fbx") && asset.files.len() != 1 {
         bail!("streamed FBX resources are not supported by the runtime adapter");
     }
@@ -373,6 +485,16 @@ pub(crate) fn adapt_cold_asset(
         ..Default::default()
     };
     result.config_source_sha256 = warm_texture_configuration(&opts.project, &input.path)?;
+    if let Some((atlas, _)) = packed {
+        // Bound to this revision of the atlas.
+        result
+            .ingredient_sha256
+            .insert(atlas.source_path.clone(), atlas.source_sha256.clone());
+        result.ingredient_sha256.insert(
+            format!("{}.meta", atlas.source_path),
+            atlas.meta_sha256.clone(),
+        );
+    }
     for object in &metadata.objects {
         result.content.objects.push(NativeContentObject {
             file_id: object.file_id.clone(),

@@ -451,6 +451,100 @@ fn texture_projection_keeps_the_texture_of_its_shape_and_its_sprites() {
     }
 }
 
+/// What a build wrote has to be in the projection, field for field. A pointer
+/// is compared through `local`, which gives the projection's local ID of an
+/// object of the build's file.
+fn assert_built_fields(built: &Val, ours: &Val, path: &str, local: &dyn Fn(i64) -> i64) {
+    match (built, ours) {
+        (Val::Map(fields), Val::Map(_)) => {
+            let pointer = fields.len() == 2 && fields[0].0 == "m_FileID";
+            for (name, value) in fields {
+                let field = ours
+                    .field(name)
+                    .unwrap_or_else(|| panic!("{path}.{name} is missing"));
+                let path = format!("{path}.{name}");
+                match (value, field) {
+                    (Val::I(id), Val::I(mapped)) if pointer && name == "m_PathID" => {
+                        assert_eq!(local(*id), *mapped, "{path}")
+                    }
+                    // The build holds the atlas in the sprite's own file.
+                    (Val::I(0), Val::I(1)) if path == ".m_SpriteAtlas.m_FileID" => {}
+                    _ => assert_built_fields(value, field, &path, local),
+                }
+            }
+        }
+        (Val::Seq(items), Val::Seq(others)) => {
+            assert_eq!(items.len(), others.len(), "{path}");
+            for (index, (item, other)) in items.iter().zip(others).enumerate() {
+                assert_built_fields(item, other, &format!("{path}[{index}]"), local);
+            }
+        }
+        _ => assert_eq!(built, ours, "{path}"),
+    }
+}
+
+/// A one-sprite atlas: the worker's artifacts of the atlas and of its sprite
+/// texture, against the serialized file of an AssetBundle the pinned Editor
+/// built from the same two sources.
+#[test]
+fn sprite_atlas_projection_holds_what_a_build_writes() {
+    const TEXTURE: &str = "e4e4e4e4e4e4e4e4e4e4e4e4e4e4e401";
+    const ATLAS: &str = "e4e4e4e4e4e4e4e4e4e4e4e4e4e4e405";
+    let read = |name: &str| fs::read(format!("rust/tests/testdata/native/{name}")).unwrap();
+    let object = |file: &[u8], class: i32| -> (i64, Val) {
+        let object = playerbake::read_serialized(file)
+            .unwrap()
+            .into_iter()
+            .find(|object| object.tree.class_id == class)
+            .unwrap();
+        (object.local_id, object.tree.decode(&object.data).unwrap())
+    };
+    let (atlas, metadata, packed) =
+        ra::adapt_sprite_atlas(&read("atlas.spriteatlasv2.artifact")).unwrap();
+    assert_eq!(packed.tag, "tiny");
+    assert_eq!(
+        packed.sprites.iter().collect::<Vec<_>>(),
+        [&(TEXTURE.to_string(), 21300000)]
+    );
+    assert_eq!(metadata.output_sha256, sha256(&atlas));
+    assert_eq!(
+        metadata
+            .objects
+            .iter()
+            .map(|object| object.type_name.as_str())
+            .collect::<Vec<_>>(),
+        ["UnityEngine.U2D.SpriteAtlas", "UnityEngine.Texture2D"]
+    );
+    // The importer, the source asset and the cached result are dropped.
+    assert_eq!(metadata.removed.len(), 3);
+    let build = read("atlas.build");
+    let (ours_id, ours) = object(&atlas, 687078895);
+    let (built_id, built) = object(&build, 687078895);
+    assert_eq!(ours_id, packed.local_id);
+    let (page, built_page) = (object(&atlas, 28).0, object(&build, 28).0);
+    assert_built_fields(&built, &ours, "", &|id| {
+        if id == built_page { page } else { id }
+    });
+    // The texture: its one sprite as the build writes a packed sprite.
+    let (texture, mut metadata) = ra::adapt_texture(&read("sprite.png.artifact"), "png").unwrap();
+    let bound = ra::bind_packed_sprites(&texture, &mut metadata, TEXTURE, ATLAS, &packed).unwrap();
+    assert_eq!(metadata.output_sha256, sha256(&bound));
+    assert_eq!(metadata.external_references.len(), 1);
+    assert_eq!(metadata.external_references[0].guid, ATLAS);
+    assert_built_fields(&object(&build, 213).1, &object(&bound, 213).1, "", &|id| {
+        if id == built_id { ours_id } else { id }
+    });
+    // The texture itself stays in the file for what refers to it directly.
+    assert_eq!(object(&bound, 28).0, 2800000);
+
+    // An atlas that packs none of the texture's sprites is not its atlas.
+    let (texture, mut metadata) = ra::adapt_texture(&read("sprite.png.artifact"), "png").unwrap();
+    assert!(ra::bind_packed_sprites(&texture, &mut metadata, ATLAS, ATLAS, &packed).is_err());
+    // An artifact without a packed result, as the importer leaves it when
+    // the project does not pack atlases, is refused.
+    assert!(ra::adapt_sprite_atlas(&read("sprite.png.artifact")).is_err());
+}
+
 // ---- Mesh CPU retention -----------------------------------------------------
 
 fn assert_mesh_cpu_projection(input: &[u8]) -> (Vec<u8>, MeshCpuProjection) {

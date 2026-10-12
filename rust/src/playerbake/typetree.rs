@@ -218,6 +218,11 @@ impl TypeTree {
                 "double" => Val::D(f64::from_le_bytes(take(8)?.try_into()?)),
                 other => bail!("unsupported scalar type {other}"),
             }
+        } else if node.type_name == "TypelessData" {
+            // A byte count and that many bytes, which the tree lists as two
+            // fields of the node.
+            let count = u32::from_le_bytes(take(4)?.try_into()?) as usize;
+            Val::Bytes(take(count)?.to_vec())
         } else if let Some((array, element)) = self.element(index) {
             let count = u32::from_le_bytes(take(4)?.try_into()?) as usize;
             let value = if node.type_name == "string" {
@@ -274,6 +279,15 @@ impl TypeTree {
             // A structure without fields takes no bytes.
         } else if children.is_empty() {
             scalar(&node.type_name, value, out).map_err(|error| fail(&error.to_string()))?;
+        } else if node.type_name == "TypelessData" {
+            match value {
+                Val::Zero => out.extend_from_slice(&0u32.to_le_bytes()),
+                Val::Bytes(bytes) => {
+                    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    out.extend_from_slice(bytes);
+                }
+                _ => return Err(fail("value is not a run of bytes")),
+            }
         } else if let Some((array, element)) = self.element(index) {
             match value {
                 Val::Zero => out.extend_from_slice(&0u32.to_le_bytes()),

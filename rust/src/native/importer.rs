@@ -51,6 +51,11 @@ pub struct NativeProjectImporter {
     /// The GUID each known clip takes its additive reference pose from, by
     /// the clip's path; empty for a clip with none.
     pub(crate) additive_references: BTreeMap<String, String>,
+    /// The import batch of every sprite atlas and of every texture one
+    /// packs, by path, as of the last walk.
+    pub(crate) atlas_batch: BTreeMap<String, Vec<String>>,
+    /// What the import of such a source depends on beyond the source itself.
+    pub(crate) atlas_identity: BTreeMap<String, String>,
 }
 
 struct Replay<'a> {
@@ -78,6 +83,8 @@ impl NativeProjectImporter {
             behaviour_layouts: BTreeMap::new(),
             model_clips: BTreeMap::new(),
             additive_references: BTreeMap::new(),
+            atlas_batch: BTreeMap::new(),
+            atlas_identity: BTreeMap::new(),
         };
         let index = sysutil::join(&[&importer.opts.output, "native/index.json"]);
         let entries: Option<Vec<NativeReplacement>> = match read_json_verbatim(&index) {
@@ -155,12 +162,14 @@ impl NativeProjectImporter {
             let stale: Vec<String> = current
                 .values()
                 .filter(|entry| {
-                    matches!(
+                    // So is a texture whose atlas is not current.
+                    (matches!(
                         lower_ext(&entry.source_path).as_str(),
                         ".controller" | ".overridecontroller" | ".shader"
-                    ) && entry.content.dependencies.iter().any(|dependency| {
-                        !dependency.global && !current.contains_key(&dependency.guid)
-                    })
+                    ) || super::texture_profile::texture_source(&entry.source_path))
+                        && entry.content.dependencies.iter().any(|dependency| {
+                            !dependency.global && !current.contains_key(&dependency.guid)
+                        })
                 })
                 .map(|entry| entry.guid.clone())
                 .collect();
@@ -240,7 +249,12 @@ impl NativeProjectImporter {
         &self.pending_native_paths
     }
     pub(crate) fn cold_input(&self, logical: &str) -> Result<NativeColdInput> {
-        cold_input(&self.opts, &self.environment_sha256, logical)
+        cold_input(
+            &self.opts,
+            &self.environment_sha256,
+            logical,
+            self.atlas_identity.get(logical).map_or("", String::as_str),
+        )
     }
 
     /// Publishes a revision, importing native content the Session reports as
@@ -304,6 +318,10 @@ impl NativeProjectImporter {
             bail!(
                 "native update for {logical} requires an unsupported importer runtime profile ({profile})"
             );
+        }
+        // An atlas and the textures it packs are imported together.
+        if let Some(batch) = self.atlas_batch.get(logical).cloned() {
+            return self.import_cold_batch(ctx, &batch);
         }
         let input = self.cold_input(logical)?;
         if let Ok(cached) = read_json_verbatim::<NativeReplacement>(&input.cache_path)
