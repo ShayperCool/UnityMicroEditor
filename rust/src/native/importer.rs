@@ -112,9 +112,7 @@ impl NativeProjectImporter {
                 continue;
             }
             // Only a current, independently validated cache entry may replace a baseline.
-            let Ok(source) =
-                resolve_project_import_source(&importer.opts.project, &entry.source_path)
-            else {
+            let Ok(source) = importer.baked_source(&entry.source_path) else {
                 continue;
             };
             if !file_hash(&source).is_ok_and(|sha| sha == entry.source_sha256)
