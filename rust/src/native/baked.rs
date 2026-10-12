@@ -31,6 +31,7 @@ use std::{
 /// Reads the scripts, clips and masks a baked source refers to.
 struct ProjectSources<'a> {
     importer: &'a NativeProjectImporter,
+    ctx: &'a Context,
 }
 
 impl ProjectSources<'_> {
@@ -159,6 +160,11 @@ impl ControllerSources for ProjectSources<'_> {
             identity,
             layout: layout.clone(),
         }))
+    }
+    // The code of the project runs in the SDK helper, on the assemblies the
+    // layouts were read from.
+    fn run_object(&self, request: &serde_json::Value) -> Result<Option<serde_json::Value>> {
+        self.importer.behaviour_code.run(self.ctx, request)
     }
     // A clip is published in baked form, so the behaviour's file can point at
     // it. Any other object reaches the Player some other way; the session
@@ -685,16 +691,34 @@ impl NativeProjectImporter {
         }
         let mut deferred = Vec::new();
         let baked = match lower_ext(logical).as_str() {
-            ".anim" => playerbake::bake_clip(&data, &ProjectSources { importer: self }),
-            ".controller" => playerbake::bake_controller(&data, &ProjectSources { importer: self })
-                .map(|controller| {
-                    deferred = controller.deferred;
-                    controller.baked
-                }),
+            ".anim" => playerbake::bake_clip(
+                &data,
+                &ProjectSources {
+                    importer: self,
+                    ctx,
+                },
+            ),
+            ".controller" => playerbake::bake_controller(
+                &data,
+                &ProjectSources {
+                    importer: self,
+                    ctx,
+                },
+            )
+            .map(|controller| {
+                deferred = controller.deferred;
+                controller.baked
+            }),
             ".overridecontroller" => playerbake::bake_override(&data),
             ".mask" => playerbake::bake_mask(&data),
             ".physicmaterial" | ".physicsmaterial2d" | ".rendertexture" | ".mixer" => {
-                playerbake::bake_native(&data, &ProjectSources { importer: self })
+                playerbake::bake_native(
+                    &data,
+                    &ProjectSources {
+                        importer: self,
+                        ctx,
+                    },
+                )
             }
             ".shader" => self.bake_shader_source(ctx, logical, &guid, &mut ingredients),
             _ => bail!("no baker for {logical}"),

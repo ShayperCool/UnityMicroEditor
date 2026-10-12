@@ -1,0 +1,65 @@
+{
+ "className": "SmbCtorNative",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "bases": [
+  "UnityEngine.StateMachineBehaviour",
+  "UnityEngine.ScriptableObject",
+  "UnityEngine.Object"
+ ],
+ "overridesStateMachineCallbacks": false,
+ "fields": [
+  {
+   "name": "a",
+   "initial": "5",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "curve",
+   "initialUnknown": true,
+   "type": {
+    "kind": "unity",
+    "name": "AnimationCurve"
+   }
+  },
+  {
+   "name": "b",
+   "initial": "6",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "grad",
+   "initialUnknown": true,
+   "type": {
+    "kind": "unity",
+    "name": "Gradient"
+   }
+  },
+  {
+   "name": "arr",
+   "initialUnknown": true,
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "primitive",
+     "name": "int"
+    }
+   }
+  },
+  {
+   "name": "tail",
+   "initial": "9",
+   "type": {
+    "kind": "primitive",
+    "name": "byte"
+   }
+  }
+ ]
+}

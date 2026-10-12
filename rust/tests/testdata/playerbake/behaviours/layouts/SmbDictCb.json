@@ -1,0 +1,150 @@
+{
+ "className": "SmbDictCb",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "bases": [
+  "UnityEngine.StateMachineBehaviour",
+  "UnityEngine.ScriptableObject",
+  "UnityEngine.Object"
+ ],
+ "overridesStateMachineCallbacks": false,
+ "fields": [
+  {
+   "name": "dict",
+   "type": {
+    "kind": "struct",
+    "name": "SerDict",
+    "fields": [
+     {
+      "name": "keys",
+      "type": {
+       "kind": "array",
+       "element": {
+        "kind": "string"
+       }
+      }
+     },
+     {
+      "name": "values",
+      "type": {
+       "kind": "array",
+       "element": {
+        "kind": "primitive",
+        "name": "int"
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "dicts",
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "struct",
+     "name": "SerDict",
+     "fields": [
+      {
+       "name": "keys",
+       "type": {
+        "kind": "array",
+        "element": {
+         "kind": "string"
+        }
+       }
+      },
+      {
+       "name": "values",
+       "type": {
+        "kind": "array",
+        "element": {
+         "kind": "primitive",
+         "name": "int"
+        }
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "dir",
+   "type": {
+    "kind": "unity",
+    "name": "Vector3"
+   }
+  },
+  {
+   "name": "unit",
+   "type": {
+    "kind": "unity",
+    "name": "Vector3"
+   }
+  },
+  {
+   "name": "length",
+   "type": {
+    "kind": "primitive",
+    "name": "float"
+   }
+  },
+  {
+   "name": "clip",
+   "type": {
+    "kind": "object",
+    "className": "AnimationClip",
+    "namespace": "UnityEngine"
+   }
+  },
+  {
+   "name": "hasClip",
+   "type": {
+    "kind": "primitive",
+    "name": "bool"
+   }
+  },
+  {
+   "name": "tint",
+   "type": {
+    "kind": "unity",
+    "name": "Color"
+   }
+  },
+  {
+   "name": "half",
+   "type": {
+    "kind": "unity",
+    "name": "Color"
+   }
+  },
+  {
+   "name": "label",
+   "type": {
+    "kind": "string"
+   }
+  },
+  {
+   "name": "upper",
+   "type": {
+    "kind": "string"
+   }
+  },
+  {
+   "name": "curve",
+   "type": {
+    "kind": "unity",
+    "name": "AnimationCurve"
+   }
+  },
+  {
+   "name": "tail",
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  }
+ ],
+ "serializationCallbacks": true
+}

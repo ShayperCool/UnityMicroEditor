@@ -540,7 +540,9 @@ pub fn prepare_agent_project_with_native(
                 session.clone(),
             )?;
             importer.script_assemblies = compiler.script_assemblies();
-            importer.set_behaviour_layouts(ctx, compiler.behaviour_layouts(ctx, &types)?)?;
+            let layouts = compiler.behaviour_layouts(ctx, &types)?;
+            importer.behaviour_code = compiler.behaviour_code.clone();
+            importer.set_behaviour_layouts(ctx, layouts)?;
             importer.prepare(ctx)?
         }
         other => other?,
