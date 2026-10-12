@@ -555,6 +555,34 @@ impl Inventory<'_> {
         Ok(())
     }
 }
+/// Orders names without regard to case, a run of digits by its number.
+fn natural_order(a: &str, b: &str) -> std::cmp::Ordering {
+    let (a, b) = (a.to_lowercase(), b.to_lowercase());
+    let (mut left, mut right) = (a.as_bytes(), b.as_bytes());
+    loop {
+        match (left.first(), right.first()) {
+            (None, None) => return a.len().cmp(&b.len()),
+            (None, _) => return std::cmp::Ordering::Less,
+            (_, None) => return std::cmp::Ordering::Greater,
+            (Some(x), Some(y)) if x.is_ascii_digit() && y.is_ascii_digit() => {
+                let run = |text: &[u8]| text.iter().take_while(|c| c.is_ascii_digit()).count();
+                let (m, n) = (run(left), run(right));
+                let digits = |text: &[u8]| {
+                    let start = text.iter().take_while(|c| **c == b'0').count();
+                    text[start..].to_vec()
+                };
+                let (p, q) = (digits(&left[..m]), digits(&right[..n]));
+                let order = p.len().cmp(&q.len()).then_with(|| p.cmp(&q));
+                if order != std::cmp::Ordering::Equal {
+                    return order;
+                }
+                (left, right) = (&left[m..], &right[n..]);
+            }
+            (Some(x), Some(y)) if x != y => return x.cmp(y),
+            _ => (left, right) = (&left[1..], &right[1..]),
+        }
+    }
+}
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 /// Atomically publish a file without replacing another coordinator's result.
 pub fn publish_new(path: &Path, data: &[u8]) -> Result<()> {
@@ -667,7 +695,9 @@ pub fn write(input: Input) -> Result<Report> {
     }
     for (name, data) in &input.singletons {
         ensure!(
-            logical_path(name).is_ok() && name.starts_with("Library/") && !data.is_empty(),
+            logical_path(name).is_ok()
+                && (name.starts_with("Library/") || name.starts_with("ProjectSettings/"))
+                && !data.is_empty(),
             "registry singleton must be a serialized Library file: {name}"
         );
         tables
@@ -680,7 +710,7 @@ pub fn write(input: Input) -> Result<Report> {
     }
     tables.insert("PropertyIDToType".into(), types());
     let mut guid_paths = BTreeMap::new();
-    let mut children: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut children: BTreeMap<String, Vec<(&str, [u8; 16])>> = BTreeMap::new();
     let zero = FileHash {
         hash: [0; 16],
         ticks: 0,
@@ -754,14 +784,23 @@ pub fn write(input: Input) -> Result<Report> {
                         .into_owned(),
                 )
                 .or_default()
-                .extend_from_slice(&entry.wire);
+                .push((name.as_str(), entry.wire));
         }
     }
-    for (name, values) in children {
+    for (name, mut entries) in children {
+        // The Editor lists the children of a folder in the order of its
+        // project window and puts the hash of the list before it. A reader
+        // takes the first sixteen bytes for that hash, so a list without
+        // one loses its first child wherever folders are walked, as an
+        // asset search does.
+        entries.sort_by(|a, b| natural_order(a.0, b.0));
+        let list: Vec<u8> = entries.iter().flat_map(|(_, wire)| *wire).collect();
+        let mut value = native_hash(&list).to_vec();
+        value.extend_from_slice(&list);
         add(
             "GuidToChildren",
             inventory.entries[&name].wire.to_vec(),
-            values,
+            value,
         );
     }
     for (name, digest) in &inventory.hashes {

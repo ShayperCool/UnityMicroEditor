@@ -279,6 +279,81 @@ fn output_paths_reject_traversal_and_symlinks() {
         .is_err()
     );
 }
+/// The children of a folder follow the hash of their list, in the order of
+/// the Editor's project window. The first sixteen bytes of a record are
+/// read as that hash, so a list without one hides its first child from
+/// everything that walks folders, an asset search for one.
+#[test]
+fn registry_lists_the_children_of_a_folder_as_the_editor_does() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("Temp/context");
+    std::fs::create_dir_all(project.join("Library")).unwrap();
+    std::fs::create_dir_all(project.join("Assets/Settings")).unwrap();
+    // In byte order `Mobile_RPAsset` precedes `Mobile_Renderer` and `b@128`
+    // precedes `b@32`; the Editor orders without case and by number.
+    let names = [
+        "Mobile_RPAsset.asset",
+        "Mobile_Renderer.asset",
+        "b@128.png",
+        "b@32.png",
+    ];
+    let mut assets = Vec::new();
+    for (index, name) in names.iter().enumerate() {
+        let path = format!("Assets/Settings/{name}");
+        std::fs::write(project.join(&path), "x").unwrap();
+        std::fs::write(
+            project.join(format!("{path}.meta")),
+            format!("fileFormatVersion: 2\nguid: {:032x}\n", index + 1),
+        )
+        .unwrap();
+        assets.push(registry::Asset {
+            path,
+            source: String::new(),
+            meta: String::new(),
+            guid: String::new(),
+            directory: false,
+            script: false,
+        });
+    }
+    let report = registry::write(registry::Input {
+        project: project.clone(),
+        unity_version: String::new(),
+        assets,
+        roots: Default::default(),
+        singletons: Default::default(),
+    })
+    .unwrap();
+    let data = std::fs::read(&report.database).unwrap();
+    let image = Image::open(&data).unwrap();
+    let paths = image.table("GuidToPath").unwrap();
+    let name_of = |wire: &[u8]| {
+        let record = paths.iter().find(|record| record.key == wire).unwrap();
+        String::from_utf8_lossy(&record.value[..record.value.len() - 1]).into_owned()
+    };
+    let folder = paths
+        .iter()
+        .find(|record| record.value == b"Assets/Settings\0")
+        .unwrap();
+    let children = image.table("GuidToChildren").unwrap();
+    let list = &children
+        .iter()
+        .find(|record| record.key == folder.key)
+        .unwrap()
+        .value;
+    assert_eq!(list.len(), 16 * 5);
+    assert_eq!(list[..16], registry::native_hash(&list[16..]));
+    let listed: Vec<String> = list[16..].chunks(16).map(name_of).collect();
+    assert_eq!(
+        listed,
+        [
+            "Assets/Settings/b@32.png",
+            "Assets/Settings/b@128.png",
+            "Assets/Settings/Mobile_Renderer.asset",
+            "Assets/Settings/Mobile_RPAsset.asset",
+        ]
+    );
+}
+
 #[test]
 fn registry_preserves_metadata_and_refuses_replacement() {
     let temp = tempfile::tempdir().unwrap();
