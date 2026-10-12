@@ -304,6 +304,11 @@ impl NativeProjectImporter {
         if native_texture_needs_warm(&self.opts.project, logical)? {
             return self.import_warm_ui(ctx, logical, &mut HashSet::new());
         }
+        // A material is loaded from its authored fields; the session asks
+        // only for a variant whose shader names an inspector.
+        if profile == "mat" {
+            return self.import_material_variant(ctx, logical);
+        }
         if matches!(
             profile,
             "anim"

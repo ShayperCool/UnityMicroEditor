@@ -15,6 +15,7 @@ mod environment;
 mod import;
 mod importer;
 mod inspector;
+mod material_variant;
 mod mesh_cpu;
 mod player_objects;
 mod probe;

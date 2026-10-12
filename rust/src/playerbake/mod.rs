@@ -6,6 +6,7 @@
 mod binding;
 mod clip;
 mod controller;
+mod flat_material;
 mod freeform;
 mod humanoid;
 mod managed;
@@ -30,6 +31,7 @@ pub use controller::{
     BakedObjects, Behaviour, BehaviourScript, ClipFacts, Controller, ControllerSources,
     bake_controller, bake_controller_object, read_clip_facts,
 };
+pub use flat_material::flatten_inspected_variant;
 pub use freeform::{Freeform, precompute as precompute_freeform};
 pub use managed::{
     DeferredBinding, DeferredReference, Encoded, Field, FieldType, ManagedLayout, ManagedType,

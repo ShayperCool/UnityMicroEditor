@@ -40,14 +40,19 @@ impl Inner {
         let Some(material) = material else {
             bail!("material {path} has no class21 document");
         };
-        let data = material.fields();
+        // A variant of a shader with an inspector is published as a build
+        // writes it: whole, without a parent.
+        let inspected = self.inspected_material_fields(&path, material)?;
+        let data = inspected.as_ref().unwrap_or_else(|| material.fields());
         if number(get(data, "serializedVersion")) != 8 {
             bail!("material {path} requires serializedVersion8");
         }
         if file_id(get(data, "m_Shader")) == "0" {
             bail!("material {path} has no Shader");
         }
-        self.validate_material_parents(&path, material, &mut HashSet::new())?;
+        if inspected.is_none() {
+            self.validate_material_parents(&path, material, &mut HashSet::new())?;
+        }
         for group in ["m_TexEnvs", "m_Ints", "m_Floats", "m_Colors"] {
             for item in array(get(data, "m_SavedProperties").field(group)) {
                 if object(item).len() != 1 {
