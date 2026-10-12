@@ -19,6 +19,7 @@ pub mod playerbake;
 pub mod project;
 pub mod protocol;
 pub mod registry;
+pub mod remote;
 pub mod runner;
 pub mod runtimeartifact;
 pub mod sourcegraph;

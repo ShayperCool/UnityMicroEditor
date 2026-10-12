@@ -16,6 +16,7 @@ mod host;
 mod jobs;
 mod native;
 mod progress;
+mod remote;
 mod scene;
 mod source_prepare;
 mod source_scene;
@@ -158,6 +159,8 @@ pub(crate) struct Inner {
     pub jobs: Mutex<Jobs>,
     pub job_wait: (Mutex<usize>, Condvar),
     pub progress: Mutex<progress::Progress>,
+    /// The remote session of this service's Player, while one is served.
+    pub remote: Mutex<Option<crate::remote::Session>>,
 }
 
 /// Cheap to clone; clones share one service.
@@ -184,6 +187,7 @@ impl Service {
             jobs: Mutex::default(),
             job_wait: (Mutex::new(0), Condvar::new()),
             progress: Mutex::default(),
+            remote: Mutex::default(),
         }))
     }
     pub fn project(&self) -> &str {

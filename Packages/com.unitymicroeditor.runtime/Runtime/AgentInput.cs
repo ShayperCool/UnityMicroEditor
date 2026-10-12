@@ -19,6 +19,7 @@ namespace UnityMicroEditor
         private Vector2 mousePosition;
         private long queuedEvents, uiClicks;
         internal AgentInput(Func<string> projectRoot) { this.projectRoot = projectRoot; }
+        internal Vector2 MousePosition => mousePosition;
 
         internal Dictionary<string, object> Capabilities()
         {
@@ -134,6 +135,24 @@ namespace UnityMicroEditor
             return new Dictionary<string, object> { ["action"] = "ui_click", ["targetPath"] = AgentRuntimeSnapshot.PathOf(target.transform),
                 ["handlerPath"] = AgentRuntimeSnapshot.PathOf(receiver.transform), ["delivered"] = true,
                 ["delivery"] = "targeted_pointer_down_up_click", ["clickSequence"] = uiClicks };
+        }
+
+        /// <summary>Releases every key and mouse button the virtual devices hold down.</summary>
+        internal void ReleaseAll()
+        {
+            Type input = PackageType("UnityEngine.InputSystem.InputSystem", "Unity.InputSystem"); if (input == null) return;
+            if (keyboard != null && heldKeys.Count > 0)
+            {
+                Type stateType = RequirePackage("UnityEngine.InputSystem.LowLevel.KeyboardState", "Unity.InputSystem");
+                heldKeys.Clear(); Queue(input, keyboard, stateType, Activator.CreateInstance(stateType)); queuedEvents++;
+            }
+            if (mouse != null && mouseButtons != 0)
+            {
+                Type stateType = RequirePackage("UnityEngine.InputSystem.LowLevel.MouseState", "Unity.InputSystem");
+                object state = Activator.CreateInstance(stateType);
+                SetField(stateType, state, "position", mousePosition); SetField(stateType, state, "buttons", (ushort)0);
+                mouseButtons = 0; Queue(input, mouse, stateType, state); queuedEvents++;
+            }
         }
 
         private static bool Dispatch(Type executeType, string interfaceName, string property, GameObject receiver, object data)

@@ -98,6 +98,7 @@ enum Kind {
     SessionControl,
     RuntimeQuery,
     RuntimeCommand,
+    RemoteSession,
     ProjectPrepare,
     ProjectBuild,
     PrefabEdit,
@@ -173,6 +174,15 @@ pub struct RuntimeInput {
     pub request_id: String,
     pub expected_pid: i64,
     pub expected_revision: String,
+}
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
+struct RemoteInput {
+    action: String,
+    listen: String,
+    fps: i64,
+    max_width: i64,
+    bitrate_kbps: i64,
 }
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -343,6 +353,17 @@ impl RuntimeInput {
             self.expected_pid,
             &self.expected_revision,
         )
+    }
+}
+impl RemoteInput {
+    fn marshal(&self) -> Vec<u8> {
+        let mut out = Encoder::new();
+        out.text("action", &self.action);
+        out.text_omitempty("listen", &self.listen);
+        out.int_omitempty("fps", self.fps);
+        out.int_omitempty("maxWidth", self.max_width);
+        out.int_omitempty("bitrateKbps", self.bitrate_kbps);
+        out.finish()
     }
 }
 impl ProjectPrepareInput {
@@ -1057,6 +1078,43 @@ fn runtime_tools() -> Vec<StaticTool> {
             &[],
             Kind::RuntimeCommand,
         ),
+        static_tool(
+            write_tool(
+                "remote_session",
+                "Serve the Player's picture and input to a browser: start, stop, status. start binds an HTTP listener of its own (default 127.0.0.1 and a free port, so every editor gets a distinct address) and returns url, which carries the session's secret; open it in a browser to watch the game as hardware-encoded H.264 and play it with keyboard and mouse. It can be started before the Player: the page waits and follows Player restarts. Encoding needs an NVIDIA GPU; viewing needs a browser with WebCodecs on localhost or HTTPS. Exposing the address beyond this machine is the caller's step.",
+                false,
+                object(&[
+                    ("action", string("start,stop,status"), true),
+                    (
+                        "listen",
+                        string(
+                            "start: literal IP and port of the HTTP listener, default 127.0.0.1:0",
+                        ),
+                        false,
+                    ),
+                    (
+                        "fps",
+                        integer(
+                            "start: capture rate, 1-60, default 60; bounded by the Player's own frame rate",
+                        ),
+                        false,
+                    ),
+                    (
+                        "maxWidth",
+                        integer("start: widest encoded picture, 64-4096, default 1920"),
+                        false,
+                    ),
+                    (
+                        "bitrateKbps",
+                        integer("start: video bitrate, 250-100000, default 12000"),
+                        false,
+                    ),
+                ]),
+            ),
+            "RemoteInput",
+            &[],
+            Kind::RemoteSession,
+        ),
     ]
 }
 fn project_action_tools() -> Vec<StaticTool> {
@@ -1496,6 +1554,18 @@ impl Server {
                         Ok(self.forward_runtime(ctx, "runtime_command", &input.marshal()))
                     }
                     _ => Err(typed("unsupported_operation", "unknown runtime command")),
+                }
+            }
+            Kind::RemoteSession => {
+                let input: RemoteInput = Self::decode(tool, raw)?;
+                match input.action.as_str() {
+                    "start" | "stop" | "status" => {
+                        Ok(self.forward_runtime(ctx, "remote_session", &input.marshal()))
+                    }
+                    _ => Err(typed(
+                        "unsupported_operation",
+                        "unknown remote session action",
+                    )),
                 }
             }
             Kind::ProjectPrepare => {

@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="referrer" content="no-referrer">
+<title>Unity Micro Editor</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #101114; color: #c9ccd3; font: 13px/1.4 system-ui, sans-serif; overflow: hidden; }
+  #stage { position: fixed; inset: 0 0 28px 0; display: flex; align-items: center; justify-content: center; }
+  canvas { background: #000; outline: none; touch-action: none; max-width: 100%; max-height: 100%; }
+  #bar { position: fixed; left: 0; right: 0; bottom: 0; height: 28px; display: flex; align-items: center; gap: 14px; padding: 0 10px; background: #191b20; white-space: nowrap; }
+  #message { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+  #stats { font-variant-numeric: tabular-nums; color: #8b909b; }
+  button { background: #2a2d35; color: inherit; border: 0; border-radius: 4px; padding: 3px 10px; font: inherit; cursor: pointer; }
+  button:hover { background: #353944; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #c0453d; flex: none; }
+  .dot.on { background: #3fa860; }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="screen" width="1280" height="720" tabindex="0"></canvas></div>
+<div id="bar"><span class="dot" id="dot"></span><span id="message">Connecting…</span><span id="stats"></span><button id="fullscreen">Fullscreen</button></div>
+<script>
+"use strict";
+const canvas = document.getElementById("screen");
+const context = canvas.getContext("2d", { alpha: false, desynchronized: true });
+const message = document.getElementById("message");
+const stats = document.getElementById("stats");
+const dot = document.getElementById("dot");
+const base = location.pathname.replace(/\/+$/, "");
+let socket = null, decoder = null, configured = "", waiting = true, latest = null;
+let state = { playerConnected: false, cursorLocked: false, error: "" };
+let frames = 0, bytes = 0, decoded = 0;
+
+function say(text) { message.textContent = text; }
+function describe() {
+  dot.classList.toggle("on", !!(socket && socket.readyState === 1 && state.playerConnected));
+  if (!socket || socket.readyState !== 1) return say("Connecting…");
+  if (state.error) return say(state.error);
+  if (!state.playerConnected) return say("Waiting for the Player. Start the session and this page continues by itself.");
+  if (!decoded) return say("Waiting for the first frame…");
+  say(state.cursorLocked && document.pointerLockElement !== canvas ? "The game locked the cursor: click the picture to capture the mouse." : "");
+}
+
+if (!("VideoDecoder" in window)) {
+  say("This browser cannot decode the stream: WebCodecs needs a current browser and a secure context (localhost or HTTPS).");
+} else {
+  connect();
+  requestAnimationFrame(paint);
+  setInterval(report, 1000);
+}
+
+function connect() {
+  socket = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + base + "/ws");
+  socket.binaryType = "arraybuffer";
+  socket.onopen = () => { waiting = true; describe(); };
+  socket.onclose = () => { socket = null; describe(); setTimeout(connect, 1000); };
+  socket.onmessage = event => {
+    if (typeof event.data === "string") {
+      try { state = JSON.parse(event.data); } catch (error) { return; }
+      if (!state.cursorLocked && document.pointerLockElement === canvas) document.exitPointerLock();
+      describe();
+    } else video(event.data);
+  };
+}
+
+// flags u8, epoch u32, timestamp u64 (µs), width u16, height u16, codec length u8, codec, access unit.
+function video(buffer) {
+  const view = new DataView(buffer);
+  const key = (view.getUint8(0) & 1) === 1, epoch = view.getUint32(1, true);
+  const timestamp = Number(view.getBigUint64(5, true));
+  const width = view.getUint16(13, true), height = view.getUint16(15, true), length = view.getUint8(17);
+  const codec = new TextDecoder().decode(new Uint8Array(buffer, 18, length));
+  frames++; bytes += buffer.byteLength;
+  if (key) configure(codec, width, height, epoch);
+  if (!decoder || decoder.state !== "configured" || (waiting && !key)) return;
+  // A decoder that fell behind resumes from a fresh keyframe instead of showing the past.
+  if (!key && decoder.decodeQueueSize > 8) { resync(); return; }
+  waiting = false;
+  try { decoder.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp, data: new Uint8Array(buffer, 18 + length) })); }
+  catch (error) { resync(); }
+}
+
+function configure(codec, width, height, epoch) {
+  const identity = codec + ":" + width + "x" + height + ":" + epoch;
+  if (identity === configured && decoder && decoder.state === "configured") return;
+  if (decoder && decoder.state !== "closed") decoder.close();
+  decoder = new VideoDecoder({
+    output: frame => { if (latest) latest.close(); latest = frame; decoded++; },
+    error: error => { say("Decoder: " + error.message); configured = ""; resync(); },
+  });
+  decoder.configure({ codec, optimizeForLatency: true });
+  configured = identity;
+  if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
+}
+
+function resync() {
+  waiting = true;
+  if (socket && socket.readyState === 1) socket.send('{"k":1}');
+}
+
+function paint() {
+  if (latest) { context.drawImage(latest, 0, 0, canvas.width, canvas.height); latest.close(); latest = null; if (decoded === 1) describe(); }
+  flush();
+  requestAnimationFrame(paint);
+}
+
+function report() {
+  stats.textContent = canvas.width + "×" + canvas.height + " · " + frames + " fps · " + (bytes * 8 / 1e6).toFixed(1) + " Mbit/s";
+  frames = 0; bytes = 0;
+}
+
+// Input. Motion is coalesced per painted frame; keys and buttons go out at once, in order.
+let queue = [], move = null, delta = null;
+function flush() {
+  if (move) { queue.push(move); move = null; }
+  if (delta) { queue.push(delta); delta = null; }
+  if (!queue.length) return;
+  if (socket && socket.readyState === 1) socket.send(JSON.stringify({ e: queue }));
+  queue = [];
+}
+function emit(event) { queue.push(event); flush(); }
+function place(event) {
+  const box = canvas.getBoundingClientRect();
+  return { x: (event.clientX - box.left) / box.width, y: (event.clientY - box.top) / box.height };
+}
+const locked = () => document.pointerLockElement === canvas;
+
+canvas.addEventListener("pointermove", event => {
+  if (locked()) {
+    const box = canvas.getBoundingClientRect();
+    delta = { t: "d", dx: (delta ? delta.dx : 0) + event.movementX / box.width, dy: (delta ? delta.dy : 0) + event.movementY / box.height };
+  } else move = { t: "m", ...place(event) };
+});
+canvas.addEventListener("pointerdown", event => {
+  canvas.focus();
+  if (state.cursorLocked && !locked() && canvas.requestPointerLock) { canvas.requestPointerLock(); return; }
+  if (!locked()) canvas.setPointerCapture(event.pointerId);
+  if (move) { queue.push(move); move = null; }
+  emit(locked() ? { t: "b", b: event.button, down: true } : { t: "b", b: event.button, down: true, ...place(event) });
+  event.preventDefault();
+});
+function lift(event) {
+  if (move) { queue.push(move); move = null; }
+  emit(locked() ? { t: "b", b: event.button, down: false } : { t: "b", b: event.button, down: false, ...place(event) });
+  event.preventDefault();
+}
+canvas.addEventListener("pointerup", lift);
+canvas.addEventListener("pointercancel", () => release());
+canvas.addEventListener("contextmenu", event => event.preventDefault());
+canvas.addEventListener("wheel", event => {
+  const scale = event.deltaMode === 1 ? 100 / 3 : event.deltaMode === 2 ? 800 : 1;
+  emit(locked() ? { t: "w", dx: event.deltaX * scale, dy: event.deltaY * scale } : { t: "w", dx: event.deltaX * scale, dy: event.deltaY * scale, ...place(event) });
+  event.preventDefault();
+}, { passive: false });
+
+// The browser keeps its own developer and fullscreen keys.
+const browserKeys = new Set(["F11", "F12"]);
+function key(event, down) {
+  if (browserKeys.has(event.code) || document.activeElement !== canvas) return;
+  event.preventDefault();
+  if (event.repeat) return;
+  emit({ t: "k", c: event.code, down });
+}
+window.addEventListener("keydown", event => key(event, true));
+window.addEventListener("keyup", event => key(event, false));
+
+function release() {
+  queue = []; move = null; delta = null;
+  if (socket && socket.readyState === 1) socket.send('{"r":1}');
+}
+window.addEventListener("blur", release);
+document.addEventListener("visibilitychange", () => { if (document.hidden) release(); });
+document.addEventListener("pointerlockchange", describe);
+document.getElementById("fullscreen").addEventListener("click", () => {
+  if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen();
+  canvas.focus();
+});
+canvas.focus();
+</script>
+</body>
+</html>
