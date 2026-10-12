@@ -1096,7 +1096,8 @@ impl Controller {
             }
             _ => {}
         }
-        if !allowed_operation(&operation) {
+        // `stream` is sent by the remote session alone, through `request`.
+        if operation == "stream" || !allowed_operation(&operation) {
             return Err(unsupported(&operation).into());
         }
         Ok(Reply::Value(self.request(ctx, &operation, &args)?))
@@ -1557,6 +1558,7 @@ fn allowed_operation(operation: &str) -> bool {
             | "simulation_resume"
             | "simulation_step"
             | "input"
+            | "stream"
     )
 }
 

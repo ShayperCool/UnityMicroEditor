@@ -27,7 +27,7 @@ base64 = "0.22"
 regex = "1"
 rmcp = { version = "=3.5.1", default-features = false, features = ["server", "transport-io", "transport-streamable-http-server"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time"] }
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 subtle = "2"
 serde = { version = "1", features = ["derive"] }
@@ -44,6 +44,9 @@ tar = { version = "0.4", default-features = false }
 url = "2"
 sha1 = "0.10"
 lz4-sys = "1.11.1"
+
+[build-dependencies]
+cc = "1"
 
 [[test]]
 name = "authoring"

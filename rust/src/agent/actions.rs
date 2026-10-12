@@ -446,6 +446,7 @@ pub(crate) fn session_input(raw: &[u8]) -> Result<SessionInput> {
 impl Service {
     /// Cancels detached jobs, then stops the owned Editor.
     pub fn close(&self) {
+        self.close_remote_session();
         self.close_action_jobs();
         let _guard = self
             .0
@@ -808,6 +809,12 @@ impl Service {
             .unwrap_or_else(RuntimeOutcome::failed)
     }
     pub(crate) fn runtime_outcome(&self, ctx: &Context, name: &str, raw: &[u8]) -> RuntimeOutcome {
+        if name == "remote_session" {
+            return match self.remote_session(raw) {
+                Ok(value) => RuntimeOutcome::handler(value),
+                Err(error) => RuntimeOutcome::failed(error),
+            };
+        }
         if self.0.asynchronous {
             let outcome = self.runtime_with_action_jobs(ctx, name, raw);
             return self.recover_configuration(ctx, name, raw, outcome);

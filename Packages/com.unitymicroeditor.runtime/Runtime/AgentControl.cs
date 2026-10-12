@@ -230,6 +230,7 @@ namespace UnityMicroEditor
         private readonly Dictionary<string, PendingFrames> pending = new Dictionary<string, PendingFrames>(StringComparer.Ordinal);
         private readonly AgentSimulation simulation = new AgentSimulation();
         private readonly AgentInput input;
+        private readonly AgentStream stream;
         private readonly Dictionary<string, PendingFrames> pendingScreens = new Dictionary<string, PendingFrames>(StringComparer.Ordinal);
         private AgentCaptureRunner captureRunner;
         private PendingFrames pendingStep;
@@ -243,6 +244,7 @@ namespace UnityMicroEditor
         {
             this.directory = Path.GetFullPath(directory); this.session = session;
             input = new AgentInput(() => session() == null ? null : session().ProjectRoot);
+            stream = new AgentStream(input, CaptureRunner);
             AgentRuntimeTools.BindMainThread();
             Directory.CreateDirectory(this.directory);
             if ((File.GetAttributes(this.directory) & FileAttributes.ReparsePoint) != 0) throw new InvalidDataException("Control directory cannot be a symlink.");
@@ -253,6 +255,7 @@ namespace UnityMicroEditor
         internal void Poll()
         {
             if (disposed) return;
+            stream.Poll();
             bool stepFinished = simulation.CompleteAtEndOfFrame();
             if (pendingStep != null)
             {
@@ -401,6 +404,7 @@ namespace UnityMicroEditor
                     { if (!(arguments.TryGetValue("target", out object rawTarget) && rawTarget is Dictionary<string, object> targetArgs)) throw new InvalidDataException("UI click requires a source object target."); target = FindObject(targetArgs, live); }
                     return input.Execute(arguments, target);
                 }
+                case "stream": return stream.Execute(arguments);
                 case "screenshot":
                 {
                     if (Text(arguments, "mode") != "camera") throw new InvalidDataException("Screenshot mode must be screen or camera.");
@@ -426,14 +430,14 @@ namespace UnityMicroEditor
             return new Dictionary<string, object> { ["pid"] = pid, ["revision"] = live == null ? string.Empty : live.Revision,
                 ["frame"] = Time.frameCount, ["timeScale"] = Time.timeScale, ["pausedScaledTime"] = paused,
                 ["pauseSemantics"] = simulation.Paused ? "gated_game_player_loop" : "scaled_time_only", ["graphicsDevice"] = SystemInfo.graphicsDeviceName,
-                ["simulation"] = simulation.Status(), ["input"] = input.Capabilities(),
+                ["simulation"] = simulation.Status(), ["input"] = input.Capabilities(), ["stream"] = stream.Status(),
                 ["viewport"] = new Dictionary<string, object> { ["width"] = Screen.width, ["height"] = Screen.height },
                 ["screenshot"] = new Dictionary<string, object> { ["screenSupported"] = SystemInfo.graphicsDeviceType != UnityEngine.Rendering.GraphicsDeviceType.Null && AgentCaptureRunner.ScreenCaptureMethod() != null,
                     ["cameraSupported"] = SystemInfo.graphicsDeviceType != UnityEngine.Rendering.GraphicsDeviceType.Null,
                     ["defaultMode"] = "screen", ["screenIncludesOverlayUi"] = true, ["screenSemantics"] = "native_viewport_at_end_of_frame", ["maximumDimension"] = 4096 },
                 ["rootSiblingIndexSemantics"] = "scene_root_enumeration",
                 ["unityVersion"] = Application.unityVersion, ["commands"] = AgentRuntimeCommands.Names(),
-                ["operations"] = new List<object> { "status", "hierarchy", "inspect", "logs", "pause", "resume", "scaled_time_pause", "scaled_time_resume", "simulation_pause", "simulation_resume", "simulation_step", "input", "tools", "invoke", "wait_frames", "screenshot", "raycast", "custom" } };
+                ["operations"] = new List<object> { "status", "hierarchy", "inspect", "logs", "pause", "resume", "scaled_time_pause", "scaled_time_resume", "simulation_pause", "simulation_resume", "simulation_step", "input", "tools", "invoke", "wait_frames", "screenshot", "raycast", "custom", "stream" } };
         }
 
         private static List<GameObject> SceneObjects()
@@ -458,12 +462,7 @@ namespace UnityMicroEditor
             if (arguments.ContainsKey("target") || !string.IsNullOrEmpty(Text(arguments, "camera")))
                 throw new InvalidDataException("Screen mode captures the whole viewport and does not accept a camera target.");
             if (pendingScreens.Count >= 4) throw new InvalidOperationException("Too many screen captures are pending.");
-            if (captureRunner == null)
-            {
-                var owner = new GameObject("UnityMicroEditor.AgentCapture") { hideFlags = HideFlags.HideAndDontSave };
-                owner.AddComponent<RawSceneResources>(); Object.DontDestroyOnLoad(owner);
-                captureRunner = owner.AddComponent<AgentCaptureRunner>();
-            }
+            CaptureRunner();
             var pendingValue = new PendingFrames { Id = id, Request = request, Hash = hash, Revision = live.Revision,
                 Deadline = now + 30, Width = Screen.width, Height = Screen.height };
             pendingScreens.Add(id, pendingValue);
@@ -482,6 +481,17 @@ namespace UnityMicroEditor
                 if (disposed || !pendingScreens.Remove(id)) return;
                 Reply(request, hash, null, "capture_failed", "Public end-of-frame screen capture failed: " + error.Message);
             });
+        }
+
+        private AgentCaptureRunner CaptureRunner()
+        {
+            if (captureRunner == null)
+            {
+                var owner = new GameObject("UnityMicroEditor.AgentCapture") { hideFlags = HideFlags.HideAndDontSave };
+                owner.AddComponent<RawSceneResources>(); Object.DontDestroyOnLoad(owner);
+                captureRunner = owner.AddComponent<AgentCaptureRunner>();
+            }
+            return captureRunner;
         }
 
         private object CameraCapture(Dictionary<string, object> arguments, RawSceneLoader.LiveSession live)
@@ -598,7 +608,7 @@ namespace UnityMicroEditor
         {
             if (disposed) return; disposed = true;
             Application.logMessageReceivedThreaded -= OnLog;
-            simulation.Dispose(); input.Dispose();
+            stream.Dispose(); simulation.Dispose(); input.Dispose();
             if (captureRunner != null) Object.Destroy(captureRunner.gameObject);
             pendingScreens.Clear();
             if (paused) Time.timeScale = previousTimeScale;
