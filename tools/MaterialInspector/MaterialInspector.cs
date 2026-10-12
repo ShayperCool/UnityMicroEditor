@@ -8,6 +8,13 @@
 // text. Nothing of an inspector is restated here; the engine calls the project's own
 // compiled class.
 //
+// The shaders of the variants are imported earlier in the same run and recorded in the
+// worker's ArtifactDB, so a material finds its shader through its reference and an inspector
+// that asks the asset database about the shader (the path of a graph, its importer, the
+// metadata beside it) gets the answers it gets in the Editor. The report names, for each
+// variant, the class of the inspector and the assembly that defines it; none when no loaded
+// assembly does, in which case the engine ran no inspector.
+//
 // The asset lists one item a line: "colorspace linear" or "colorspace gamma" states the color
 // space of the project, which a standalone worker does not take from the project settings and
 // in which the engine converts the colors an inspector reads and sets; "pipeline <path>" names
@@ -32,6 +39,20 @@ namespace UnityMicroEditor.Inspection
     public sealed class MaterialInspector : ScriptedImporter
     {
         const string Output = "Temp/UnityMicroEditorInspect";
+
+        // The assembly that defines a class the engine would take as an inspector: the
+        // name as the shader gives it, or in the UnityEditor namespace.
+        static string AssemblyOf(string inspector)
+        {
+            if (string.IsNullOrEmpty(inspector)) return "";
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+                foreach (var name in new[] { inspector, "UnityEditor." + inspector })
+                {
+                    var type = assembly.GetType(name, false);
+                    if (type != null && typeof(ShaderGUI).IsAssignableFrom(type)) return assembly.GetName().Name;
+                }
+            return "";
+        }
 
         static void Build(Material material)
         {
@@ -85,8 +106,9 @@ namespace UnityMicroEditor.Inspection
                     if (phase == "a")
                     {
                         var shader = material.shader;
+                        var inspector = shader ? ShaderUtil.GetCurrentCustomEditor(shader) : "";
                         report.Append("material\t").Append(index).Append('\t')
-                            .Append(shader ? ShaderUtil.GetCurrentCustomEditor(shader) : "").Append('\t')
+                            .Append(inspector).Append('\t').Append(AssemblyOf(inspector)).Append('\t')
                             .Append(shader ? shader.name : "").Append('\n');
                     }
                     InternalEditorUtility.SaveToSerializedFileAndForget(new UnityEngine.Object[] { material }, Output + "/" + phase + "/" + index + ".mat", true);

@@ -231,6 +231,11 @@ pub struct BuildImport<'a> {
     /// same files in a project's `Library/ShaderCache`, each named after
     /// everything its variant was compiled from.
     pub shader_cache: &'a str,
+    /// What the context of a run that writes no Player objects holds
+    /// beyond its batch (`native::inspect_material_variants`). Such a run
+    /// gets neither the tool's build importer nor the project's settings
+    /// managers; its imports are recorded all the same.
+    pub extras: Option<&'a ContextExtras>,
 }
 
 /// Copies the files of a directory tree that the destination lacks. A file
@@ -296,6 +301,7 @@ fn import(
             assets,
             build.environment,
             build.files,
+            build.extras.unwrap_or(&ContextExtras::default()),
         ),
         None => create_scripted_import_context(
             ctx,
@@ -309,10 +315,13 @@ fn import(
     if let Err(error) = created {
         return (None, Some(error));
     }
+    // A build of Player objects, as opposed to a run that only loads what
+    // it imports.
+    let player = build.is_some_and(|build| build.extras.is_none());
+    if player && let Err(error) = stage_importer(ctx, &opts.editor, &prepared.project) {
+        return (None, Some(error));
+    }
     if build.is_some() {
-        if let Err(error) = stage_importer(ctx, &opts.editor, &prepared.project) {
-            return (None, Some(error));
-        }
         opts.artifact_database = true;
     }
     if let Some(cache) = build.map(|build| build.shader_cache)
@@ -350,7 +359,7 @@ fn import(
             Err(error) => return (None, Some(error)),
         };
     }
-    if build.is_some() {
+    if player {
         // The worker reads these managers from the database, as text. With
         // them it has the project's colour space, its quality levels and
         // the render pipeline asset of each.
