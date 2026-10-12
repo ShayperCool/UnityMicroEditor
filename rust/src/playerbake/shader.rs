@@ -496,9 +496,11 @@ impl ShaderSettings {
     }
 }
 
-/// The graphics APIs a Linux standalone build of the project compiles
-/// shaders for, by compiler platform number, from the Player settings:
-/// OpenGL Core and Vulkan, unless the project lists them itself.
+/// The graphics APIs the project's shaders are compiled for, by compiler
+/// platform number, from the Player settings: those the project lists for
+/// Linux standalone, else OpenGL Core, the one the Player runs on. A build
+/// of a project that lists none compiles Vulkan as well, which no session
+/// loads.
 pub fn shader_platforms(player: &str) -> Result<Vec<u32>> {
     for target in entries(player, "m_BuildTargetGraphicsAPIs") {
         if entry(&target, "m_BuildTarget") != Some("LinuxStandaloneSupport")
@@ -526,7 +528,7 @@ pub fn shader_platforms(player: &str) -> Result<Vec<u32>> {
         }
         return Ok(platforms);
     }
-    Ok(vec![15, 18])
+    Ok(vec![15])
 }
 
 /// A material that uses the shader, as far as a build of the shader reads it.
