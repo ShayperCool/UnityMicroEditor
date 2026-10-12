@@ -4,7 +4,7 @@ use super::{
     Event, LaunchOptions, StopOnDrop, Wake,
     json::{First, members, read_document, set_list, set_string_map, set_strings},
     mkdir_all,
-    player::{require_player_report, start_player},
+    player::{READY_BUDGET, require_player_report, start_player},
     routes::{RawContentRoutes, valid_scene_guid},
     text_error, wrap,
 };
@@ -25,7 +25,7 @@ use anyhow::{Result, anyhow, bail};
 use serde::de::DeserializeOwned;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -644,7 +644,7 @@ pub fn run_prepared_player(opts: &mut LaunchOptions) -> Result<()> {
         "",
     )?));
     let player = player.0.as_mut().ok_or_else(|| anyhow!("no Player"))?;
-    player.wait_ready(&ctx, Duration::from_secs(45))?;
+    player.wait_ready(&ctx, READY_BUDGET)?;
     Event::new("ready")
         .with("pid", &player.pid())
         .with("manifest", &launch.manifest)
