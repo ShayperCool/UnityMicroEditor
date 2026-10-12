@@ -11,6 +11,7 @@ mod datastore;
 mod environment;
 mod import;
 mod importer;
+mod inspector;
 mod mesh_cpu;
 mod probe;
 mod scripted;
@@ -26,7 +27,7 @@ pub use artifact::{ArtifactExtraction, MAX_ARTIFACT_BYTES, UdsArtifactStore};
 pub use batch::{NATIVE_IMPORT_BATCH_SIZE, cold_native_profile, order_native_batch};
 pub use builtin_shader::{apply_builtin_shaders, verify_builtin_shader_snapshot};
 pub use context::{
-    ProjectImportContext, ProjectImportSource, create_project_import_context,
+    ContextExtras, ProjectImportContext, ProjectImportSource, create_project_import_context,
     resolve_project_import_source, verify_project_import_sources,
 };
 pub use datastore::{DataStoreLogEvidence, DataStoreService, DataStoreStatus, read_data_store_log};
@@ -35,11 +36,16 @@ pub use environment::{
     parse_worker_environment, read_worker_environment, run_native_environment_cli,
 };
 pub use import::{
-    ProjectImportContent, ProjectImportedAsset, ProjectImportedFile,
+    ImportExtras, ProjectImportContent, ProjectImportedAsset, ProjectImportedFile,
     extract_project_import_content, run_project_import, run_project_import_cli,
+    run_project_import_with,
 };
 pub use importer::{
     NativeOptions, NativeProjectImporter, stage_native_resources, valid_native_guid,
+};
+pub use inspector::{
+    InspectedMaterial, InspectionOptions, MaterialInspection, VERIFIED_INSPECTORS,
+    inspect_material_variants, project_asset_paths, run_material_inspect_cli,
 };
 pub use probe::{
     FrameEvidence, ImportEvidence, NativeImportJob, ProbeOptions, ProbeReport, capture_frame,

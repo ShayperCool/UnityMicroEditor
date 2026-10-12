@@ -2,12 +2,12 @@
 use super::{
     ArtifactExtraction, JsonF64, NativeImportJob, ProbeOptions, ProbeReport, ProjectImportContext,
     UdsArtifactStore,
-    context::create_scripted_import_context,
+    context::{ContextExtras, create_scripted_import_context},
     probe::{rss_kib, run_probe},
     resolve_project_import_source,
     scripted::{
-        ScriptEnvironment, generated_material_profile, script_environment, scripted_importer,
-        shader_name_registry,
+        ScriptEnvironment, ScriptSelection, generated_material_profile, scripted_importer,
+        selected_environment, shader_name_registry,
     },
     support::{
         check, context_error, join, lower_ext, mkdir, nul, read_file, text, wrap, write_file,
@@ -18,7 +18,6 @@ use crate::{cancel::Context, flags::FlagSet, jsondoc, registry, sysutil, util};
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
     io::Write,
     time::{Duration, Instant},
 };
@@ -166,8 +165,13 @@ pub fn run_project_import_cli(args: &[String]) -> Result<()> {
 }
 
 /// The compiled importers the assets' `.meta` files select, if any does.
-fn importer_environment(project: &str, assets: &[String]) -> Result<Option<ScriptEnvironment>> {
-    let mut importers = BTreeSet::new();
+fn importer_environment(
+    project: &str,
+    assets: &[String],
+    extras: &ImportExtras,
+) -> Result<Option<ScriptEnvironment>> {
+    let mut selection = extras.scripts.clone();
+    let importers = &mut selection.scripts;
     for asset in assets {
         // A source that does not resolve is reported by the context.
         let Ok(source) = resolve_project_import_source(project, asset) else {
@@ -179,26 +183,51 @@ fn importer_environment(project: &str, assets: &[String]) -> Result<Option<Scrip
             importers.insert(script);
         }
     }
-    if importers.is_empty() {
+    if selection.scripts.is_empty() && selection.files.is_empty() {
         return Ok(None);
     }
-    script_environment(project, &importers).map(Some)
+    selected_environment(project, &selection).map(Some)
+}
+
+/// What a worker run takes beyond the sources it imports.
+#[derive(Clone, Debug, Default)]
+pub struct ImportExtras {
+    /// Compiled code the worker loads besides the importers the sources'
+    /// `.meta` files select.
+    pub scripts: ScriptSelection,
+    pub context: ContextExtras,
 }
 
 /// Creates the owned context, imports every asset in one worker run and
 /// extracts the linked artifacts. The report accompanies a later failure.
 pub fn run_project_import(
     ctx: &Context,
-    mut opts: ProbeOptions,
+    opts: ProbeOptions,
     assets: &[String],
 ) -> (Option<ProbeReport>, Option<anyhow::Error>) {
+    run_project_import_with(ctx, opts, assets, &ImportExtras::default())
+}
+
+/// The same with files and compiled code of the caller's in the context.
+pub fn run_project_import_with(
+    ctx: &Context,
+    mut opts: ProbeOptions,
+    assets: &[String],
+    extras: &ImportExtras,
+) -> (Option<ProbeReport>, Option<anyhow::Error>) {
     let started = Instant::now();
-    let scripts = match importer_environment(&opts.project, assets) {
+    let scripts = match importer_environment(&opts.project, assets, extras) {
         Ok(scripts) => scripts,
         Err(error) => return (None, Some(error)),
     };
-    let (prepared, created) =
-        create_scripted_import_context(ctx, &opts.project, &opts.output, assets, scripts.as_ref());
+    let (prepared, created) = create_scripted_import_context(
+        ctx,
+        &opts.project,
+        &opts.output,
+        assets,
+        scripts.as_ref(),
+        &extras.context,
+    );
     if let Err(error) = created {
         return (None, Some(error));
     }
@@ -233,6 +262,9 @@ pub fn run_project_import(
             directory: false,
             script: false,
         });
+        if prepared.registered.contains(&asset.path) {
+            continue;
+        }
         opts.jobs.push(NativeImportJob {
             guid: asset.guid.clone(),
             importer: -1,
@@ -317,14 +349,14 @@ fn extract(
     report: &ProbeReport,
     content: &mut ProjectImportContent,
 ) -> Result<()> {
-    if report.worker_exit != "exit 0" || report.imports.len() != prepared.assets().len() {
+    if report.worker_exit != "exit 0" || report.imports.len() != prepared.imported().count() {
         bail!("project artifact extraction requires all imports and a stopped worker");
     }
     let store =
         UdsArtifactStore::open(&sysutil::join(&[&prepared.project, "Library", "DataStore"]))?;
     let artifacts = sysutil::join(&[output, "artifacts"]);
     mkdir(&artifacts, 0o700)?;
-    for (index, source) in prepared.assets().iter().enumerate() {
+    for (index, source) in prepared.imported().enumerate() {
         check(ctx)?;
         let imported = &report.imports[index];
         let files = &imported.metadata.files;
