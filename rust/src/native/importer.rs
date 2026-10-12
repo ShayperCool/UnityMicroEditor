@@ -1,7 +1,7 @@
 //! The validated native cache of one runner session: replay of the persisted
 //! index, on-demand imports and the published runtime resources.
 use super::{
-    batch::{NativeColdInput, cold_input, cold_native_profile},
+    batch::{NativeColdInput, cold_input, cold_native_profile, host_binding_current},
     environment::native_environment_fingerprint,
     mesh_cpu::retain_native_model_mesh_cpu,
     resolve_project_import_source,
@@ -32,6 +32,10 @@ pub struct NativeOptions {
     pub project: String,
     pub output: String,
     pub editor: String,
+    /// The host Player the content is imported for, or empty when the caller
+    /// has none. A generated material takes its built-in shader from the
+    /// files of that Player.
+    pub player: String,
 }
 
 pub struct NativeProjectImporter {
@@ -120,6 +124,10 @@ impl NativeProjectImporter {
             if !file_hash(&source).is_ok_and(|sha| sha == entry.source_sha256)
                 || !file_hash(&format!("{source}.meta")).is_ok_and(|sha| sha == entry.meta_sha256)
             {
+                continue;
+            }
+            // A generated material is bound to the shaders of one host Player.
+            if !host_binding_current(&importer.opts, &entry) {
                 continue;
             }
             // A controller's behaviours are laid out from the scripts that
@@ -336,6 +344,7 @@ impl NativeProjectImporter {
             && cached.meta_sha256 == input.meta_sha
             && cached.environment_sha256 == self.environment_sha256
             && verify_compiled_shader_cache(&cached).is_ok()
+            && host_binding_current(&self.opts, &cached)
         {
             let cached = retain_native_model_mesh_cpu(&self.opts, cached)?;
             if self.session.replace_native_content(&cached).is_ok() {

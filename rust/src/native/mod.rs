@@ -12,6 +12,7 @@ mod builtin_shader;
 mod context;
 mod datastore;
 mod environment;
+mod host_shaders;
 mod import;
 mod importer;
 mod inspector;

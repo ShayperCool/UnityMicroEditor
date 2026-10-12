@@ -93,12 +93,14 @@ impl LaunchOptions {
     pub fn has_content_routes(&self) -> bool {
         !self.content_scenes.is_empty() || !self.addressables.is_empty()
     }
-    /// The part the native importer reads.
-    pub fn native(&self) -> NativeOptions {
+    /// The part the native importer reads, with the host Player the content
+    /// is imported for.
+    pub fn native(&self, player: &str) -> NativeOptions {
         NativeOptions {
             project: self.project.clone(),
             output: self.output.clone(),
             editor: self.editor.clone(),
+            player: player.to_string(),
         }
     }
 }
@@ -654,7 +656,8 @@ fn run_session(
             apply_compiled_bindings(&session, compiled, &script_types);
         }
         apply_builtin_shaders(&session, &opts.builtin_shaders)?;
-        let mut native_importer = NativeProjectImporter::new(opts.native(), session.clone())?;
+        let mut native_importer =
+            NativeProjectImporter::new(opts.native(&baseline.player), session.clone())?;
         native_importer.script_assemblies = compiler.script_assemblies();
         let layouts = compiler.behaviour_layouts(ctx, &script_types)?;
         native_importer.behaviour_code = compiler.behaviour_code.clone();

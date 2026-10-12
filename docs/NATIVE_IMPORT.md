@@ -107,6 +107,14 @@ A sprite texture yields its Texture2D and one Sprite per sprite, single or multi
 
 Loaded in a Player as new assets, with pixels read back: BC7 from the automatic format, from an explicit format and from a platform override, RGBA64, BC6H, a resized DXT5 override, normal maps in DXT5 and BC7, a lightmap, a single channel texture, a cubemap in DXT1 and one in BC6H (a face copied out), a texture array (a slice copied out) and a volume. Sprites, single, with a custom pivot and border, and one of a multiple sheet, were each drawn by a `SpriteRenderer` through a camera.
 
+A second run loaded one fixture of every remaining group in one Player and reported the format and size the engine gives the texture and its centre pixel, copied out through a render target:
+
+- the explicit formats ARGB4444, BC4, BC5, R8, R16, RG16, RGB24, RGB565, RGBA32, Alpha8, DXT1 and DXT5 at 256x128 with 9 mip levels, RGB9e5, RGBAFloat and RGBAHalf from a 16x8 `.exr`, and the crunched forms, which the Player reports as `DXT1Crunched` and `DXT5Crunched`. The pixels agree with the sources within what each format keeps: `0.667,0.341,0.714` in RGB24 is `0.678,0.333,0.710` in RGB565, `0.667,0.341,0` in RG16 and `0.667,0,0` in R8; the three HDR formats give the same `0.998,0.537,0.000`;
+- the cubemap mappings: cylindrical, diffuse and specular convolution in DXT1, high quality in BC7 and uncompressed in RGB24, each 128 with 8 mip levels and the same centre of the +X face within what the compression keeps (`0.475,0.388,0.290` in DXT1, `0.490,0.392,0.314` in RGB24);
+- the types Cookie (Alpha8), Cursor (RGBA32, one mip level, readable), GUI (DXT1, one mip level), Shadowmask (ARGB4444) and DirectionalLightmap (DXT1, linear).
+
+What a light, a cursor or a lightmap does with such a texture was not run; the proof is that the Player holds the texture a build holds, in the format, size and content of the import.
+
 A setting outside this list keeps to an exact warm artifact from an existing Unity import; a changed source or `.meta` without such an artifact is refused. For a warm BC7 artifact, the compressor setting recorded in the artifact database is checked against `EditorSettings.asset`, and its hash is part of the cache key.
 
 A `.meta` that holds a GUID but no `TextureImporter` block is refused. The engine reads it as a version 1 importer and makes an 8x8 cubemap of the file, in the Editor as in a worker, so there is no Texture2D to deliver; the Editor writes the block when it first sees the file.
@@ -125,7 +133,32 @@ A resource is replaced by renaming a new file over the mounted path, so a clip t
 
 A model without a material of its own gets one from the importer, which looks up the `Standard` shader by name. A worker fills its table of shaders by name with the built-in shaders when it starts, then replaces it with the `mem://Library/ScriptMapper` record of its source database; with no such record the table ends up empty, the lookup fails, and the importer copies the built-in default material instead, under another name and local ID (`Default-Material`, `3297912226980038121`) than the Editor's (`defaultMat`, `-3033667219593020291`; the ID is XXH64 of `Type:Material->` + name + `0`). The coordinator therefore writes that record for these two formats, with the bytes of `Library/ScriptMapper` from an Editor run of the project: the staging clone a preparation with a host build leaves in `Library/UnityMicroEditor/stage/project`, or else the project's own `Library`. Without either the import is refused. With the record the worker's artifacts for `.obj` and `.dae` are byte-identical to the Editor's. FBX imports are left as they were.
 
-Both were loaded in a Player as new assets: hierarchy, mesh and, for `.obj`, the generated material under the Editor's local ID. That material refers to the built-in `Standard` shader; it renders only in a host that holds that shader, and shows the error shader otherwise.
+Both were loaded in a Player as new assets: hierarchy, mesh and, for `.obj`, the generated material under the Editor's local ID, with the shader and the pixel of a build (below).
+
+### Generated materials
+
+A material the importer makes (`defaultMat` of an `.obj`, the materials of a `.blend` or of an FBX that are not remapped) names its shader as an object of the Editor's `unity_builtin_extra`: `Standard` is path ID 46 there. A Player has that file too, but a build keeps in it only the shaders the project always includes. Any other built-in shader an asset uses is copied into the file of that asset (`resources.assets`, `sharedassets<n>.assets`) under a path ID of that file. The reference of an imported material therefore led nowhere in a Player: the material had `Hidden/InternalErrorShader` and drew magenta, in every host, whether or not it held `Standard`.
+
+A ContentFile can reach an object of the Player's own files. The loader (`ContentLoadBackend::BuildLocalRemappingSet`, read from the pinned Player) takes an external reference without a GUID from the dependency list it is given, by position; one with a GUID it looks up itself, by the path name of the reference, among the files the Player has open. So the importer reads which shaders the host Player holds (`rust/src/native/host_shaders.rs`: the object tables of the `.assets` files of its data directory and the names of their `Shader` objects), and the adapter rewrites the model's file (`rust/src/runtimeartifact/builtin_reference.rs`): the reference names the Player's file, with a GUID that is no asset's, and the material points at the path ID the shader has there. Nothing else of the file changes. This is the shader an authored material of the project gets by name, and what a host built by this tool always holds for `Standard`.
+
+What a real build gives was established with Players built by the pinned Editor from the same three models, one project without a render pipeline and one with URP 17.6.0, each drawing the model with one directional light of half intensity, no ambient light and no reflection, from both sides:
+
+| Model | Build without a pipeline | Session, same project | Build with URP |
+| --- | --- | --- | --- |
+| `.blend` (cube, material `Material`) | `Standard`, pixel 136,136,136 | `Standard`, pixel 136,136,136 | `Universal Render Pipeline/Lit`, 125,125,125 |
+| `.obj` without a material (`defaultMat`) | `Standard`, 94,94,94 | `Standard`, 94,94,94 | `Universal Render Pipeline/Lit`, 99,99,99 |
+| `.dae` without a material | the engine's `Default-Material`, 156,156,156 | no material, magenta (255,0,255) | the pipeline's `Lit` material, 88,88,88 |
+
+The binding is kept with what stands for the host's shaders (file, path ID and content of each), so a model bound to one host is imported again for another, and so is a cached model that was adapted before materials were bound.
+
+Refused, with the reason named:
+
+- in a project with a scriptable render pipeline, a model with a generated material, unless its importer uses the legacy material mode (`materialImportMode: 1`). The Editor makes such a material with the pipeline's importer script (URP gives it `Universal Render Pipeline/Lit` with converted properties); a standalone worker does not run that script and names `Standard`. The model is delivered when its materials are remapped to materials of the project or it is imported without materials. Before this refusal such a material was published and drew magenta;
+- a generated material that enables keywords: the host holds `Standard` with the variants of its own materials, and a build would compile the material's;
+- a built-in shader other than `Standard`, whose name is not established for the engine; a shader the host does not hold, or holds in several copies; a call without a host Player (`native-adopt`);
+- a model that names another built-in object beside its shaders, a part without a material next to a part with one, since one reference leads into one file.
+
+Not delivered as a build has it, and not refused: a model none of whose parts has a material. The Editor gives its renderer the engine's `Default-Material` (in a pipeline project the pipeline's default material), which a build copies into its files and a host Player does not hold. In a session that renderer has no material: a script reads `sharedMaterial == null` and the mesh draws magenta until a scene or a prefab assigns a material. A model used only for its meshes is not affected, which is why this is not a refusal.
 
 ### Blender files
 
@@ -137,7 +170,7 @@ blender -b <project>/Assets/.../file.blend -P <Editor>/Data/Tools/Unity-BlenderT
 
 The program is found through `PATH` (`execvp`), in the Editor as in a worker; the script is the Editor's own and runs inside Blender. A worker started by this tool inherits the tool's `PATH`, so nothing else is needed on a machine that has Blender, and the artifact is byte-identical to the Editor's with the shader name table above (compared with Blender 5.2.2). Without a `blender` on `PATH` the importer leaves an asset with an import log and no model, so the tool refuses the import before starting a worker and names the missing program. A sandbox that hides the program from the worker has the same effect: a snap-packaged Blender does not start inside `bwrap`, for one.
 
-Loaded in a Player as a new asset: a mesh with its material. A `.blend` with a camera or a light yields those components, which the static model profile refuses, as it does for an FBX.
+Loaded in a Player as a new asset, imported by a worker: the mesh with its material, which has the `Standard` shader and draws the pixel of a build; see [Generated materials](#generated-materials) for a project with a render pipeline. A `.blend` with a camera or a light yields those components, which the static model profile refuses, as it does for an FBX.
 
 ## Video
 
@@ -189,6 +222,13 @@ Both were compared with AssetBundles built by the pinned Editor from the same so
 No scene refers to an atlas. A sprite belongs to one because the atlas lists its texture, one of its sprites, or a folder above it. So each walk reads the project's `.spriteatlasv2` sources (`rust/src/native/atlas.rs`), and an atlas that packs a texture the scene uses, or one a session already published, is imported in one batch with all of its textures. The batch is imported again when the atlas, its `.meta`, one of the textures or a texture's `.meta` changes, or when the atlas gains or loses a texture; a texture that an atlas no longer packs is imported again on its own. The atlas records the textures it was packed from, and a bound texture the revision of the atlas, so a cache entry made from other revisions is not replayed.
 
 In a Player, as new assets (`Temp/e2e/kinds3`): a `SpriteRenderer` drew a sprite of a single-sprite texture and a sprite of a sheet through a camera, each reporting `packed=True` and the atlas texture (`sactx-0-256x512-DXT5|BC3-atlas2-...`, 256x512) as its texture, with the pixels of the sprite; a script field of type `SpriteAtlas` held the atlas with its five sprites.
+
+Also in a Player, with the uGUI package in the project:
+
+- A UI `Image` on a canvas, rendered by a camera into a texture, showed a packed sprite from the atlas: `mainTexture` is the atlas texture, the shader `UI/Default`, and the pixel that of the sprite.
+- An atlas of several pages: three sprites of 1100x1100 with the page limit of 2048 give three textures (`sactx-0-2048x2048-...`, `sactx-1-...`, `sactx-2-...`). Each sprite names its own page, and both a `SpriteRenderer` and an `Image` drew each in its own colour.
+- Edits between two runs on one baseline: a member texture with another colour was imported again with its atlas and drew the new colour; a fourth texture added to the atlas gave a fourth page and an atlas of four sprites.
+- An edit in a watched session: with the Player running, a member texture was overwritten; the session imported the batch and the same Player process drew the new colour 7 s later.
 
 Refused, with the reason named:
 
@@ -527,6 +567,10 @@ What is reproduced is the same build as above: an AssetBundle build for Linux st
 
 A Player loaded a new URP shader with package includes, a `multi_compile` and a `shader_feature_local` keyword and a package fallback, rendered a material with it under URP on OpenGL Core, and rendered the edited shader and the material's other keyword variant after a re-bake. It also loaded one of the shader graphs through a material (name, six passes and thirty properties read back; no pixel compared).
 
+A Player ran a compute shader delivered by a session of the URP sample: a `.compute` of two kernels over a `RWStructuredBuffer<float>`, dispatched one after the other, gave the expected sixteen values through `ComputeBuffer.GetData` and through `AsyncGPUReadback`, as a new asset and again after its source was edited between two runs.
+
+In a watched session the running Player took both kinds of edit without a restart: an edited `.shader` was built and the same process rendered the new colour 29 s later, an edited `.compute` gave the new values 16 s later.
+
 #### What the worker needs to find imported assets
 
 A worker resolves an asset it loads by reading `Library/ArtifactDB` of its project directly, with a new LMDB read transaction per lookup; no message of the import protocol is involved. Three tables have to hold a record of the import: `ImportAddressToImportResultIDs`, `ImportResultIDToArtifactDependencies` and `ImportResultIDToArtifactMetaInfo`. The key of an import address is XXH3-128 (seed 0) over its GUID, importer ID and importer hash, low half first; the values are the three blobs of the import response as they came. The coordinator also writes `CurrentRevisions`, `ImportResultIDToImportStats` and `ImportResultIDPropertyIDToProperty`, as the Editor does. A reader takes the newest revision from the transaction number in `ArtifactDB-lock`, so a commit writes the pages, then the metadata page, then that number (`lmdb::commit`).
@@ -567,7 +611,7 @@ A baked source is kept with the hashes of the project's files it was built from:
 - One pipeline (URP 17.6.0), one set of pipeline assets, Linux standalone with OpenGL Core and Vulkan. HDRP, a custom pipeline, a project with its own shader strippers, XR and other package versions were not run.
 - An asset a pipeline object loads by path when it finds a field empty (`ResourceReloader`) is taken from the worker's message, added to the batch and the run repeated, at most 24 times; the list is kept in `Library/UnityMicroEditor/pipeline-reloads.json`. With the references of the pipeline assets staged this did not occur in any run, so the retry itself is covered by a unit test only.
 - A shader graph's default material (an object of the graph asset beside the shader) is not delivered. A graph that refers to an asset its importer loads through a path rather than a GUID is not followed. Of a graph's sources only those the project holds are hashed; a file its custom functions include from `Assets` is one of them only when the graph names it by GUID.
-- The compute shader was compared with the Editor's object; a Player did not run one. Of the shader graphs a Player loaded one and rendered none.
+- Of the shader graphs a Player loaded one and rendered none. The compute shader a Player ran used a structured buffer on OpenGL Core; textures as kernel targets, several buffers and Vulkan were not run.
 - Materials found for a shader are those of the project's sources; a material that only a package holds is not counted, as in the first route.
 - The scripts of the packages run in the worker with the state the worker has. A stripper that reads Editor state a worker lacks (the open scene, build profiles, XR settings) gets the worker's state. URP's reads of the quality levels, the graphics settings and the volume profiles were checked against the worker's report; nothing else was.
 
@@ -581,7 +625,7 @@ Unchanged UXML, USS and font assets are extracted from an existing Unity import 
 - There is no proven general support for animation inside models, skinned meshes, complex model settings, texture formats of other platform families, custom AssetPostprocessors or every dependency of an arbitrary project. A project with an `AssetPostprocessor` for textures imports them in the Editor through that script; a standalone worker has no script assemblies and does not run it.
 - Video other than VP8 `.webm`, ScriptedImporter assets other than `.inputactions` and `.shadergraph`, and sprite atlases of the first format (`.spriteatlas`) are not imported; a scene that refers to a new one needs a catalog built by the Editor.
 - `.obj`, `.dae`, `.blend` and `.inputactions` need files of an Editor run of the project (the shader name table, the script assemblies); a project that was only ever prepared with a reused host and never opened in an Editor has none, and such an import is refused with that reason.
-- A model's generated material uses the built-in `Standard` shader and depends on the host holding it.
+- A model's generated material is delivered in a project without a render pipeline, with the `Standard` shader of the host and without keywords; in a pipeline project the model is refused, and a part without any material has none in a session. See [Generated materials](#generated-materials).
 - A shader is delivered only in the cases listed under [Shaders](#shaders). In a project with a scriptable render pipeline a shader, shader graph or compute shader needs the script assemblies of an Editor run of the project, like the entries above, and is refused in the cases listed [there](#refused-in-a-pipeline-project); in a project without one, shader graphs and compute shaders still need a catalog built by the Editor.
 - The store reader handles inline and concatenated storage, limits one file to 64 MiB and refuses other layouts. The LMDB reader targets the observed Linux x64 format.
 - A worker is started per import batch. A persistent native service is not used.
@@ -603,6 +647,7 @@ The coordinator lives in `rust/src/native/`, with the wire format, LMDB reader a
 | `rust/src/native/scripted.rs` | What an import takes from an Editor run: compiled importers and the shader name table |
 | `rust/src/native/atlas.rs` | The project's sprite atlases, the textures they pack and the batches they are imported in |
 | `rust/src/runtimeartifact/scripted.rs`, `video.rs`, `atlas.rs` | The Player form of a scripted importer's objects, of a video clip, and of a sprite atlas and its sprites |
+| `rust/src/native/host_shaders.rs`, `rust/src/runtimeartifact/builtin_reference.rs` | The shaders a host Player holds, and the binding of a model's generated materials to them |
 | `rust/src/native/baked.rs`, `rust/src/playerbake/` | Assets baked from authored YAML without a worker |
 | `rust/src/playerbake/shader.rs`, `shader/`, `rust/src/native/shader_compiler.rs` | Shaders: variants, program tables, the client of `UnityShaderCompiler` |
 | `rust/src/native/player_objects.rs`, `build_settings.rs`, `tools/WorkerScripts/PlayerObjectImporter.cs` | Shaders of a pipeline project: what a build reads, the batch, the importer that calls the Editor's build code |
