@@ -541,6 +541,20 @@ struct Merged {
     variant: bool,
 }
 
+/// The state the parents of an inspected variant are taken in. A build
+/// builds the properties of a variant when it first needs them, so it may
+/// meet a parent that is a variant itself before or after that parent's own
+/// inspector has run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Parents {
+    /// As their sources give them.
+    Authored,
+    /// Each as its inspector leaves it over authored parents.
+    BuiltAlone,
+    /// Each as its inspector leaves it after its own parents were built.
+    BuiltFirst,
+}
+
 /// How long a chain of parents is followed. The engine sets no limit.
 const DEEPEST_PARENT: usize = 32;
 
@@ -548,6 +562,7 @@ fn merged(
     fields: &Map<String, Value>,
     sources: &dyn NativeSources,
     ancestors: &mut Vec<(String, i64)>,
+    parents: Parents,
 ) -> Result<Merged> {
     // The engine upgrades a source of an older layout on load.
     if version(fields)? != "8" {
@@ -598,7 +613,13 @@ fn merged(
     ancestors.push((guid.clone(), file_id));
     // Without its parent a variant keeps its own overrides over defaults
     // of the engine; whether the parent exists is the project's to say.
-    let Some(source) = sources.material(&guid) else {
+    let inspected = match parents {
+        Parents::Authored => None,
+        Parents::BuiltAlone => sources.inspected_material(&guid).map(|(alone, _)| alone),
+        Parents::BuiltFirst => sources.inspected_material(&guid).map(|(_, first)| first),
+    };
+    let built = inspected.is_some();
+    let Some(source) = inspected.or_else(|| sources.material(&guid)) else {
         return Err(unsupported(format!(
             "material variant whose parent {guid} is not known"
         )));
@@ -614,7 +635,16 @@ fn merged(
             "material variant whose parent {guid} holds no material {file_id}"
         )));
     };
-    let mut parent = merged(&parent.data, sources, ancestors)?;
+    // Only the material at the top of a chain has no inspected form.
+    if parents != Parents::Authored
+        && !built
+        && other_source(get(&parent.data, "m_Parent"), "m_Parent")?.is_some()
+    {
+        return Err(unsupported(format!(
+            "material variant whose parent {guid}, a variant itself, has not been inspected"
+        )));
+    }
+    let mut parent = merged(&parent.data, sources, ancestors, parents)?;
     // What the chain inherits is written into the variant; a texture that
     // lives in a parent's own source cannot be named from here.
     for (name, texture) in &parent.saved.textures {
@@ -818,6 +848,7 @@ pub(super) fn bake(
     fields: &Map<String, Value>,
     references: &mut References<'_>,
     sources: &dyn NativeSources,
+    inspected: Option<Parents>,
 ) -> Result<Val> {
     let Merged {
         shader: shader_source,
@@ -831,7 +862,15 @@ pub(super) fn bake(
             },
         variant,
         ..
-    } = merged(fields, sources, &mut Vec::new())?;
+    } = merged(
+        fields,
+        sources,
+        &mut Vec::new(),
+        inspected.unwrap_or(Parents::Authored),
+    )?;
+    if inspected.is_some() && !variant {
+        return Err(unsupported("inspected material that is not a variant"));
+    }
     let shader = match &shader_source {
         Value::Object(reference) => {
             let guid = text(get(reference, "guid"))?.to_ascii_lowercase();
@@ -900,7 +939,9 @@ pub(super) fn bake(
 
     let mut keywords = strings(fields, "m_ValidKeywords")?;
     keywords.extend(strings(fields, "m_InvalidKeywords")?);
-    if variant {
+    // The engine has run the drawers and the inspector of an inspected
+    // variant; its keywords are what they left.
+    if variant && inspected.is_none() {
         apply_drawers(&shader, &mut keywords, &|property| {
             let sheet = match property.kind {
                 PropertyKind::Int => &ints,

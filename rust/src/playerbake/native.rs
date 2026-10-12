@@ -8,7 +8,7 @@ use super::{
     Baked,
     mask::bake_mask_object,
     mask_tree,
-    material::{self, ShaderFacts},
+    material::{self, Parents, ShaderFacts},
     mixer,
     serialized::{self, External, Object},
     settle::{self, Settle},
@@ -53,6 +53,15 @@ pub trait NativeSources {
     /// The source text of the material with a GUID, which a variant names
     /// as its parent. `None` leaves the variant refused.
     fn material(&self, _guid: &str) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// The material variant with a GUID as the inspector of its shader
+    /// leaves it (`native::inspect_material_variants`): built over authored
+    /// parents, and built after the variants among its parents. Asked for
+    /// the parents of an inspected variant; `None` for a material that is
+    /// not a variant or was not inspected.
+    fn inspected_material(&self, _guid: &str) -> Option<(Vec<u8>, Vec<u8>)> {
         None
     }
 
@@ -465,6 +474,56 @@ pub fn bake_native_objects(
     yaml: &[u8],
     sources: &dyn NativeSources,
 ) -> Result<(Vec<NativeObject>, Vec<External>)> {
+    native_objects(yaml, sources, None)
+}
+
+/// A material variant as the inspector of its shader leaves it.
+#[derive(Debug, Clone, Copy)]
+pub struct InspectedVariant<'a> {
+    /// Built over parents as their sources give them.
+    pub over_authored: &'a [u8],
+    /// Built after the variants among its parents were built.
+    pub over_inspected: &'a [u8],
+}
+
+/// The objects of a material variant whose shader names an inspector, from
+/// the documents the engine leaves once the inspector has run.
+///
+/// A build builds the properties of a material when it first needs them,
+/// and a variant's inspector decides by the values its parents have at that
+/// moment. For a variant of a variant the build may get there before or
+/// after the parent's own inspector has run, and may merge the two at yet
+/// another moment; which, depends on the order the build meets them in. The
+/// variant is baked for each of the three states; a variant they disagree
+/// on is refused.
+pub fn bake_inspected_variant_objects(
+    inspected: &InspectedVariant<'_>,
+    sources: &dyn NativeSources,
+) -> Result<(Vec<NativeObject>, Vec<External>)> {
+    let (objects, externals) =
+        native_objects(inspected.over_authored, sources, Some(Parents::Authored))?;
+    for (document, parents) in [
+        (inspected.over_authored, Parents::BuiltAlone),
+        (inspected.over_inspected, Parents::BuiltFirst),
+    ] {
+        let (other, other_externals) = native_objects(document, sources, Some(parents))?;
+        let same = other.len() == objects.len()
+            && other.iter().zip(&objects).all(|(a, b)| a.data == b.data)
+            && other_externals == externals;
+        if !same {
+            return Err(unsupported(
+                "material variant whose built form depends on the order in which a build meets it and its parents: their sources are not as their inspector leaves them",
+            ));
+        }
+    }
+    Ok((objects, externals))
+}
+
+fn native_objects(
+    yaml: &[u8],
+    sources: &dyn NativeSources,
+    inspected: Option<Parents>,
+) -> Result<(Vec<NativeObject>, Vec<External>)> {
     let mut documents = crate::yaml::parse_unity_yaml_lexical(yaml)?;
     // A render pipeline keeps Editor-only records next to a material, as
     // hidden script objects of its Editor assemblies. A Player holds none.
@@ -518,9 +577,12 @@ pub fn bake_native_objects(
                 settle(&document.data, &mut value, sources)?;
                 tree.encode(&value)?
             }
-            How::Material => {
-                tree.encode(&material::bake(&document.data, &mut references, sources)?)?
-            }
+            How::Material => tree.encode(&material::bake(
+                &document.data,
+                &mut references,
+                sources,
+                inspected,
+            )?)?,
             How::Mask => bake_mask_object(&document.data)?,
             How::Mixer => {
                 return Err(unsupported(format!(
@@ -541,7 +603,19 @@ pub fn bake_native_objects(
 /// Bakes an authored native-format source into a ContentFile. Every object
 /// is published under its authored local file ID.
 pub fn bake_native(yaml: &[u8], sources: &dyn NativeSources) -> Result<Baked> {
-    let (baked, externals) = bake_native_objects(yaml, sources)?;
+    publish(bake_native_objects(yaml, sources)?)
+}
+
+/// Bakes a material variant whose shader names an inspector into a
+/// ContentFile; see `bake_inspected_variant_objects`.
+pub fn bake_inspected_variant(
+    inspected: &InspectedVariant<'_>,
+    sources: &dyn NativeSources,
+) -> Result<Baked> {
+    publish(bake_inspected_variant_objects(inspected, sources)?)
+}
+
+fn publish((baked, externals): (Vec<NativeObject>, Vec<External>)) -> Result<Baked> {
     let mut objects = Vec::new();
     let mut published = Vec::new();
     for object in baked {

@@ -1980,6 +1980,13 @@ impl playerbake::NativeSources for Project {
         let (_, path) = self.materials.iter().find(|(known, _)| known == guid)?;
         fs::read(path).ok()
     }
+
+    // The documents an inspection left next to a source.
+    fn inspected_material(&self, guid: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+        let (_, path) = self.materials.iter().find(|(known, _)| known == guid)?;
+        let phase = |phase: &str| fs::read(format!("{}.{phase}", path.display())).ok();
+        Some((phase("a")?, phase("b")?))
+    }
 }
 
 /// Compares every `<source>` / `<source>.bin` pair of a directory: a
@@ -1993,8 +2000,9 @@ fn compare_native(root: &Path, project: &Project) -> (usize, Vec<String>, Vec<St
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension != "bin" && extension != "meta")
+            path.extension().is_some_and(|extension| {
+                !["bin", "meta", "a", "b"].contains(&extension.to_str().unwrap())
+            })
         })
         .collect();
     sources.sort();
@@ -2004,7 +2012,19 @@ fn compare_native(root: &Path, project: &Project) -> (usize, Vec<String>, Vec<St
         let Ok(expected) = fs::read(root.join(format!("{name}.bin"))) else {
             continue;
         };
-        let baked = playerbake::bake_native_objects(&fs::read(&source).unwrap(), project);
+        // A variant with the documents its inspector leaves is baked from
+        // them, over the sources of its parents.
+        let inspected = [".a", ".b"].map(|phase| fs::read(root.join(format!("{name}{phase}"))));
+        let baked = match &inspected {
+            [Ok(over_authored), Ok(over_inspected)] => playerbake::bake_inspected_variant_objects(
+                &playerbake::InspectedVariant {
+                    over_authored,
+                    over_inspected,
+                },
+                project,
+            ),
+            _ => playerbake::bake_native_objects(&fs::read(&source).unwrap(), project),
+        };
         let (objects, _) = match baked {
             Ok(baked) => baked,
             Err(error) if error.is::<Unsupported>() => {
@@ -2117,6 +2137,109 @@ fn native_corpus_matches_the_engine_build() {
         failed += differing.len();
     }
     assert_eq!(failed, 0);
+}
+
+/// A project that knows no inspected form of any material.
+struct Uninspected<'a>(&'a Project);
+
+impl playerbake::NativeSources for Uninspected<'_> {
+    fn linear_color_space(&self) -> Option<bool> {
+        self.0.linear_color_space()
+    }
+    fn shader(&self, guid: &str, file_id: i64) -> Option<playerbake::ShaderFacts> {
+        self.0.shader(guid, file_id)
+    }
+    fn tag_spelling(&self, tag: &str) -> Option<String> {
+        self.0.tag_spelling(tag)
+    }
+    fn material(&self, guid: &str) -> Option<Vec<u8>> {
+        self.0.material(guid)
+    }
+}
+
+/// Variants of a shader that names an inspector (URP's `LitShader` on a
+/// shader of the reference project), baked from the documents the engine
+/// left after running that inspector in a standalone worker
+/// (`native::inspect_material_variants`), against the objects of Editor
+/// builds in both color spaces. A plain material next to them keeps its
+/// stale keywords: a build runs no inspector on it.
+#[test]
+fn inspected_variants_match_the_engine_build() {
+    for (directory, linear, built) in [
+        ("inspected/gamma", false, 13),
+        ("inspected/linear", true, 4),
+    ] {
+        let root = fixture(directory);
+        let project = Project::new(linear, LIT).read(&root);
+        let (matched, refused, differing) = compare_native(&root, &project);
+        assert_eq!(differing, Vec::<String>::new(), "{directory}");
+        assert_eq!(matched, built, "{directory}");
+        // The grandchild turns opaque again over a parent whose own source
+        // is stale: what a build writes of it depends on which of the two
+        // it builds first.
+        let order: Vec<&String> = refused.iter().collect();
+        if linear {
+            assert!(order.is_empty(), "{order:?}");
+        } else {
+            assert_eq!(order.len(), 1);
+            assert!(order[0].starts_with("IV_Grand.mat: "), "{order:?}");
+            assert!(order[0].contains("depends on the order"), "{order:?}");
+        }
+    }
+}
+
+#[test]
+fn inspected_variant_needs_its_documents() {
+    let root = fixture("inspected/gamma");
+    let project = Project::new(false, LIT).read(&root);
+    let read = |name: &str| fs::read(root.join(name)).unwrap();
+    // From its source alone the variant stays refused: the inspector is the
+    // project's code.
+    let error = playerbake::bake_native(&read("IV_Transparent.mat"), &project).unwrap_err();
+    assert!(error.is::<Unsupported>(), "{error:#}");
+    assert!(
+        error.to_string().contains("LitShader validates"),
+        "{error:#}"
+    );
+    // The same documents give the published object.
+    let baked = playerbake::bake_inspected_variant(
+        &playerbake::InspectedVariant {
+            over_authored: &read("IV_Transparent.mat.a"),
+            over_inspected: &read("IV_Transparent.mat.b"),
+        },
+        &project,
+    )
+    .unwrap();
+    assert_eq!(
+        baked.objects,
+        [("2100000".to_string(), "UnityEngine.Material".to_string())]
+    );
+    // A parent that is a variant has to be inspected as well.
+    let error = playerbake::bake_inspected_variant_objects(
+        &playerbake::InspectedVariant {
+            over_authored: &read("IV_Settled.mat.a"),
+            over_inspected: &read("IV_Settled.mat.b"),
+        },
+        &Uninspected(&project),
+    )
+    .err()
+    .unwrap();
+    assert!(error.is::<Unsupported>(), "{error:#}");
+    assert!(
+        error.to_string().contains("has not been inspected"),
+        "{error:#}"
+    );
+    // A plain material has no inspected form.
+    let error = playerbake::bake_inspected_variant_objects(
+        &playerbake::InspectedVariant {
+            over_authored: &read("IP_Base.mat"),
+            over_inspected: &read("IP_Base.mat"),
+        },
+        &project,
+    )
+    .err()
+    .unwrap();
+    assert!(error.to_string().contains("not a variant"), "{error:#}");
 }
 
 /// A material is published alone: the Editor-only script objects a render
