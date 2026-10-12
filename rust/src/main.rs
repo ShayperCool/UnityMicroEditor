@@ -56,6 +56,9 @@ fn execute() -> Result<()> {
         "project-import" => {
             unity_micro_editor::native::run_project_import_cli(&args.collect::<Vec<_>>())?
         }
+        "material-inspect" => {
+            unity_micro_editor::native::run_material_inspect_cli(&args.collect::<Vec<_>>())?
+        }
         "native-adopt" => {
             unity_micro_editor::native::run_native_adopt_cli(&args.collect::<Vec<_>>())?
         }

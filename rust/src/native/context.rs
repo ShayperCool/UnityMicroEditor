@@ -17,7 +17,7 @@ use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::File,
     io::{Read, Write},
 };
@@ -50,8 +50,17 @@ pub struct ProjectImportContext {
     pub source_hashes: Option<BTreeMap<String, String>>,
     #[serde(deserialize_with = "super::support::nul")]
     pub source_bytes: i64,
+    /// The selected assets the worker finds but is not asked to import.
+    #[serde(skip)]
+    pub registered: BTreeSet<String>,
 }
 impl ProjectImportContext {
+    /// The selected assets the worker imports, in request order.
+    pub fn imported(&self) -> impl Iterator<Item = &ProjectImportSource> {
+        self.assets()
+            .iter()
+            .filter(|asset| !self.registered.contains(&asset.path))
+    }
     pub fn assets(&self) -> &[ProjectImportSource] {
         self.assets.as_deref().unwrap_or(&[])
     }
@@ -417,7 +426,25 @@ pub fn create_project_import_context(
     output: &str,
     assets: &[String],
 ) -> (ProjectImportContext, Result<()>) {
-    create_scripted_import_context(ctx, source_project, output, assets, None)
+    create_scripted_import_context(
+        ctx,
+        source_project,
+        output,
+        assets,
+        None,
+        &ContextExtras::default(),
+    )
+}
+
+/// What a context holds beyond the selected sources of its project.
+#[derive(Clone, Debug, Default)]
+pub struct ContextExtras {
+    /// Files written into the context, by path relative to its project. One
+    /// at the path of a selected asset or its `.meta` stands for the
+    /// project's file.
+    pub files: BTreeMap<String, Vec<u8>>,
+    /// The selected assets the worker finds but is not asked to import.
+    pub registered: BTreeSet<String>,
 }
 
 /// The same with the compiled importers the selected assets need: their
@@ -429,9 +456,18 @@ pub fn create_scripted_import_context(
     output: &str,
     assets: &[String],
     scripts: Option<&ScriptEnvironment>,
+    extras: &ContextExtras,
 ) -> (ProjectImportContext, Result<()>) {
     let mut result = ProjectImportContext::default();
-    let outcome = create(ctx, source_project, output, assets, scripts, &mut result);
+    let outcome = create(
+        ctx,
+        source_project,
+        output,
+        assets,
+        scripts,
+        extras,
+        &mut result,
+    );
     (result, outcome)
 }
 
@@ -454,6 +490,7 @@ fn create(
     output: &str,
     assets: &[String],
     scripts: Option<&ScriptEnvironment>,
+    extras: &ContextExtras,
     result: &mut ProjectImportContext,
 ) -> Result<()> {
     // Where the context holds a logical path, relative to its project.
@@ -485,12 +522,23 @@ fn create(
         if !seen.insert(super::support::rune_lower(asset)) {
             bail!("source asset repeated or has a case collision: {asset}");
         }
-        let filename = resolve_project_import_source(&source_project, asset)?;
-        let meta_name = resolve_project_import_source(&source_project, &format!("{asset}.meta"))?;
-        if !sysutil::stat(&meta_name).is_ok_and(|info| info.size <= 16 * 1024 * 1024) {
-            bail!("source .meta exceeds import bounds");
+        let meta_path = format!("{asset}.meta");
+        if !extras.files.contains_key(&place(asset)) {
+            let filename = resolve_project_import_source(&source_project, asset)?;
+            source_files.insert(place(asset), filename);
         }
-        let meta = read_file(&meta_name)?;
+        let meta = match extras.files.get(&place(&meta_path)) {
+            Some(meta) => meta.clone(),
+            None => {
+                let meta_name = resolve_project_import_source(&source_project, &meta_path)?;
+                if !sysutil::stat(&meta_name).is_ok_and(|info| info.size <= 16 * 1024 * 1024) {
+                    bail!("source .meta exceeds import bounds");
+                }
+                let meta = read_file(&meta_name)?;
+                source_files.insert(place(&meta_path), meta_name);
+                meta
+            }
+        };
         let guid = meta_guid(&meta).map_err(|e| wrap(asset, e))?;
         if let Some(previous) = guid_paths.get(&guid) {
             bail!("source GUID is shared by {previous} and {asset}");
@@ -500,8 +548,6 @@ fn create(
             path: asset.clone(),
             guid,
         });
-        source_files.insert(place(asset), filename);
-        source_files.insert(place(&format!("{asset}.meta")), meta_name);
         let mut folder = logical_dir(asset);
         while folder != "Assets" && folder != "Packages" && folder != "." {
             match resolve_project_import_source(&source_project, &format!("{folder}.meta")) {
@@ -568,6 +614,13 @@ fn create(
             let filename = resolve_script_source(&environment.library, &name)?;
             source_files.insert(name, filename);
         }
+        for plugin in &environment.plugins {
+            let filename = resolve_script_source(&environment.library, plugin)?;
+            source_files.insert(
+                format!("Library/ScriptAssemblies/{}", sysutil::base(plugin)),
+                filename,
+            );
+        }
     }
     let version_path =
         resolve_project_import_source(&source_project, "ProjectSettings/ProjectVersion.txt")?;
@@ -627,8 +680,22 @@ fn create(
         assets: Some(selected),
         source_hashes: Some(BTreeMap::new()),
         source_bytes: 0,
+        registered: extras.registered.clone(),
     };
+    for (logical, data) in &extras.files {
+        if project_registry_path(logical).is_err()
+            && !logical.starts_with("Library/ScriptAssemblies/")
+        {
+            bail!("invalid context file {logical}");
+        }
+        let destination = sysutil::join(&[&project, logical]);
+        mkdir_all(&sysutil::dir(&destination), 0o700)?;
+        write_file(&destination, data, 0o600)?;
+    }
     for (logical, filename) in &source_files {
+        if extras.files.contains_key(logical) {
+            continue;
+        }
         let (hash, size) =
             copy_project_import_source(ctx, filename, &sysutil::join(&[&project, logical]))?;
         result

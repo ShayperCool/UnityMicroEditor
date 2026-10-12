@@ -36,6 +36,10 @@ pub struct ScriptEnvironment {
     pub roots: BTreeMap<String, String>,
     /// Identifies the assemblies' contents.
     pub sha256: String,
+    /// The precompiled assemblies of immutable packages the assemblies
+    /// name, by their place relative to the project. The worker's runtime
+    /// finds one that lies next to the assembly that names it.
+    pub plugins: Vec<String>,
 }
 
 impl ScriptEnvironment {
@@ -230,17 +234,36 @@ fn package_root(logical: &str) -> Option<&str> {
     Some(&logical[..9 + name.len()])
 }
 
-/// The environment in which the scripts with the given GUIDs import, or why
-/// this project has none.
-pub fn script_environment(
+/// The compiled code a worker run needs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScriptSelection {
+    /// The GUIDs of scripts whose assemblies are loaded.
+    pub scripts: BTreeSet<String>,
+    /// File names of package scripts whose assemblies are loaded, such as
+    /// `LitShader.cs` for a class of that name.
+    pub files: BTreeSet<String>,
+    /// Whether the precompiled assemblies those assemblies name are put
+    /// next to them instead of the run being refused.
+    pub plugins: bool,
+}
+
+/// The environment in which the selected scripts run, or why this project
+/// has none.
+pub fn selected_environment(
     project: &str,
-    importers: &BTreeSet<String>,
+    selection: &ScriptSelection,
 ) -> Result<ScriptEnvironment> {
-    let mut failure = None;
+    let mut failure: Option<anyhow::Error> = None;
     for library in libraries(project) {
-        match read_environment(&library, importers) {
+        match read_environment(&library, selection) {
             Ok(environment) => return Ok(environment),
-            Err(error) => failure = failure.or(Some(error)),
+            // A project that has no staging clone fails by its own Library.
+            Err(error) => {
+                failure = match failure {
+                    Some(first) if !super::is_not_exist(&first) => Some(first),
+                    _ => Some(error),
+                }
+            }
         }
     }
     Err(wrap(
@@ -249,7 +272,8 @@ pub fn script_environment(
     ))
 }
 
-fn read_environment(library: &str, importers: &BTreeSet<String>) -> Result<ScriptEnvironment> {
+fn read_environment(library: &str, selection: &ScriptSelection) -> Result<ScriptEnvironment> {
+    let importers = &selection.scripts;
     let library = eval_symlinks(library)?;
     let record_path = compilation_record(&library)?;
     let record: Record = serde_json::from_slice(&read_file(&record_path)?)
@@ -268,7 +292,23 @@ fn read_environment(library: &str, importers: &BTreeSet<String>) -> Result<Scrip
     // The assembly of each importer: the one compiled from its script.
     let mut wanted: BTreeSet<&str> = importers.iter().map(String::as_str).collect();
     let mut selected = BTreeSet::new();
+    let mut files: BTreeSet<&str> = selection.files.iter().map(String::as_str).collect();
+    for (index, assembly) in assemblies.iter().enumerate() {
+        for source in &assembly.source_files {
+            if package_root(source).is_some_and(|root| packages.contains_key(root))
+                && files.remove(sysutil::base(source).as_str())
+            {
+                selected.insert(index);
+            }
+        }
+    }
+    if let Some(missing) = files.first() {
+        bail!("no compiled package assembly is made from a script {missing}");
+    }
     'search: for (index, assembly) in assemblies.iter().enumerate() {
+        if wanted.is_empty() {
+            break;
+        }
         for source in &assembly.source_files {
             let Some(directory) = package_root(source).and_then(|root| {
                 packages
@@ -310,6 +350,7 @@ fn read_environment(library: &str, importers: &BTreeSet<String>) -> Result<Scrip
         ..Default::default()
     };
     let mut scripts = BTreeSet::new();
+    let mut plugins = BTreeSet::new();
     let mut identity = String::from("script-environment-v1\0");
     for &index in &selected {
         let assembly = &assemblies[index];
@@ -324,16 +365,25 @@ fn read_environment(library: &str, importers: &BTreeSet<String>) -> Result<Scrip
         // worker does not have. Every assembly is compiled against all of
         // those that are referenced automatically; one it really uses is
         // named in its metadata.
-        if let Some(plugin) = assembly
+        for plugin in assembly
             .prebuilt_references
             .iter()
             .filter(|path| !sysutil::is_abs(path) || within_directory(path, &library))
-            .find(|path| names_assembly(&data, path))
+            .filter(|path| names_assembly(&data, path))
         {
-            bail!(
-                "importer assembly {} needs the precompiled assembly {plugin}, which a standalone worker does not load",
-                assembly.name
-            );
+            let place = package_root(plugin).and_then(|root| {
+                packages
+                    .get(root)
+                    .filter(|directory| directory.starts_with("Library/PackageCache/"))
+                    .map(|directory| format!("{directory}{}", &plugin[root.len()..]))
+            });
+            match place {
+                Some(place) if selection.plugins => plugins.insert(place),
+                _ => bail!(
+                    "importer assembly {} needs the precompiled assembly {plugin}, which a standalone worker does not load",
+                    assembly.name
+                ),
+            };
         }
         for source in assembly
             .source_files
@@ -368,6 +418,12 @@ fn read_environment(library: &str, importers: &BTreeSet<String>) -> Result<Scrip
     for (root, directory) in &environment.roots {
         identity.push_str(&format!("{root}\0{directory}\0"));
     }
+    for plugin in &plugins {
+        let data = read_file(&sysutil::join(&[&library, plugin]))
+            .map_err(|error| wrap(&format!("precompiled assembly {plugin}"), error))?;
+        identity.push_str(&format!("plugin\0{plugin}\0{}\0", sha256(&data)));
+    }
+    environment.plugins = plugins.into_iter().collect();
     environment.sha256 = sha256(identity.as_bytes());
     Ok(environment)
 }
