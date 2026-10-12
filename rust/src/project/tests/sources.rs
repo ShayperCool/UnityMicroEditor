@@ -373,6 +373,92 @@ fn reject_unsupported_authored_material_variant_and_runtime_subasset() {
     }
 }
 
+/// The stamps as Editors write them: 6000.6 with the class beside the script,
+/// earlier ones with the script alone, and a material that carries all three.
+#[test]
+fn authored_material_leaves_out_the_version_stamps_of_the_pipelines() {
+    let stamp = |id: &str, guid: &str, class: &str| {
+        format!(
+            "--- !u!114 &{id}\nMonoBehaviour:\n  m_ObjectHideFlags: 11\n  m_GameObject: {{fileID: 0}}\n  m_Enabled: 1\n  m_Script: {{fileID: 11500000, guid: {guid}, type: 3}}\n  m_Name: \n  m_EditorClassIdentifier: {class}\n  version: 10\n"
+        )
+    };
+    let material = AUTHORED_MATERIAL_FIXTURE
+        .split("--- !u!114")
+        .next()
+        .unwrap();
+    let urp = "d0353a89b1f911e48b9e16bdc9f2e058";
+    let graph = "639247ca83abc874e893eb93af2b5e44";
+    let hdrp = "da692e001514ec24dbc4cca1949ff7e8";
+    let urp_class =
+        "Unity.RenderPipelines.Universal.Editor::UnityEditor.Rendering.Universal.AssetVersion";
+    let graph_class = "Unity.ShaderGraph.Editor::UnityEditor.Rendering.BuiltIn.AssetVersion";
+    let refresh = |content: String| {
+        let fixture = fixture_session();
+        let mut session = fixture.session.lock();
+        let path = "Assets/Material.mat";
+        let physical = format!("{}/{path}", fixture.project);
+        write_fixture_file(&physical, content);
+        write_fixture_file(
+            format!("{physical}.meta"),
+            "guid: 22222222222222222222222222222222\n",
+        );
+        let mut asset = asset(serde_json::json!({"path": path, "kind": "authoredMaterial"}));
+        session
+            .refresh_asset(&mut asset)
+            .map(|()| value::get(&asset, "fileId").as_str().map(str::to_string))
+            .map_err(|error| format!("{error:#}"))
+    };
+    let (head, body) = material.split_at(material.find("--- !u!21").unwrap());
+    for content in [
+        // Saved by 6000.6: both stamps, the first before the material.
+        format!(
+            "{head}{}{body}{}",
+            stamp("-3627636042289115933", urp, urp_class),
+            stamp("4795349616271329459", graph, graph_class)
+        ),
+        // Saved by an earlier Editor, in a project that had all three packages.
+        format!(
+            "{material}{}{}{}",
+            stamp("1030908612866383966", hdrp, ""),
+            stamp("4814849476012220932", graph, ""),
+            stamp("8336996437747029529", urp, "")
+        ),
+    ] {
+        assert_eq!(refresh(content), Ok(Some("2100000".to_string())));
+    }
+    for (content, why) in [
+        (
+            format!(
+                "{material}{}",
+                stamp("5", "99999999999999999999999999999999", "")
+            ),
+            "a script that is no stamp",
+        ),
+        (
+            format!("{material}{}", stamp("5", urp, graph_class)),
+            "a class that is not the script's",
+        ),
+        (
+            format!(
+                "{material}{}",
+                stamp("5", urp, "Assembly-CSharp::Game.Data")
+            ),
+            "a class of the project",
+        ),
+        (
+            format!("{material}{}", stamp("5", urp, urp_class))
+                .replace("m_GameObject: {fileID: 0}", "m_GameObject: {fileID: 7}"),
+            "a component of a GameObject",
+        ),
+    ] {
+        let error = refresh(content).expect_err(why);
+        assert!(
+            error.contains("not a render pipeline version stamp") && error.contains("document 5"),
+            "{why}: {error}"
+        );
+    }
+}
+
 const AUTHORED_MATERIAL_VARIANT_FIXTURE: &str = "%YAML 1.1
 %TAG !u! tag:unity3d.com,2011:
 --- !u!21 &2100000

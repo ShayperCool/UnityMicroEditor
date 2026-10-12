@@ -53,6 +53,7 @@ The runner asks for OpenGL Core with VSync off. Its readiness check rejects a mi
 | New empty GameObject with a Transform, child or root | The patch adds the object and updates the hierarchy in the same Player. |
 | Other supported scene, prefab and raw asset changes | The loader rebuilds the scene in the same Player. Scene state resets; loaded assemblies and the native cache remain. |
 | Shader (`.shader`), a file it includes, a material's keywords | The worker parses the shader, `UnityShaderCompiler` compiles its programs and the runner publishes the Player's object; the shaders that fall back on it or use its passes follow. The scene is rebuilt in the same Player. [NATIVE_IMPORT.md](NATIVE_IMPORT.md#shaders) lists what is refused. |
+| Material (`.mat`) | The scene is rebuilt with a material made from the source. In a render pipeline project the shader it names is built with the project's materials, also when it is a shader of a package; a change of keywords builds it again. [NATIVE_IMPORT.md](NATIVE_IMPORT.md#materials-in-a-session) says what is set and what is refused. |
 | Supported model, audio, video, texture, text or input actions asset | Unity's AssetImportWorker imports the file in an owned context. The runner adapts the result and loads it into the same Player, then the scene is rebuilt. |
 | C# method body | The SDK recompiles the changed assembly and the runner restarts the Player. Process and scene state reset. |
 | C# API change | Dependent assemblies can be recompiled as well. The Player restarts. |

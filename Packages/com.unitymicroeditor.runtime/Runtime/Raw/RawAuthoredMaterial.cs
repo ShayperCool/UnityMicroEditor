@@ -126,10 +126,13 @@ namespace UnityMicroEditor.Raw
                         if (material.renderQueue != (expectedQueue == -1 ? shader.renderQueue : expectedQueue))
                             throw new InvalidDataException("Material render queue readback differs: " + asset.path);
                     }
+                    // A build keeps a value saved for a property the shader lacks in the file,
+                    // but the loaded material has no such property: none is set here either.
                     var saved = Map(data["m_SavedProperties"]);
                     foreach (object item in List(saved["m_Floats"]))
                         foreach (var property in Map(item))
                         {
+                            if (shader.FindPropertyIndex(property.Key) < 0) continue;
                             int id = Shader.PropertyToID(property.Key);
                             float value = Float(property.Value);
                             material.SetFloat(id, value);
@@ -139,6 +142,7 @@ namespace UnityMicroEditor.Raw
                     foreach (object item in IntProperties(saved))
                         foreach (var property in Map(item))
                         {
+                            if (shader.FindPropertyIndex(property.Key) < 0) continue;
                             int id = Shader.PropertyToID(property.Key), value = Int(property.Value);
                             material.SetInteger(id, value);
                             if (material.HasProperty(id) && material.GetInteger(id) != value)
@@ -151,7 +155,8 @@ namespace UnityMicroEditor.Raw
                             int id = Shader.PropertyToID(property.Key);
                             var value = new Color(Float(color["r"]), Float(color["g"]), Float(color["b"]), Float(color["a"]));
                             int vectorPropertyIndex = shader.FindPropertyIndex(property.Key);
-                            if (vectorPropertyIndex >= 0 && shader.GetPropertyType(vectorPropertyIndex) == ShaderPropertyType.Vector)
+                            if (vectorPropertyIndex < 0) continue;
+                            if (shader.GetPropertyType(vectorPropertyIndex) == ShaderPropertyType.Vector)
                             {
                                 // Unity stores Vector shader properties in m_Colors too.
                                 // Hidden particle fade vectors legitimately contain +Infinity.
@@ -177,6 +182,10 @@ namespace UnityMicroEditor.Raw
                     foreach (object item in List(saved["m_TexEnvs"]))
                         foreach (var property in Map(item))
                         {
+                            // A build writes a saved texture only for a texture property of the
+                            // shader; one left by another shader is dropped with its reference.
+                            int textureIndex = shader.FindPropertyIndex(property.Key);
+                            if (textureIndex < 0 || shader.GetPropertyType(textureIndex) != ShaderPropertyType.Texture) continue;
                             var texture = Map(property.Value);
                             int id = Shader.PropertyToID(property.Key);
                             ReferenceData reference = Reference(texture["m_Texture"]);

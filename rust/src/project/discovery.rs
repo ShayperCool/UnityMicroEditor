@@ -652,6 +652,10 @@ impl Inner {
         let mut clip_models = BTreeSet::new();
         // A mask is baked into the layers of its controllers.
         let mut masks = BTreeSet::new();
+        // A shader of a package is delivered with the prepared content, built
+        // without the project's materials; one a material names is built
+        // again with them.
+        let mut package_shaders = BTreeSet::new();
         while let Some(logical) = queue.pop_front() {
             if !seen.insert(logical.clone()) {
                 continue;
@@ -697,6 +701,14 @@ impl Inner {
                     clip_models.insert(source.to_string());
                 } else if plays_clips && lexpath::lower_ext(source) == ".mask" {
                     masks.insert(source.to_string());
+                } else if lexpath::lower_ext(&logical) == ".mat"
+                    && source.starts_with("Packages/")
+                    && matches!(
+                        lexpath::lower_ext(source).as_str(),
+                        ".shader" | ".shadergraph"
+                    )
+                {
+                    package_shaders.insert(source.to_string());
                 } else if !seen.contains(source) {
                     queue.push_back(source.to_string());
                 }
@@ -710,6 +722,7 @@ impl Inner {
         }
         self.changed_clip_models = changed_clip_models;
         self.controller_masks = masks.into_iter().collect();
+        self.package_shaders = package_shaders.into_iter().collect();
         let mut pending = Vec::new();
         for logical in heavy {
             if self.needs_native_import(&logical)? {
@@ -750,6 +763,16 @@ impl Session {
     pub fn changed_clip_models(&self) -> Vec<(String, String)> {
         let s = self.lock();
         s.changed_clip_models
+            .iter()
+            .map(|path| (s.guid_of(path).to_string(), path.clone()))
+            .collect()
+    }
+
+    /// The shaders of packages that the materials of the last walk name,
+    /// each with its GUID.
+    pub fn material_package_shaders(&self) -> Vec<(String, String)> {
+        let s = self.lock();
+        s.package_shaders
             .iter()
             .map(|path| (s.guid_of(path).to_string(), path.clone()))
             .collect()

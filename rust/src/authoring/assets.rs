@@ -48,7 +48,7 @@ impl Store {
                 match extension{
                     "mat"=>{
                         if document.class_id==21&&main_id.is_empty(){main_id=document.file_id.clone();}
-                        else if document.class_id!=114||field(&document.data,"m_EditorClassIdentifier").as_str()!=Some("Unity.RenderPipelines.Universal.Editor::UnityEditor.Rendering.Universal.AssetVersion"){return Err(failure("unsupported_asset","material requires one class21 object and only supported version subassets",None));}
+                        else if document.class_id!=114||!crate::project::editor_version_stamp(field(&document.data,"m_EditorClassIdentifier").as_str().unwrap_or_default(),&id(field(&document.data,"m_Script")),field(&document.data,"m_Script")["guid"].as_str().unwrap_or_default(),&id(field(&document.data,"m_GameObject"))){return Err(failure("unsupported_asset","material requires one class21 object and only supported version subassets",None));}
                     }
                     "asset"=>{
                         if document.class_id!=114||id(field(&document.data,"m_GameObject"))!="0"||id(field(&document.data,"m_Script"))=="0"{return Err(failure("unsupported_asset","ScriptableObject asset requires class114 objects with explicit MonoScript references and no GameObject owner",None));}
