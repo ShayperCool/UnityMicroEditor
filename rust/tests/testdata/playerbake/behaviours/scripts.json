@@ -11,6 +11,10 @@
   "className": "SmbManaged2",
   "localId": -3181609813844466394
  },
+ "082f9a0892d1c859988312d8509dec49": {
+  "className": "SmbCtorBase",
+  "localId": -80078201523047801
+ },
  "2100e3421ba4cd72f9bc05a32c4a6d97": {
   "className": "MySO",
   "localId": -1332065481928836478
@@ -71,6 +75,10 @@
   "className": "SmbCbMove",
   "localId": 1482834712336459473
  },
+ "563dcfa24e81e81b7b5341493dbaa52a": {
+  "className": "SmbCount",
+  "localId": -270033408588403571
+ },
  "5871cf1503d9dadc5aadcfa389717b64": {
   "className": "SmbDict",
   "localId": -3366480469672533932
@@ -78,6 +86,10 @@
  "5a78ec9d71a57b52aa4a9c9a987d5572": {
   "className": "SmbCbIK",
   "localId": -8220247949065511270
+ },
+ "60321fe640f597fa19e75fa9f6a568de": {
+  "className": "SmbCtor",
+  "localId": 6690140589089827776
  },
  "63761deeb07b6d036b7b21ed90628b9c": {
   "className": "SmbDeep2",
@@ -123,6 +135,10 @@
   "className": "SmbCbInherited",
   "localId": -1283064112971416632
  },
+ "a2a2f09043aff65938141264a54e7f02": {
+  "className": "SmbNulls",
+  "localId": 633174567869609061
+ },
  "a415167375755024cb6f57f59c2445d1": {
   "className": "SmbNested",
   "localId": -5751086760410106111
@@ -134,6 +150,14 @@
  "ab23b100605d6397095af89e07797f82": {
   "className": "SoNamespaced",
   "localId": -5415086181842842218
+ },
+ "acdb88a00e24c6f6aaabe5e5ca6c4d18": {
+  "className": "SmbRefNew",
+  "localId": 4730704988491005338
+ },
+ "adc2c1373775b8f439a17602ee671421": {
+  "className": "SmbCountPlain",
+  "localId": 1372808858518603224
  },
  "adcf8a034c0f6e3ddabc8292a66b2100": {
   "className": "SmbCut",
@@ -147,13 +171,25 @@
   "className": "SmbEnums",
   "localId": -6249565432717253802
  },
+ "b2d3f837837f31cb292976bc1e217a97": {
+  "className": "SmbDictCb",
+  "localId": 3635055031521886622
+ },
  "b69010361ee818b8780551d0acaeee6c": {
   "className": "SmbCbMachineEnter3",
   "localId": 780057722582141184
  },
+ "b9e1bc37ded824055b47447a62a4536e": {
+  "className": "SmbRefOne",
+  "localId": 3976705664064080284
+ },
  "ba48e9079d388955894aff0328ba6b09": {
   "className": "SmbEvent",
   "localId": 987653540596513554
+ },
+ "be2243ce5c58a6f0d8dba89cc9fed8b7": {
+  "className": "SmbWrap",
+  "localId": 1795569751207796235
  },
  "c05e6190e2a795be3b0e199b4c74c218": {
   "className": "SmbDerived",
@@ -175,6 +211,10 @@
   "className": "SmbKnownDerived",
   "localId": -6461982776728086506
  },
+ "dbfa12dc11e78498196592d082941014": {
+  "className": "SmbRefPlain",
+  "localId": -4694751566654594273
+ },
  "e536c0c88c30b942380147c2ea407363": {
   "className": "SmbCbExit",
   "localId": -9149886475095687702
@@ -190,6 +230,10 @@
  "eca4fb8cbaee32a79af8ba0d374ecdc2": {
   "className": "SoPack",
   "localId": -8390044555241506001
+ },
+ "ee40c3b55ff3caea999bbca24bb4f28c": {
+  "className": "SmbCtorNative",
+  "localId": -3026373727259104187
  },
  "ef8255fd6b6e1f75ead3757926e67efb": {
   "className": "SmbCbShared",

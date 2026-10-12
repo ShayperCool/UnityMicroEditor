@@ -280,6 +280,7 @@ pub fn prepare_content_routes(
         // clips and controllers a content scene bakes too.
         if let Some(root) = root {
             cached.importer.script_assemblies = root.script_assemblies.clone();
+            cached.importer.behaviour_code = root.behaviour_code.clone();
             cached
                 .importer
                 .set_behaviour_layouts(ctx, root.behaviour_layouts.clone())

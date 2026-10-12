@@ -2969,17 +2969,70 @@ fn compiler_behaviour_layouts_sdk() {
         assert_eq!(layout, &expected[guid], "{}", layout.class_name);
     }
     // What grows past the reader's bound on its way down to the engine's
-    // depth limit, holds a managed reference that any class may fill or
-    // has callbacks a build runs is refused.
+    // depth limit or holds a managed reference that any class may fill is
+    // refused.
     let refused: BTreeSet<&str> = actual
         .values()
         .filter(|layout| !layout.unsupported.is_empty())
         .map(|layout| layout.class_name.as_str())
         .collect();
+    assert_eq!(refused, BTreeSet::from(["SmbDeep", "SmbManaged2"]));
+    // A class with serialization callbacks, in itself, in what it stores
+    // inline or in what it may hold by reference, is marked: its objects
+    // are what the callbacks leave.
+    let receivers: BTreeSet<&str> = actual
+        .values()
+        .filter(|layout| layout.serialization_callbacks)
+        .map(|layout| layout.class_name.as_str())
+        .collect();
     assert_eq!(
-        refused,
-        BTreeSet::from(["SmbCallback", "SmbDeep", "SmbManaged2"])
+        receivers,
+        BTreeSet::from([
+            "SmbCallback",
+            "SmbCount",
+            "SmbCountPlain",
+            "SmbDictCb",
+            "SmbEvent",
+            "SmbNulls",
+            "SmbWrap"
+        ])
     );
+    // The helper runs the constructors and callbacks of those classes. The
+    // fixtures record its reply for every object the baker asks about, and
+    // the baked objects made from those replies equal the engine's.
+    let mut records = sys::glob_lossy(&join(&[&fixtures, "code", "*.json"]));
+    records.sort();
+    assert!(records.len() >= 30);
+    let (mut requests, mut replies) = (Vec::new(), Vec::new());
+    for record in &records {
+        let record: serde_json::Value = read_json_file(record).unwrap();
+        requests.push(record["request"].clone());
+        replies.push(record["reply"].clone());
+    }
+    let objects_path = join(&[&cache, "objects.json"]);
+    atomic_json(
+        &objects_path,
+        &json!({"assemblies": assemblies, "objects": requests}),
+    )
+    .unwrap();
+    let output = compiler_command(
+        &ctx,
+        &cache,
+        &compiler.dotnet,
+        &[&helper, "--behaviour-objects", &objects_path],
+    )
+    .unwrap();
+    let run: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    for (index, reply) in replies.iter().enumerate() {
+        assert_eq!(&run["objects"][index], reply, "{}", records[index]);
+    }
+    // Code that asks the engine is refused by what it asked for.
+    let refused = replies
+        .iter()
+        .filter_map(|reply| reply["refused"].as_str())
+        .filter(|reason| reason.contains("a call into the engine in UnityEngine.AnimationCurve"))
+        .count();
+    assert!(refused >= 3);
     let callbacks: BTreeSet<&str> = actual
         .values()
         .filter(|layout| layout.overrides_state_machine_callbacks)

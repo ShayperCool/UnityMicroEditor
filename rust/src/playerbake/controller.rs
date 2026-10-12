@@ -230,6 +230,14 @@ pub trait ControllerSources {
             Err(error) => Err(error),
         }
     }
+    /// Runs the code of the project on a behaviour object, as
+    /// `References::run_object` describes it: a build constructs the object,
+    /// reads the text over it and runs its serialization callbacks, so what
+    /// it writes may be more than the text tells. `None` is the answer of a
+    /// source that cannot run code; such an object is then refused.
+    fn run_object(&self, _request: &serde_json::Value) -> Result<Option<serde_json::Value>> {
+        Ok(None)
+    }
 }
 
 /// A behaviour object of a baked controller.
@@ -1306,6 +1314,7 @@ pub fn bake_controller_object(
                     local: &local,
                     resolve: &|reference| sources.reference(reference),
                     externals: &mut builder.externals,
+                    code: &|request| sources.run_object(request),
                 },
             )
             .map_err(|error| {
@@ -1674,6 +1683,31 @@ pub fn bake_controller(yaml: &[u8], sources: &dyn ControllerSources) -> Result<B
     )];
     for (identity, layout) in &baked.scripts {
         objects.push((identity.object(layout.properties_hash)?, Vec::new()));
+    }
+    // An avatar mask stored in the controller's file is an object of that
+    // file for the Editor's importer as well, shown in the Project window or
+    // hidden, and is published beside the controller. The layers hold its
+    // content in the controller itself and do not point at it.
+    for document in &documents {
+        if document.class_id != 319 || document.stripped {
+            continue;
+        }
+        let Ok(local_id) = document.file_id.parse::<i64>() else {
+            bail!("avatar mask of a controller has an invalid file ID");
+        };
+        published.push((
+            document.file_id.clone(),
+            "UnityEngine.AvatarMask".to_string(),
+        ));
+        objects.push((
+            Object {
+                local_id,
+                tree: super::mask_tree()?,
+                data: super::mask::bake_mask_object(&document.data)?,
+                script: None,
+            },
+            Vec::new(),
+        ));
     }
     let mut deferred = Vec::new();
     for behaviour in baked.behaviours {

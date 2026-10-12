@@ -53,6 +53,89 @@ struct LayoutCache {
     layouts_sha256: String,
 }
 
+/// Runs the code of script classes on their objects through the SDK helper
+/// (`--behaviour-objects`): the constructors, and the serialization callbacks
+/// in the order a build calls them. The helper loads the project's compiled
+/// assemblies into a process of its own, without the engine, and refuses an
+/// object whose code asks the engine for something.
+#[derive(Debug, Clone, Default)]
+pub struct BehaviourCode {
+    dotnet: String,
+    helper: String,
+    cache: String,
+    /// The assemblies the layouts were read from, in the helper's order.
+    assemblies: Vec<String>,
+    /// Identifies the helper and the content of the assemblies.
+    key: String,
+}
+
+#[derive(Serialize)]
+struct CodeRequest<'a> {
+    assemblies: &'a [String],
+    objects: [&'a serde_json::Value; 1],
+}
+
+#[derive(Serialize, Deserialize)]
+struct CodeRecord {
+    request: serde_json::Value,
+    reply: serde_json::Value,
+}
+
+impl BehaviourCode {
+    /// The helper's reply for one object, as `playerbake::References::run_object`
+    /// describes it; `None` before any script was laid out. A reply is kept
+    /// by its request and by the assemblies, so an object is run once.
+    pub fn run(
+        &self,
+        ctx: &Context,
+        request: &serde_json::Value,
+    ) -> Result<Option<serde_json::Value>> {
+        if self.helper.is_empty() {
+            return Ok(None);
+        }
+        let encoded = marshal(request)?;
+        let key = sha256(&[self.key.as_bytes(), b"\n", encoded.as_slice()].concat());
+        let directory = join(&[&self.cache, "behaviour-objects", &key]);
+        let record = join(&[&directory, "reply.json"]);
+        if let Ok(known) = read_json_file::<CodeRecord>(&record)
+            && known.request == *request
+        {
+            return Ok(Some(known.reply));
+        }
+        sys::mkdir_all(&directory)?;
+        let asked = join(&[&directory, "request.json"]);
+        atomic_json(
+            &asked,
+            &CodeRequest {
+                assemblies: &self.assemblies,
+                objects: [request],
+            },
+        )?;
+        let output = compiler_command(
+            ctx,
+            &self.cache,
+            &self.dotnet,
+            &[&self.helper, "--behaviour-objects", &asked],
+        )
+        .map_err(|error| anyhow!("run behaviour script code: {error}"))?;
+        #[derive(Deserialize)]
+        struct Replies {
+            objects: [serde_json::Value; 1],
+        }
+        let Ok(Replies { objects: [reply] }) = serde_json::from_slice::<Replies>(&output) else {
+            bail!("SDK helper returned no behaviour object");
+        };
+        atomic_json(
+            &record,
+            &CodeRecord {
+                request: request.clone(),
+                reply: reply.clone(),
+            },
+        )?;
+        Ok(Some(reply))
+    }
+}
+
 impl Compiler {
     /// The fields the engine serializes of every script whose class derives
     /// from `ScriptableObject`, state machine behaviours among them, by
@@ -109,6 +192,15 @@ impl Compiler {
             }
         }
         let key = self.behaviour_layout_cache_key(&helper, &assemblies, &scripts)?;
+        // The code of the classes runs on the assemblies they were laid out
+        // from.
+        self.behaviour_code = BehaviourCode {
+            dotnet: self.dotnet.clone(),
+            helper: helper.clone(),
+            cache: self.cache.clone(),
+            assemblies: assemblies.clone(),
+            key: key.clone(),
+        };
         let directory = join(&[&self.cache, "behaviour-layouts", &key]);
         if let Some(layouts) = read_layout_cache(&directory, &key) {
             return Ok(layouts);

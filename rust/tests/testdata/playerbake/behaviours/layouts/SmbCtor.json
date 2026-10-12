@@ -1,0 +1,871 @@
+{
+ "className": "SmbCtor",
+ "namespace": "",
+ "assembly": "Assembly-CSharp",
+ "baseKind": "StateMachineBehaviour",
+ "bases": [
+  "SmbCtorBase",
+  "UnityEngine.StateMachineBehaviour",
+  "UnityEngine.ScriptableObject",
+  "UnityEngine.Object"
+ ],
+ "overridesStateMachineCallbacks": false,
+ "fields": [
+  {
+   "name": "baseCall",
+   "initialUnknown": true,
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "baseText",
+   "initialUnknown": true,
+   "type": {
+    "kind": "string"
+   }
+  },
+  {
+   "name": "call",
+   "initialUnknown": true,
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "branch",
+   "initialUnknown": true,
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "arr",
+   "initialUnknown": true,
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "primitive",
+     "name": "int"
+    }
+   }
+  },
+  {
+   "name": "names",
+   "initialUnknown": true,
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "string"
+    }
+   }
+  },
+  {
+   "name": "empty",
+   "initialUnknown": true,
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "string"
+    }
+   }
+  },
+  {
+   "name": "priv",
+   "initialUnknown": true,
+   "type": {
+    "kind": "struct",
+    "name": "PrivCtor",
+    "fields": [
+     {
+      "name": "q",
+      "initialUnknown": true,
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     },
+     {
+      "name": "w",
+      "initialUnknown": true,
+      "type": {
+       "kind": "string"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "privMade",
+   "initialUnknown": true,
+   "type": {
+    "kind": "struct",
+    "name": "PrivCtor",
+    "fields": [
+     {
+      "name": "q",
+      "initialUnknown": true,
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     },
+     {
+      "name": "w",
+      "initialUnknown": true,
+      "type": {
+       "kind": "string"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "privs",
+   "initialUnknown": true,
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "struct",
+     "name": "PrivCtor",
+     "fields": [
+      {
+       "name": "q",
+       "initialUnknown": true,
+       "type": {
+        "kind": "primitive",
+        "name": "int"
+       }
+      },
+      {
+       "name": "w",
+       "initialUnknown": true,
+       "type": {
+        "kind": "string"
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "arg",
+   "initialUnknown": true,
+   "type": {
+    "kind": "struct",
+    "name": "ArgCtor",
+    "fields": [
+     {
+      "name": "q",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     },
+     {
+      "name": "w",
+      "type": {
+       "kind": "string"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "argNull",
+   "initialUnknown": true,
+   "type": {
+    "kind": "struct",
+    "name": "ArgCtor",
+    "fields": [
+     {
+      "name": "q",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     },
+     {
+      "name": "w",
+      "type": {
+       "kind": "string"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "args",
+   "initialUnknown": true,
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "struct",
+     "name": "ArgCtor",
+     "fields": [
+      {
+       "name": "q",
+       "type": {
+        "kind": "primitive",
+        "name": "int"
+       }
+      },
+      {
+       "name": "w",
+       "type": {
+        "kind": "string"
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "si",
+   "initialUnknown": true,
+   "type": {
+    "kind": "struct",
+    "name": "StaticInit",
+    "fields": [
+     {
+      "name": "v",
+      "initialUnknown": true,
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     },
+     {
+      "name": "squares",
+      "initialUnknown": true,
+      "type": {
+       "kind": "array",
+       "element": {
+        "kind": "primitive",
+        "name": "int"
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "concat",
+   "initialUnknown": true,
+   "type": {
+    "kind": "string"
+   }
+  },
+  {
+   "name": "root",
+   "initialUnknown": true,
+   "type": {
+    "kind": "primitive",
+    "name": "float"
+   }
+  },
+  {
+   "name": "v",
+   "initialUnknown": true,
+   "type": {
+    "kind": "unity",
+    "name": "Vector3"
+   }
+  },
+  {
+   "name": "c",
+   "initialUnknown": true,
+   "type": {
+    "kind": "unity",
+    "name": "Color"
+   }
+  },
+  {
+   "name": "norm",
+   "initialUnknown": true,
+   "type": {
+    "kind": "unity",
+    "name": "Vector3"
+   }
+  },
+  {
+   "name": "q",
+   "initialUnknown": true,
+   "type": {
+    "kind": "unity",
+    "name": "Quaternion"
+   }
+  },
+  {
+   "name": "rect",
+   "initialUnknown": true,
+   "type": {
+    "kind": "unity",
+    "name": "Rect"
+   }
+  },
+  {
+   "name": "bounds",
+   "initialUnknown": true,
+   "type": {
+    "kind": "unity",
+    "name": "Bounds"
+   }
+  },
+  {
+   "name": "mask",
+   "initialUnknown": true,
+   "type": {
+    "kind": "unity",
+    "name": "LayerMask"
+   }
+  },
+  {
+   "name": "c32",
+   "initialUnknown": true,
+   "type": {
+    "kind": "unity",
+    "name": "Color32"
+   }
+  },
+  {
+   "name": "v2i",
+   "initialUnknown": true,
+   "type": {
+    "kind": "unity",
+    "name": "Vector2Int"
+   }
+  },
+  {
+   "name": "m",
+   "initialUnknown": true,
+   "type": {
+    "kind": "unity",
+    "name": "Matrix4x4"
+   }
+  },
+  {
+   "name": "part",
+   "initialUnknown": true,
+   "type": {
+    "kind": "struct",
+    "name": "CtorPart",
+    "fields": [
+     {
+      "name": "hp",
+      "initial": "100",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     },
+     {
+      "name": "s",
+      "initial": "x",
+      "type": {
+       "kind": "string"
+      }
+     },
+     {
+      "name": "sub",
+      "initialUnknown": true,
+      "type": {
+       "kind": "struct",
+       "name": "CtorPart2",
+       "fields": [
+        {
+         "name": "k",
+         "initial": "7",
+         "type": {
+          "kind": "primitive",
+          "name": "int"
+         }
+        },
+        {
+         "name": "t",
+         "initial": "seven",
+         "type": {
+          "kind": "string"
+         }
+        }
+       ]
+      }
+     },
+     {
+      "name": "arr",
+      "initialUnknown": true,
+      "type": {
+       "kind": "array",
+       "element": {
+        "kind": "primitive",
+        "name": "int"
+       }
+      }
+     },
+     {
+      "name": "v",
+      "initialUnknown": true,
+      "type": {
+       "kind": "unity",
+       "name": "Vector3"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "partA",
+   "initialUnknown": true,
+   "type": {
+    "kind": "struct",
+    "name": "CtorPart",
+    "fields": [
+     {
+      "name": "hp",
+      "initial": "100",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     },
+     {
+      "name": "s",
+      "initial": "x",
+      "type": {
+       "kind": "string"
+      }
+     },
+     {
+      "name": "sub",
+      "initialUnknown": true,
+      "type": {
+       "kind": "struct",
+       "name": "CtorPart2",
+       "fields": [
+        {
+         "name": "k",
+         "initial": "7",
+         "type": {
+          "kind": "primitive",
+          "name": "int"
+         }
+        },
+        {
+         "name": "t",
+         "initial": "seven",
+         "type": {
+          "kind": "string"
+         }
+        }
+       ]
+      }
+     },
+     {
+      "name": "arr",
+      "initialUnknown": true,
+      "type": {
+       "kind": "array",
+       "element": {
+        "kind": "primitive",
+        "name": "int"
+       }
+      }
+     },
+     {
+      "name": "v",
+      "initialUnknown": true,
+      "type": {
+       "kind": "unity",
+       "name": "Vector3"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "partB",
+   "initialUnknown": true,
+   "type": {
+    "kind": "struct",
+    "name": "CtorPart",
+    "fields": [
+     {
+      "name": "hp",
+      "initial": "100",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     },
+     {
+      "name": "s",
+      "initial": "x",
+      "type": {
+       "kind": "string"
+      }
+     },
+     {
+      "name": "sub",
+      "initialUnknown": true,
+      "type": {
+       "kind": "struct",
+       "name": "CtorPart2",
+       "fields": [
+        {
+         "name": "k",
+         "initial": "7",
+         "type": {
+          "kind": "primitive",
+          "name": "int"
+         }
+        },
+        {
+         "name": "t",
+         "initial": "seven",
+         "type": {
+          "kind": "string"
+         }
+        }
+       ]
+      }
+     },
+     {
+      "name": "arr",
+      "initialUnknown": true,
+      "type": {
+       "kind": "array",
+       "element": {
+        "kind": "primitive",
+        "name": "int"
+       }
+      }
+     },
+     {
+      "name": "v",
+      "initialUnknown": true,
+      "type": {
+       "kind": "unity",
+       "name": "Vector3"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "parts",
+   "initialUnknown": true,
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "struct",
+     "name": "CtorPart",
+     "fields": [
+      {
+       "name": "hp",
+       "initial": "100",
+       "type": {
+        "kind": "primitive",
+        "name": "int"
+       }
+      },
+      {
+       "name": "s",
+       "initial": "x",
+       "type": {
+        "kind": "string"
+       }
+      },
+      {
+       "name": "sub",
+       "initialUnknown": true,
+       "type": {
+        "kind": "struct",
+        "name": "CtorPart2",
+        "fields": [
+         {
+          "name": "k",
+          "initial": "7",
+          "type": {
+           "kind": "primitive",
+           "name": "int"
+          }
+         },
+         {
+          "name": "t",
+          "initial": "seven",
+          "type": {
+           "kind": "string"
+          }
+         }
+        ]
+       }
+      },
+      {
+       "name": "arr",
+       "initialUnknown": true,
+       "type": {
+        "kind": "array",
+        "element": {
+         "kind": "primitive",
+         "name": "int"
+        }
+       }
+      },
+      {
+       "name": "v",
+       "initialUnknown": true,
+       "type": {
+        "kind": "unity",
+        "name": "Vector3"
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "partList",
+   "initialUnknown": true,
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "struct",
+     "name": "CtorPart",
+     "fields": [
+      {
+       "name": "hp",
+       "initial": "100",
+       "type": {
+        "kind": "primitive",
+        "name": "int"
+       }
+      },
+      {
+       "name": "s",
+       "initial": "x",
+       "type": {
+        "kind": "string"
+       }
+      },
+      {
+       "name": "sub",
+       "initialUnknown": true,
+       "type": {
+        "kind": "struct",
+        "name": "CtorPart2",
+        "fields": [
+         {
+          "name": "k",
+          "initial": "7",
+          "type": {
+           "kind": "primitive",
+           "name": "int"
+          }
+         },
+         {
+          "name": "t",
+          "initial": "seven",
+          "type": {
+           "kind": "string"
+          }
+         }
+        ]
+       }
+      },
+      {
+       "name": "arr",
+       "initialUnknown": true,
+       "type": {
+        "kind": "array",
+        "element": {
+         "kind": "primitive",
+         "name": "int"
+        }
+       }
+      },
+      {
+       "name": "v",
+       "initialUnknown": true,
+       "type": {
+        "kind": "unity",
+        "name": "Vector3"
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "st",
+   "initialUnknown": true,
+   "type": {
+    "kind": "struct",
+    "name": "CtorStruct",
+    "fields": [
+     {
+      "name": "a",
+      "type": {
+       "kind": "primitive",
+       "name": "int"
+      }
+     },
+     {
+      "name": "c",
+      "type": {
+       "kind": "struct",
+       "name": "CtorPart2",
+       "fields": [
+        {
+         "name": "k",
+         "initial": "7",
+         "type": {
+          "kind": "primitive",
+          "name": "int"
+         }
+        },
+        {
+         "name": "t",
+         "initial": "seven",
+         "type": {
+          "kind": "string"
+         }
+        }
+       ]
+      }
+     },
+     {
+      "name": "s",
+      "type": {
+       "kind": "string"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "sts",
+   "initialUnknown": true,
+   "type": {
+    "kind": "array",
+    "element": {
+     "kind": "struct",
+     "name": "CtorStruct",
+     "fields": [
+      {
+       "name": "a",
+       "type": {
+        "kind": "primitive",
+        "name": "int"
+       }
+      },
+      {
+       "name": "c",
+       "type": {
+        "kind": "struct",
+        "name": "CtorPart2",
+        "fields": [
+         {
+          "name": "k",
+          "initial": "7",
+          "type": {
+           "kind": "primitive",
+           "name": "int"
+          }
+         },
+         {
+          "name": "t",
+          "initial": "seven",
+          "type": {
+           "kind": "string"
+          }
+         }
+        ]
+       }
+      },
+      {
+       "name": "s",
+       "type": {
+        "kind": "string"
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "d",
+   "initialUnknown": true,
+   "type": {
+    "kind": "primitive",
+    "name": "double"
+   }
+  },
+  {
+   "name": "big",
+   "initialUnknown": true,
+   "type": {
+    "kind": "primitive",
+    "name": "long"
+   }
+  },
+  {
+   "name": "ch",
+   "initialUnknown": true,
+   "type": {
+    "kind": "primitive",
+    "name": "char"
+   }
+  },
+  {
+   "name": "nul",
+   "initialUnknown": true,
+   "type": {
+    "kind": "string"
+   }
+  },
+  {
+   "name": "clip",
+   "initialUnknown": true,
+   "type": {
+    "kind": "object",
+    "className": "AnimationClip",
+    "namespace": "UnityEngine"
+   }
+  },
+  {
+   "name": "curve",
+   "initialUnknown": true,
+   "type": {
+    "kind": "unity",
+    "name": "AnimationCurve"
+   }
+  },
+  {
+   "name": "grad",
+   "initialUnknown": true,
+   "type": {
+    "kind": "unity",
+    "name": "Gradient"
+   }
+  },
+  {
+   "name": "ctorSet",
+   "initialUnknown": true,
+   "type": {
+    "kind": "primitive",
+    "name": "int"
+   }
+  },
+  {
+   "name": "tail",
+   "initialUnknown": true,
+   "type": {
+    "kind": "primitive",
+    "name": "byte"
+   }
+  }
+ ]
+}

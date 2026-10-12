@@ -12,6 +12,7 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 using FieldAttributes = System.Reflection.FieldAttributes;
 using MethodAttributes = System.Reflection.MethodAttributes;
 using TypeAttributes = System.Reflection.TypeAttributes;
+using Reflection = System.Reflection;
 
 internal sealed record SourceInput(string Path, string OriginalPath, string OutputPath);
 internal sealed record Request(string AssemblyName, string[] References, string[] Defines,
@@ -724,6 +725,9 @@ internal static class BehaviourLayouts
         public readonly List<TypeId> ManagedDeclared = new();
         // Whether a type was read that the engine cuts off.
         public bool Cut;
+        // Whether a type was read that has serialization callbacks. A build runs them, so what
+        // it writes of such an object is what they leave, not what the text holds.
+        public bool Callbacks;
         public Reader(Universe universe) { this.universe = universe; construction = new Construction(universe); }
 
         // The serialized fields a class declares itself, in declaration order.
@@ -914,6 +918,7 @@ internal static class BehaviourLayouts
                             if (reader.Cut) throw new Unsupported("a managed type that nests serialized types up to the engine's depth limit");
                             layout["fields"] = fields;
                             declared.AddRange(reader.ManagedDeclared);
+                            Callbacks |= reader.Callbacks;
                         }
                         catch (Unsupported error)
                         {
@@ -1037,10 +1042,10 @@ internal static class BehaviourLayouts
         private static bool PlainEngineType(string name) => name.StartsWith("UnityEngine.Events.", StringComparison.Ordinal);
 
         // A build runs the callbacks of such a type before it writes an object, so what it writes
-        // need not be what the text holds. The engine's events have them and store what they read.
+        // need not be what the text holds. The engine's events have them as well: a call they
+        // hold names a type by its assembly, which the callback shortens.
         private bool HasSerializationCallbacks(TypeId type)
         {
-            if (type.Module.Engine && PlainEngineType(Universe.FullName(type))) return false;
             var reader = type.Module.Reader;
             foreach (var handle in type.Definition.GetInterfaceImplementations())
             {
@@ -1082,14 +1087,15 @@ internal static class BehaviourLayouts
                     || (parent.Arguments.Length != 0 && !PlainEngineType(parent.FullName));
                 if (!behaviour && next.Module.Engine && native)
                     throw new Unsupported($"type {Universe.FullName(type)} derives from engine type {parent.FullName}");
+                // A dictionary that serializes itself through callbacks: a build stores the fields
+                // the classes of the project declare and nothing of the dictionary.
+                if (parent.FullName == "System.Collections.Generic.Dictionary`2") break;
                 if (parent.FullName.StartsWith("System.", StringComparison.Ordinal))
                     throw new Unsupported($"type {Universe.FullName(type)} derives from {parent.FullName}");
                 current = (next, parent.Arguments);
             }
             chain.Reverse();
-            foreach (var (member, _) in chain)
-                if (HasSerializationCallbacks(member))
-                    throw new Unsupported($"type {Universe.FullName(member)} has serialization callbacks, which a build runs");
+            foreach (var (member, _) in chain) Callbacks |= HasSerializationCallbacks(member);
             var names = new HashSet<string>(StringComparer.Ordinal);
             bool callbacks = false;
             var initials = construction.Of(type);
@@ -1160,12 +1166,14 @@ internal static class BehaviourLayouts
                 if (behaviour) layout["overridesStateMachineCallbacks"] = callbacks;
                 layout["fields"] = fields;
                 if (reader.ManagedDeclared.Count != 0) layout["managedTypes"] = reader.ManagedTypes();
+                if (reader.Callbacks) layout["serializationCallbacks"] = true;
             }
             catch (Unsupported error)
             {
                 layout.Remove("overridesStateMachineCallbacks");
                 layout.Remove("bases");
                 layout.Remove("managedTypes");
+                layout.Remove("serializationCallbacks");
                 layout["unsupported"] = error.Message;
                 layout["fields"] = Array.Empty<object>();
             }
@@ -1198,6 +1206,11 @@ internal static class Program
             if (args.Length == 2 && args[0] == "--behaviour-layouts")
             {
                 Console.WriteLine(JsonSerializer.Serialize(BehaviourLayouts.Read(args[1])));
+                return 0;
+            }
+            if (args.Length == 2 && args[0] == "--behaviour-objects")
+            {
+                Console.WriteLine(JsonSerializer.Serialize(BehaviourObjects.Run(args[1])));
                 return 0;
             }
             if (args.Length == 2 && args[0] == "--source-type-declarations")
@@ -1739,5 +1752,746 @@ internal static class Program
             var location = node.GetLocation().GetLineSpan();
             throw new InvalidOperationException($"{location.Path}({location.StartLinePosition.Line + 1}): {message}");
         }
+    }
+}
+
+// Runs the project's own code on a script object: its constructors and its serialization
+// callbacks. A build reads an authored object over a newly constructed one, calls
+// OnAfterDeserialize on what it read, and calls OnBeforeSerialize before it writes, so what it
+// stores is what that code leaves. The request holds the fields the text sets, already read by
+// their types; the reply holds every field as the build writes it.
+//
+// The code runs without the engine. Whatever it asks of native code fails, and the object is then
+// refused by the name of what failed. An engine object it holds is a placeholder of the field's
+// class that is not null and answers nothing; a curve, a gradient and the other engine classes
+// with native state are placeholders as well and are passed through.
+internal static class BehaviourObjects
+{
+    private const Reflection.BindingFlags Declared = Reflection.BindingFlags.Instance | Reflection.BindingFlags.Public
+        | Reflection.BindingFlags.NonPublic | Reflection.BindingFlags.DeclaredOnly;
+    // A build stamps a new object with an ID from its clock, so no two builds agree on it. New
+    // objects are numbered from here in the order a build numbers them.
+    private const long FirstNewId = 0x7000_0000_0000_0000;
+
+    private sealed class Refused : Exception
+    {
+        public Refused(string message) : base(message) { }
+    }
+
+    private static bool Library(string assembly) => assembly is "mscorlib" or "netstandard" || assembly.StartsWith("System", StringComparison.Ordinal)
+        || assembly.StartsWith("Mono.", StringComparison.Ordinal) || assembly.StartsWith("Microsoft.", StringComparison.Ordinal);
+
+    // The project's and the engine's assemblies; the base library is this process's own.
+    private sealed class Game : System.Runtime.Loader.AssemblyLoadContext
+    {
+        private readonly Dictionary<string, string> paths = new(StringComparer.Ordinal);
+
+        public Game(IEnumerable<string> assemblies) : base("game")
+        {
+            foreach (string path in assemblies)
+            {
+                string name = Path.GetFileNameWithoutExtension(path);
+                if (!Library(name)) paths.TryAdd(name, path);
+            }
+        }
+
+        protected override Reflection.Assembly? Load(Reflection.AssemblyName name)
+        {
+            if (name.Name is not { } simple || !paths.TryGetValue(simple, out var path)) return null;
+            return simple == "UnityEngine.CoreModule" ? LoadFromStream(new MemoryStream(WithoutNativeConstruction(path))) : LoadFromAssemblyPath(path);
+        }
+
+        public Reflection.Assembly Find(string name) => paths.ContainsKey(name)
+            ? LoadFromAssemblyName(new Reflection.AssemblyName(name))
+            : throw new Refused($"assembly {name} is not among the given ones");
+    }
+
+    // The constructor of ScriptableObject registers the new object with the engine, which created
+    // it; here nothing did, and the call is taken out. Any other shape of that constructor is
+    // another engine than the pinned one.
+    private static byte[] WithoutNativeConstruction(string path)
+    {
+        byte[] image = File.ReadAllBytes(path);
+        using var pe = new PEReader(new MemoryStream(image));
+        var reader = pe.GetMetadataReader();
+        foreach (var handle in reader.TypeDefinitions)
+        {
+            var type = reader.GetTypeDefinition(handle);
+            if (reader.GetString(type.Name) != "ScriptableObject" || reader.GetString(type.Namespace) != "UnityEngine") continue;
+            foreach (var methodHandle in type.GetMethods())
+            {
+                var method = reader.GetMethodDefinition(methodHandle);
+                if (reader.GetString(method.Name) != ".ctor" || method.RelativeVirtualAddress == 0) continue;
+                var body = pe.GetMethodBody(method.RelativeVirtualAddress);
+                byte[] il = body.GetILBytes() ?? Array.Empty<byte>();
+                bool shape = il.Length == 13 && il[0] == 0x02 && il[1] == 0x28 && il[6] == 0x02 && il[7] == 0x28 && il[12] == 0x2a;
+                if (shape)
+                {
+                    var called = MetadataTokens.EntityHandle(BitConverter.ToInt32(il, 8));
+                    shape = called.Kind == HandleKind.MethodDefinition
+                        && reader.GetString(reader.GetMethodDefinition((MethodDefinitionHandle)called).Name) == "CreateScriptableObject";
+                }
+                if (!shape) throw new Refused("the constructor of ScriptableObject is not the pinned engine's");
+                int rva = method.RelativeVirtualAddress;
+                foreach (var section in pe.PEHeaders.SectionHeaders)
+                {
+                    if (rva < section.VirtualAddress || rva >= section.VirtualAddress + section.VirtualSize) continue;
+                    int at = rva - section.VirtualAddress + section.PointerToRawData + (body.Size - il.Length);
+                    if (!image.AsSpan(at, il.Length).SequenceEqual(il)) break;
+                    image.AsSpan(at + 6, 6).Clear();
+                    return image;
+                }
+                throw new Refused("the constructor of ScriptableObject was not found in its file");
+            }
+        }
+        throw new Refused("the engine assembly holds no ScriptableObject");
+    }
+
+    // What failed inside code of the project because the engine is absent: set while that code
+    // runs, also when the code catches the failure itself.
+    [ThreadStatic] private static bool running;
+    [ThreadStatic] private static string? absent;
+
+    private static void FirstChance(object? sender, System.Runtime.ExceptionServices.FirstChanceExceptionEventArgs raised)
+    {
+        if (!running || absent is not null) return;
+        var error = raised.Exception;
+        if (error is not (System.Security.SecurityException or EntryPointNotFoundException or DllNotFoundException or MissingMethodException
+            or MissingFieldException or TypeLoadException or FileNotFoundException or FileLoadException or BadImageFormatException
+            or PlatformNotSupportedException or InvalidProgramException)) return;
+        var frame = new System.Diagnostics.StackTrace(error, false).GetFrame(0)?.GetMethod();
+        string where = frame is null ? "" : $" in {frame.DeclaringType?.FullName}.{frame.Name}";
+        absent = error is System.Security.SecurityException ? $"a call into the engine{where}" : $"{error.GetType().Name}{where}: {error.Message}";
+    }
+
+    private sealed class Evaluation
+    {
+        private readonly Game game;
+        private readonly Type receiver;
+        private readonly Reflection.MethodInfo before, after;
+        private readonly Type engineObject;
+        private readonly Action<object, IntPtr> alive;
+        private readonly Dictionary<string, (Type Type, JsonElement Fields, string[] Name)> managedTypes = new(StringComparer.Ordinal);
+        private readonly Dictionary<object, int> pointers = new(ReferenceEqualityComparer.Instance);
+        private readonly Dictionary<object, int> opaques = new(ReferenceEqualityComparer.Instance);
+        // Engine structs with native state that are values: they cannot be told apart once code ran.
+        private readonly Dictionary<string, int> opaqueValues = new(StringComparer.Ordinal);
+        private readonly Dictionary<long, object> instances = new();
+        private readonly Dictionary<object, long> ids = new(ReferenceEqualityComparer.Instance);
+        private readonly Dictionary<object, string[]> names = new(ReferenceEqualityComparer.Instance);
+        private long nextId = FirstNewId;
+        private bool ranCallbacks, nullReference;
+
+        public Evaluation(Game game)
+        {
+            this.game = game;
+            var core = game.Find("UnityEngine.CoreModule");
+            receiver = core.GetType("UnityEngine.ISerializationCallbackReceiver") ?? throw new Refused("the engine assembly holds no ISerializationCallbackReceiver");
+            before = receiver.GetMethod("OnBeforeSerialize") ?? throw new Refused("ISerializationCallbackReceiver lacks OnBeforeSerialize");
+            after = receiver.GetMethod("OnAfterDeserialize") ?? throw new Refused("ISerializationCallbackReceiver lacks OnAfterDeserialize");
+            engineObject = core.GetType("UnityEngine.Object") ?? throw new Refused("the engine assembly holds no Object");
+            // The engine keeps its side of an object here; an object without it compares equal to
+            // null. The field is stored by code of its own: reflection would first run the static
+            // initializer of the class, which asks the engine and has to keep failing, so that
+            // code of the project that asks for the identity of a placeholder fails as well.
+            var cachedPointer = engineObject.GetField("m_CachedPtr", Declared) ?? throw new Refused("UnityEngine.Object is not the pinned engine's");
+            var store = new Reflection.Emit.DynamicMethod("StoreCachedPointer", typeof(void), new[] { typeof(object), typeof(IntPtr) }, engineObject, true);
+            var code = store.GetILGenerator();
+            code.Emit(Reflection.Emit.OpCodes.Ldarg_0);
+            code.Emit(Reflection.Emit.OpCodes.Castclass, engineObject);
+            code.Emit(Reflection.Emit.OpCodes.Ldarg_1);
+            code.Emit(Reflection.Emit.OpCodes.Stfld, cachedPointer);
+            code.Emit(Reflection.Emit.OpCodes.Ret);
+            alive = (Action<object, IntPtr>)store.CreateDelegate(typeof(Action<object, IntPtr>));
+        }
+
+        private static string Kind(JsonElement type) => type.GetProperty("kind").GetString() ?? "";
+
+        // Runs code of the project.
+        private void Run(string what, Action code)
+        {
+            absent = null; running = true;
+            try { code(); }
+            catch (Reflection.TargetInvocationException error)
+            {
+                Exception inner = error.InnerException ?? error;
+                while (inner is TypeInitializationException or Reflection.TargetInvocationException && inner.InnerException is { } next) inner = next;
+                throw new Refused(absent is { } missing ? $"{what} needs the engine: {missing}" : $"{what} failed with {inner.GetType().Name}: {inner.Message}");
+            }
+            finally { running = false; }
+            if (absent is { } caught) throw new Refused($"{what} needs the engine: {caught}");
+        }
+
+        private static Reflection.FieldInfo Field(Type type, string name)
+        {
+            for (Type? current = type; current is not null; current = current.BaseType)
+                if (current.GetField(name, Declared) is { } field) return field;
+            throw new Refused($"class {type.FullName} has no field {name}");
+        }
+
+        // A new object as the engine makes one for a field or an element: through the constructor
+        // without parameters, whatever its visibility; without running code if there is none, and
+        // for a struct.
+        private object Instantiate(Type type)
+        {
+            if (type.IsAbstract || type.IsInterface) throw new Refused($"type {type.FullName} cannot be constructed");
+            var constructor = type.IsValueType ? null : type.GetConstructor(Declared, null, Type.EmptyTypes, null);
+            if (constructor is null) return System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(type);
+            object? made = null;
+            Run($"the constructor of {type.FullName}", () => made = constructor.Invoke(null));
+            return made!;
+        }
+
+        private object Placeholder(Type type, string what)
+        {
+            if (type.IsAbstract || type.IsInterface || type.ContainsGenericParameters)
+                throw new Refused($"{what} of the abstract class {type.FullName} cannot be handed to the project's code");
+            object made = System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(type);
+            if (engineObject.IsAssignableFrom(type)) alive(made, 1);
+            return made;
+        }
+
+        private static object Scalar(string keyword, string text)
+        {
+            var culture = System.Globalization.CultureInfo.InvariantCulture;
+            return keyword switch
+            {
+                "bool" => text != "0", "byte" => byte.Parse(text, culture), "sbyte" => sbyte.Parse(text, culture),
+                "short" => short.Parse(text, culture), "ushort" => ushort.Parse(text, culture), "char" => (char)ushort.Parse(text, culture),
+                "int" => int.Parse(text, culture), "uint" => uint.Parse(text, culture), "long" => long.Parse(text, culture), "ulong" => ulong.Parse(text, culture),
+                "float" => BitConverter.Int32BitsToSingle(unchecked((int)Convert.ToUInt32(text, 16))),
+                "double" => BitConverter.Int64BitsToDouble(unchecked((long)Convert.ToUInt64(text, 16))),
+                _ => throw new Refused($"a field of the unknown simple type {keyword}"),
+            };
+        }
+
+        private static string ScalarText(string keyword, object value)
+        {
+            var culture = System.Globalization.CultureInfo.InvariantCulture;
+            return keyword switch
+            {
+                "bool" => (bool)value ? "1" : "0", "char" => ((ushort)(char)value).ToString(culture),
+                "float" => unchecked((uint)BitConverter.SingleToInt32Bits((float)value)).ToString("x8", culture),
+                "double" => unchecked((ulong)BitConverter.DoubleToInt64Bits((double)value)).ToString("x16", culture),
+                "byte" or "sbyte" or "short" or "ushort" or "int" or "uint" or "long" or "ulong" => ((IFormattable)value).ToString(null, culture),
+                _ => throw new Refused($"a field of the unknown simple type {keyword}"),
+            };
+        }
+
+        // The engine's structs whose C# members hold all of their state, by the names the engine
+        // stores their parts under: the member and the type of each part.
+        private static readonly Dictionary<string, (string Part, string Member, string Kind)[]> Plain = MakePlain();
+
+        private static Dictionary<string, (string, string, string)[]> MakePlain()
+        {
+            (string, string, string)[] Parts(string kind, params string[] names) => names.Select(name => (name, name, kind)).ToArray();
+            var matrix = new List<(string, string, string)>();
+            for (int row = 0; row < 4; row++) for (int column = 0; column < 4; column++) matrix.Add(($"e{row}{column}", $"m{row}{column}", "float"));
+            return new(StringComparer.Ordinal)
+            {
+                ["Vector2"] = Parts("float", "x", "y"), ["Vector3"] = Parts("float", "x", "y", "z"), ["Vector4"] = Parts("float", "x", "y", "z", "w"),
+                ["Quaternion"] = Parts("float", "x", "y", "z", "w"), ["Color"] = Parts("float", "r", "g", "b", "a"),
+                ["Rect"] = Parts("float", "x", "y", "width", "height"), ["Vector2Int"] = Parts("int", "x", "y"), ["Vector3Int"] = Parts("int", "x", "y", "z"),
+                ["RectInt"] = Parts("int", "x", "y", "width", "height"),
+                ["Bounds"] = new[] { ("m_Center", "center", "Vector3"), ("m_Extent", "extents", "Vector3") },
+                ["BoundsInt"] = new[] { ("m_Position", "position", "Vector3Int"), ("m_Size", "size", "Vector3Int") },
+                ["LayerMask"] = new[] { ("m_Bits", "value", "uint") }, ["RenderingLayerMask"] = new[] { ("m_Bits", "value", "uint") },
+                ["Matrix4x4"] = matrix.ToArray(),
+                ["Color32"] = new[] { ("rgba", "", "uint") },
+            };
+        }
+
+        private static (Func<object, object?> Get, Action<object, object?> Set, Type Type) Member(Type type, string name)
+        {
+            const Reflection.BindingFlags open = Reflection.BindingFlags.Instance | Reflection.BindingFlags.Public;
+            if (type.GetField(name, open) is { } field) return (field.GetValue, field.SetValue, field.FieldType);
+            if (type.GetProperty(name, open) is { CanRead: true, CanWrite: true } property) return (property.GetValue, property.SetValue, property.PropertyType);
+            throw new Refused($"engine struct {type.FullName} has no member {name}");
+        }
+
+        private static object Bits(Type type, uint bits) => type == typeof(int) ? unchecked((int)bits) : type == typeof(uint) ? bits
+            : throw new Refused($"a mask held as {type.FullName}");
+
+        // Sets the parts of an engine struct that the text holds; the others stay as they are.
+        private object PlainValue(string kind, object current, JsonElement parts)
+        {
+            var type = current.GetType();
+            if (kind == "Color32")
+            {
+                if (!parts.TryGetProperty("rgba", out var packed)) return current;
+                uint value = (uint)Scalar("uint", packed.GetString()!);
+                foreach (var (name, shift) in new[] { ("r", 0), ("g", 8), ("b", 16), ("a", 24) }) Member(type, name).Set(current, (byte)(value >> shift));
+                return current;
+            }
+            foreach (var (part, member, partKind) in Plain[kind])
+            {
+                if (!parts.TryGetProperty(part, out var value)) continue;
+                var (get, set, memberType) = Member(type, member);
+                object? stored = Plain.ContainsKey(partKind) ? PlainValue(partKind, get(current)!, value)
+                    : partKind == "uint" ? Bits(memberType, (uint)Scalar("uint", value.GetString()!)) : Scalar(partKind, value.GetString()!);
+                Run($"{type.Name}.{member}", () => set(current, stored));
+            }
+            return current;
+        }
+
+        private object PlainParts(string kind, object value)
+        {
+            var type = value.GetType();
+            var parts = new Dictionary<string, object?>(StringComparer.Ordinal);
+            if (kind == "Color32")
+            {
+                uint packed = 0;
+                foreach (var (name, shift) in new[] { ("r", 0), ("g", 8), ("b", 16), ("a", 24) }) packed |= (uint)(byte)Member(type, name).Get(value)! << shift;
+                parts["rgba"] = ScalarText("uint", packed);
+                return parts;
+            }
+            foreach (var (part, member, partKind) in Plain[kind])
+            {
+                object? held = null;
+                Run($"{type.Name}.{member}", () => held = Member(type, member).Get(value));
+                parts[part] = Plain.ContainsKey(partKind) ? PlainParts(partKind, held!)
+                    : partKind == "uint" ? ScalarText("uint", held is int signed ? unchecked((uint)signed) : (uint)held!) : ScalarText(partKind, held!);
+            }
+            return parts;
+        }
+
+        private static Type ElementType(Type collection, string field)
+        {
+            if (collection.IsArray) return collection.GetElementType()!;
+            if (collection.IsGenericType && collection.GetGenericTypeDefinition() == typeof(List<>)) return collection.GetGenericArguments()[0];
+            throw new Refused($"field {field} is stored as a list and is a {collection.Name}, which only the engine fills");
+        }
+
+        // What a field or an element holds once the text is read into it. `current` is what it
+        // held before: an object of a class is read over, an element is always new.
+        private object? Value(Type type, JsonElement kind, JsonElement text, object? current, string path)
+        {
+            switch (Kind(kind))
+            {
+                case "primitive": return Scalar(kind.GetProperty("name").GetString()!, text.GetString()!);
+                case "enum": return Enum.ToObject(type, Scalar(kind.GetProperty("underlying").GetString()!, text.GetString()!));
+                case "string": return text.GetString();
+                case "struct":
+                {
+                    object target = current ?? Instantiate(type);
+                    Read(target, kind.GetProperty("fields"), text, path + ".");
+                    After(target);
+                    return target;
+                }
+                case "array":
+                {
+                    var element = kind.GetProperty("element");
+                    var elementType = ElementType(type, path);
+                    var items = Array.CreateInstance(elementType, text.GetArrayLength());
+                    int index = 0;
+                    foreach (var item in text.EnumerateArray())
+                    {
+                        object? fresh = elementType.IsValueType ? System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(elementType) : null;
+                        items.SetValue(Value(elementType, element, item, fresh, $"{path}[{index}]"), index);
+                        index++;
+                    }
+                    if (type.IsArray) return items;
+                    var list = (System.Collections.IList)Activator.CreateInstance(type)!;
+                    foreach (var item in items) list.Add(item);
+                    return list;
+                }
+                case "object":
+                {
+                    if (text.GetProperty("ptr").ValueKind == JsonValueKind.Null) return null;
+                    object made = Placeholder(type, $"the reference of field {path}");
+                    pointers[made] = text.GetProperty("ptr").GetInt32();
+                    return made;
+                }
+                case "managedReference":
+                {
+                    long id = long.Parse(text.GetProperty("rid").GetString()!, System.Globalization.CultureInfo.InvariantCulture);
+                    if (id == -2) return null;
+                    if (!instances.TryGetValue(id, out var held)) throw new Refused($"field {path} refers to object {id}, which the registry lacks");
+                    if (!type.IsInstanceOfType(held)) throw new Refused($"field {path} refers to an object of {held.GetType().FullName}, which it cannot hold");
+                    return held;
+                }
+                case "unity":
+                {
+                    string name = kind.GetProperty("name").GetString()!;
+                    if (Plain.ContainsKey(name)) return PlainValue(name, current ?? throw new Refused($"field {path} is a {name} that is no value"), text);
+                    if (text.GetProperty("opaque").ValueKind == JsonValueKind.Null) return current;
+                    int position = text.GetProperty("opaque").GetInt32();
+                    if (type.IsValueType)
+                    {
+                        // The text is read over what the constructor left, which only the engine reads back.
+                        if (!current!.Equals(System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(type)))
+                            throw new Refused($"the constructor sets field {path}, a {name}, which is not read back without the engine");
+                        opaqueValues[path] = position;
+                        return current;
+                    }
+                    object made = Placeholder(type, $"the {name} of field {path}");
+                    opaques[made] = position;
+                    return made;
+                }
+                default: throw new Refused($"field {path} is a {Kind(kind)}, which is not run through the project's code");
+            }
+        }
+
+        // Reads the fields the text holds into an object. Of the fields left empty the engine
+        // then fills those of a class it stores inline and those that are lists; an array, a
+        // string and an engine class stay null until the object is written.
+        private void Read(object target, JsonElement fields, JsonElement text, string path)
+        {
+            foreach (var field in fields.EnumerateArray())
+            {
+                string name = field.GetProperty("name").GetString()!;
+                var info = Field(target.GetType(), name);
+                var kind = field.GetProperty("type");
+                if (text.TryGetProperty(name, out var value)) info.SetValue(target, Value(info.FieldType, kind, value, info.GetValue(target), path + name));
+                if (info.GetValue(target) is not null) continue;
+                if (Kind(kind) == "struct") info.SetValue(target, Instantiate(info.FieldType));
+                else if (Kind(kind) == "array" && !info.FieldType.IsArray)
+                {
+                    ElementType(info.FieldType, path + name);
+                    info.SetValue(target, Activator.CreateInstance(info.FieldType));
+                }
+            }
+        }
+
+        private void After(object target)
+        {
+            if (!receiver.IsInstanceOfType(target)) return;
+            ranCallbacks = true;
+            Run($"OnAfterDeserialize of {target.GetType().FullName}", () => after.Invoke(target, null));
+        }
+
+        private void Before(object target)
+        {
+            if (!receiver.IsInstanceOfType(target)) return;
+            ranCallbacks = true;
+            Run($"OnBeforeSerialize of {target.GetType().FullName}", () => before.Invoke(target, null));
+        }
+
+        private void Discover(object held, List<object> found)
+        {
+            if (!ids.ContainsKey(held)) ids[held] = nextId++;
+            if (!found.Contains(held, ReferenceEqualityComparer.Instance)) found.Add(held);
+        }
+
+        // How far a pass over an object goes into what it stores inline.
+        private enum Visit
+        {
+            // Only where a callback waits: the first pass a build makes is there to announce the
+            // writing and goes nowhere else.
+            Receivers,
+            // Everything, as a pass that writes does.
+            All,
+            // Nothing is touched; only the objects held by reference are collected.
+            Collect,
+        }
+
+        private readonly Dictionary<Type, bool> receivers = new();
+
+        // Whether an object of a class stored inline, or anything stored inline in it, has callbacks.
+        private bool HasReceivers(Type type, JsonElement fields)
+        {
+            if (receivers.TryGetValue(type, out bool known)) return known;
+            receivers[type] = false;
+            bool found = receiver.IsAssignableFrom(type);
+            foreach (var field in fields.EnumerateArray())
+            {
+                if (found) break;
+                var kind = field.GetProperty("type");
+                var info = Field(type, field.GetProperty("name").GetString()!);
+                if (Kind(kind) == "struct") found = HasReceivers(info.FieldType, kind.GetProperty("fields"));
+                else if (Kind(kind) == "array" && Kind(kind.GetProperty("element")) == "struct")
+                    found = HasReceivers(ElementType(info.FieldType, info.Name), kind.GetProperty("element").GetProperty("fields"));
+            }
+            return receivers[type] = found;
+        }
+
+        // One pass of the engine over an object it is about to write: an empty field of a class
+        // stored inline gets its object, and every such object is told that it is being written,
+        // itself before what it holds. An empty field of an engine class gets its object only in
+        // a pass that writes. The objects held by reference are collected in the order met.
+        private void Walk(object target, JsonElement fields, bool callbacks, Visit visit, List<object> found)
+        {
+            // An object stored inline: whether the pass enters it, and what it does there.
+            object? Inline(object? held, Type type, JsonElement kind)
+            {
+                var inner = kind.GetProperty("fields");
+                var deeper = visit == Visit.Receivers && !HasReceivers(type, inner) ? Visit.Collect : visit;
+                if (deeper == Visit.Collect)
+                {
+                    if (held is not null) Walk(held, inner, false, Visit.Collect, found);
+                    return held;
+                }
+                held ??= Instantiate(type);
+                if (callbacks) Before(held);
+                Walk(held, inner, callbacks, deeper, found);
+                return held;
+            }
+            foreach (var field in fields.EnumerateArray())
+            {
+                var info = Field(target.GetType(), field.GetProperty("name").GetString()!);
+                var kind = field.GetProperty("type");
+                object? held = info.GetValue(target);
+                switch (Kind(kind))
+                {
+                    case "struct":
+                        info.SetValue(target, Inline(held, info.FieldType, kind));
+                        break;
+                    case "managedReference":
+                        if (held is not null) Discover(held, found);
+                        break;
+                    case "unity":
+                        if (held is null && visit == Visit.All && !Plain.ContainsKey(kind.GetProperty("name").GetString()!))
+                        {
+                            object made = Placeholder(info.FieldType, $"the {info.FieldType.Name} of field {info.Name}");
+                            opaques[made] = -1;
+                            info.SetValue(target, made);
+                        }
+                        break;
+                    case "array":
+                    {
+                        if (held is not System.Collections.IList items) break;
+                        var element = kind.GetProperty("element");
+                        string elementKind = Kind(element);
+                        if (elementKind == "managedReference")
+                        {
+                            foreach (object? item in items) if (item is not null) Discover(item, found);
+                        }
+                        else if (elementKind == "struct")
+                        {
+                            var elementType = ElementType(info.FieldType, info.Name);
+                            for (int index = 0; index < items.Count; index++) items[index] = Inline(items[index], elementType, element);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        private (Type Type, JsonElement Fields, string[] Name) Managed(string[] name)
+        {
+            if (managedTypes.TryGetValue(string.Join("\n", name), out var known)) return known;
+            throw new Refused($"managed reference to an object of {name[0]}, a class the layout does not hold");
+        }
+
+        private (Type Type, JsonElement Fields, string[] Name) Managed(object held)
+        {
+            if (names.TryGetValue(held, out var authored)) return Managed(authored);
+            var type = held.GetType();
+            string name = type.Name;
+            for (var outer = type.DeclaringType; outer is not null; outer = outer.DeclaringType) name = outer.Name + "/" + name;
+            return Managed(new[] { name, type.Namespace ?? "", type.Assembly.GetName().Name ?? "" });
+        }
+
+        private object Capture(Type type, JsonElement kind, object? held, string path)
+        {
+            switch (Kind(kind))
+            {
+                case "primitive": return ScalarText(kind.GetProperty("name").GetString()!, held!);
+                case "enum":
+                {
+                    string underlying = kind.GetProperty("underlying").GetString()!;
+                    return ScalarText(underlying, Convert.ChangeType(held!, Enum.GetUnderlyingType(type), System.Globalization.CultureInfo.InvariantCulture));
+                }
+                case "string":
+                {
+                    string text = (string?)held ?? "";
+                    for (int index = 0; index < text.Length; index++)
+                    {
+                        if (char.IsHighSurrogate(text[index]) && index + 1 < text.Length && char.IsLowSurrogate(text[index + 1])) index++;
+                        else if (char.IsSurrogate(text[index])) throw new Refused($"field {path} holds half a character");
+                    }
+                    return text;
+                }
+                case "struct":
+                    return CaptureFields(held ?? Instantiate(type), kind.GetProperty("fields"), path + ".");
+                case "array":
+                {
+                    var result = new List<object?>();
+                    if (held is not System.Collections.IList items) return result;
+                    var element = kind.GetProperty("element");
+                    var elementType = ElementType(type, path);
+                    for (int index = 0; index < items.Count; index++) result.Add(Capture(elementType, element, items[index], $"{path}[{index}]"));
+                    return result;
+                }
+                case "object":
+                    if (held is null) return new Dictionary<string, object?> { ["ptr"] = null };
+                    if (!pointers.TryGetValue(held, out int pointer)) throw new Refused($"field {path} holds an engine object the project's code made");
+                    return new Dictionary<string, object?> { ["ptr"] = pointer };
+                case "managedReference":
+                {
+                    if (held is null) nullReference = true;
+                    long id = held is null ? -2 : ids.TryGetValue(held, out long known) ? known : throw new Refused($"field {path} holds an object the engine did not meet");
+                    return new Dictionary<string, object?> { ["rid"] = id.ToString(System.Globalization.CultureInfo.InvariantCulture) };
+                }
+                case "unity":
+                {
+                    string name = kind.GetProperty("name").GetString()!;
+                    if (Plain.ContainsKey(name)) return PlainParts(name, held!);
+                    var result = new Dictionary<string, object?> { ["opaque"] = null };
+                    if (type.IsValueType)
+                    {
+                        if (ranCallbacks) throw new Refused($"field {path} is a {name}, which cannot be handed to the callbacks of the project");
+                        if (opaqueValues.TryGetValue(path, out int position)) result["opaque"] = position;
+                        else if (!held!.Equals(System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(type)))
+                            throw new Refused($"the constructor sets field {path}, a {name}, which is not read back without the engine");
+                        return result;
+                    }
+                    if (held is null) return result;
+                    if (!opaques.TryGetValue(held, out int placed)) throw new Refused($"field {path} holds a {name} the project's code made");
+                    if (placed >= 0) result["opaque"] = placed;
+                    return result;
+                }
+                default: throw new Refused($"field {path} is a {Kind(kind)}, which is not run through the project's code");
+            }
+        }
+
+        private Dictionary<string, object?> CaptureFields(object target, JsonElement fields, string path)
+        {
+            var result = new Dictionary<string, object?>(StringComparer.Ordinal);
+            foreach (var field in fields.EnumerateArray())
+            {
+                string name = field.GetProperty("name").GetString()!;
+                var info = Field(target.GetType(), name);
+                result[name] = Capture(info.FieldType, field.GetProperty("type"), info.GetValue(target), path + name);
+            }
+            return result;
+        }
+
+        public Dictionary<string, object?> Settle(JsonElement request)
+        {
+            var layout = request.GetProperty("layout");
+            string assembly = layout.GetProperty("assembly").GetString()!, ns = layout.GetProperty("namespace").GetString() ?? "";
+            string typeName = (ns.Length == 0 ? "" : ns + ".") + layout.GetProperty("className").GetString();
+            var rootType = game.Find(assembly).GetType(typeName) ?? throw new Refused($"assembly {assembly} holds no class {typeName}");
+            var rootFields = layout.GetProperty("fields");
+            if (layout.TryGetProperty("managedTypes", out var managed))
+            {
+                foreach (var entry in managed.EnumerateArray())
+                {
+                    var name = new[] { entry.GetProperty("className").GetString()!, entry.GetProperty("namespace").GetString() ?? "", entry.GetProperty("assembly").GetString()! };
+                    if (entry.TryGetProperty("unsupported", out var why) && why.GetString() is { Length: > 0 }) continue;
+                    string full = (name[1].Length == 0 ? "" : name[1] + ".") + name[0].Replace('/', '+');
+                    if (game.Find(name[2]).GetType(full) is { } type) managedTypes[string.Join("\n", name)] = (type, entry.GetProperty("fields"), name);
+                }
+            }
+
+            // The object as its constructor leaves it. The engine made it, so it is not null.
+            if (rootType.GetConstructor(Declared, null, Type.EmptyTypes, null) is not { } constructor)
+                throw new Refused($"class {typeName} has no constructor without parameters");
+            object root = null!;
+            Run($"the constructor of {typeName}", () => root = constructor.Invoke(null));
+            if (engineObject.IsInstanceOfType(root)) alive(root, 1);
+
+            // The objects of the registry exist before anything refers to them.
+            var registry = request.GetProperty("registry");
+            var authored = new List<(long Id, object Held, JsonElement Data, JsonElement Fields)>();
+            foreach (var entry in registry.EnumerateArray())
+            {
+                long id = long.Parse(entry.GetProperty("rid").GetString()!, System.Globalization.CultureInfo.InvariantCulture);
+                var name = new[] { entry.GetProperty("class").GetString()!, entry.GetProperty("ns").GetString()!, entry.GetProperty("asm").GetString()! };
+                var (type, fields, _) = Managed(name);
+                object held = Instantiate(type);
+                instances[id] = held; ids[held] = id; names[held] = name;
+                authored.Add((id, held, entry.GetProperty("data"), fields));
+            }
+
+            // Reading: the fields of the object, then the objects of the registry in its order.
+            // Each object stored inline hears of it once it is read, the objects of the registry
+            // after all of them, the last one first, and the object itself at the end.
+            Read(root, rootFields, request.GetProperty("fields"), "");
+            foreach (var (id, held, data, fields) in authored) Read(held, fields, data, $"managedReferences[{id}].");
+            for (int index = authored.Count - 1; index >= 0; index--) After(authored[index].Held);
+            After(root);
+
+            // Writing, as a build was seen to go about it: five passes over what is stored
+            // inline, the second without the objects held by reference, and twice the callback
+            // of the object itself and of the objects it holds by reference.
+            var found = new List<object>();
+            void Pass(bool held, Visit visit, bool sorted)
+            {
+                found = new List<object>();
+                if (sorted)
+                {
+                    // The pass that writes knows the objects beforehand and takes them by ID.
+                    Walk(root, rootFields, false, Visit.Collect, found);
+                    for (int index = 0; index < found.Count; index++) Walk(found[index], Managed(found[index]).Fields, false, Visit.Collect, found);
+                }
+                Walk(root, rootFields, true, visit, found);
+                var done = new HashSet<object>(ReferenceEqualityComparer.Instance);
+                while (true)
+                {
+                    var pending = found.Where(item => !done.Contains(item));
+                    object? next = sorted ? pending.OrderBy(item => ids[item]).FirstOrDefault() : pending.FirstOrDefault();
+                    if (next is null) break;
+                    done.Add(next);
+                    Walk(next, Managed(next).Fields, held, visit, found);
+                }
+            }
+            void Callbacks()
+            {
+                Before(root);
+                foreach (object held in found.ToArray()) Before(held);
+            }
+            Pass(true, Visit.Receivers, false);
+            Callbacks();
+            Pass(false, Visit.All, false);
+            Pass(true, Visit.All, false);
+            Pass(true, Visit.All, false);
+            Callbacks();
+            Pass(true, Visit.All, true);
+
+            // A build drops an object of the registry that nothing refers to. Whether it runs
+            // the callbacks of such an object before was not compared.
+            if (ranCallbacks && authored.Any(entry => !found.Contains(entry.Held, ReferenceEqualityComparer.Instance)))
+                throw new Refused("the registry holds an object that nothing refers to, in an object with serialization callbacks");
+            var result = new Dictionary<string, object?> { ["fields"] = CaptureFields(root, rootFields, "") };
+            var entries = new List<object?>();
+            foreach (object held in found.OrderBy(item => ids[item]))
+            {
+                var (_, fields, name) = Managed(held);
+                entries.Add(new Dictionary<string, object?>
+                {
+                    ["rid"] = ids[held].ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    ["class"] = name[0], ["ns"] = name[1], ["asm"] = name[2],
+                    ["data"] = CaptureFields(held, fields, $"managedReferences[{ids[held]}]."),
+                });
+            }
+            // The entry of the null reference leads the registry of an object that holds one.
+            if (nullReference)
+                entries.Insert(0, new Dictionary<string, object?> { ["rid"] = "-2", ["class"] = "", ["ns"] = "", ["asm"] = "", ["data"] = new Dictionary<string, object?>() });
+            result["registry"] = entries;
+            return result;
+        }
+    }
+
+    internal static Dictionary<string, object?> Run(string requestPath)
+    {
+        using var document = JsonDocument.Parse(File.ReadAllText(requestPath));
+        var request = document.RootElement;
+        var assemblies = request.GetProperty("assemblies").EnumerateArray().Select(path => path.GetString()!).ToArray();
+        if (assemblies.Length == 0 || assemblies.Length > 4096) throw new InvalidOperationException("Expected a bounded list of managed DLLs");
+        // Code of the project that never returns must not hold the caller.
+        using var watchdog = new Timer(_ =>
+        {
+            Console.Error.WriteLine("The project's code did not finish constructing and serializing its objects");
+            Environment.Exit(4);
+        }, null, TimeSpan.FromSeconds(120), Timeout.InfiniteTimeSpan);
+        AppDomain.CurrentDomain.FirstChanceException += FirstChance;
+        var game = new Game(assemblies);
+        var replies = new List<object?>();
+        foreach (var item in request.GetProperty("objects").EnumerateArray())
+        {
+            try { replies.Add(new Evaluation(game).Settle(item)); }
+            catch (Refused refusal) { replies.Add(new Dictionary<string, object?> { ["refused"] = refusal.Message }); }
+            catch (Exception error) when (error is Reflection.TargetInvocationException or TypeInitializationException or TypeLoadException or FileNotFoundException
+                or FileLoadException or BadImageFormatException or MissingMemberException or InvalidCastException or ArgumentException or FormatException)
+            {
+                // A class of the project that does not load, or that initializes itself through the engine.
+                Exception inner = error;
+                while (inner.InnerException is { } next) inner = next;
+                replies.Add(new Dictionary<string, object?> { ["refused"] = $"{inner.GetType().Name}: {inner.Message}" });
+            }
+        }
+        return new Dictionary<string, object?> { ["objects"] = replies };
     }
 }
