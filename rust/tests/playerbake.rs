@@ -1477,6 +1477,22 @@ fn text_of_another_type_reads_as_the_engine_reads_it() {
             field("f", primitive("float"), Some("1.5")),
             field("d", primitive("double"), Some("2.5")),
             field("s", json!({"kind": "string"}), Some("hello")),
+            field("arr", json!({"kind": "array", "element": primitive("int")}), None),
+            field("strs", json!({"kind": "array", "element": {"kind": "string"}}), None),
+            field(
+                "items",
+                json!({"kind": "array", "element": {"kind": "struct", "name": "Item", "fields": [
+                    field("hp", primitive("int"), Some("100")),
+                ]}}),
+                None,
+            ),
+            field("v", json!({"kind": "unity", "name": "Vector3"}), None),
+            field("mask", json!({"kind": "unity", "name": "LayerMask"}), None),
+            field(
+                "clip",
+                json!({"kind": "object", "className": "AnimationClip", "namespace": "UnityEngine"}),
+                None,
+            ),
         ],
     }))
     .unwrap();
@@ -1549,6 +1565,41 @@ fn text_of_another_type_reads_as_the_engine_reads_it() {
     assert_eq!(read("d", sequence()), Val::D(2.5));
     assert_eq!(read("s", structure()), Val::Str(String::new()));
     assert_eq!(read("s", sequence()), Val::Str(String::new()));
+    // Of a hex dump that ends inside an element the whole elements are
+    // read. A mapping where a list is declared is read as its values: a
+    // number for a number, and for a class a new element, which a number is
+    // not read into.
+    let numbers = |values: &[i64]| Val::Seq(values.iter().map(|&value| Val::I(value)).collect());
+    assert_eq!(read("arr", json!("07000000080000")), numbers(&[7]));
+    assert_eq!(read("arr", json!({"a": "1"})), numbers(&[1]));
+    assert_eq!(
+        read("strs", json!([{"a": "1"}, "x"])),
+        Val::Seq(vec![Val::Str(String::new()), Val::str("x")])
+    );
+    match read("items", json!({"hp": "1"})) {
+        Val::Seq(items) => {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].field("hp"), Some(&Val::I(100)));
+        }
+        other => panic!("{other:?}"),
+    }
+    // A number or a sequence where an engine struct or a reference is
+    // declared reads as nothing.
+    let unread = layout
+        .object(&serde_json::Map::new(), 1, &mut NoReferences)
+        .unwrap();
+    for (name, authored) in [
+        ("v", json!("5")),
+        ("v", sequence()),
+        ("mask", json!("7")),
+        ("clip", json!("5")),
+        ("clip", json!(["1"])),
+    ] {
+        let mut document = serde_json::Map::new();
+        document.insert(name.to_string(), authored.clone());
+        let object = layout.object(&document, 1, &mut NoReferences).unwrap();
+        assert_eq!(object.data, unread.data, "{name}: {authored}");
+    }
     // A field the text lacks is as the constructor left it.
     assert_eq!(read("i0", json!("3")), Val::I(3));
     let object = layout

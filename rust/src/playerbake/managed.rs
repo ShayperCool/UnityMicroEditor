@@ -1553,10 +1553,9 @@ struct Authored {
 /// The reference a text value holds; `None` for the null reference.
 fn authored_reference(value: &Value, path: &str) -> Result<Option<Authored>> {
     let reference = match value {
-        Value::Null => return Ok(None),
-        Value::String(text) if text.is_empty() => return Ok(None),
         Value::Object(reference) => reference,
-        _ => return Err(mismatch(path, "a value")),
+        // Out of a number or a sequence the engine reads no reference.
+        _ => return Ok(None),
     };
     let file_id = scalar_text(get(reference, "fileID"), path)?;
     if file_id.is_empty() || file_id == "0" {
@@ -1741,9 +1740,36 @@ fn dump_suffix(type_name: &str) -> Option<char> {
     })
 }
 
+/// A mapping where the class declares an array or a list: the engine reads
+/// its values as the elements. This was compared for a mapping of one entry;
+/// the order it takes several in was not.
+fn sole_value<'a>(mapping: &'a Map<String, Value>, path: &str) -> Result<&'a Value> {
+    let mut values = mapping.values();
+    match (values.next(), values.next()) {
+        (Some(value), None) => Ok(value),
+        _ => Err(mismatch(path, "a mapping of several entries")),
+    }
+}
+
+/// Whether the text of a field is a number, or for a vector also a sequence,
+/// where the class declares an engine struct: the engine then reads nothing
+/// and the field stays as it was constructed. Compared for these structs; a
+/// gradient is zeroed instead and stays refused.
+fn unread_struct(node: &Node, value: &Value) -> bool {
+    let scalar = matches!(value, Value::String(text) if !text.is_empty());
+    match node.type_name.as_str() {
+        "Vector3f" => scalar || matches!(value, Value::Array(_)),
+        "AnimationCurve" | "BitField" | "Hash128" => scalar,
+        // `Color32`.
+        "ColorRGBA" => scalar && node.version == 2,
+        _ => false,
+    }
+}
+
 /// The elements of an array of integers that the text holds as one scalar:
 /// little-endian hex, then a letter for their type. Out of such a value the
-/// engine reads no element of another type.
+/// engine reads no element of another type, and of a dump that ends inside
+/// an element it reads the whole elements.
 fn hex_dump(type_name: &str, text: &str, path: &str) -> Result<Vec<Val>> {
     let Some((size, _)) = integer_type(type_name) else {
         return Ok(Vec::new());
@@ -1752,9 +1778,11 @@ fn hex_dump(type_name: &str, text: &str, path: &str) -> Result<Vec<Val>> {
         .strip_suffix(|last| dump_suffix(type_name) == Some(last))
         .unwrap_or(text);
     let width = size as usize * 2;
-    if !digits.is_ascii() || !digits.len().is_multiple_of(width) {
+    // What the engine makes of half a byte was not compared.
+    if !digits.is_ascii() || !digits.len().is_multiple_of(2) {
         return Err(mismatch(path, "a hex dump of another width"));
     }
+    let digits = &digits[..digits.len() / width * width];
     let mut items = Vec::with_capacity(digits.len() / width);
     for chunk in digits.as_bytes().chunks(width) {
         let mut number = 0u64;
@@ -1861,7 +1889,7 @@ impl<'a> Encoder<'a> {
             FieldType::Primitive { .. } | FieldType::Enum { .. } => {
                 runner_text(&node.type_name, &scalar(&node.type_name, value, path)?)?
             }
-            FieldType::String if structure && field => Value::String(String::new()),
+            FieldType::String if structure => Value::String(String::new()),
             FieldType::String => Value::String(string(value, path)?),
             FieldType::Object {
                 class_name,
@@ -1906,6 +1934,13 @@ impl<'a> Encoder<'a> {
                         }
                         items
                     }
+                    Value::Object(mapping) => {
+                        let item = sole_value(mapping, path)?;
+                        match self.present_value(element, data, item, path, false)? {
+                            Some(read) => vec![read],
+                            None => bail!("element {path} was not read"),
+                        }
+                    }
                     _ => return Err(mismatch(path, "a structure")),
                 })
             }
@@ -1922,10 +1957,13 @@ impl<'a> Encoder<'a> {
                     // The engine reads neither a number nor a sequence into
                     // a class.
                     Value::String(_) | Value::Array(_) if field => return Ok(None),
+                    // A new element stays as it was constructed.
+                    Value::String(_) => &empty,
                     _ => return Err(mismatch(path, "a value")),
                 };
                 self.present(fields, &node.children, mapping, &format!("{path}."))?
             }
+            FieldType::Unity { .. } if field && unread_struct(node, value) => return Ok(None),
             FieldType::ManagedReference { .. } => {
                 serde_json::json!({ "rid": managed_id(value, path)?.to_string() })
             }
@@ -2090,7 +2128,36 @@ impl<'a> Encoder<'a> {
             {
                 self.missing(field, node, &path, known)
             }
+            FieldType::Unity { .. } if unread_struct(node, value) => {
+                self.missing(field, node, &path, known)
+            }
             kind => self.value(kind, node, value, &path, known && !field.initial_unknown),
+        }
+    }
+
+    /// One element of an array or list, which is an object of its own. Text
+    /// of another kind than the element's type is read as for a field: a
+    /// structure gives an empty string, and a number where a class is
+    /// expected leaves the new element as it was constructed.
+    fn element(&mut self, kind: &FieldType, node: &Node, item: &Value, path: &str) -> Result<Val> {
+        match kind {
+            FieldType::String if matches!(item, Value::Object(_) | Value::Array(_)) => {
+                Ok(Val::Str(String::new()))
+            }
+            FieldType::Struct { fields, .. }
+                if !fields.is_empty() && matches!(item, Value::String(_)) =>
+            {
+                let made = Field {
+                    name: String::new(),
+                    hidden: false,
+                    former_names: Vec::new(),
+                    initial: None,
+                    initial_unknown: false,
+                    kind: kind.clone(),
+                };
+                self.missing(&made, node, path, true)
+            }
+            _ => self.value(kind, node, item, path, true),
         }
     }
 
@@ -2231,10 +2298,12 @@ impl<'a> Encoder<'a> {
                         .iter()
                         .enumerate()
                         .map(|(index, item)| {
-                            // An element is an object of its own.
-                            self.value(element, data, item, &format!("{path}[{index}]"), true)
+                            self.element(element, data, item, &format!("{path}[{index}]"))
                         })
                         .collect::<Result<_>>()?,
+                    Value::Object(mapping) => {
+                        vec![self.element(element, data, sole_value(mapping, path)?, path)?]
+                    }
                     _ => return Err(mismatch(path, "a structure")),
                 };
                 // A fixed buffer always has its declared length.
