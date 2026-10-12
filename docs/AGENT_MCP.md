@@ -180,6 +180,7 @@ An attached interactive Editor is not owned or terminated by the tool.
 | `runtime_query` | Public status, hierarchy, inspection, logs, raycast and tool catalog. |
 | `runtime_command` | Simulation, input, screenshots and public project tool calls. |
 | `project_tools` | Refresh the live catalog and register `project.<name>` MCP tools. |
+| `remote_session` | Start/stop/status of a browser page that shows the Player as H.264 video and plays it with keyboard and mouse. |
 
 Resources `unitymicroeditor://project` and `unitymicroeditor://capabilities` expose
 project context and supported behavior. These are our tool names, not an assertion
@@ -426,6 +427,78 @@ they are not a general reflected Inspector. Logs have bounded history and sequen
 markers. Screenshots require a graphics device and return a PNG path, hash,
 dimensions and frame. Viewport-dependent UI and advancing counters need aligned
 checkpoints for comparisons.
+
+## Watch and play in a browser
+
+`remote_session` with `action: start` serves the running game to a browser:
+
+```json
+{"name": "remote_session", "arguments": {"action": "start"}}
+```
+
+The reply's `url` (`http://127.0.0.1:<port>/<secret>/`) opens a page that shows
+the Player's viewport and sends keyboard, mouse, wheel and touch input back.
+`status` reports the same object with `playerConnected`, `viewers` and the
+`video` counters; `stop` closes the listener and every viewer. Stopping the MCP
+server stops the session too.
+
+Every session binds its own listener, by default `127.0.0.1` and a free port, so
+several editors on one machine each return a different address. The session can
+be started before the Player: the page waits, connects when the Player is
+ready, and follows resets and Player replacements by itself.
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `listen` | `127.0.0.1:0` | Literal IP and port of the HTTP listener; port `0` picks a free one. |
+| `fps` | `60` | Capture rate, 1-60. The Player's own frame cap (`mcp --fps`, default 30) bounds it. |
+| `maxWidth` | `1920` | Widest encoded picture; a wider viewport is scaled down. |
+| `bitrateKbps` | `12000` | Constant video bitrate. |
+
+A repeated `start` with the same or no settings returns the running session;
+other settings need a `stop` first.
+
+How it works: the Player captures its viewport at the end of each frame with
+the public `ScreenCapture` API, reads it back asynchronously and sends the raw
+frame over a loopback connection that only it can open (the port and a secret
+travel through the control directory). The server encodes H.264 on the GPU
+through the NVIDIA driver's encoder (NVENC: ultra-low-latency tuning, no
+B-frames, keyframes only on request) and sends each frame to the viewers over
+one WebSocket as soon as it is encoded. The page decodes with WebCodecs, which
+uses the browser's hardware decoder. Nothing is captured or encoded while
+nobody watches.
+
+Making the address reachable from another machine is the caller's step: an
+SSH forward, a reverse proxy or a tunnel to the listener, or `listen` on
+another interface. Everything is one HTTP port (the page and a WebSocket
+beneath the same secret path). The secret in the address is the only access
+control and the listener speaks plain HTTP, so terminate TLS in front of it
+when it leaves the machine.
+
+Limits:
+
+- Encoding needs an NVIDIA GPU with driver support for NVENC API 12.1 (driver
+  530.41 or newer on Linux); `libnvidia-encode.so.1` and `libcuda.so.1` are opened at run
+  time. Without them the session starts, the page reports
+  `video encoder unavailable`, and `status.lastError` says why. There is no
+  software encoder. `UNITY_MICRO_EDITOR_NVENC_DEVICE` selects the GPU by CUDA
+  ordinal. The driver limits concurrent encode sessions per machine; each
+  remote session with a viewer uses one.
+- Viewing needs a browser with WebCodecs H.264 decoding (current Chrome, Edge,
+  Safari, Firefox). Browsers offer WebCodecs only in a secure context:
+  `localhost`/`127.0.0.1` or HTTPS. A plain `http://<lan-ip>` address shows an
+  explanation instead of the picture.
+- Keyboard and mouse use the same virtual Input System devices as
+  `runtime_command(input)`, so they need the target's Input System profile
+  (`activeInputHandler` 1 or 2). A legacy-Input project is shown but cannot be
+  played. Text typed into input fields that read IMGUI events is not delivered.
+- Keys are matched by physical position (`KeyboardEvent.code`). The browser
+  keeps F11, F12 and whatever the operating system intercepts; Escape also
+  releases a captured pointer.
+- When the game locks the cursor, the page asks for a click and then sends
+  relative motion (pointer lock).
+- The picture is the Player window's viewport as rendered; frames arrive a few
+  frames after they were drawn (asynchronous GPU readback). Row order is
+  verified on OpenGL Core, the verified graphics path. Audio is not streamed.
 
 ## Known differences from the Editor
 

@@ -31,7 +31,7 @@ const dot = document.getElementById("dot");
 const base = location.pathname.replace(/\/+$/, "");
 let socket = null, decoder = null, configured = "", waiting = true, latest = null;
 let state = { playerConnected: false, cursorLocked: false, error: "" };
-let frames = 0, bytes = 0, decoded = 0;
+let frames = 0, bytes = 0, decoded = 0, painted = false;
 
 function say(text) { message.textContent = text; }
 function describe() {
@@ -39,7 +39,7 @@ function describe() {
   if (!socket || socket.readyState !== 1) return say("Connecting…");
   if (state.error) return say(state.error);
   if (!state.playerConnected) return say("Waiting for the Player. Start the session and this page continues by itself.");
-  if (!decoded) return say("Waiting for the first frame…");
+  if (!painted) return say("Waiting for the first frame…");
   say(state.cursorLocked && document.pointerLockElement !== canvas ? "The game locked the cursor: click the picture to capture the mouse." : "");
 }
 
@@ -101,7 +101,10 @@ function resync() {
 }
 
 function paint() {
-  if (latest) { context.drawImage(latest, 0, 0, canvas.width, canvas.height); latest.close(); latest = null; if (decoded === 1) describe(); }
+  if (latest) {
+    context.drawImage(latest, 0, 0, canvas.width, canvas.height); latest.close(); latest = null;
+    if (!painted) { painted = true; describe(); }
+  }
   flush();
   requestAnimationFrame(paint);
 }
