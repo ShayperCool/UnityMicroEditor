@@ -3,10 +3,14 @@
 use super::{
     ProbeOptions,
     batch::GLOBAL_GUIDS,
-    import::run_project_import,
+    built_store,
+    import::{IMPORT_BUDGET, run_bounded_import, run_project_import},
     importer::NativeProjectImporter,
-    player_objects::{Build, open_sources, plan_source, write_player_objects},
+    player_objects::{
+        Build, Plan, importer_identity, open_sources, plan_source, write_player_objects,
+    },
     resolve_project_import_source,
+    scripted::script_environment_identity,
     support::{Event, is_not_exist, lower_ext, mkdir_all, read_file, write_file},
 };
 use crate::{
@@ -315,21 +319,26 @@ impl NativeProjectImporter {
             return Ok(());
         }
         let started = Instant::now();
-        let root = sysutil::join(&[&self.opts.output, "native/imports", &random_id()]);
-        mkdir_all(&sysutil::dir(&root), 0o700)?;
-        let import_context = ctx.with_timeout(Duration::from_secs(45));
-        let (report, error) = run_project_import(
-            &import_context,
-            ProbeOptions {
-                project: self.opts.project.clone(),
-                editor: self.opts.editor.clone(),
-                output: root,
-                timeout: Duration::from_secs(45),
-                ..Default::default()
+        let imports = sysutil::join(&[&self.opts.output, "native/imports"]);
+        mkdir_all(&imports, 0o700)?;
+        let (report, error) = run_bounded_import(
+            ctx,
+            &format!("native import of the clips of {logical}"),
+            IMPORT_BUDGET,
+            |bounded, budget| {
+                run_project_import(
+                    bounded,
+                    ProbeOptions {
+                        project: self.opts.project.clone(),
+                        editor: self.opts.editor.clone(),
+                        output: sysutil::join(&[&imports, &random_id()]),
+                        timeout: budget,
+                        ..Default::default()
+                    },
+                    &[logical.to_string()],
+                )
             },
-            &[logical.to_string()],
         );
-        import_context.cancel();
         if let Some(error) = error {
             return Err(error);
         }
@@ -984,7 +993,7 @@ impl NativeProjectImporter {
     /// its hash.
     fn shader_ingredients(&self, logical: &str, guid: &str) -> Result<ShaderIngredients> {
         if lower_ext(logical) != ".shader" || self.pipeline_project()? {
-            return Ok((self.built_plan(logical, guid)?.1, Vec::new()));
+            return Ok((self.built_plan(logical, guid)?.1.ingredients, Vec::new()));
         }
         let mut ingredients = BTreeMap::new();
         let mut visited = BTreeSet::from([logical.to_string()]);
@@ -1074,21 +1083,28 @@ impl NativeProjectImporter {
             )?,
             materials,
         };
-        let root = sysutil::join(&[&self.opts.output, "native/imports", &random_id()]);
-        mkdir_all(&sysutil::dir(&root), 0o700)?;
-        let import_context = ctx.with_timeout(Duration::from_secs(45));
-        let (report, error) = run_project_import(
-            &import_context,
-            ProbeOptions {
-                project: self.opts.project.clone(),
-                editor: self.opts.editor.clone(),
-                output: root.clone(),
-                timeout: Duration::from_secs(45),
-                ..Default::default()
+        let imports = sysutil::join(&[&self.opts.output, "native/imports"]);
+        mkdir_all(&imports, 0o700)?;
+        let mut root = String::new();
+        let (report, error) = run_bounded_import(
+            ctx,
+            &format!("native import of {logical}"),
+            IMPORT_BUDGET,
+            |bounded, budget| {
+                root = sysutil::join(&[&imports, &random_id()]);
+                run_project_import(
+                    bounded,
+                    ProbeOptions {
+                        project: self.opts.project.clone(),
+                        editor: self.opts.editor.clone(),
+                        output: root.clone(),
+                        timeout: budget,
+                        ..Default::default()
+                    },
+                    &[logical.to_string()],
+                )
             },
-            &[logical.to_string()],
         );
-        import_context.cancel();
         if let Some(error) = error {
             return Err(error);
         }
@@ -1250,13 +1266,9 @@ impl NativeProjectImporter {
         ])
     }
 
-    /// The materials that use a source, and the hash of every file of the
-    /// project a build of it depends on.
-    fn built_plan(
-        &self,
-        logical: &str,
-        guid: &str,
-    ) -> Result<(Vec<String>, BTreeMap<String, String>)> {
+    /// The materials that use a source, and the plan of its build, which
+    /// holds the hash of every file of the project the build depends on.
+    fn built_plan(&self, logical: &str, guid: &str) -> Result<(Vec<String>, Plan)> {
         if !self.pipeline_project()? {
             return Err(Unsupported(format!(
                 "a {} of a project without a scriptable render pipeline: the Editor's build code in a worker is verified for pipeline projects only",
@@ -1284,7 +1296,34 @@ impl NativeProjectImporter {
             logical,
             &users,
         )?;
-        Ok((users, plan.ingredients))
+        Ok((users, plan))
+    }
+
+    /// The key of a build in the project's store: everything the build is
+    /// made from. A plan tells what the worker imports and is asked for.
+    fn built_key(
+        &self,
+        logical: &str,
+        guid: &str,
+        users: &[String],
+        plan: &Plan,
+    ) -> Result<String> {
+        let source = self.baked_source(logical)?;
+        built_store::Inputs {
+            importer: &importer_identity(),
+            environment_sha256: &self.environment_sha256,
+            scripts_identity: &script_environment_identity(&self.opts.project),
+            target: logical,
+            guid,
+            source_sha256: &file_sha(&source)?,
+            meta_sha256: &file_sha(&format!("{source}.meta"))?,
+            users,
+            request: &plan.request.encode()?,
+            batch: &plan.batch,
+            scripts: &plan.scripts,
+            ingredients: &plan.ingredients,
+        }
+        .key()
     }
 
     /// Has the Editor's own build code write the Player object of a shader,
@@ -1297,8 +1336,36 @@ impl NativeProjectImporter {
         ingredients: &mut BTreeMap<String, String>,
         paths: &mut BTreeMap<String, String>,
     ) -> Result<Baked> {
-        let (users, guards) = self.built_plan(logical, guid)?;
-        *ingredients = guards;
+        let (users, plan) = self.built_plan(logical, guid)?;
+        *ingredients = plan.ingredients.clone();
+        let (class, local_id, type_name) = if lower_ext(logical) == ".compute" {
+            (
+                playerbake::COMPUTE_SHADER_CLASS,
+                playerbake::COMPUTE_SHADER_LOCAL_ID,
+                "UnityEngine.ComputeShader",
+            )
+        } else {
+            (48, playerbake::SHADER_LOCAL_ID, "UnityEngine.Shader")
+        };
+        // Another importer of the project may have built the same already:
+        // that of a content scene builds the shaders of the scene's own.
+        let key = self.built_key(logical, guid, &users, &plan)?;
+        if let Some(kept) = built_store::load(&self.opts.project, &key) {
+            Event::new("native-build-reused")
+                .with("path", logical)
+                .with("key", &key)
+                .emit();
+            paths.extend(kept.external_paths);
+            return Ok(Baked {
+                file: kept.file,
+                objects: kept.objects,
+                externals: kept
+                    .externals
+                    .into_iter()
+                    .map(|guid| playerbake::External { guid })
+                    .collect(),
+            });
+        }
         let built = write_player_objects(
             ctx,
             &Build {
@@ -1317,15 +1384,6 @@ impl NativeProjectImporter {
                 ]),
             },
         )?;
-        let (class, local_id, type_name) = if lower_ext(logical) == ".compute" {
-            (
-                playerbake::COMPUTE_SHADER_CLASS,
-                playerbake::COMPUTE_SHADER_LOCAL_ID,
-                "UnityEngine.ComputeShader",
-            )
-        } else {
-            (48, playerbake::SHADER_LOCAL_ID, "UnityEngine.Shader")
-        };
         let own = built.objects_of(guid);
         let [main] = &own[..] else {
             return Err(Unsupported(format!(
@@ -1360,6 +1418,7 @@ impl NativeProjectImporter {
         // What the objects refer to in other files: the shaders of the
         // project a shader names, each published as a file of its own.
         let mut externals = Vec::with_capacity(built.externals.len());
+        let mut external_paths = BTreeMap::new();
         for external in &built.externals {
             let path = built
                 .external_paths
@@ -1385,7 +1444,7 @@ impl NativeProjectImporter {
                 ))
                 .into());
             }
-            paths.insert(external.guid.clone(), path);
+            external_paths.insert(external.guid.clone(), path);
             externals.push(playerbake::External {
                 guid: external.guid.clone(),
             });
@@ -1417,11 +1476,42 @@ impl NativeProjectImporter {
             .seconds("artifactDatabaseSeconds", built.database_seconds)
             .seconds("elapsedSeconds", built.seconds)
             .emit();
-        Ok(Baked {
+        let baked = Baked {
             file,
             objects: vec![(local_id.to_string(), type_name.into())],
             externals,
-        })
+        };
+        // Kept under what the build was planned from, and under what a
+        // plan says now when the build itself added to the list of assets
+        // the pipeline loads by path: the next plan is made with that list.
+        let kept = built_store::Built {
+            file: baked.file.clone(),
+            objects: baked.objects.clone(),
+            externals: baked
+                .externals
+                .iter()
+                .map(|external| external.guid.clone())
+                .collect(),
+            external_paths: external_paths.clone(),
+        };
+        let mut keys = vec![key];
+        if let Ok((users, plan)) = self.built_plan(logical, guid)
+            && let Ok(now) = self.built_key(logical, guid, &users, &plan)
+            && !keys.contains(&now)
+        {
+            keys.push(now);
+        }
+        for key in keys {
+            // Only a store: without it the next importer builds again.
+            if let Err(error) = built_store::store(&self.opts.project, &key, logical, &kept) {
+                Event::new("native-build-not-kept")
+                    .with("path", logical)
+                    .with("reason", &format!("{error:#}"))
+                    .emit();
+            }
+        }
+        paths.extend(external_paths);
+        Ok(baked)
     }
 }
 
