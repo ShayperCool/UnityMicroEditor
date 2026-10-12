@@ -58,10 +58,10 @@ Each cache entry records an `environmentSha256`. The fingerprint covers the pinn
 ## How an import works
 
 1. The coordinator creates an isolated context with its own `Assets`, `ProjectSettings`, `Packages`, `Library` and `Logs`, and copies the exact source and `.meta` bytes into it.
-2. The coordinator writes a minimal `SourceAssetDB` directly: GUIDs, paths, importer settings and XXH3-128 file hashes taken from the sources. Nothing is copied from an Editor, except for the two kinds of import that need a piece of one: [models that make their own material](#obj-and-collada-models) and [scripted importers](#scripted-importers). Those run in batches of their own, so what an asset is imported with does not depend on what changed along with it.
+2. The coordinator writes a minimal `SourceAssetDB` directly: GUIDs, paths, importer settings, the children of every folder and XXH3-128 file hashes taken from the sources. Nothing is copied from an Editor, except for the two kinds of import that need a piece of one: [models that make their own material](#obj-and-collada-models) and [scripted importers](#scripted-importers). Those run in batches of their own, so what an asset is imported with does not depend on what changed along with it.
 3. It starts a DataStore with a unique namespace, accepts the worker's local TCP connection, and sends `Initialize`, `Prepare` and `ImportRequest`.
 4. Requests use the primary importer ID `-1`, so the native pipeline picks the importer and reads its settings from `.meta`. Explicit importer IDs run an extra importer with default settings and are rejected by content validation.
-5. The worker is stopped through the protocol, then the DataStore. It reads only the stopped store, following `ImportResponse.ArtifactBlobs[1]` → `ArtifactMetaInfo.Files[].Hash` → the stored file.
+5. The worker is stopped through the protocol, then the DataStore, whose shared memory segments in `/dev/shm` are removed: the service is ended by a signal and leaves about 180 MB a run there. It reads only the stopped store, following `ImportResponse.ArtifactBlobs[1]` → `ArtifactMetaInfo.Files[].Hash` → the stored file.
 
 Worker parameters come from an exact copy of `ProjectSettings.asset`: color space, shader precision and the Linux graphics API override. The profile is limited to the Linux standalone target, with OpenGLCore and Vulkan as the verified automatic API set. Unsupported or ambiguous settings are refused. The applied values and the settings hash are written to `environment` in the report.
 
@@ -152,7 +152,7 @@ A `.inputactions` file is imported by the Input System package's own `InputActio
 The worker has no compiler; what it needs comes from an Editor compilation of the project, the staging clone of a preparation with a host build (`Library/UnityMicroEditor/stage/project`) or else the project's own `Library`:
 
 - `Library/Bee/*E-inputdata.json` is the Editor's record of that compilation. It lists every assembly with its sources, the assemblies it refers to and the directory of every package.
-- The importer's assembly is the one compiled from the script the asset's `.meta` names, and it is loaded together with the assemblies it refers to, from `Library/ScriptAssemblies`. Only immutable packages (`Library/PackageCache/<name>@<hash>`) qualify. An assembly that uses a precompiled assembly of a package or the project is refused, because the worker finds those only through an asset database; the check is whether the compiled code names that assembly.
+- The importer's assembly is the one compiled from the script the asset's `.meta` names, and it is loaded together with the assemblies it refers to, from `Library/ScriptAssemblies`. Only immutable packages (`Library/PackageCache/<name>@<hash>`) qualify. An importer's assembly that uses a precompiled assembly of a package or the project is refused; the check is whether the compiled code names that assembly. (A [build in a worker](#projects-with-a-scriptable-render-pipeline) copies such assemblies next to the others, where the worker loads them; that is verified for the render pipeline packages only.)
 - The scripts and assembly definitions those assemblies were compiled from are copied into the context where the Editor compiled them, and registered as script compilation assets. An assembly records each script by its path relative to the project; the worker gives an imported object its `MonoScript` only when it can map that path to a registered asset, and it reads where a package lies from the database's root folders only when the database states a refresh version.
 
 The adapter then turns the artifact into a ContentFile. An object of a script class points at its script asset by GUID, which a Player does not have; the file gets one `MonoScript` object per class, named after the class identifier the Editor wrote into each object, and the objects point at it. Their data, local IDs and type trees stay as imported, and the importer object is dropped. An object that refers to another asset is refused.
@@ -469,6 +469,8 @@ Not covered: what the mixers sound like was not measured, only that the Player h
 
 ## Shaders
 
+A project without a scriptable render pipeline gets its `.shader` sources as described first. A project with one gets `.shader`, `.shadergraph` and `.compute` sources from the Editor's own build code, run in a worker; see [Projects with a scriptable render pipeline](#projects-with-a-scriptable-render-pipeline).
+
 The worker parses a `.shader` and leaves a `Shader` object with the parsed passes and the source of every program, but no compiled program. A build compiles each program with `UnityShaderCompiler`, a separate program the Editor ships in `Data/Tools`, and stores the results in compressed tables. The tool does the same (`rust/src/playerbake/shader.rs` and `shader/`, `rust/src/native/shader_compiler.rs`): the worker imports the shader, the tool starts the compiler, takes the Editor's side of its local socket protocol, asks for every variant a build compiles and writes the Player's object through the Player's type tree. The main Editor does not run. A new or changed `.shader` is published like a baked clip, and a watched session applies it to the running Player. An unlit shader of two passes takes about three seconds, most of it the worker.
 
 What is reproduced is an AssetBundle build for Linux standalone, started from the command line, of the shader and the materials of the project that use it. The result is compared byte for byte with objects built by Unity `6000.6.3f1`: 83 objects of 48 shaders, built with default settings, without materials, with changed settings (linear colour space, another lightmap encoding, the unified precision model, deferred reflections off, hardware tiers that differ, custom lightmap and fog stripping, instancing variants kept, a shader chunk size of 1 MB) and for OpenGL Core alone, Vulkan alone and both listed in either order. 69 are equal and 14 are refused for a reason of the list below; none differs. `rust/tests/testdata/playerbake/shaders` holds 28 of them with the compiler's replies, each stored under the hash of its request, so the test also pins what the compiler is asked. `UNITY_PLAYERBAKE_SHADER_CORPUS` with `UNITY_PLAYERBAKE_EDITOR` compares directories of the same form with the real compiler. The rules below were read out of the Editor binary and then confirmed against those builds.
@@ -493,10 +495,9 @@ A baked shader is kept with the hashes of everything it was made from: the files
 
 Refused, never approximated:
 
-- a project with a scriptable render pipeline asset: the pipeline's Editor scripts decide which variants remain, and its pass kinds and keyword filters are not reproduced;
 - a `Fallback` or `UsePass` that names a shader built into the engine (`VertexLit`, `Diffuse`), a shader the project has no source for or one that several sources declare, a used pass its shader lacks, and a shader whose keywords more than one other shader extends, for which the order was not established;
 - a program that does not compile, with the compiler's message, and a program the compiler warns about. A build leaves a failed variant out and goes on;
-- a shader with an import error; an include that is not a literal path; an include of a package file, which the worker's project does not hold;
+- a shader with an import error; an include that is not a literal path; an include of a package file, which this route's worker project does not hold;
 - a material variant that uses the shader, whose keywords come from its parent;
 - a Linux graphics API other than OpenGL Core and Vulkan, non-empty shader build settings, 360 stereo capture, a pass that selects a compiler toolchain, a ray tracing pass, a pass without a vertex program;
 - a shader in `Packages`.
@@ -505,9 +506,70 @@ Not covered:
 
 - What a build takes from outside the project's files: scriptable stripping (`IPreprocessShaders`), shader variant collections, XR, native shader plugins. A project that has one of these gets the variants described above, not those of its own build.
 - A material-less shader used only from code (`Shader.Find`, `new Material`) gets no `shader_feature` variant beyond the first.
-- Compute shaders: the worker imports a `.compute`, but its kernels are compiled by another request of the compiler and laid out otherwise. A `.shadergraph` is imported by a script, which a standalone worker does not run.
+- Compute shaders and shader graphs of a project without a scriptable render pipeline: the worker imports a `.compute`, but its kernels are compiled by another request of the compiler and laid out otherwise, and a `.shadergraph` is imported by a package's script. The route below would write both, but it is verified for pipeline projects only.
 - A Player loaded shaders with one and two passes, keyword variants, an include, a fallback and a used pass, on OpenGL Core. The Vulkan programs are compared with the engine's but were not run.
 - Rules read from the Editor binary that no reference build exercises: virtual texturing, entities graphics, a `stats:` or warning line in a compiler reply.
+
+### Projects with a scriptable render pipeline
+
+When the graphics or quality settings name a render pipeline asset, the variants a build keeps are decided by the pipeline's Editor C#: the keyword filters on the pipeline asset and its renderers, and the `IPreprocessShaders` strippers of the packages. None of that is reproduced. Instead the Editor's own build code writes the Player object, inside a standalone import worker, and the main Editor still does not run (`rust/src/native/player_objects.rs`, `build_settings.rs`, `artifactdb.rs`, `tools/WorkerScripts/PlayerObjectImporter.cs`). This covers `.shader`, `.shadergraph` and `.compute` sources, includes of package files and shaders that name a shader of a package.
+
+How one source is built:
+
+1. The coordinator finds from the sources what a build reads beside the asset: the pipeline assets of the quality levels and of the graphics settings with everything they refer to (renderers, renderer features, their shaders and textures), followed through every text asset by GUID; the settings objects the graphics settings keep per pipeline (the pipeline's global settings); every volume profile under `Assets` with what it refers to; the files the shader includes, through every branch; the shaders it names with `Fallback` or `UsePass`, in the project or in a package; the materials of the project that use it and the parents of those that are variants. For a shader graph the sources it refers to by GUID (sub graphs, custom function files, textures) come first.
+2. It takes the script assemblies from an Editor compilation of the project, as for [scripted importers](#scripted-importers): those of the scripts of the objects found in step 1, every assembly that names `IPreprocessShaders` or `IPreprocessComputeShaders`, what they refer to, and the precompiled assemblies those use (`nunit.framework.dll` and the like), copied next to them. Only immutable packages qualify.
+3. All of it goes into one import context as one batch, in dependency order, with the project's `GraphicsSettings.asset`, `QualitySettings.asset` and `ProjectSettings.asset` given to the worker as its settings managers. The last asset of the batch is a request file for the tool's own `ScriptedImporter`, which the tool compiles with the SDK's Roslyn into the context's `Library/ScriptAssemblies`; the worker picks it by the file extension.
+4. After every import the coordinator records the result in the context's `Library/ArtifactDB` (below). That is what lets a later import of the batch load an earlier one: without it `AssetDatabase.LoadAssetAtPath`, `Shader.Find` and every reference to an imported asset give null in a worker, without an error.
+5. The importer loads the asset, the materials and the settings, computes the usage of the materials (`ContentBuildInterface.CalculateBuildUsageTags`), starts the build's shader callbacks and calls `ContentBuildInterface.WriteSerializedFile` for the Linux standalone target. Variant enumeration, keyword filtering, stripping, compilation through the worker's own `UnityShaderCompiler` processes and compression are the engine's and the packages'.
+6. The coordinator takes the object out of the written file and publishes it like any baked shader. A shader of a package that the object names (URP's `FallbackError`) is no source a session publishes, so the build writes it into the same file, as a bundle build does for an asset no bundle is named for; a named shader under `Assets` is published as a file of its own.
+
+What is reproduced is the same build as above: an AssetBundle build for Linux standalone, started from the command line, of the asset and the materials of the project that use it. Compared byte for byte with objects built by Unity `6000.6.3f1` and URP 17.6.0 in a reference project with the pipeline assets, shaders and materials of a game: 2 hand-written URP shaders (one of 12 programs and 2 materials, one of 1,176 programs and 280 materials, 78 of them material variants), 4 shader graphs (0, 81, 108 and 108 programs; Built-in and URP targets) and 1 compute shader of two kernels. All 7 equal the Editor's objects in every byte except the references to other files, which depend on the layout of the file (the shader without references and the compute shader are equal outright); the package shaders written along with them equal theirs in the same way. The 6 shaders and graphs were also built in a copy of the game's own project, with its script assemblies and its whole `Assets`, and gave the same objects. `UME_PLAYER_BUILD_PROJECT` with `UME_PLAYER_BUILD_CASES` and `UME_LIFECYCLE_SDK` repeats the comparison (`builds_player_objects_like_the_editor`); no fixture of it is in the repository, since it needs the URP packages and an Editor compilation.
+
+A Player loaded a new URP shader with package includes, a `multi_compile` and a `shader_feature_local` keyword and a package fallback, rendered a material with it under URP on OpenGL Core, and rendered the edited shader and the material's other keyword variant after a re-bake. It also loaded one of the shader graphs through a material (name, six passes and thirty properties read back; no pixel compared).
+
+#### What the worker needs to find imported assets
+
+A worker resolves an asset it loads by reading `Library/ArtifactDB` of its project directly, with a new LMDB read transaction per lookup; no message of the import protocol is involved. Three tables have to hold a record of the import: `ImportAddressToImportResultIDs`, `ImportResultIDToArtifactDependencies` and `ImportResultIDToArtifactMetaInfo`. The key of an import address is XXH3-128 (seed 0) over its GUID, importer ID and importer hash, low half first; the values are the three blobs of the import response as they came. The coordinator also writes `CurrentRevisions`, `ImportResultIDToImportStats` and `ImportResultIDPropertyIDToProperty`, as the Editor does. A reader takes the newest revision from the transaction number in `ArtifactDB-lock`, so a commit writes the pages, then the metadata page, then that number (`lmdb::commit`).
+
+Every commit rewrites the whole database. On the largest batch of the comparison (448 imports, database 3.3 MB at the end) all commits together took 1.7 s of a 649 s run, on the smallest (110 imports) 0.16 s of 25 s, so it is left as it is. The cost grows with the square of the batch, and the file is bounded at 128 MB, which a batch of the 4,000 assets one context holds stays far below. The writer does not take LMDB's writer lock: the worker was only seen to write this database at start-up, which is an observation of the file, not a reading of its code.
+
+An asset search (`AssetDatabase.FindAssets`) walks the folders of the `SourceAssetDB`. The Editor puts the hash of a folder's list of children before the list; the coordinator's database lacked it, so the first child of every folder was taken for the hash and never found. URP searches for volume profiles this way. The list now has the Editor's form, and a build is refused if the worker's search finds other volume profiles than the sources hold.
+
+#### The build callbacks
+
+Two things the importer does are not public API, because no public entry runs a build's shader callbacks short of a whole build:
+
+- It calls `UnityEditor.Build.BuildPipelineInterfaces.InitializeBuildCallbacks` and `CleanupBuildCallbacks`, the entry the scriptable build pipeline package uses as a friend assembly. Without it `WriteSerializedFile` runs no `IPreprocessShaders`.
+- URP's `UpdateShaderPrefilteringDataBeforeBuild` prepares every pipeline asset of the build in its constructor and then saves the asset, and `AssetDatabase.SaveAssetIfDirty` is refused inside an import. The exception leaves the Editor's list of callbacks half filled. The importer then fills the two lists itself (`processors.shaderProcessors`, `computeShaderProcessors`), taking that one class without its constructor. This is allowed only for that class, only when the exception is the refused save, only when the class has no instance fields, and only when the build is made with exactly one render pipeline asset (as the public `BuildTargetExtensions.TryGetRenderPipelineAssets` of the pipeline core package lists them): the save is refused after the first asset is prepared, so with one asset everything a build takes from the constructor is in place. Any other callback whose constructor fails, and a build with several pipeline assets, is refused with its name.
+
+#### Costs
+
+One build is one worker run: about 20 s for a shader of a few programs (110 imports, most of them the pipeline's settings closure), 11 minutes for the shader of 1,176 programs when nothing is cached and 85 s when its variants are. The worker's compiled variants (`Library/ShaderCache` of the context) are kept in `Library/UnityMicroEditor/shader-cache` of the project and given to the next worker, as the Editor keeps them in a project's `Library`; a file there is named after everything its variant was compiled from, and the object built from the kept variants was the same. A shader graph takes two or three runs, 60 to 100 s for the graphs above: its importer leaves out an include whose file is not an asset of the context and notes the path, so the graph is imported until nothing is left out, then built. The templates of the graph targets are copied into the context as plain files, which is where the importer reads them.
+
+A baked source is kept with the hashes of the project's files it was built from: the pipeline assets and what they refer to under `Assets`, the volume profiles, the included files, the materials and their parents, the two settings files and the package manifest with its lock file. Files of a cached package are not hashed; the manifest and the lock file stand for them. A session builds the source again when one of these changes.
+
+#### Refused in a pipeline project
+
+- A project without an Editor compilation (`Library/ScriptAssemblies` and `Library/Bee/*E-inputdata.json` in the staging clone or the project): the pipeline's code comes from there.
+- An assembly that names a shader callback and is not compiled from an immutable package: the project's own `IPreprocessShaders` in `Assets` or in an embedded package. A script of the project's own code on a pipeline asset, renderer or renderer feature. A class of a precompiled assembly there.
+- A 2D renderer among the settings: with 2D variant stripping a build chooses the light variants from its scenes.
+- A build made with more than one render pipeline asset for the platform, when a callback saves assets in its constructor (URP does): see above.
+- A shader program with a compile error, with the compiler's message; an object whose program tables are empty or hold an empty program although its passes list programs, which is what a compile that did not find an include leaves.
+- A shader that names a shader no source of the project or its packages declares (one built into the engine), or one that several sources declare; a reference from the written object to anything but a shader source under `Assets` (a default texture of a shader, for one).
+- A material variant whose parent has no source, or whose chain returns to itself or is longer than 32. Other variants are built: the Editor merges them itself.
+- An asset the pipeline settings refer to that the worker cannot import, with the worker's message; settings that refer to more than 3,000 assets; a batch of more than 4,000.
+- An included file or other asset without a `.meta`; a source in a package that lies outside the project.
+- A shader graph or compute shader in a project without a scriptable render pipeline (not verified there).
+
+#### Not covered or not verified
+
+- What the settings objects of the pipeline (URP's global settings asset) refer to is not loaded in the worker: the pipeline's runtime shaders, textures and debug windows, several of which a standalone worker cannot import. A build's shader code reads the settings held inside the object; that this is all it reads is established by the comparisons above, not by a proof.
+- One pipeline (URP 17.6.0), one set of pipeline assets, Linux standalone with OpenGL Core and Vulkan. HDRP, a custom pipeline, a project with its own shader strippers, XR and other package versions were not run.
+- An asset a pipeline object loads by path when it finds a field empty (`ResourceReloader`) is taken from the worker's message, added to the batch and the run repeated, at most 24 times; the list is kept in `Library/UnityMicroEditor/pipeline-reloads.json`. With the references of the pipeline assets staged this did not occur in any run, so the retry itself is covered by a unit test only.
+- A shader graph's default material (an object of the graph asset beside the shader) is not delivered. A graph that refers to an asset its importer loads through a path rather than a GUID is not followed. Of a graph's sources only those the project holds are hashed; a file its custom functions include from `Assets` is one of them only when the graph names it by GUID.
+- The compute shader was compared with the Editor's object; a Player did not run one. Of the shader graphs a Player loaded one and rendered none.
+- Materials found for a shader are those of the project's sources; a material that only a package holds is not counted, as in the first route.
+- The scripts of the packages run in the worker with the state the worker has. A stripper that reads Editor state a worker lacks (the open scene, build profiles, XR settings) gets the worker's state. URP's reads of the quality levels, the graphics settings and the volume profiles were checked against the worker's report; nothing else was.
 
 ## UI and fonts
 
@@ -517,10 +579,10 @@ Unchanged UXML, USS and font assets are extracted from an existing Unity import 
 
 - The wire protocol, LMDB schema and DataStore layout were derived for one Unity version and are not a stable public API. A worker version mismatch is refused, and another engine version needs its own verification.
 - There is no proven general support for animation inside models, skinned meshes, complex model settings, texture formats of other platform families, custom AssetPostprocessors or every dependency of an arbitrary project. A project with an `AssetPostprocessor` for textures imports them in the Editor through that script; a standalone worker has no script assemblies and does not run it.
-- Video other than VP8 `.webm`, ScriptedImporter assets other than `.inputactions`, sprite atlases of the first format (`.spriteatlas`) and compute shaders are not imported; a scene that refers to a new one needs a catalog built by the Editor.
+- Video other than VP8 `.webm`, ScriptedImporter assets other than `.inputactions` and `.shadergraph`, and sprite atlases of the first format (`.spriteatlas`) are not imported; a scene that refers to a new one needs a catalog built by the Editor.
 - `.obj`, `.dae`, `.blend` and `.inputactions` need files of an Editor run of the project (the shader name table, the script assemblies); a project that was only ever prepared with a reused host and never opened in an Editor has none, and such an import is refused with that reason.
 - A model's generated material uses the built-in `Standard` shader and depends on the host holding it.
-- A shader is delivered only in the cases listed under [Shaders](#shaders); a shader of a project with a scriptable render pipeline and a compute shader still need a catalog built by the Editor.
+- A shader is delivered only in the cases listed under [Shaders](#shaders). In a project with a scriptable render pipeline a shader, shader graph or compute shader needs the script assemblies of an Editor run of the project, like the entries above, and is refused in the cases listed [there](#refused-in-a-pipeline-project); in a project without one, shader graphs and compute shaders still need a catalog built by the Editor.
 - The store reader handles inline and concatenated storage, limits one file to 64 MiB and refuses other layouts. The LMDB reader targets the observed Linux x64 format.
 - A worker is started per import batch. A persistent native service is not used.
 
@@ -535,7 +597,7 @@ The coordinator lives in `rust/src/native/`, with the wire format, LMDB reader a
 | `rust/src/registry.rs` | The owned SourceAssetDB and native source hashes |
 | `rust/src/protocol.rs` | Wire format, requests, responses and `ArtifactMetaInfo` |
 | `rust/src/native/datastore.rs` | DataStore namespace, readiness and shutdown |
-| `rust/src/lmdb.rs` | Reading a stopped LMDB without a native library |
+| `rust/src/lmdb.rs` | Reading a stopped LMDB without a native library; committing a revision to a live one |
 | `rust/src/native/artifact.rs` | Extracting stored files and checking content keys |
 | `rust/src/native/environment.rs` | The import environment fingerprint |
 | `rust/src/native/scripted.rs` | What an import takes from an Editor run: compiled importers and the shader name table |
@@ -543,6 +605,8 @@ The coordinator lives in `rust/src/native/`, with the wire format, LMDB reader a
 | `rust/src/runtimeartifact/scripted.rs`, `video.rs`, `atlas.rs` | The Player form of a scripted importer's objects, of a video clip, and of a sprite atlas and its sprites |
 | `rust/src/native/baked.rs`, `rust/src/playerbake/` | Assets baked from authored YAML without a worker |
 | `rust/src/playerbake/shader.rs`, `shader/`, `rust/src/native/shader_compiler.rs` | Shaders: variants, program tables, the client of `UnityShaderCompiler` |
+| `rust/src/native/player_objects.rs`, `build_settings.rs`, `tools/WorkerScripts/PlayerObjectImporter.cs` | Shaders of a pipeline project: what a build reads, the batch, the importer that calls the Editor's build code |
+| `rust/src/native/artifactdb.rs`, `rust/src/lmdb.rs` (`commit`) | The records of accepted imports in a live worker's ArtifactDB |
 
 `rust/src/runtimeartifact/` adapts imported serialized files for the Player.
 

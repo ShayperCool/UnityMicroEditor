@@ -23,10 +23,16 @@ use regex::Regex;
 use std::{borrow::Cow, sync::LazyLock};
 
 mod blob;
+mod check;
 mod link;
 mod object;
 mod variant;
 
+pub use check::verify_shader_programs;
+/// The class of a `ComputeShader` and the local file ID of the one object
+/// of a `.compute` asset.
+pub const COMPUTE_SHADER_CLASS: i32 = 72;
+pub const COMPUTE_SHADER_LOCAL_ID: i64 = 7_200_000;
 pub use link::{
     NoShaders, ShaderDependency, ShaderLinks, ShaderPass, ShaderPointer, ShaderSources,
     read_shader_links,
@@ -327,15 +333,20 @@ fn names_asset(text: &str, key: &str) -> bool {
     })
 }
 
+/// Whether the graphics or quality settings of a project name a scriptable
+/// render pipeline asset. The pipeline's Editor scripts then decide which
+/// variants a build keeps.
+pub fn names_render_pipeline(graphics: &str, quality: &str) -> bool {
+    names_asset(graphics, "m_CustomRenderPipeline") || names_asset(quality, "customRenderPipeline")
+}
+
 impl ShaderSettings {
     /// Reads the settings from the project's files: `ProjectSettings.asset`,
     /// `GraphicsSettings.asset`, `QualitySettings.asset` and the package
     /// manifest. A file the project lacks holds the engine's defaults. A
     /// setting whose effect on a build is not reproduced is refused.
     pub fn read(player: &str, graphics: &str, quality: &str, manifest: &str) -> Result<Self> {
-        if names_asset(graphics, "m_CustomRenderPipeline")
-            || names_asset(quality, "customRenderPipeline")
-        {
+        if names_render_pipeline(graphics, quality) {
             return Err(unsupported(
                 "a shader of a project with a scriptable render pipeline, whose keyword filters and pass kinds are not reproduced",
             ));
@@ -547,10 +558,8 @@ pub struct ShaderArtifact {
 /// Reads the `Shader` object out of the artifact the import worker leaves
 /// for a `.shader`.
 pub fn read_shader_artifact(file: &[u8]) -> Result<ShaderArtifact> {
-    let objects = serialized::read(file)?;
-    let mut shaders = objects
-        .iter()
-        .filter(|object| object.tree.class_id == SHADER_CLASS);
+    let objects = serialized::read_of_class(file, SHADER_CLASS)?;
+    let mut shaders = objects.iter();
     let (Some(shader), None) = (shaders.next(), shaders.next()) else {
         bail!("shader artifact does not hold exactly one Shader object");
     };

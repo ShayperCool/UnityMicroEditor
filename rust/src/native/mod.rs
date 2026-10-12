@@ -3,9 +3,11 @@
 //! validated native cache that feeds a `project::Session`.
 mod adopt;
 mod artifact;
+mod artifactdb;
 mod atlas;
 mod baked;
 mod batch;
+mod build_settings;
 mod builtin_shader;
 mod context;
 mod datastore;
@@ -14,6 +16,7 @@ mod import;
 mod importer;
 mod inspector;
 mod mesh_cpu;
+mod player_objects;
 mod probe;
 mod scripted;
 mod shader_cache;
@@ -47,6 +50,12 @@ pub use importer::{
 pub use inspector::{
     InspectedMaterial, InspectionOptions, MaterialInspection, VERIFIED_INSPECTORS,
     inspect_material_variants, project_asset_paths, run_material_inspect_cli,
+};
+pub use player_objects::{
+    Build as PlayerBuild, ExternalObject as PlayerExternalObject, Plan as PlayerBuildPlan,
+    PlayerObjects, Report as PlayerObjectReport, Request as PlayerObjectRequest,
+    importer_identity as player_importer_identity, open_sources as open_build_sources,
+    plan_source as plan_player_build, write_player_objects,
 };
 pub use probe::{
     FrameEvidence, ImportEvidence, NativeImportJob, ProbeOptions, ProbeReport, capture_frame,

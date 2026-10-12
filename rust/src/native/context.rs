@@ -466,6 +466,46 @@ pub fn create_scripted_import_context(
         assets,
         scripts,
         extras,
+        None,
+        &mut result,
+    );
+    (result, outcome)
+}
+
+/// What a build of Player objects adds to an import context.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BuildFiles {
+    /// Assets the coordinator makes itself, which no source of the project
+    /// stands for: the data and the `.meta` of each, by logical path. They
+    /// are listed among the assets of the batch.
+    pub generated: BTreeMap<String, (Vec<u8>, Vec<u8>)>,
+    /// Files an importer reads from disk without their being assets of the
+    /// batch, by logical path: the templates a shader graph is written
+    /// out with.
+    pub files: Vec<String>,
+}
+
+/// The same for a build of Player objects: the context also holds the
+/// graphics and quality settings, whose pipeline assets a build reads, and
+/// an asset of a package is taken from where the compilation found the
+/// package.
+pub fn create_build_import_context(
+    ctx: &Context,
+    source_project: &str,
+    output: &str,
+    assets: &[String],
+    scripts: &ScriptEnvironment,
+    build: &BuildFiles,
+) -> (ProjectImportContext, Result<()>) {
+    let mut result = ProjectImportContext::default();
+    let outcome = create(
+        ctx,
+        source_project,
+        output,
+        assets,
+        Some(scripts),
+        &ContextExtras::default(),
+        Some(build),
         &mut result,
     );
     (result, outcome)
@@ -484,6 +524,7 @@ fn resolve_script_source(library: &str, relative: &str) -> Result<String> {
     Ok(canonical)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create(
     ctx: &Context,
     source_project: &str,
@@ -491,6 +532,7 @@ fn create(
     assets: &[String],
     scripts: Option<&ScriptEnvironment>,
     extras: &ContextExtras,
+    build: Option<&BuildFiles>,
     result: &mut ProjectImportContext,
 ) -> Result<()> {
     // Where the context holds a logical path, relative to its project.
@@ -510,6 +552,16 @@ fn create(
         bail!("project import output already exists");
     }
     // Validate source identities before creating output or native processes.
+    // A build takes an asset of a package from where the compilation found
+    // the package; anything else comes from the project.
+    let resolve = |logical: &str| -> Result<String> {
+        match scripts.filter(|_| build.is_some()) {
+            Some(environment) if environment.physical(logical) != logical => {
+                resolve_script_source(&environment.library, &environment.physical(logical))
+            }
+            _ => resolve_project_import_source(&source_project, logical),
+        }
+    };
     let mut selected = Vec::new();
     let mut source_files: BTreeMap<String, String> = BTreeMap::new();
     let mut seen = HashSet::new();
@@ -522,15 +574,27 @@ fn create(
         if !seen.insert(super::support::rune_lower(asset)) {
             bail!("source asset repeated or has a case collision: {asset}");
         }
+        if let Some((_, meta)) = build.and_then(|build| build.generated.get(asset)) {
+            let guid = meta_guid(meta).map_err(|e| wrap(asset, e))?;
+            if let Some(previous) = guid_paths.get(&guid) {
+                bail!("source GUID is shared by {previous} and {asset}");
+            }
+            guid_paths.insert(guid.clone(), asset.clone());
+            selected.push(ProjectImportSource {
+                path: asset.clone(),
+                guid,
+            });
+            continue;
+        }
         let meta_path = format!("{asset}.meta");
         if !extras.files.contains_key(&place(asset)) {
-            let filename = resolve_project_import_source(&source_project, asset)?;
+            let filename = resolve(asset)?;
             source_files.insert(place(asset), filename);
         }
         let meta = match extras.files.get(&place(&meta_path)) {
             Some(meta) => meta.clone(),
             None => {
-                let meta_name = resolve_project_import_source(&source_project, &meta_path)?;
+                let meta_name = resolve(&meta_path)?;
                 if !sysutil::stat(&meta_name).is_ok_and(|info| info.size <= 16 * 1024 * 1024) {
                     bail!("source .meta exceeds import bounds");
                 }
@@ -550,7 +614,7 @@ fn create(
         });
         let mut folder = logical_dir(asset);
         while folder != "Assets" && folder != "Packages" && folder != "." {
-            match resolve_project_import_source(&source_project, &format!("{folder}.meta")) {
+            match resolve(&format!("{folder}.meta")) {
                 Ok(folder_meta) => {
                     source_files.insert(place(&format!("{folder}.meta")), folder_meta);
                 }
@@ -566,7 +630,11 @@ fn create(
     // The importer reads the files a shader includes: `#include_with_pragmas`
     // declares keywords, and the hash of the includes is part of the result.
     for asset in assets {
-        if !asset.starts_with("Assets/") || !asset.to_ascii_lowercase().ends_with(".shader") {
+        // A build lists the included files among its assets.
+        if build.is_some()
+            || !asset.starts_with("Assets/")
+            || !asset.to_ascii_lowercase().ends_with(".shader")
+        {
             continue;
         }
         let (included, _) =
@@ -580,6 +648,14 @@ fn create(
                 source_files.insert(meta, meta_name);
             }
             source_files.insert(file.path, file.source_path);
+        }
+    }
+    for file in build.iter().flat_map(|build| &build.files) {
+        if project_registry_path(file).is_err() || file.ends_with(".meta") {
+            bail!("invalid build file {file}");
+        }
+        if let std::collections::btree_map::Entry::Vacant(entry) = source_files.entry(place(file)) {
+            entry.insert(resolve(file)?);
         }
     }
     if let Some(environment) = scripts {
@@ -609,17 +685,17 @@ fn create(
                 folder = logical_dir(folder);
             }
         }
-        for assembly in &environment.assemblies {
-            let name = format!("Library/ScriptAssemblies/{assembly}.dll");
-            let filename = resolve_script_source(&environment.library, &name)?;
-            source_files.insert(name, filename);
-        }
         for plugin in &environment.plugins {
             let filename = resolve_script_source(&environment.library, plugin)?;
             source_files.insert(
                 format!("Library/ScriptAssemblies/{}", sysutil::base(plugin)),
                 filename,
             );
+        }
+        for assembly in &environment.assemblies {
+            let name = format!("Library/ScriptAssemblies/{assembly}.dll");
+            let filename = resolve_script_source(&environment.library, &name)?;
+            source_files.insert(name, filename);
         }
     }
     let version_path =
@@ -648,7 +724,14 @@ fn create(
         "DynamicsManager.asset",
         "TagManager.asset",
         "TimeManager.asset",
+        "GraphicsSettings.asset",
+        "QualitySettings.asset",
     ] {
+        // Only a build reads the pipeline assets these two name.
+        if (settings.starts_with("Graphics") || settings.starts_with("Quality")) && build.is_none()
+        {
+            continue;
+        }
         let logical = format!("ProjectSettings/{settings}");
         match resolve_project_import_source(&source_project, &logical) {
             Ok(filename) => {
@@ -704,6 +787,22 @@ fn create(
             .unwrap()
             .insert(filename.clone(), hash);
         result.source_bytes += size;
+    }
+    for (logical, (data, meta)) in build.iter().flat_map(|build| &build.generated) {
+        if project_registry_path(logical).is_err() || logical.ends_with(".meta") {
+            bail!("invalid generated asset {logical}");
+        }
+        let filename = sysutil::join(&[&project, logical]);
+        mkdir_all(&sysutil::dir(&filename), 0o700)?;
+        write_file(&filename, data, 0o600)?;
+        write_file(&format!("{filename}.meta"), meta, 0o600)?;
+    }
+    // The database names every package root, and the worker looks each up.
+    for directory in scripts
+        .iter()
+        .flat_map(|environment| environment.roots.values())
+    {
+        mkdir_all(&sysutil::join(&[&project, directory]), 0o700)?;
     }
     write_file(
         &sysutil::join(&[&project, "Packages", "manifest.json"]),

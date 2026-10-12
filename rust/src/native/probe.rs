@@ -139,6 +139,12 @@ pub struct ProbeOptions {
     pub registry: Option<registry::Report>,
     pub jobs: Vec<NativeImportJob>,
     pub project_context: Option<ProjectImportContext>,
+    /// Records every accepted import in the context's ArtifactDB, where the
+    /// worker looks up what a later import loads.
+    pub artifact_database: bool,
+    /// The worker's job threads, which also bound how many shader compilers
+    /// it runs; two when zero.
+    pub job_workers: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -516,7 +522,7 @@ impl Probe<'_> {
                 "-parentPid",
                 &std::process::id().to_string(),
                 "-job-worker-count",
-                "2",
+                &self.opts.job_workers.max(2).to_string(),
                 "-background-job-worker-count",
                 "2",
                 "-nographics",
@@ -692,6 +698,18 @@ impl Probe<'_> {
                 bail!("artifact metadata address differs from request");
             }
             report.imports.last_mut().unwrap().metadata = metadata;
+            // The worker finds what a later import loads in the ArtifactDB.
+            // A build records each result while its worker lives; what a
+            // second worker reads is committed once the first has stopped.
+            if self.opts.artifact_database {
+                let committing = Instant::now();
+                super::artifactdb::publish(self.project, &response)?;
+                report
+                    .stages
+                    .entry("artifactDatabase".into())
+                    .or_default()
+                    .0 += committing.elapsed().as_secs_f64();
+            }
             records.push(ImportRecord {
                 address,
                 result: frame.payload[56..72].try_into()?,

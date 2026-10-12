@@ -413,6 +413,10 @@ impl Inner {
         // Packed by the importer; its textures are sources of their own.
         let atlas = profile == ".spriteatlasv2";
         let shader = profile == ".shader";
+        // A shader graph is delivered as the shader a build makes of it,
+        // under the local ID the graph's importer gives that shader.
+        let graph = profile == ".shadergraph";
+        let compute = profile == ".compute";
         // Baked by this tool from the authored source; see `playerbake`.
         let clip = profile == ".anim";
         let controller = profile == ".controller" || profile == ".overridecontroller";
@@ -452,9 +456,10 @@ impl Inner {
             let source = logical.strip_suffix(".meta").unwrap_or(logical);
             let guarded = match profile.as_str() {
                 ".controller" => lexpath::equal_fold(lexpath::ext(source), ".mask"),
-                // A baked shader holds the files it includes and the
-                // keywords of the materials that use it.
-                ".shader" => source == logical,
+                // A baked shader holds the files it includes, the materials
+                // that use it and, in a project with a scriptable render
+                // pipeline, the settings assets a build reads.
+                ".shader" | ".shadergraph" | ".compute" => true,
                 // A packed atlas holds the sprites of its textures, and a
                 // texture is bound to the atlas that packs it.
                 ".spriteatlasv2" => crate::runtimeartifact::texture_profile(
@@ -500,6 +505,8 @@ impl Inner {
             && !atlas
             && !ui
             && !shader
+            && !graph
+            && !compute
             && !clip
             && !controller
             && !mask
@@ -609,6 +616,8 @@ impl Inner {
                 }
             } else if shader {
                 expected.insert("4800000".into(), "UnityEngine.Shader".into());
+            } else if compute {
+                expected.insert("7200000".into(), "UnityEngine.ComputeShader".into());
             } else if ui {
                 validate_native_ui_objects(&profile, r)?;
                 for value in r.content.objects.iter() {
@@ -616,7 +625,7 @@ impl Inner {
                 }
             } else if video {
                 expected.insert("32900000".into(), "UnityEngine.Video.VideoClip".into());
-            } else if clip || controller || mask || mixer || scripted {
+            } else if clip || controller || mask || mixer || scripted || graph {
                 for value in r.content.objects.iter() {
                     expected.insert(value.file_id.clone(), value.type_name.clone());
                 }
@@ -718,6 +727,33 @@ impl Inner {
             {
                 bail!(
                     "standalone Shader replacement must contain only Shader 4800000 without native dependencies"
+                );
+            }
+        } else if graph {
+            if objects.len() != 1
+                || objects[0].type_name != "UnityEngine.Shader"
+                || !r.model_graph.is_empty()
+                || !r.model_graph_sha256.is_empty()
+                || !r.content.resources.is_empty()
+                || r.compiled_shader_snapshot.is_some()
+                || r.content
+                    .dependencies
+                    .iter()
+                    .any(|dependency| dependency.global)
+            {
+                bail!("{path} replacement must contain only the Shader of the graph");
+            }
+        } else if compute {
+            if objects.len() != 1
+                || objects[0].file_id != "7200000"
+                || objects[0].type_name != "UnityEngine.ComputeShader"
+                || !r.model_graph.is_empty()
+                || !r.model_graph_sha256.is_empty()
+                || !r.content.resources.is_empty()
+                || !r.content.dependencies.is_empty()
+            {
+                bail!(
+                    "{path} replacement must contain only ComputeShader 7200000 without native dependencies"
                 );
             }
         } else if clip {

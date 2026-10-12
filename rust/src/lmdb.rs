@@ -1,4 +1,5 @@
-//! Offline Linux x64 LMDB v1 images. Native LMDB owns live transactions.
+//! Offline Linux x64 LMDB v1 images, and whole-database revisions appended to
+//! an environment whose readers are live. Native LMDB owns everything else.
 use crate::protocol::{put_u16, put_u32, put_u64, u32_at, u64_at};
 use anyhow::{Context, Result, bail, ensure};
 use std::collections::{BTreeMap, HashSet};
@@ -21,6 +22,11 @@ pub struct Image<'a> {
     data: &'a [u8],
     last_page: u64,
     root: u64,
+    /// The newest metadata page and its transaction number.
+    meta: usize,
+    transaction: u64,
+    /// The lowest and highest page visited so far.
+    extent: std::cell::Cell<Option<(u64, u64)>>,
 }
 impl<'a> Image<'a> {
     pub fn open(data: &'a [u8]) -> Result<Self> {
@@ -30,7 +36,7 @@ impl<'a> Image<'a> {
                 && data.len() <= MAX_FILE_BYTES,
             "LMDB image size is outside probe bounds"
         );
-        let mut chosen: Option<(&[u8], u64)> = None;
+        let mut chosen: Option<(&[u8], u64, usize)> = None;
         for i in 0..2 {
             let page = &data[i * PAGE_SIZE..(i + 1) * PAGE_SIZE];
             if u64_at(page, 0)? != i as u64
@@ -42,11 +48,12 @@ impl<'a> Image<'a> {
                 continue;
             }
             let tx = u64_at(page, 144)?;
-            if chosen.is_none_or(|(_, current)| tx > current) {
-                chosen = Some((page, tx));
+            if chosen.is_none_or(|(_, current, _)| tx > current) {
+                chosen = Some((page, tx, i));
             }
         }
-        let (page, _) = chosen.context("no valid Linux x64 LMDB v1 metadata page")?;
+        let (page, transaction, meta) =
+            chosen.context("no valid Linux x64 LMDB v1 metadata page")?;
         let last_page = u64_at(page, 136)?;
         ensure!(
             last_page < (data.len() / PAGE_SIZE) as u64,
@@ -56,6 +63,9 @@ impl<'a> Image<'a> {
             data,
             last_page,
             root: u64_at(page, 128)?,
+            meta,
+            transaction,
+            extent: std::cell::Cell::new(None),
         })
     }
     pub fn table(&self, name: &str) -> Result<Vec<Record>> {
@@ -84,6 +94,13 @@ impl<'a> Image<'a> {
         }
         Ok(tables)
     }
+    fn touch(&self, first: u64, count: u64) {
+        let last = first + count - 1;
+        self.extent.set(Some(match self.extent.get() {
+            Some((low, high)) => (low.min(first), high.max(last)),
+            None => (first, last),
+        }));
+    }
     fn records(&self, root: u64) -> Result<Vec<Record>> {
         let mut output = Vec::new();
         if root != u64::MAX {
@@ -102,6 +119,7 @@ impl<'a> Image<'a> {
             depth <= 32 && number >= 2 && number <= self.last_page && seen.insert(number),
             "LMDB tree contains an invalid page or cycle"
         );
+        self.touch(number, 1);
         let page = &self.data[number as usize * PAGE_SIZE..(number as usize + 1) * PAGE_SIZE];
         ensure!(
             u64_at(page, 0)? == number,
@@ -158,6 +176,7 @@ impl<'a> Image<'a> {
                         && size as u64 <= pages * PAGE_SIZE as u64 - 16,
                     "LMDB overflow record exceeds allocated pages"
                 );
+                self.touch(overflow, pages);
                 &self.data[start + 16..start + 16 + size]
             } else {
                 node.get(8 + key_size..8 + key_size + size)
@@ -202,6 +221,8 @@ struct Child {
     key: Vec<u8>,
 }
 struct Builder {
+    /// The number of the first page in `pages`.
+    base: u64,
     pages: Vec<Vec<u8>>,
 }
 fn node(key: &[u8], value: &[u8], flags: u16, size: u32) -> Vec<u8> {
@@ -231,23 +252,27 @@ fn pack(nodes: &[Vec<u8>], flags: u16) -> Result<Vec<u8>> {
     Ok(page)
 }
 impl Builder {
+    /// The number of the page appended next.
+    fn next(&self) -> u64 {
+        self.base + self.pages.len() as u64
+    }
     fn append(&mut self, mut page: Vec<u8>) -> Result<u64> {
+        let n = self.next();
         ensure!(
-            page.len() == PAGE_SIZE && (self.pages.len() + 1) * PAGE_SIZE <= MAX_FILE_BYTES,
+            page.len() == PAGE_SIZE && (n as usize + 1) * PAGE_SIZE <= MAX_FILE_BYTES,
             "LMDB image exceeds bounded size"
         );
-        let n = self.pages.len() as u64;
         put_u64(&mut page, 0, n);
         self.pages.push(page);
         Ok(n)
     }
     fn overflow(&mut self, value: &[u8]) -> Result<(u64, u64)> {
         let count = (16 + value.len()).div_ceil(PAGE_SIZE);
+        let number = self.next();
         ensure!(
-            (self.pages.len() + count) * PAGE_SIZE <= MAX_FILE_BYTES,
+            (number as usize + count) * PAGE_SIZE <= MAX_FILE_BYTES,
             "LMDB overflow exceeds bounded size"
         );
-        let number = self.pages.len() as u64;
         let mut data = vec![0; count * PAGE_SIZE];
         put_u64(&mut data, 0, number);
         put_u16(&mut data, 10, 4);
@@ -374,29 +399,36 @@ impl Builder {
         Ok(tree)
     }
 }
+impl Builder {
+    /// Appends the trees of all tables and the main tree naming them.
+    fn tables(&mut self, tables: &Tables) -> Result<Tree> {
+        ensure!(
+            !tables.is_empty() && tables.len() <= 64,
+            "LMDB table count is outside bounds"
+        );
+        let mut descriptors = Vec::new();
+        for (name, records) in tables {
+            ensure!(
+                !name.is_empty() && !name.contains('\0'),
+                "LMDB table name is invalid"
+            );
+            let tree = self
+                .tree(records, false)
+                .with_context(|| format!("LMDB table {name}"))?;
+            descriptors.push(Record {
+                key: name.as_bytes().to_vec(),
+                value: tree.descriptor(),
+            });
+        }
+        self.tree(&descriptors, true)
+    }
+}
 pub fn build(tables: &Tables) -> Result<Vec<u8>> {
-    ensure!(
-        !tables.is_empty() && tables.len() <= 64,
-        "LMDB table count is outside bounds"
-    );
     let mut builder = Builder {
+        base: 0,
         pages: vec![vec![0; PAGE_SIZE], vec![0; PAGE_SIZE]],
     };
-    let mut descriptors = Vec::new();
-    for (name, records) in tables {
-        ensure!(
-            !name.is_empty() && !name.contains('\0'),
-            "LMDB table name is invalid"
-        );
-        let tree = builder
-            .tree(records, false)
-            .with_context(|| format!("LMDB table {name}"))?;
-        descriptors.push(Record {
-            key: name.as_bytes().to_vec(),
-            value: tree.descriptor(),
-        });
-    }
-    let root = builder.tree(&descriptors, true)?;
+    let root = builder.tables(tables)?;
     let last = builder.pages.len() as u64 - 1;
     for i in 0..2 {
         let meta = &mut builder.pages[i];
@@ -418,6 +450,107 @@ pub fn build(tables: &Tables) -> Result<Vec<u8>> {
         put_u64(meta, 144, 1 - i as u64);
     }
     Ok(builder.pages.concat())
+}
+/// Whether no reader of the environment holds a transaction, by the reader
+/// table of its lock file. Without a lock file nobody has it open.
+fn readers_idle(lock: &str) -> Result<bool> {
+    let data = match std::fs::read(lock) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => bail!(crate::sysutil::Error::os("read", lock, &error)),
+    };
+    ensure!(
+        data.len() >= 128 && u32_at(&data, 0)? == 0xbeefc0de,
+        "LMDB lock file is not recognized"
+    );
+    let count = (u32_at(&data, 56)? as usize).min((data.len() - 128) / 64);
+    for slot in data[128..128 + count * 64].as_chunks::<64>().0 {
+        if u32_at(slot, 8)? != 0 && u64_at(slot, 0)? != u64::MAX {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+/// Publishes a new revision of a live environment that has no other writer.
+/// All tables are rewritten into pages the current revision does not use,
+/// then the older metadata page and the transaction number of the lock file
+/// are switched to them, in the order native LMDB commits. A reader that
+/// begins meanwhile sees the current revision, which stays intact; pages of
+/// older revisions are reused only while no reader holds a transaction, so
+/// the file stays within a few sizes of the database. Every revision costs
+/// a write of the whole database.
+pub fn commit(path: &str, update: impl FnOnce(&mut Tables) -> Result<()>) -> Result<u64> {
+    use std::os::unix::fs::FileExt;
+    let os = |operation: &str, path: &str, error: &std::io::Error| {
+        anyhow::anyhow!(crate::sysutil::Error::os(operation, path, error))
+    };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| os("open", path, &e))?;
+    let size = file.metadata().map_err(|e| os("stat", path, &e))?.len();
+    ensure!(
+        size <= MAX_FILE_BYTES as u64,
+        "LMDB input is outside probe bounds"
+    );
+    let mut data = vec![0; size as usize];
+    file.read_exact_at(&mut data, 0)
+        .map_err(|e| os("read", path, &e))?;
+    let image = Image::open(&data)?;
+    let mut tables = image.tables()?;
+    update(&mut tables)?;
+    let lock = format!("{path}-lock");
+    let build = |base: u64| -> Result<(Builder, Tree)> {
+        let mut builder = Builder {
+            base,
+            pages: Vec::new(),
+        };
+        let root = builder.tables(&tables)?;
+        Ok((builder, root))
+    };
+    // The page count does not depend on where the pages go.
+    let (mut builder, mut root) = build(2)?;
+    let count = builder.pages.len() as u64;
+    let base = match (readers_idle(&lock)?, image.extent.get()) {
+        (true, Some((low, _))) if 2 + count <= low => 2,
+        (true, Some((_, high))) => high + 1,
+        (true, None) => 2,
+        (false, _) => (image.last_page + 1).max(size / PAGE_SIZE as u64),
+    };
+    if base != builder.base {
+        (builder, root) = build(base)?;
+    }
+    let (last, transaction) = (builder.next() - 1, image.transaction + 1);
+    let slot = (transaction & 1) as usize;
+    let mut meta = data[image.meta * PAGE_SIZE..(image.meta + 1) * PAGE_SIZE].to_vec();
+    put_u64(&mut meta, 0, slot as u64);
+    // A reader whose map is smaller than the pages in use reopens it with
+    // the size recorded here.
+    let mut map = u64_at(&meta, 32)?.max(PAGE_SIZE as u64);
+    while map < (last + 1) * PAGE_SIZE as u64 {
+        map *= 2;
+    }
+    put_u64(&mut meta, 32, map);
+    // No free list is kept: the next revision finds the unused pages itself.
+    meta[46..80].fill(0);
+    put_u64(&mut meta, 80, u64::MAX);
+    meta[88..136].copy_from_slice(&root.descriptor());
+    put_u64(&mut meta, 136, last);
+    put_u64(&mut meta, 144, transaction);
+    file.write_all_at(&builder.pages.concat(), builder.base * PAGE_SIZE as u64)
+        .map_err(|e| os("write", path, &e))?;
+    file.write_all_at(&meta, (slot * PAGE_SIZE) as u64)
+        .map_err(|e| os("write", path, &e))?;
+    // Readers take the newest transaction number from the lock file.
+    match std::fs::OpenOptions::new().write(true).open(&lock) {
+        Ok(file) => file
+            .write_all_at(&transaction.to_le_bytes(), 48)
+            .map_err(|e| os("write", &lock, &e))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(os("open", &lock, &error)),
+    }
+    Ok(transaction)
 }
 /// One named table of a bounded regular file, read without
 /// opening LMDB locks or changing any database files.
