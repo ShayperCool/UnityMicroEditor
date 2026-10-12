@@ -636,7 +636,7 @@ impl NativeProjectImporter {
             bail!("baked sources refer to each other too deeply: {logical}");
         }
         let started = Instant::now();
-        let source = resolve_project_import_source(&self.opts.project, logical)?;
+        let source = self.baked_source(logical)?;
         let data = read_file(&source)?;
         let meta = read_file(&format!("{source}.meta"))?;
         let guid = meta_guid(&meta)?;
@@ -1153,6 +1153,59 @@ impl NativeProjectImporter {
                     Event::new("native-bake-refused")
                         .with("path", &logical)
                         .with("reason", &format!("{error:#}"))
+                        .emit();
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+}
+
+impl NativeProjectImporter {
+    /// Where a baked source lies. A package lies where the Editor
+    /// compilation of the project says, which need not be the project's own
+    /// `Library`.
+    pub(super) fn baked_source(&self, logical: &str) -> Result<String> {
+        if !logical.starts_with("Packages/") {
+            return resolve_project_import_source(&self.opts.project, logical);
+        }
+        open_sources(&self.opts.project)?
+            .physical(logical)
+            .ok_or_else(|| {
+                Unsupported(format!(
+                    "{logical}, which lies in a package outside the project"
+                ))
+                .into()
+            })
+    }
+
+    /// Builds the shaders of packages that materials of the scene name, in a
+    /// project with a scriptable render pipeline. The prepared content holds
+    /// such a shader as a build without materials writes it, with the first
+    /// combination of every `shader_feature` alone, so a material that
+    /// enables a keyword would be drawn with another variant than in a
+    /// build. Once built, a shader is kept current by `refresh_shaders`.
+    pub(crate) fn build_package_shaders(&mut self, ctx: &Context) -> Result<()> {
+        let shaders = self.session.material_package_shaders();
+        if shaders.is_empty() || !self.pipeline_project()? {
+            return Ok(());
+        }
+        for (guid, logical) in shaders {
+            if guid.is_empty() || self.entries.contains_key(&guid) {
+                continue;
+            }
+            match self.publish_baked(ctx, &logical, 0) {
+                Ok(_) => {}
+                // The prepared shader stays; the event says what it lacks.
+                Err(error) if error.chain().any(|cause| cause.is::<Unsupported>()) => {
+                    Event::new("native-bake-refused")
+                        .with("path", &logical)
+                        .with("reason", &format!("{error:#}"))
+                        .with(
+                            "kept",
+                            "the shader of the prepared content, built without the project's materials",
+                        )
                         .emit();
                 }
                 Err(error) => return Err(error),

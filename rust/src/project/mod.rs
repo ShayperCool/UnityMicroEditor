@@ -37,6 +37,7 @@ pub use builtin_shader::BUILTIN_RESOURCE_GUID;
 pub use cache_paths::is_owned_cache_path;
 pub use discovery::ControllerMask;
 pub use expand::{apply_authored_override, resolve_authored_graph};
+pub(crate) use material::editor_version_stamp;
 pub use native_model::native_model_graph_sha256;
 pub use session::{NeedsImportError, Options, Prepared, Session, manifest_json};
 pub(crate) use shader_sources::shader_without_comments;
