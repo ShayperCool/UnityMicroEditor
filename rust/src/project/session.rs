@@ -232,6 +232,8 @@ pub(crate) struct Inner {
     pub changed_clip_models: Vec<String>,
     /// The avatar masks the controllers of the last walk refer to.
     pub controller_masks: Vec<String>,
+    /// The shaders of packages that materials of the last walk name.
+    pub package_shaders: Vec<String>,
     /// Catalog ScriptableObject sources edited since the catalog was built,
     /// each with whether it is loaded from its authored text instead.
     pub authored_scriptables: HashMap<String, bool>,
@@ -345,6 +347,7 @@ impl Inner {
             derived_native: BTreeMap::new(),
             changed_clip_models: Vec::new(),
             controller_masks: Vec::new(),
+            package_shaders: Vec::new(),
             authored_scriptables: HashMap::new(),
             extra_assets: Vec::new(),
             ignored_diagnostics: Vec::new(),
