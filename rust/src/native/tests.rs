@@ -227,7 +227,7 @@ fn worker_environment_preserves_source_graphics_settings_and_native_dependencies
     let environment = parse_worker_environment(WORKER_SETTINGS.as_bytes()).unwrap();
     assert!(
         environment.color_space == 1
-            && environment.graphics_api_mask == 2228224
+            && environment.graphics_api_mask == 1 << 17
             && environment.shader_precision_model == 0
     );
     let (initialize, prepare) = (environment.message(16), environment.message(17));
@@ -238,7 +238,7 @@ fn worker_environment_preserves_source_graphics_settings_and_native_dependencies
             && word(8) == 2
             && initialize[24] == 1
             && word(28) == 1
-            && word(32) == 2228224
+            && word(32) == 1 << 17
             && word(36) == 1
     );
     let (dependencies, _) = blob_array(&initialize, 44, 24).unwrap();
@@ -333,9 +333,12 @@ fn worker_environment_rejects_ambiguous_or_unproven_settings() {
     assert!(read_worker_environment(&project.1).is_err());
     write(&version, format!("m_EditorVersion: {ENGINE_VERSION}\n"));
     let environment = read_worker_environment(&project.1).unwrap();
+    // The hash is of the settings as a context holds them.
     assert_eq!(
         environment.settings_sha256,
-        sha256(WORKER_SETTINGS.as_bytes())
+        sha256(&super::environment::context_player_settings(
+            WORKER_SETTINGS.as_bytes()
+        ))
     );
 }
 
@@ -2156,4 +2159,41 @@ fn live_commit_publishes_revisions_without_touching_the_current_one() {
         data[..size][2 * lmdb::PAGE_SIZE..],
         previous[2 * lmdb::PAGE_SIZE..]
     );
+}
+
+#[test]
+fn context_settings_give_an_automatic_linux_list_the_api_of_the_player() {
+    use super::environment::context_player_settings;
+    let held =
+        |source: &str| String::from_utf8(context_player_settings(source.as_bytes())).unwrap();
+    let entry =
+        "  - m_BuildTarget: LinuxStandaloneSupport\n    m_APIs: 11000000i\n    m_Automatic: 0\n";
+    // No list, a list of other targets, and an automatic Linux entry.
+    assert_eq!(
+        held("PlayerSettings:\n  m_BuildTargetGraphicsAPIs: []\n  next: 1\n"),
+        format!("PlayerSettings:\n  m_BuildTargetGraphicsAPIs:\n{entry}  next: 1\n")
+    );
+    let others = "  m_BuildTargetGraphicsAPIs:\n  - m_BuildTarget: WebGLSupport\n    m_APIs: 1c000000i\n    m_Automatic: 0\n";
+    assert_eq!(
+        held(&format!("PlayerSettings:\n{others}  next: 1\n")),
+        format!("PlayerSettings:\n{others}{entry}  next: 1\n")
+    );
+    assert_eq!(
+        held(&format!(
+            "PlayerSettings:\n{others}  - m_BuildTarget: LinuxStandaloneSupport\n    m_APIs: 1500000011000000i\n    m_Automatic: 1\n  next: 1\n"
+        )),
+        format!("PlayerSettings:\n{others}{entry}  next: 1\n")
+    );
+    // A list of the project's own, and a file without the key, stay.
+    for kept in [
+        format!(
+            "PlayerSettings:\n{others}  - m_BuildTarget: LinuxStandaloneSupport\n    m_APIs: 15000000i\n    m_Automatic: 0\n  next: 1\n"
+        ),
+        "PlayerSettings:\n  next: 1\n".to_string(),
+    ] {
+        assert_eq!(held(&kept), kept);
+    }
+    // What the context holds is read as OpenGLCore alone.
+    let environment = parse_worker_environment(held(WORKER_SETTINGS).as_bytes()).unwrap();
+    assert_eq!(environment.graphics_api_mask, 1 << 17);
 }

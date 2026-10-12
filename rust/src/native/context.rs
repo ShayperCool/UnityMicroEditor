@@ -780,8 +780,17 @@ fn create(
         if extras.files.contains_key(logical) {
             continue;
         }
-        let (hash, size) =
-            copy_project_import_source(ctx, filename, &sysutil::join(&[&project, logical]))?;
+        let destination = sysutil::join(&[&project, logical]);
+        let (hash, size) = copy_project_import_source(ctx, filename, &destination)?;
+        if logical == "ProjectSettings/ProjectSettings.asset" {
+            // The hash stays that of the source; the context holds the
+            // settings with the graphics API of the Player.
+            let copied = read_file(&destination)?;
+            let held = super::environment::context_player_settings(&copied);
+            if held != copied {
+                write_file(&destination, &held, 0o600)?;
+            }
+        }
         result
             .source_hashes
             .as_mut()

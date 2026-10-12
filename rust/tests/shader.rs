@@ -492,7 +492,7 @@ fn unreproduced_shader_settings_are_refused() {
     }
     assert_eq!(
         playerbake::shader_platforms("  m_BuildTargetGraphicsAPIs: []\n").unwrap(),
-        [15, 18]
+        [15]
     );
 }
 

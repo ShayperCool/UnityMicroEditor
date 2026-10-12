@@ -1,6 +1,8 @@
 //! The pinned 6000.6.3f1 Linux standalone importer profile. Automatic Linux
-//! graphics APIs were observed as OpenGLCore 17 and Vulkan 21. Project values
-//! are read from exact copied source, never from an Editor cache.
+//! graphics APIs were observed as OpenGLCore 17 and Vulkan 21; of them a
+//! project that lists none is imported for OpenGLCore alone, the API the
+//! Player runs on. Project values are read from exact copied source, never
+//! from an Editor cache.
 use super::support::{nul, read_file, stat, text, wrap};
 use crate::{
     ENGINE_VERSION,
@@ -104,7 +106,9 @@ pub fn read_worker_environment(project: &str) -> Result<WorkerEnvironment> {
     if !info.is_regular() || info.size > 1 << 20 {
         bail!("native worker PlayerSettings is not bounded source text");
     }
-    let data = read_file(&filename)?;
+    // The settings as a context holds them, so that the project and a
+    // context made from it name one environment.
+    let data = context_player_settings(&read_file(&filename)?);
     let version = read_file(&sysutil::join(&[
         project,
         "ProjectSettings/ProjectVersion.txt",
@@ -227,7 +231,7 @@ pub fn parse_worker_environment(data: &[u8]) -> Result<WorkerEnvironment> {
         build_target: 24,
         subtarget: 2,
         color_space: color,
-        graphics_api_mask: 1 << 17 | 1 << 21,
+        graphics_api_mask: 1 << 17,
         shader_precision_model: precision,
         bc7_compressor: BC7_ISPC,
         ..Default::default()
@@ -323,6 +327,76 @@ pub fn parse_worker_environment(data: &[u8]) -> Result<WorkerEnvironment> {
         }
     }
     Ok(environment)
+}
+
+/// `ProjectSettings.asset` as an import context holds it. A build inside a
+/// worker compiles shaders for the APIs the worker's own Player settings
+/// list, and automatic Linux APIs are OpenGLCore and Vulkan. The Player
+/// runs on OpenGLCore, so a project that leaves the choice to the engine is
+/// given that one API; a list of the project's own stays as written.
+pub(crate) fn context_player_settings(data: &[u8]) -> Vec<u8> {
+    const KEY: &str = "m_BuildTargetGraphicsAPIs:";
+    let Ok(text) = std::str::from_utf8(data) else {
+        return data.to_vec();
+    };
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let depth = |line: &str| line.len() - line.trim_start().len();
+    let ending = |line: &str| if line.ends_with("\r\n") { "\r\n" } else { "\n" };
+    let Some(key) = lines.iter().position(|line| {
+        line.trim()
+            .strip_prefix(KEY)
+            .is_some_and(|rest| matches!(rest.trim(), "" | "[]"))
+    }) else {
+        return data.to_vec();
+    };
+    let (indent, end) = (depth(lines[key]), ending(lines[key]));
+    let pad = " ".repeat(indent);
+    let entry = format!(
+        "{pad}- m_BuildTarget: LinuxStandaloneSupport{end}{pad}  m_APIs: 11000000i{end}{pad}  m_Automatic: 0{end}"
+    );
+    // The entries of the list, each from its dash to the next.
+    let mut last = key + 1;
+    let mut linux = None;
+    let mut index = key + 1;
+    while index < lines.len() {
+        let body = lines[index].trim();
+        if !body.is_empty() {
+            let at = depth(lines[index]);
+            if at < indent || at == indent && !body.starts_with('-') {
+                break;
+            }
+            if at == indent && body == "- m_BuildTarget: LinuxStandaloneSupport" {
+                linux = Some(index);
+            }
+            last = index + 1;
+        }
+        index += 1;
+    }
+    let mut out = String::with_capacity(text.len() + entry.len());
+    match linux {
+        Some(start) => {
+            let stop = (start + 1..last)
+                .find(|&line| depth(lines[line]) == indent && !lines[line].trim().is_empty())
+                .unwrap_or(last);
+            if !lines[start..stop]
+                .iter()
+                .any(|line| line.trim() == "m_Automatic: 1")
+            {
+                return data.to_vec();
+            }
+            out.extend(lines[..start].iter().copied());
+            out.push_str(&entry);
+            out.extend(lines[stop..].iter().copied());
+        }
+        None => {
+            out.extend(lines[..key].iter().copied());
+            out.push_str(&format!("{pad}{KEY}{end}"));
+            out.extend(lines[key + 1..last].iter().copied());
+            out.push_str(&entry);
+            out.extend(lines[last..].iter().copied());
+        }
+    }
+    out.into_bytes()
 }
 
 /// Decodes a hex string; `None` for an odd length or a non-hex digit.
