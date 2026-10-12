@@ -45,13 +45,16 @@ pub use native::{
 };
 pub use override_controller::{bake_override, bake_override_object};
 pub use serialized::{
-    External, Object, Read, ReferenceType, read as read_serialized, write, write_with_references,
+    External, Object, Read, ReferenceType, read as read_serialized,
+    read_of_class as read_serialized_of_class,
+    read_with_externals as read_serialized_with_externals, write, write_with_references,
 };
 pub use shader::{
-    FogKeep, LightmapKeep, NoShaders, SHADER_LOCAL_ID, ShaderDependency, ShaderLinks,
-    ShaderMaterialUse, ShaderPass, ShaderPointer, ShaderProject, ShaderSettings, ShaderSources,
-    ShaderTier, SnippetCompiler, SnippetReply, SnippetRequest, WIRE_MARKER, bake_shader,
-    bake_shader_object, read_shader_artifact, read_shader_links, shader_platforms, shader_tree,
+    COMPUTE_SHADER_CLASS, COMPUTE_SHADER_LOCAL_ID, FogKeep, LightmapKeep, NoShaders,
+    SHADER_LOCAL_ID, ShaderDependency, ShaderLinks, ShaderMaterialUse, ShaderPass, ShaderPointer,
+    ShaderProject, ShaderSettings, ShaderSources, ShaderTier, SnippetCompiler, SnippetReply,
+    SnippetRequest, WIRE_MARKER, bake_shader, bake_shader_object, names_render_pipeline,
+    read_shader_artifact, read_shader_links, shader_platforms, shader_tree, verify_shader_programs,
 };
 pub use typetree::{TypeTree, Val};
 

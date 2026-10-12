@@ -169,7 +169,7 @@ impl NativeProjectImporter {
                     // So is a texture whose atlas is not current.
                     (matches!(
                         lower_ext(&entry.source_path).as_str(),
-                        ".controller" | ".overridecontroller" | ".shader"
+                        ".controller" | ".overridecontroller" | ".shader" | ".shadergraph"
                     ) || super::texture_profile::texture_source(&entry.source_path))
                         && entry.content.dependencies.iter().any(|dependency| {
                             !dependency.global && !current.contains_key(&dependency.guid)
@@ -315,6 +315,8 @@ impl NativeProjectImporter {
                 | "rendertexture"
                 | "mixer"
                 | "shader"
+                | "shadergraph"
+                | "compute"
         ) {
             return self.import_baked(ctx, logical);
         }

@@ -1984,3 +1984,174 @@ fn sprite_atlas_sources_list_their_textures_folders_included() {
         "an atlas that is not included in the build is not supported"
     );
 }
+
+/// One import response as a worker sends it, with the three artifact
+/// records in their blob arrays.
+fn import_response_fixture(address: &[u8; 44], id: &[u8; 16], meta: &[u8]) -> Vec<u8> {
+    let mut dependencies = [0; 72];
+    dependencies[40..56].copy_from_slice(id);
+    let stats = [7; 24];
+    let mut data = vec![0; 128];
+    data[0] = 20;
+    data[8..52].copy_from_slice(address);
+    data[56..72].copy_from_slice(id);
+    for (field, blob) in [(88, &dependencies[..]), (96, meta), (104, &stats[..])] {
+        let start = data.len();
+        crate::protocol::put_u32(&mut data, field, (start - field) as u32);
+        crate::protocol::put_u32(&mut data, field + 4, blob.len() as u32);
+        data.extend_from_slice(blob);
+    }
+    data
+}
+
+#[test]
+fn artifact_database_records_follow_the_editor_layout() {
+    // A record of an Editor-written ArtifactDB: the key of this address.
+    let mut address = [0u8; 44];
+    address[..16]
+        .copy_from_slice(&environment::decode_hex("23b5a128e3538d44878e69968f80ce9b").unwrap());
+    address[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(
+        crate::hex(&artifactdb::address_key(&address)),
+        "0004e6b046dc126463243521ce412f38"
+    );
+
+    // An ArtifactMetaInfo with one property, "Kind" = [1, 2, 3].
+    let mut meta = vec![0; 112];
+    crate::protocol::put_u32(&mut meta, 96, 16);
+    crate::protocol::put_u32(&mut meta, 100, 1);
+    meta.extend_from_slice(&[0; 12]);
+    let entry = 112;
+    let name = meta.len();
+    crate::protocol::put_u32(&mut meta, entry, (name - entry) as u32);
+    meta.extend_from_slice(b"Kind\0");
+    let value = meta.len();
+    crate::protocol::put_u32(&mut meta, entry + 4, (value - entry - 4) as u32);
+    crate::protocol::put_u32(&mut meta, entry + 8, 3);
+    meta.extend_from_slice(&[1, 2, 3]);
+
+    let mut tables = Tables::new();
+    for id in [[0x11u8; 16], [0x22; 16], [0x11; 16]] {
+        let frame = import_response_fixture(&address, &id, &meta);
+        let response = crate::protocol::import_response(&frame).unwrap();
+        artifactdb::record(&mut tables, &response).unwrap();
+    }
+    let key = artifactdb::address_key(&address).to_vec();
+    let only = |table: &str| {
+        let records = &tables[table];
+        assert_eq!(
+            records.iter().filter(|r| r.key == key).count(),
+            1,
+            "{table}"
+        );
+        records.iter().find(|r| r.key == key).unwrap().value.clone()
+    };
+    // The current revision is the last result; the list leads with it and
+    // keeps the other one known for the address.
+    let revision = only("CurrentRevisions");
+    assert_eq!(revision.len(), 56);
+    assert_eq!(revision[..40], address[..40]);
+    assert_eq!(revision[40..], [0x11; 16]);
+    let list = only("ImportAddressToImportResultIDs");
+    assert_eq!(list[..40], address[..40]);
+    assert_eq!(
+        blob_array(&list, 40, 16).unwrap(),
+        (&[[0x11u8; 16], [0x22; 16]].concat()[..], 2)
+    );
+    for table in [
+        "ImportResultIDToArtifactDependencies",
+        "ImportResultIDToArtifactMetaInfo",
+        "ImportResultIDToImportStats",
+    ] {
+        assert_eq!(tables[table].len(), 2, "{table}");
+    }
+    assert_eq!(
+        tables["ImportResultIDToArtifactMetaInfo"]
+            .iter()
+            .find(|r| r.key == [0x22; 16])
+            .unwrap()
+            .value,
+        meta
+    );
+    let property = [&b"Kind"[..], &[0x11; 16]].concat();
+    assert!(
+        tables["ImportResultIDPropertyIDToProperty"]
+            .iter()
+            .any(|r| r.key == property && r.value == [1, 2, 3])
+    );
+}
+
+#[test]
+fn live_commit_publishes_revisions_without_touching_the_current_one() {
+    let temp = Temp::new();
+    let path = temp.path("ArtifactDB");
+    let table = |count: usize| -> Vec<Record> {
+        (0..count)
+            .map(|i| Record {
+                key: format!("key-{i:05}").into_bytes(),
+                value: vec![i as u8; 300 + (i % 7) * 900],
+            })
+            .collect()
+    };
+    let initial = Tables::from([
+        ("Table".to_string(), table(1)),
+        ("Empty".to_string(), vec![]),
+    ]);
+    write(&path, lmdb::build(&initial).unwrap());
+    // A lock file as native LMDB leaves it: one idle reader slot.
+    let lock = format!("{path}-lock");
+    let mut header = vec![0u8; 8192];
+    header[..4].copy_from_slice(&0xbeefc0deu32.to_le_bytes());
+    header[48..56].copy_from_slice(&1u64.to_le_bytes());
+    header[56..60].copy_from_slice(&1u32.to_le_bytes());
+    header[128..136].copy_from_slice(&u64::MAX.to_le_bytes());
+    header[136..140].copy_from_slice(&4242u32.to_le_bytes());
+    write(&lock, &header);
+
+    let mut previous = fs::read(&path).unwrap();
+    let mut largest = 0;
+    for count in 2..40 {
+        let transaction = lmdb::commit(&path, |tables| {
+            tables.insert("Table".into(), table(count));
+            Ok(())
+        })
+        .unwrap();
+        let data = fs::read(&path).unwrap();
+        let image = lmdb::Image::open(&data).unwrap();
+        assert_eq!(image.table("Table").unwrap().len(), count);
+        assert!(image.table("Empty").unwrap().is_empty());
+        // The lock file names the new transaction, whose metadata page is
+        // the one of its parity.
+        let lock_data = fs::read(&lock).unwrap();
+        assert_eq!(lock_data[48..56], transaction.to_le_bytes());
+        let meta = (transaction & 1) as usize * lmdb::PAGE_SIZE;
+        assert_eq!(data[meta + 144..meta + 152], transaction.to_le_bytes());
+        // What the previous revision reads is still there.
+        let before = lmdb::Image::open(&previous).unwrap().tables().unwrap();
+        let mut old = data.clone();
+        old[..2 * lmdb::PAGE_SIZE].copy_from_slice(&previous[..2 * lmdb::PAGE_SIZE]);
+        assert_eq!(lmdb::Image::open(&old).unwrap().tables().unwrap(), before);
+        largest = largest.max(data.len());
+        previous = data;
+    }
+    // Older revisions are reused: the file stays near the database size.
+    let database = lmdb::build(&lmdb::Image::open(&previous).unwrap().tables().unwrap())
+        .unwrap()
+        .len();
+    assert!(largest <= 4 * database, "{largest} > 4 * {database}");
+
+    // A reader inside a transaction pins every older page.
+    let mut busy = fs::read(&lock).unwrap();
+    busy[128..136].copy_from_slice(&3u64.to_le_bytes());
+    write(&lock, &busy);
+    let size = fs::read(&path).unwrap().len();
+    lmdb::commit(&path, |_| Ok(())).unwrap();
+    let data = fs::read(&path).unwrap();
+    let image = lmdb::Image::open(&data).unwrap();
+    assert!(data.len() > size);
+    assert_eq!(image.table("Table").unwrap().len(), 39);
+    assert_eq!(
+        data[..size][2 * lmdb::PAGE_SIZE..],
+        previous[2 * lmdb::PAGE_SIZE..]
+    );
+}

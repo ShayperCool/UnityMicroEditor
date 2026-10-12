@@ -2,7 +2,10 @@
 use super::{
     ArtifactExtraction, JsonF64, NativeImportJob, ProbeOptions, ProbeReport, ProjectImportContext,
     UdsArtifactStore,
-    context::{ContextExtras, create_scripted_import_context},
+    context::{
+        BuildFiles, ContextExtras, create_build_import_context, create_scripted_import_context,
+    },
+    player_objects::stage_importer,
     probe::{rss_kib, run_probe},
     resolve_project_import_source,
     scripted::{
@@ -211,25 +214,115 @@ pub fn run_project_import(
 /// The same with files and compiled code of the caller's in the context.
 pub fn run_project_import_with(
     ctx: &Context,
-    mut opts: ProbeOptions,
+    opts: ProbeOptions,
     assets: &[String],
     extras: &ImportExtras,
 ) -> (Option<ProbeReport>, Option<anyhow::Error>) {
-    let started = Instant::now();
-    let scripts = match importer_environment(&opts.project, assets, extras) {
-        Ok(scripts) => scripts,
-        Err(error) => return (None, Some(error)),
+    import(ctx, opts, assets, extras, None)
+}
+
+/// What a build of Player objects imports with: the script assemblies a
+/// build runs, and the assets the coordinator makes itself.
+pub struct BuildImport<'a> {
+    pub environment: &'a ScriptEnvironment,
+    pub files: &'a BuildFiles,
+    /// A directory of compiled shader variants kept from earlier builds,
+    /// which the worker starts with; none when empty. The Editor keeps the
+    /// same files in a project's `Library/ShaderCache`, each named after
+    /// everything its variant was compiled from.
+    pub shader_cache: &'a str,
+}
+
+/// Copies the files of a directory tree that the destination lacks. A file
+/// appears under its name only when it is whole.
+pub(crate) fn copy_missing(from: &str, to: &str) -> std::io::Result<()> {
+    let entries = match std::fs::read_dir(from) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
     };
-    let (prepared, created) = create_scripted_import_context(
-        ctx,
-        &opts.project,
-        &opts.output,
-        assets,
-        scripts.as_ref(),
-        &extras.context,
-    );
+    std::fs::create_dir_all(to)?;
+    for entry in entries {
+        let entry = entry?;
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let (source, destination) = (sysutil::join(&[from, &name]), sysutil::join(&[to, &name]));
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_missing(&source, &destination)?;
+        } else if kind.is_file() && !std::path::Path::new(&destination).exists() {
+            let partial = format!("{destination}.{}.partial", std::process::id());
+            std::fs::copy(&source, &partial)?;
+            std::fs::rename(&partial, &destination)?;
+        }
+    }
+    Ok(())
+}
+
+/// The same for a build of Player objects. The worker gets the project's
+/// graphics, quality and Player settings, the tool's own importer, and a
+/// record of every import it has made, so that a later import of the batch
+/// can load what an earlier one produced.
+pub fn run_build_import(
+    ctx: &Context,
+    opts: ProbeOptions,
+    assets: &[String],
+    build: &BuildImport<'_>,
+) -> (Option<ProbeReport>, Option<anyhow::Error>) {
+    import(ctx, opts, assets, &ImportExtras::default(), Some(build))
+}
+
+fn import(
+    ctx: &Context,
+    mut opts: ProbeOptions,
+    assets: &[String],
+    extras: &ImportExtras,
+    build: Option<&BuildImport<'_>>,
+) -> (Option<ProbeReport>, Option<anyhow::Error>) {
+    let started = Instant::now();
+    let scripts = match build {
+        Some(build) => Some(build.environment.clone()),
+        None => match importer_environment(&opts.project, assets, extras) {
+            Ok(scripts) => scripts,
+            Err(error) => return (None, Some(error)),
+        },
+    };
+    let (prepared, created) = match build {
+        Some(build) => create_build_import_context(
+            ctx,
+            &opts.project,
+            &opts.output,
+            assets,
+            build.environment,
+            build.files,
+        ),
+        None => create_scripted_import_context(
+            ctx,
+            &opts.project,
+            &opts.output,
+            assets,
+            scripts.as_ref(),
+            &extras.context,
+        ),
+    };
     if let Err(error) = created {
         return (None, Some(error));
+    }
+    if build.is_some() {
+        if let Err(error) = stage_importer(ctx, &opts.editor, &prepared.project) {
+            return (None, Some(error));
+        }
+        opts.artifact_database = true;
+    }
+    if let Some(cache) = build.map(|build| build.shader_cache)
+        && !cache.is_empty()
+    {
+        // Only a cache: a build without it compiles everything again.
+        let _ = copy_missing(
+            cache,
+            &sysutil::join(&[&prepared.project, "Library/ShaderCache"]),
+        );
     }
     let mut input = registry::Input {
         project: prepared.project.clone().into(),
@@ -256,6 +349,30 @@ pub fn run_project_import_with(
                 .insert("Library/ScriptMapper".into(), table),
             Err(error) => return (None, Some(error)),
         };
+    }
+    if build.is_some() {
+        // The worker reads these managers from the database, as text. With
+        // them it has the project's colour space, its quality levels and
+        // the render pipeline asset of each.
+        for name in [
+            "GraphicsSettings.asset",
+            "QualitySettings.asset",
+            "ProjectSettings.asset",
+        ] {
+            match read_file(&sysutil::join(&[
+                &prepared.project,
+                "ProjectSettings",
+                name,
+            ])) {
+                Ok(data) => {
+                    input
+                        .singletons
+                        .insert(format!("ProjectSettings/{name}"), data);
+                }
+                Err(error) if super::is_not_exist(&error) => {}
+                Err(error) => return (None, Some(error)),
+            }
+        }
     }
     opts.jobs.clear();
     for asset in prepared.assets() {

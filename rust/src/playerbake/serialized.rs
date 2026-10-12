@@ -225,6 +225,25 @@ pub struct Read {
 /// Reads the objects of a little-endian SerializedFile v23 with inline type
 /// trees, such as an import worker artifact or a baked file.
 pub fn read(file: &[u8]) -> Result<Vec<Read>> {
+    Ok(read_with_externals(file)?.0)
+}
+
+/// The same with the path names of the files the objects refer to, in the
+/// order of the file's external references: a `PPtr` with file ID `n` leads
+/// into the file at position `n - 1`.
+pub fn read_with_externals(file: &[u8]) -> Result<(Vec<Read>, Vec<String>)> {
+    read_objects(file, None)
+}
+
+/// The objects of one class that is not a script's, out of a file that may
+/// hold what `read` refuses beside them: objects of script classes whose
+/// scripts lie in other files, as the artifact of a package's importer
+/// does.
+pub fn read_of_class(file: &[u8], class_id: i32) -> Result<Vec<Read>> {
+    Ok(read_objects(file, Some(class_id))?.0)
+}
+
+fn read_objects(file: &[u8], only: Option<i32>) -> Result<(Vec<Read>, Vec<String>)> {
     let be32 = |at: usize| {
         file.get(at..at + 4)
             .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
@@ -269,9 +288,15 @@ pub fn read(file: &[u8]) -> Result<Vec<Read>> {
     for _ in 0..type_count {
         let start = at;
         let header = take(&mut at, 7)?;
-        let scripted = header[..4] == SCRIPT_CLASS.to_le_bytes();
+        let class = i32::from_le_bytes(header[..4].try_into().unwrap());
+        let mut scripted = class == SCRIPT_CLASS;
         let script = i16::from_le_bytes([header[5], header[6]]);
-        if header[4] != 0 || scripted != (script >= 0) {
+        if only.is_some() {
+            // An importer written in C# is an object of a native class
+            // with a script.
+            scripted |= script >= 0;
+        }
+        if header[4] != 0 || (only.is_none() && scripted != (script >= 0)) {
             bail!("SerializedFile holds stripped types or a script type without a class");
         }
         take(&mut at, if scripted { 48 } else { 32 })?;
@@ -283,8 +308,11 @@ pub fn read(file: &[u8]) -> Result<Vec<Read>> {
             bail!("SerializedFile type dependency count is invalid");
         }
         take(&mut at, 4 * held)?;
+        let wanted = only.is_none_or(|only| only == class && !scripted);
         trees.push((
-            std::sync::Arc::new(TypeTree::parse(file[start..at].to_vec())?),
+            wanted
+                .then(|| TypeTree::parse(file[start..at].to_vec()).map(std::sync::Arc::new))
+                .transpose()?,
             script,
         ));
     }
@@ -304,6 +332,7 @@ pub fn read(file: &[u8]) -> Result<Vec<Read>> {
         let (Some(start), Some((tree, script))) = (start, trees.get(index)) else {
             bail!("SerializedFile object bounds are invalid");
         };
+        let Some(tree) = tree else { continue };
         indices.push(*script);
         objects.push(Read {
             local_id,
@@ -311,6 +340,9 @@ pub fn read(file: &[u8]) -> Result<Vec<Read>> {
             data: file[start as usize..(start + length) as usize].to_vec(),
             script: None,
         });
+    }
+    if only.is_some() {
+        return Ok((objects, Vec::new()));
     }
     let script_count = le32(&mut at)? as usize;
     let mut scripts = Vec::new();
@@ -330,5 +362,18 @@ pub fn read(file: &[u8]) -> Result<Vec<Read>> {
             object.script = Some(*script);
         }
     }
-    Ok(objects)
+    let external_count = le32(&mut at)? as usize;
+    if external_count > 4096 {
+        bail!("SerializedFile external reference count is invalid");
+    }
+    let mut externals = Vec::with_capacity(external_count);
+    for _ in 0..external_count {
+        // An unused asset path, a GUID and a type precede the path name.
+        while take(&mut at, 1)?[0] != 0 {}
+        take(&mut at, 20)?;
+        let start = at;
+        while take(&mut at, 1)?[0] != 0 {}
+        externals.push(String::from_utf8_lossy(&file[start..at - 1]).into_owned());
+    }
+    Ok((objects, externals))
 }
