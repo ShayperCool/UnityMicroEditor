@@ -20,6 +20,7 @@ embeds `../engine-profile.json`.
 | `runtimeartifact/` | Readers of native artifacts and serialized files; shader extraction |
 | `editorbridge/`, `agentcontrol/` | Client of the Editor mailbox; Player control, journal and routing |
 | `mcp/` | The MCP server over stdio and Streamable HTTP, on the `rmcp` crate |
+| `remote/` | `remote_session`: Player link, H.264 encoding, the viewer page and its WebSocket. `native/nvenc` holds the C source that drives the NVIDIA encoder, built by `build.rs` |
 | `lmdb`, `protocol`, `registry` | The stopped-LMDB reader, the import worker wire format, the owned `SourceAssetDB` |
 | `native/` | Native import coordinator: worker, DataStore, adoption and the runtime content cache |
 | `compiler/` | Roslyn driver, script type inventory, Netcode post-processing, host staging |

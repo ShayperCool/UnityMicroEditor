@@ -74,8 +74,9 @@ tokens when decoding arguments. Integer source fields and replies retain their
 64-bit values. Prefab override `value` accepts scalar, reference, array and null
 JSON values; an omitted value remains absent.
 
-A configured Player adds `session_control`, `runtime_query`, `runtime_command`
-and `project_tools`. Start can return `phase: starting`; wait for readiness before
+A configured Player adds `session_control`, `runtime_query`, `runtime_command`,
+`project_tools` and `remote_session` (a browser page with the Player's video and
+input on a listener of its own; see [AGENT_MCP.md](AGENT_MCP.md)). Start can return `phase: starting`; wait for readiness before
 queries. While start still prepares the project it returns `result_pending` with
 `progress` (stage and Editor log path), and `status`/`wait` report the same
 preparation. `start`/`reset` take `gameArguments`, `contentScenes`,

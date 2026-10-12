@@ -25,6 +25,9 @@ namespace UnityMicroEditor
     internal sealed class AgentStream : IDisposable
     {
         private const int MaximumQueuedLines = 1024, MaximumSide = 4096;
+        // A readback completes a few frames after it was requested, so several are in
+        // flight at the full frame rate.
+        private const int MaximumReadbacks = 4, MaximumQueuedFrames = 2;
         private readonly AgentInput input;
         private readonly Func<AgentCaptureRunner> runner;
         private readonly int pid = System.Diagnostics.Process.GetCurrentProcess().Id;
@@ -33,11 +36,11 @@ namespace UnityMicroEditor
         private AgentCaptureRunner loopOwner;
         private RenderTexture screenTarget, scaledTarget;
         private Texture2D readbackTexture;
-        private byte[] pixels;
         private int fps = 60, maximumWidth = 1920;
         private int frameWidth, frameHeight;
         private double nextCapture;
-        private bool readbackPending, pendingRelease;
+        private int readbacks;
+        private bool pendingRelease;
         private long captureErrors, inputEvents, inputErrors;
         private string lastError, lastInputError, sentState;
 
@@ -163,7 +166,7 @@ namespace UnityMicroEditor
                 try { Capture(owner); }
                 catch (Exception error)
                 {
-                    readbackPending = false; captureErrors++;
+                    captureErrors++;
                     lastError = "Capture failed: " + ((error as TargetInvocationException)?.InnerException ?? error).Message;
                     // A failing renderer is not retried every frame.
                     nextCapture = Time.realtimeSinceStartupAsDouble + 1;
@@ -173,9 +176,8 @@ namespace UnityMicroEditor
 
         private void Capture(Link owner)
         {
-            // One frame is in flight at a time: a slow viewer or encoder lowers the
-            // frame rate instead of queueing stale pictures.
-            if (!owner.Connected || owner.Viewers < 1 || readbackPending || owner.Busy) return;
+            // A slow server lowers the frame rate instead of queueing stale pictures.
+            if (!owner.Connected || owner.Viewers < 1 || readbacks >= MaximumReadbacks || owner.Queued >= MaximumQueuedFrames) return;
             double now = Time.realtimeSinceStartupAsDouble;
             if (now < nextCapture) return;
             nextCapture = Math.Max(nextCapture + 1d / fps, now + .5d / fps);
@@ -200,11 +202,11 @@ namespace UnityMicroEditor
             frameWidth = width; frameHeight = height;
             if (SystemInfo.supportsAsyncGPUReadback)
             {
-                readbackPending = true;
+                readbacks++;
                 AsyncGPUReadback.Request(source, 0, TextureFormat.RGBA32, request =>
                 {
-                    readbackPending = false;
                     if (link != owner || owner.Closed) return;
+                    readbacks--;
                     if (request.hasError) { captureErrors++; lastError = "GPU readback failed."; return; }
                     Submit(owner, request.GetData<byte>(), request.width, request.height, screenWidth, screenHeight);
                 });
@@ -224,8 +226,7 @@ namespace UnityMicroEditor
         private void Submit(Link owner, NativeArray<byte> data, int width, int height, int screenWidth, int screenHeight)
         {
             if (data.Length != width * height * 4) { captureErrors++; lastError = "Readback returned an unexpected pixel layout."; return; }
-            // The link has sent the previous frame: Busy was false when this one was captured.
-            if (pixels == null || pixels.Length != data.Length) pixels = new byte[data.Length];
+            byte[] pixels = owner.Rent(data.Length);
             data.CopyTo(pixels);
             owner.SendFrame(pixels, width, height, screenWidth, screenHeight);
         }
@@ -243,7 +244,7 @@ namespace UnityMicroEditor
             if (loop != null && loopOwner != null) loopOwner.StopCoroutine(loop);
             loop = null; loopOwner = null;
             if (link != null) { link.Dispose(); link = null; Release(); }
-            readbackPending = false; pendingRelease = false;
+            readbacks = 0; pendingRelease = false;
         }
 
         public void Dispose()
@@ -278,16 +279,17 @@ namespace UnityMicroEditor
             private readonly string token;
             private TcpClient client;
             private NetworkStream stream;
-            private byte[] framePixels;
-            private int frameWidth, frameHeight, frameScreenWidth, frameScreenHeight;
+            private readonly Queue<Frame> frames = new Queue<Frame>();
+            private readonly Stack<byte[]> spare = new Stack<byte[]>();
             private string state;
-            private volatile bool closed, connected, busy;
+            private volatile bool closed, connected;
+            private volatile int queued;
             private long framesSent, bytesSent;
             private volatile string error;
             internal volatile int Viewers;
             internal bool Closed => closed;
             internal bool Connected => connected;
-            internal bool Busy => busy;
+            internal int Queued => queued;
             internal string Error => error;
             internal long FramesSent => Interlocked.Read(ref framesSent);
             internal long BytesSent => Interlocked.Read(ref bytesSent);
@@ -298,13 +300,21 @@ namespace UnityMicroEditor
                 new Thread(Write) { IsBackground = true, Name = "UnityMicroEditor.Stream.Write" }.Start();
             }
 
+            // Frame buffers are megabytes each and go round between the main thread and the writer.
+            internal byte[] Rent(int length)
+            {
+                lock (gate)
+                    while (spare.Count > 0) { byte[] buffer = spare.Pop(); if (buffer.Length == length) return buffer; }
+                return new byte[length];
+            }
+
             internal void SendFrame(byte[] pixels, int width, int height, int screenWidth, int screenHeight)
             {
                 lock (gate)
                 {
                     if (closed) return;
-                    framePixels = pixels; frameWidth = width; frameHeight = height; frameScreenWidth = screenWidth; frameScreenHeight = screenHeight;
-                    busy = true; Monitor.PulseAll(gate);
+                    frames.Enqueue(new Frame { Pixels = pixels, Width = width, Height = height, ScreenWidth = screenWidth, ScreenHeight = screenHeight });
+                    queued = frames.Count; Monitor.PulseAll(gate);
                 }
             }
 
@@ -326,13 +336,14 @@ namespace UnityMicroEditor
                     var header = new byte[13];
                     while (true)
                     {
-                        byte[] raw; string text; int width, height, screenWidth, screenHeight;
+                        Frame frame = null; string text;
                         lock (gate)
                         {
-                            while (!closed && framePixels == null && state == null) Monitor.Wait(gate);
+                            while (!closed && frames.Count == 0 && state == null) Monitor.Wait(gate);
                             if (closed) return;
-                            raw = framePixels; framePixels = null; text = state; state = null;
-                            width = frameWidth; height = frameHeight; screenWidth = frameScreenWidth; screenHeight = frameScreenHeight;
+                            // The frame stays counted until it is written.
+                            if (frames.Count > 0) frame = frames.Peek();
+                            text = state; state = null;
                         }
                         if (text != null)
                         {
@@ -340,15 +351,12 @@ namespace UnityMicroEditor
                             header[0] = (byte)'S'; Length(header, payload.Length);
                             output.Write(header, 0, 5); output.Write(payload, 0, payload.Length);
                         }
-                        if (raw == null) continue;
-                        try
-                        {
-                            header[0] = (byte)'F'; Length(header, raw.Length + 8);
-                            Short(header, 5, screenWidth); Short(header, 7, screenHeight); Short(header, 9, width); Short(header, 11, height);
-                            output.Write(header, 0, header.Length); output.Write(raw, 0, raw.Length);
-                            Interlocked.Increment(ref framesSent); Interlocked.Add(ref bytesSent, raw.Length);
-                        }
-                        finally { busy = false; }
+                        if (frame == null) continue;
+                        header[0] = (byte)'F'; Length(header, frame.Pixels.Length + 8);
+                        Short(header, 5, frame.ScreenWidth); Short(header, 7, frame.ScreenHeight); Short(header, 9, frame.Width); Short(header, 11, frame.Height);
+                        output.Write(header, 0, header.Length); output.Write(frame.Pixels, 0, frame.Pixels.Length);
+                        Interlocked.Increment(ref framesSent); Interlocked.Add(ref bytesSent, frame.Pixels.Length);
+                        lock (gate) { frames.Dequeue(); queued = frames.Count; if (spare.Count < MaximumReadbacks) spare.Push(frame.Pixels); }
                     }
                 }
                 catch (Exception failure) { if (!closed) error = failure.Message; }
@@ -394,6 +402,8 @@ namespace UnityMicroEditor
             }
 
             public void Dispose() { Close(); }
+
+            private sealed class Frame { internal byte[] Pixels; internal int Width, Height, ScreenWidth, ScreenHeight; }
         }
     }
 }

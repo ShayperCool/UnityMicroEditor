@@ -511,19 +511,24 @@ struct Active {
 
 // Reads the Player's messages until the connection ends: 'S' is its state as
 // JSON, 'F' a frame (viewport and picture size as four u16, then RGBA rows).
+// A Player that goes away ends the stream without an error; a message that
+// breaks the protocol is one.
 fn pump(shared: &Shared, stream: &mut TcpStream) -> Result<(), String> {
-    let gone = |error: std::io::Error| format!("the Player closed its stream: {error}");
     let mut header = [0u8; 5];
     let mut frame = Vec::new();
     let mut active: Option<Active> = None;
     let mut retry = Instant::now();
     loop {
-        stream.read_exact(&mut header).map_err(gone)?;
+        if stream.read_exact(&mut header).is_err() {
+            return Ok(());
+        }
         let length = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as usize;
         match header[0] {
             b'S' if length <= 4096 => {
                 let mut text = vec![0u8; length];
-                stream.read_exact(&mut text).map_err(gone)?;
+                if stream.read_exact(&mut text).is_err() {
+                    return Ok(());
+                }
                 let Ok(state) = serde_json::from_slice::<Value>(&text) else {
                     continue;
                 };
@@ -538,12 +543,18 @@ fn pump(shared: &Shared, stream: &mut TcpStream) -> Result<(), String> {
             }
             b'F' if (8..=8 + MAXIMUM_SIDE * MAXIMUM_SIDE * 4).contains(&length) => {
                 let mut sizes = [0u8; 8];
-                stream.read_exact(&mut sizes).map_err(gone)?;
+                if stream.read_exact(&mut sizes).is_err() {
+                    return Ok(());
+                }
                 let side = |index: usize| u16::from_le_bytes([sizes[index], sizes[index + 1]]);
                 let (width, height) = (side(4), side(6));
                 frame.resize(length - 8, 0);
-                stream.read_exact(&mut frame).map_err(gone)?;
-                let even = |side: u16| side >= 2 && side.is_multiple_of(2) && side as usize <= MAXIMUM_SIDE;
+                if stream.read_exact(&mut frame).is_err() {
+                    return Ok(());
+                }
+                let even = |side: u16| {
+                    side >= 2 && side.is_multiple_of(2) && side as usize <= MAXIMUM_SIDE
+                };
                 if !even(width)
                     || !even(height)
                     || frame.len() != width as usize * height as usize * 4

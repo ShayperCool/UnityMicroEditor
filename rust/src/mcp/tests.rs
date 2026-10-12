@@ -146,6 +146,53 @@ fn runtime_boundary_allows_only_honest_read_operations() {
 }
 
 #[test]
+fn remote_session_forwards_its_settings_and_rejects_unknown_actions() {
+    let (_guard, project) = project_fixture();
+    let received: Arc<Mutex<(String, Value)>> = Arc::default();
+    let seen = received.clone();
+    let server = server(&project, |options| {
+        options.runtime = handler(move |name, raw| {
+            *seen.lock().unwrap() = (name.to_string(), serde_json::from_slice(raw).unwrap());
+            value(json!({"running": true, "url": "http://127.0.0.1:1/secret/"}))
+        });
+    });
+    assert!(
+        server
+            .tool("remote_session")
+            .is_some_and(|tool| !tool.read_only)
+    );
+    let (result, started) = call(
+        &server,
+        "remote_session",
+        json!({"action": "start", "listen": "127.0.0.1:0", "fps": 30, "bitrateKbps": 8000}),
+    );
+    assert!(
+        !result.is_error && started["data"]["running"] == true,
+        "{started}"
+    );
+    assert_eq!(
+        *received.lock().unwrap(),
+        (
+            "remote_session".to_string(),
+            json!({"action": "start", "listen": "127.0.0.1:0", "fps": 30, "bitrateKbps": 8000})
+        )
+    );
+    received.lock().unwrap().0.clear();
+    for arguments in [
+        json!({"action": "restart"}),
+        json!({"action": "start", "fps": "fast"}),
+        json!({"action": "start", "quality": 5}),
+    ] {
+        let (result, _) = call(&server, "remote_session", arguments.clone());
+        assert!(result.is_error, "{arguments}");
+    }
+    assert!(
+        received.lock().unwrap().0.is_empty(),
+        "forwarded a rejected call"
+    );
+}
+
+#[test]
 fn cli_requires_project_and_loopback_listener() {
     assert!(
         parse_options(Vec::new()).is_err(),
