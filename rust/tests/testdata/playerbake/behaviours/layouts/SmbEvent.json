@@ -321,5 +321,6 @@
     "name": "byte"
    }
   }
- ]
+ ],
+ "serializationCallbacks": true
 }

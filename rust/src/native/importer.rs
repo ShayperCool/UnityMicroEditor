@@ -46,6 +46,9 @@ pub struct NativeProjectImporter {
     /// The serialized fields of the state machine behaviour scripts, by
     /// script GUID, as the current script assemblies declare them.
     pub(crate) behaviour_layouts: BTreeMap<String, ScriptLayout>,
+    /// Runs the constructors and serialization callbacks of those scripts,
+    /// which a build runs before it writes a behaviour.
+    pub behaviour_code: crate::compiler::BehaviourCode,
     /// The baked clips of models, by model GUID.
     pub(crate) model_clips: BTreeMap<String, super::baked::ModelClipSet>,
     /// The GUID each known clip takes its additive reference pose from, by
@@ -81,6 +84,7 @@ impl NativeProjectImporter {
             pending_native_paths: Vec::new(),
             script_assemblies: BTreeMap::new(),
             behaviour_layouts: BTreeMap::new(),
+            behaviour_code: Default::default(),
             model_clips: BTreeMap::new(),
             additive_references: BTreeMap::new(),
             atlas_batch: BTreeMap::new(),

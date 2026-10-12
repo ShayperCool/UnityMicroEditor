@@ -47,6 +47,11 @@ pub struct ScriptLayout {
     /// the class may be of.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub managed_types: Vec<ManagedLayout>,
+    /// Whether the class, a class it stores inline or one it may hold by
+    /// managed reference has serialization callbacks. A build runs them, so
+    /// what it writes of an object is what they leave.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub serialization_callbacks: bool,
 }
 
 /// The serialized fields of a class that is held by managed reference.
@@ -799,6 +804,23 @@ fn md4(data: &[u8]) -> [u8; 16] {
     digest
 }
 
+/// A refusal that running the code of the project lifts: what an object holds
+/// follows from its constructors and callbacks, not from its text alone.
+#[derive(Debug)]
+struct NeedsCode(String);
+
+impl std::fmt::Display for NeedsCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NeedsCode {}
+
+fn needs_code(message: impl Into<String>) -> anyhow::Error {
+    NeedsCode(message.into()).into()
+}
+
 /// The Player layout of a script class.
 pub struct ScriptType {
     /// The class's entry of a type table. Its script type index is zero; the
@@ -809,6 +831,10 @@ pub struct ScriptType {
     fields: Vec<Field>,
     root: Node,
     managed: Vec<ManagedType>,
+    /// The layout as the code runner takes it.
+    layout: Value,
+    class_name: String,
+    callbacks: bool,
 }
 
 /// A class of which script objects hold objects by managed reference.
@@ -939,6 +965,9 @@ impl ScriptType {
             fields: layout.fields.clone(),
             root,
             managed,
+            layout: serde_json::to_value(layout)?,
+            class_name: layout.class_name.clone(),
+            callbacks: layout.serialization_callbacks,
         })
     }
 
@@ -950,18 +979,46 @@ impl ScriptType {
     /// field the document lacks keeps what the class's constructor left in
     /// it. Such a field is filled in where the layout tells that value and
     /// refused where it does not.
+    ///
+    /// Where the class has serialization callbacks, or a constructor that
+    /// does more than store constants, the object is what that code leaves,
+    /// and `References::run_object` is asked to run it.
     pub fn object(
         &self,
         fields: &Map<String, Value>,
         script_local_id: i64,
         references: &mut dyn References,
     ) -> Result<Encoded> {
+        let refusal = if self.callbacks {
+            format!(
+                "class {} has serialization callbacks, which a build runs",
+                self.class_name
+            )
+        } else {
+            // A first reading that leaves no trace tells whether the text
+            // and the layout suffice.
+            match self.plain(fields, script_local_id, &mut Probe(references)) {
+                Ok(_) => return self.plain(fields, script_local_id, references),
+                Err(error) => error.downcast::<NeedsCode>()?.0,
+            }
+        };
+        self.run(fields, script_local_id, references, &refusal)
+            .map_err(|error| match error.downcast::<NeedsCode>() {
+                Ok(needs) => unsupported(needs.0),
+                Err(error) => error,
+            })
+    }
+
+    fn base_values(
+        fields: &Map<String, Value>,
+        script_local_id: i64,
+    ) -> Result<Vec<(Cow<'static, str>, Val)>> {
         // A new object is enabled.
         let enabled = match fields.get("m_Enabled") {
             Some(enabled) => integer("UInt8", enabled, "m_Enabled")?,
             None => Val::U(1),
         };
-        let mut values = vec![
+        Ok(vec![
             (Cow::Borrowed("m_Enabled"), enabled),
             (
                 Cow::Borrowed("m_Script"),
@@ -971,13 +1028,19 @@ impl ScriptType {
                 Cow::Borrowed("m_Name"),
                 Val::Str(string(get(fields, "m_Name"), "m_Name")?),
             ),
-        ];
+        ])
+    }
+
+    /// The object as the text and the layout alone tell it.
+    fn plain(
+        &self,
+        fields: &Map<String, Value>,
+        script_local_id: i64,
+        references: &mut dyn References,
+    ) -> Result<Encoded> {
+        let mut values = Self::base_values(fields, script_local_id)?;
         let nodes = &self.root.children[BASE_FIELDS.len()..];
-        let mut encoder = Encoder {
-            references,
-            deferred: Vec::new(),
-            held: Vec::new(),
-        };
+        let mut encoder = Encoder::new(references);
         for (field, node) in self.fields.iter().zip(nodes) {
             values.push((
                 Cow::Owned(field.name.clone()),
@@ -996,6 +1059,176 @@ impl ScriptType {
             };
             data.truncate(start);
             managed = encoder.registry(get(fields, REGISTRY_FIELD), &self.managed, &mut data)?;
+        }
+        Ok(Encoded {
+            data,
+            deferred: encoder.deferred,
+            managed,
+        })
+    }
+
+    /// The class of a registry entry, by the three parts of its name.
+    fn managed_type(&self, name: &[String; 3]) -> Result<(usize, &[Field], &Node, &TypeTree)> {
+        let [class, namespace, assembly] = name;
+        let position = self.managed.iter().position(|kind| {
+            kind.class_name == *class && kind.namespace == *namespace && kind.assembly == *assembly
+        });
+        let Some(position) = position else {
+            return Err(unsupported(format!(
+                "managed reference to an object of {class}, a class the layout does not hold"
+            )));
+        };
+        let kind = &self.managed[position];
+        match &kind.data {
+            Some((root, tree)) => Ok((position, &kind.fields, root, tree)),
+            None => Err(unsupported(format!(
+                "managed reference to an object of {class}: {}",
+                kind.unsupported
+            ))),
+        }
+    }
+
+    /// The object as the code of the project leaves it: the fields the text
+    /// sets go to the code runner, which constructs the object, reads them
+    /// over it, runs the callbacks as a build does and returns every field.
+    /// `refusal` is why the text alone does not tell the object.
+    fn run(
+        &self,
+        fields: &Map<String, Value>,
+        script_local_id: i64,
+        references: &mut dyn References,
+        refusal: &str,
+    ) -> Result<Encoded> {
+        let nodes = &self.root.children[BASE_FIELDS.len()..];
+        let mut encoder = Encoder::new(references);
+        let present = encoder.present(&self.fields, nodes, fields, "")?;
+        let mut registry = Vec::new();
+        let holds = hold_references(&self.fields);
+        let authored: &[Value] = match fields.get(REGISTRY_FIELD) {
+            Some(Value::Object(listed)) if holds => {
+                if scalar_text(get(listed, "version"), REGISTRY_FIELD)? != "2" {
+                    return Err(unsupported(
+                        "registry of managed references in another version",
+                    ));
+                }
+                match get(listed, "RefIds") {
+                    Value::Array(entries) => entries,
+                    Value::Null => &[],
+                    Value::String(text) if text.is_empty() => &[],
+                    _ => return Err(mismatch(REGISTRY_FIELD, "a value")),
+                }
+            }
+            // A class that has gained its first reference has none yet.
+            _ => &[],
+        };
+        let mut last = None;
+        for entry in authored {
+            let id = managed_id(entry, REGISTRY_FIELD)?;
+            let Value::Object(entry) = entry else {
+                return Err(mismatch(REGISTRY_FIELD, "a value"));
+            };
+            let Value::Object(kind) = get(entry, "type") else {
+                return Err(mismatch(REGISTRY_FIELD, "an object without a class"));
+            };
+            let name = [
+                string(get(kind, "class"), REGISTRY_FIELD)?,
+                string(get(kind, "ns"), REGISTRY_FIELD)?,
+                string(get(kind, "asm"), REGISTRY_FIELD)?,
+            ];
+            // The order of the entries is the order the objects are read in.
+            if last.is_some_and(|last| last >= id) {
+                return Err(unsupported(
+                    "registry of managed references that is not in the order of the IDs",
+                ));
+            }
+            last = Some(id);
+            if id == -2 {
+                if name.iter().any(|part| !part.is_empty()) {
+                    return Err(mismatch(REGISTRY_FIELD, "a null reference with a class"));
+                }
+                continue;
+            }
+            let (_, kind_fields, root, _) = self.managed_type(&name)?;
+            let empty = Map::new();
+            let mapping = match get(entry, "data") {
+                Value::Object(mapping) => mapping,
+                Value::Null => &empty,
+                Value::String(text) if text.is_empty() => &empty,
+                _ => return Err(mismatch(REGISTRY_FIELD, "an object whose data is a value")),
+            };
+            let data = encoder.present(
+                kind_fields,
+                &root.children,
+                mapping,
+                &format!("managedReferences[{id}]."),
+            )?;
+            let [class, namespace, assembly] = name;
+            registry.push(serde_json::json!({
+                "rid": id.to_string(), "class": class, "ns": namespace, "asm": assembly, "data": data,
+            }));
+        }
+        let request =
+            serde_json::json!({ "layout": self.layout, "fields": present, "registry": registry });
+        let Some(reply) = encoder.references.run_object(&request)? else {
+            return Err(unsupported(refusal));
+        };
+        if let Some(reason) = reply.get("refused").and_then(Value::as_str) {
+            return Err(unsupported(format!(
+                "the code of class {} could not be run without the engine: {reason}",
+                self.class_name
+            )));
+        }
+        let (Some(settled), Some(Value::Array(entries))) =
+            (reply.get("fields"), reply.get("registry"))
+        else {
+            bail!("code runner returned no object of {}", self.class_name);
+        };
+        let mut values = Self::base_values(fields, script_local_id)?;
+        values.extend(encoder.settled(&self.fields, nodes, settled, "")?);
+        let mut data = self.tree.encode(&Val::Map(values))?;
+        let mut managed = Vec::new();
+        if holds {
+            let Some(start) = data.len().checked_sub(8) else {
+                bail!("script object is shorter than its registry");
+            };
+            data.truncate(start);
+            data.extend_from_slice(&2i32.to_le_bytes());
+            data.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+            for entry in entries {
+                let part = |key: &str| entry.get(key).and_then(Value::as_str);
+                let (Some(id), Some(class), Some(namespace), Some(assembly), Some(settled)) = (
+                    part("rid").and_then(|id| id.parse::<i64>().ok()),
+                    part("class"),
+                    part("ns"),
+                    part("asm"),
+                    entry.get("data"),
+                ) else {
+                    bail!("code runner returned a registry entry without its parts");
+                };
+                let name = [
+                    class.to_string(),
+                    namespace.to_string(),
+                    assembly.to_string(),
+                ];
+                registry_entry(&mut data, id, &name);
+                if id == -2 {
+                    continue;
+                }
+                let (position, kind_fields, root, tree) = self.managed_type(&name)?;
+                let values = encoder.settled(
+                    kind_fields,
+                    &root.children,
+                    settled,
+                    &format!("managedReferences[{id}]."),
+                )?;
+                data.extend_from_slice(&tree.encode(&Val::Map(values))?);
+                if !managed.contains(&position) {
+                    managed.push(position);
+                }
+            }
+            data.resize(data.len().next_multiple_of(4), 0);
+        } else if !entries.is_empty() {
+            bail!("code runner returned a registry for a class without references");
         }
         Ok(Encoded {
             data,
@@ -1042,6 +1275,37 @@ pub enum Pointer {
 pub trait References {
     /// The pointer for a reference that is not null.
     fn pointer(&mut self, reference: &ObjectReference<'_>) -> Result<Pointer>;
+
+    /// Whether a build holds an object behind the reference, asked without
+    /// the reference being written.
+    fn exists(&mut self, reference: &ObjectReference<'_>) -> Result<bool> {
+        Ok(!matches!(self.pointer(reference)?, Pointer::Null))
+    }
+
+    /// Runs the code of the project on an object: its constructors and its
+    /// serialization callbacks. The request holds the class's layout, the
+    /// fields the text sets and the objects of its registry; the reply holds
+    /// every field as a build writes it, or `refused` with the reason.
+    /// `None` is the answer of a caller that cannot run code.
+    fn run_object(&mut self, _request: &Value) -> Result<Option<Value>> {
+        Ok(None)
+    }
+}
+
+/// Answers for a first reading, of which nothing is kept.
+struct Probe<'a>(&'a mut dyn References);
+
+impl References for Probe<'_> {
+    fn pointer(&mut self, reference: &ObjectReference<'_>) -> Result<Pointer> {
+        Ok(if self.0.exists(reference)? {
+            Pointer::Object {
+                file: 0,
+                path_id: 1,
+            }
+        } else {
+            Pointer::Null
+        })
+    }
 }
 
 /// A reference that was written as null on the resolver's word.
@@ -1098,9 +1362,22 @@ pub(super) struct FileReferences<'a> {
     pub local: &'a dyn Fn(&ObjectReference<'_>) -> Result<Pointer>,
     pub resolve: &'a dyn Fn(&ObjectReference<'_>) -> Result<Resolution>,
     pub externals: &'a mut Vec<External>,
+    /// Runs the code of the project on an object, if the caller can.
+    pub code: &'a dyn Fn(&Value) -> Result<Option<Value>>,
 }
 
 impl References for FileReferences<'_> {
+    fn exists(&mut self, reference: &ObjectReference<'_>) -> Result<bool> {
+        if reference.guid.is_empty() {
+            return Ok(!matches!((self.local)(reference)?, Pointer::Null));
+        }
+        Ok(!matches!((self.resolve)(reference)?, Resolution::Null))
+    }
+
+    fn run_object(&mut self, request: &Value) -> Result<Option<Value>> {
+        (self.code)(request)
+    }
+
     fn pointer(&mut self, reference: &ObjectReference<'_>) -> Result<Pointer> {
         if reference.guid.is_empty() {
             return (self.local)(reference);
@@ -1131,6 +1408,126 @@ struct Encoder<'a> {
     /// The IDs of the objects the fields read so far hold by managed
     /// reference.
     held: Vec<i64>,
+    /// What the code runner is handed in place of the references and of the
+    /// engine structs with native state: it returns each by its position.
+    pointers: Vec<Authored>,
+    opaques: Vec<Val>,
+}
+
+/// The engine's structs whose C# members hold all of their state: the code
+/// runner reads and writes them part by part. Every other engine struct has
+/// native state and passes through the runner as it is.
+const PLAIN_STRUCTS: [&str; 15] = [
+    "Vector2",
+    "Vector3",
+    "Vector4",
+    "Quaternion",
+    "Color",
+    "Color32",
+    "Rect",
+    "Bounds",
+    "LayerMask",
+    "RenderingLayerMask",
+    "Vector2Int",
+    "Vector3Int",
+    "RectInt",
+    "BoundsInt",
+    "Matrix4x4",
+];
+
+/// A scalar as the code runner exchanges it: an integer in digits, a float
+/// as the hex digits of its bits.
+fn runner_text(type_name: &str, value: &Val) -> Result<Value> {
+    Ok(Value::String(match (type_name, value) {
+        ("float", Val::F(number)) => format!("{:08x}", number.to_bits()),
+        ("float", Val::Zero) => "00000000".into(),
+        ("double", Val::D(number)) => format!("{:016x}", number.to_bits()),
+        ("double", Val::Zero) => "0000000000000000".into(),
+        ("float" | "double", _) => bail!("script value is not a float"),
+        (_, Val::Zero) => "0".into(),
+        (_, Val::Bool(flag)) => (*flag as u8).to_string(),
+        (_, Val::I(number)) => number.to_string(),
+        (_, Val::U(number)) => number.to_string(),
+        _ => bail!("script value is not a scalar"),
+    }))
+}
+
+fn runner_scalar(type_name: &str, value: &Value, path: &str) -> Result<Val> {
+    let parsed = value.as_str().and_then(|text| {
+        Some(match type_name {
+            "float" => Val::F(f32::from_bits(u32::from_str_radix(text, 16).ok()?)),
+            "double" => Val::D(f64::from_bits(u64::from_str_radix(text, 16).ok()?)),
+            _ => match integer_type(type_name)? {
+                (_, true) => Val::I(text.parse().ok()?),
+                (_, false) => Val::U(text.parse().ok()?),
+            },
+        })
+    });
+    match parsed {
+        Some(parsed) => Ok(parsed),
+        None => bail!("code runner returned no {type_name} for {path}"),
+    }
+}
+
+/// The parts of a plain engine struct that the text sets.
+fn plain_parts(node: &Node, value: &Value, path: &str) -> Result<Value> {
+    let Value::Object(mapping) = value else {
+        return Err(mismatch(path, "a value"));
+    };
+    let expected = authored_version(node);
+    let current = match mapping.get("serializedVersion") {
+        Some(version) => scalar_text(version, path)?.parse::<u16>().ok() == Some(expected),
+        None => expected <= 1,
+    };
+    if !current {
+        return Err(unsupported(format!(
+            "behaviour field {path} is authored in another version of {}",
+            node.type_name
+        )));
+    }
+    let mut parts = Map::new();
+    for child in &node.children {
+        let Some(authored) = mapping.get(&child.name) else {
+            continue;
+        };
+        let path = format!("{path}.{}", child.name);
+        let part = if child.children.is_empty() {
+            runner_text(
+                &child.type_name,
+                &scalar(&child.type_name, authored, &path)?,
+            )?
+        } else {
+            plain_parts(child, authored, &path)?
+        };
+        parts.insert(child.name.clone(), part);
+    }
+    Ok(Value::Object(parts))
+}
+
+fn plain_value(node: &Node, parts: &Value, path: &str) -> Result<Val> {
+    let mut values = Vec::with_capacity(node.children.len());
+    for child in &node.children {
+        let Some(part) = parts.get(&child.name) else {
+            bail!("code runner returned no {} for {path}", child.name);
+        };
+        let value = if child.children.is_empty() {
+            runner_scalar(&child.type_name, part, path)?
+        } else {
+            plain_value(child, part, path)?
+        };
+        values.push((Cow::Owned(child.name.clone()), value));
+    }
+    Ok(Val::Map(values))
+}
+
+/// Appends the head of a registry entry: the ID and the class by name.
+fn registry_entry(out: &mut Vec<u8>, id: i64, name: &[String; 3]) {
+    out.extend_from_slice(&id.to_le_bytes());
+    for part in name {
+        out.extend_from_slice(&(part.len() as u32).to_le_bytes());
+        out.extend_from_slice(part.as_bytes());
+        out.resize(out.len().next_multiple_of(4), 0);
+    }
 }
 
 /// The ID a managed reference holds: that of an object of the registry, or
@@ -1144,6 +1541,42 @@ fn managed_id(value: &Value, path: &str) -> Result<i64> {
         // -1 stands for an object whose class is gone.
         _ => Err(mismatch(path, "a managed reference without an object")),
     }
+}
+
+/// An object reference as the text holds it.
+struct Authored {
+    guid: String,
+    file_id: i64,
+    kind: i64,
+}
+
+/// The reference a text value holds; `None` for the null reference.
+fn authored_reference(value: &Value, path: &str) -> Result<Option<Authored>> {
+    let reference = match value {
+        Value::Object(reference) => reference,
+        // Out of a number or a sequence the engine reads no reference.
+        _ => return Ok(None),
+    };
+    let file_id = scalar_text(get(reference, "fileID"), path)?;
+    if file_id.is_empty() || file_id == "0" {
+        return Ok(None);
+    }
+    let Ok(file_id) = file_id.parse::<i64>() else {
+        return Err(mismatch(path, "a reference without a file ID"));
+    };
+    let guid = scalar_text(get(reference, "guid"), path)?.to_ascii_lowercase();
+    let kind = match scalar_text(get(reference, "type"), path)? {
+        "" => 0,
+        kind => match kind.parse::<i64>() {
+            Ok(kind) => kind,
+            Err(_) => return Err(mismatch(path, "a reference of an unknown type")),
+        },
+    };
+    Ok(Some(Authored {
+        guid,
+        file_id,
+        kind,
+    }))
 }
 
 fn mismatch(path: &str, what: &str) -> anyhow::Error {
@@ -1307,6 +1740,64 @@ fn dump_suffix(type_name: &str) -> Option<char> {
     })
 }
 
+/// A mapping where the class declares an array or a list: the engine reads
+/// its values as the elements. This was compared for a mapping of one entry;
+/// the order it takes several in was not.
+fn sole_value<'a>(mapping: &'a Map<String, Value>, path: &str) -> Result<&'a Value> {
+    let mut values = mapping.values();
+    match (values.next(), values.next()) {
+        (Some(value), None) => Ok(value),
+        _ => Err(mismatch(path, "a mapping of several entries")),
+    }
+}
+
+/// Whether the text of a field is a number, or for a vector also a sequence,
+/// where the class declares an engine struct: the engine then reads nothing
+/// and the field stays as it was constructed. Compared for these structs; a
+/// gradient is zeroed instead and stays refused.
+fn unread_struct(node: &Node, value: &Value) -> bool {
+    let scalar = matches!(value, Value::String(text) if !text.is_empty());
+    match node.type_name.as_str() {
+        "Vector3f" => scalar || matches!(value, Value::Array(_)),
+        "AnimationCurve" | "BitField" | "Hash128" => scalar,
+        // `Color32`.
+        "ColorRGBA" => scalar && node.version == 2,
+        _ => false,
+    }
+}
+
+/// The elements of an array of integers that the text holds as one scalar:
+/// little-endian hex, then a letter for their type. Out of such a value the
+/// engine reads no element of another type, and of a dump that ends inside
+/// an element it reads the whole elements.
+fn hex_dump(type_name: &str, text: &str, path: &str) -> Result<Vec<Val>> {
+    let Some((size, _)) = integer_type(type_name) else {
+        return Ok(Vec::new());
+    };
+    let digits = text
+        .strip_suffix(|last| dump_suffix(type_name) == Some(last))
+        .unwrap_or(text);
+    let width = size as usize * 2;
+    // What the engine makes of half a byte was not compared.
+    if !digits.is_ascii() || !digits.len().is_multiple_of(2) {
+        return Err(mismatch(path, "a hex dump of another width"));
+    }
+    let digits = &digits[..digits.len() / width * width];
+    let mut items = Vec::with_capacity(digits.len() / width);
+    for chunk in digits.as_bytes().chunks(width) {
+        let mut number = 0u64;
+        for (index, pair) in chunk.chunks(2).enumerate() {
+            let pair = std::str::from_utf8(pair).unwrap_or("");
+            let Ok(byte) = u8::from_str_radix(pair, 16) else {
+                return Err(mismatch(path, "text that is not a hex dump"));
+            };
+            number |= (byte as u64) << (8 * index);
+        }
+        items.push(truncated(type_name, number as i128));
+    }
+    Ok(items)
+}
+
 /// The `serializedVersion` the Editor writes into the YAML of an engine
 /// struct. An older form has other fields, which the engine converts.
 fn authored_version(node: &Node) -> u16 {
@@ -1345,7 +1836,270 @@ fn engine_default(node: &Node) -> Option<Val> {
     })
 }
 
-impl Encoder<'_> {
+impl<'a> Encoder<'a> {
+    fn new(references: &'a mut dyn References) -> Self {
+        Self {
+            references,
+            deferred: Vec::new(),
+            held: Vec::new(),
+            pointers: Vec::new(),
+            opaques: Vec::new(),
+        }
+    }
+
+    /// The fields of an object that the text sets, as the code runner takes
+    /// them. A field the text lacks keeps what the object's constructor left
+    /// in it, so it is left out.
+    fn present(
+        &mut self,
+        fields: &[Field],
+        nodes: &[Node],
+        mapping: &Map<String, Value>,
+        prefix: &str,
+    ) -> Result<Value> {
+        let mut present = Map::new();
+        for (field, node) in fields.iter().zip(nodes) {
+            let path = format!("{prefix}{}", field.name);
+            let names = std::iter::once(&field.name).chain(&field.former_names);
+            let Some(value) = names.into_iter().find_map(|name| mapping.get(name)) else {
+                continue;
+            };
+            if let Some(read) = self.present_value(&field.kind, node, value, &path, true)? {
+                present.insert(field.name.clone(), read);
+            }
+        }
+        Ok(Value::Object(present))
+    }
+
+    /// What the engine reads out of a text value; `None` if it reads nothing
+    /// and leaves the field as it is. `field` tells a field from an element.
+    fn present_value(
+        &mut self,
+        kind: &FieldType,
+        node: &Node,
+        value: &Value,
+        path: &str,
+        field: bool,
+    ) -> Result<Option<Value>> {
+        let structure = matches!(value, Value::Object(_) | Value::Array(_));
+        Ok(Some(match kind {
+            FieldType::Primitive { .. } | FieldType::Enum { .. } if structure && field => {
+                return Ok(None);
+            }
+            FieldType::Primitive { .. } | FieldType::Enum { .. } => {
+                runner_text(&node.type_name, &scalar(&node.type_name, value, path)?)?
+            }
+            FieldType::String if structure => Value::String(String::new()),
+            FieldType::String => Value::String(string(value, path)?),
+            FieldType::Object {
+                class_name,
+                namespace,
+            } => {
+                let mut position = Value::Null;
+                if let Some(authored) = authored_reference(value, path)? {
+                    // A build keeps a reference only if its object exists
+                    // and is of the field's class.
+                    let exists = self.references.exists(&ObjectReference {
+                        guid: &authored.guid,
+                        file_id: authored.file_id,
+                        kind: authored.kind,
+                        class_name,
+                        namespace,
+                        path,
+                    })?;
+                    if exists {
+                        position = Value::from(self.pointers.len());
+                        self.pointers.push(authored);
+                    }
+                }
+                serde_json::json!({ "ptr": position })
+            }
+            FieldType::Array { element } => {
+                let data = node.element();
+                Value::Array(match value {
+                    Value::Null => Vec::new(),
+                    Value::String(text) if text.is_empty() => Vec::new(),
+                    Value::String(text) => hex_dump(&data.type_name, text, path)?
+                        .iter()
+                        .map(|item| runner_text(&data.type_name, item))
+                        .collect::<Result<_>>()?,
+                    Value::Array(authored) => {
+                        let mut items = Vec::with_capacity(authored.len());
+                        for (index, item) in authored.iter().enumerate() {
+                            let path = format!("{path}[{index}]");
+                            match self.present_value(element, data, item, &path, false)? {
+                                Some(read) => items.push(read),
+                                None => bail!("element {path} was not read"),
+                            }
+                        }
+                        items
+                    }
+                    Value::Object(mapping) => {
+                        let item = sole_value(mapping, path)?;
+                        match self.present_value(element, data, item, path, false)? {
+                            Some(read) => vec![read],
+                            None => bail!("element {path} was not read"),
+                        }
+                    }
+                    _ => return Err(mismatch(path, "a structure")),
+                })
+            }
+            FieldType::FixedBuffer { .. } => {
+                return Err(unsupported(format!(
+                    "behaviour field {path} is a fixed buffer in an object whose constructors or callbacks have to be run"
+                )));
+            }
+            FieldType::Struct { fields, .. } => {
+                let empty = Map::new();
+                let mapping = match value {
+                    Value::Object(mapping) => mapping,
+                    _ if fields.is_empty() => &empty,
+                    // The engine reads neither a number nor a sequence into
+                    // a class.
+                    Value::String(_) | Value::Array(_) if field => return Ok(None),
+                    // A new element stays as it was constructed.
+                    Value::String(_) => &empty,
+                    _ => return Err(mismatch(path, "a value")),
+                };
+                self.present(fields, &node.children, mapping, &format!("{path}."))?
+            }
+            FieldType::Unity { .. } if field && unread_struct(node, value) => return Ok(None),
+            FieldType::ManagedReference { .. } => {
+                serde_json::json!({ "rid": managed_id(value, path)?.to_string() })
+            }
+            FieldType::Unity { name } if PLAIN_STRUCTS.contains(&name.as_str()) => {
+                plain_parts(node, value, path)?
+            }
+            FieldType::Unity { .. } if node.type_name.starts_with("PPtr<") => {
+                return Err(unsupported(format!(
+                    "behaviour field {path} is a lazy reference in an object whose constructors or callbacks have to be run"
+                )));
+            }
+            FieldType::Unity { .. } => {
+                // The runner cannot have made such a struct, so the text is
+                // read over one as the engine makes it.
+                let made = self.engine_struct(node, value, path, true)?;
+                self.opaques.push(made);
+                serde_json::json!({ "opaque": self.opaques.len() - 1 })
+            }
+        }))
+    }
+
+    /// The fields of an object as the code runner returned them.
+    fn settled(
+        &mut self,
+        fields: &[Field],
+        nodes: &[Node],
+        reply: &Value,
+        prefix: &str,
+    ) -> Result<Vec<(Cow<'static, str>, Val)>> {
+        let mut values = Vec::with_capacity(fields.len());
+        for (field, node) in fields.iter().zip(nodes) {
+            let path = format!("{prefix}{}", field.name);
+            let Some(value) = reply.get(&field.name) else {
+                bail!("code runner returned no field {path}");
+            };
+            values.push((
+                Cow::Owned(field.name.clone()),
+                self.settled_value(&field.kind, node, value, &path)?,
+            ));
+        }
+        Ok(values)
+    }
+
+    fn settled_value(
+        &mut self,
+        kind: &FieldType,
+        node: &Node,
+        reply: &Value,
+        path: &str,
+    ) -> Result<Val> {
+        let position = |key: &str| -> Result<Option<usize>> {
+            match reply.get(key) {
+                Some(Value::Null) => Ok(None),
+                Some(Value::Number(number)) if number.is_u64() => {
+                    Ok(Some(number.as_u64().unwrap_or_default() as usize))
+                }
+                _ => bail!("code runner returned no {key} for {path}"),
+            }
+        };
+        match kind {
+            FieldType::Primitive { .. } | FieldType::Enum { .. } => {
+                runner_scalar(&node.type_name, reply, path)
+            }
+            FieldType::String => match reply {
+                Value::String(text) => Ok(Val::Str(text.clone())),
+                _ => bail!("code runner returned no text for {path}"),
+            },
+            FieldType::Object {
+                class_name,
+                namespace,
+            } => {
+                let Some(position) = position("ptr")? else {
+                    return Ok(Val::Zero);
+                };
+                if position >= self.pointers.len() {
+                    bail!("code runner returned an unknown reference for {path}");
+                }
+                let authored = Authored {
+                    guid: self.pointers[position].guid.clone(),
+                    ..self.pointers[position]
+                };
+                self.resolve(&authored, class_name, namespace, path)
+            }
+            FieldType::Array { element } => {
+                let Value::Array(items) = reply else {
+                    bail!("code runner returned no list for {path}");
+                };
+                let data = node.element();
+                let mut values = Vec::with_capacity(items.len());
+                for (index, item) in items.iter().enumerate() {
+                    values.push(self.settled_value(
+                        element,
+                        data,
+                        item,
+                        &format!("{path}[{index}]"),
+                    )?);
+                }
+                Ok(Val::Seq(values))
+            }
+            FieldType::FixedBuffer { .. } => bail!("code runner returned a fixed buffer"),
+            FieldType::Struct { fields, .. } => Ok(Val::Map(self.settled(
+                fields,
+                &node.children,
+                reply,
+                &format!("{path}."),
+            )?)),
+            FieldType::ManagedReference { .. } => {
+                let id = reply
+                    .get("rid")
+                    .and_then(Value::as_str)
+                    .and_then(|id| id.parse::<i64>().ok());
+                match id {
+                    Some(id) => Ok(Val::map([("rid", Val::I(id))])),
+                    None => bail!("code runner returned no object ID for {path}"),
+                }
+            }
+            FieldType::Unity { name } if PLAIN_STRUCTS.contains(&name.as_str()) => {
+                plain_value(node, reply, path)
+            }
+            FieldType::Unity { .. } => match position("opaque")? {
+                Some(position) => match self.opaques.get(position) {
+                    Some(made) => Ok(made.clone()),
+                    None => bail!("code runner returned an unknown struct for {path}"),
+                },
+                // Nothing set it: it is as the engine makes it when it
+                // writes the object.
+                None => engine_default(node).ok_or_else(|| {
+                    unsupported(format!(
+                        "behaviour field {path} is not in the authored document, and what the engine makes of a new {} is not known",
+                        node.type_name
+                    ))
+                }),
+            },
+        }
+    }
+
     /// One field of a C# type, found by its name or a former name.
     fn field(
         &mut self,
@@ -1374,7 +2128,36 @@ impl Encoder<'_> {
             {
                 self.missing(field, node, &path, known)
             }
+            FieldType::Unity { .. } if unread_struct(node, value) => {
+                self.missing(field, node, &path, known)
+            }
             kind => self.value(kind, node, value, &path, known && !field.initial_unknown),
+        }
+    }
+
+    /// One element of an array or list, which is an object of its own. Text
+    /// of another kind than the element's type is read as for a field: a
+    /// structure gives an empty string, and a number where a class is
+    /// expected leaves the new element as it was constructed.
+    fn element(&mut self, kind: &FieldType, node: &Node, item: &Value, path: &str) -> Result<Val> {
+        match kind {
+            FieldType::String if matches!(item, Value::Object(_) | Value::Array(_)) => {
+                Ok(Val::Str(String::new()))
+            }
+            FieldType::Struct { fields, .. }
+                if !fields.is_empty() && matches!(item, Value::String(_)) =>
+            {
+                let made = Field {
+                    name: String::new(),
+                    hidden: false,
+                    former_names: Vec::new(),
+                    initial: None,
+                    initial_unknown: false,
+                    kind: kind.clone(),
+                };
+                self.missing(&made, node, path, true)
+            }
+            _ => self.value(kind, node, item, path, true),
         }
     }
 
@@ -1388,7 +2171,7 @@ impl Encoder<'_> {
             return Ok(Val::Zero);
         }
         if !known || field.initial_unknown {
-            return Err(unsupported(format!(
+            return Err(needs_code(format!(
                 "behaviour field {path} is not in the authored document, and what its class constructs it with is not known"
             )));
         }
@@ -1406,10 +2189,10 @@ impl Encoder<'_> {
             }
             FieldType::String => Val::Str(field.initial.clone().unwrap_or_default()),
             FieldType::Object { .. } => Val::Zero,
-            // What a build makes of a reference the text lacks was not
-            // compared.
+            // The field holds what the constructor made, under an ID the
+            // build gives it, or nothing; the registry tells either.
             FieldType::ManagedReference { .. } => {
-                return Err(unsupported(format!(
+                return Err(needs_code(format!(
                     "behaviour field {path} is a managed reference that is not in the authored document"
                 )));
             }
@@ -1445,31 +2228,24 @@ impl Encoder<'_> {
         value: &Value,
         path: &str,
     ) -> Result<Val> {
-        let reference = match value {
-            Value::Null => return Ok(Val::Zero),
-            Value::String(text) if text.is_empty() => return Ok(Val::Zero),
-            Value::Object(reference) => reference,
-            _ => return Err(mismatch(path, "a value")),
-        };
-        let file_id = scalar_text(get(reference, "fileID"), path)?;
-        if file_id.is_empty() || file_id == "0" {
-            return Ok(Val::Zero);
+        match authored_reference(value, path)? {
+            Some(authored) => self.resolve(&authored, class_name, namespace, path),
+            None => Ok(Val::Zero),
         }
-        let Ok(file_id) = file_id.parse::<i64>() else {
-            return Err(mismatch(path, "a reference without a file ID"));
-        };
-        let guid = scalar_text(get(reference, "guid"), path)?.to_ascii_lowercase();
-        let kind = match scalar_text(get(reference, "type"), path)? {
-            "" => 0,
-            kind => match kind.parse::<i64>() {
-                Ok(kind) => kind,
-                Err(_) => return Err(mismatch(path, "a reference of an unknown type")),
-            },
-        };
+    }
+
+    /// The pointer a field of a class holds for an authored reference.
+    fn resolve(
+        &mut self,
+        authored: &Authored,
+        class_name: &str,
+        namespace: &str,
+        path: &str,
+    ) -> Result<Val> {
         let pointer = self.references.pointer(&ObjectReference {
-            guid: &guid,
-            file_id,
-            kind,
+            guid: &authored.guid,
+            file_id: authored.file_id,
+            kind: authored.kind,
             class_name,
             namespace,
             path,
@@ -1482,9 +2258,9 @@ impl Encoder<'_> {
             Pointer::Deferred => {
                 self.deferred.push(DeferredReference {
                     path: path.to_string(),
-                    guid,
-                    file_id,
-                    kind,
+                    guid: authored.guid.clone(),
+                    file_id: authored.file_id,
+                    kind: authored.kind,
                 });
                 Val::Zero
             }
@@ -1517,40 +2293,17 @@ impl Encoder<'_> {
                     Value::String(text) if text.is_empty() => Vec::new(),
                     // An array of integers is one scalar: the elements as
                     // little-endian hex, then a letter for their type.
-                    Value::String(text) => {
-                        let Some((size, _)) = integer_type(&data.type_name) else {
-                            // The engine reads no element out of a value.
-                            return Ok(Val::Seq(Vec::new()));
-                        };
-                        let digits = text
-                            .strip_suffix(|last| dump_suffix(&data.type_name) == Some(last))
-                            .unwrap_or(text);
-                        let width = size as usize * 2;
-                        if !digits.is_ascii() || !digits.len().is_multiple_of(width) {
-                            return Err(mismatch(path, "a hex dump of another width"));
-                        }
-                        let mut items = Vec::with_capacity(digits.len() / width);
-                        for chunk in digits.as_bytes().chunks(width) {
-                            let mut number = 0u64;
-                            for (index, pair) in chunk.chunks(2).enumerate() {
-                                let pair = std::str::from_utf8(pair).unwrap_or("");
-                                let Ok(byte) = u8::from_str_radix(pair, 16) else {
-                                    return Err(mismatch(path, "text that is not a hex dump"));
-                                };
-                                number |= (byte as u64) << (8 * index);
-                            }
-                            items.push(truncated(&data.type_name, number as i128));
-                        }
-                        items
-                    }
+                    Value::String(text) => hex_dump(&data.type_name, text, path)?,
                     Value::Array(authored) => authored
                         .iter()
                         .enumerate()
                         .map(|(index, item)| {
-                            // An element is an object of its own.
-                            self.value(element, data, item, &format!("{path}[{index}]"), true)
+                            self.element(element, data, item, &format!("{path}[{index}]"))
                         })
                         .collect::<Result<_>>()?,
+                    Value::Object(mapping) => {
+                        vec![self.element(element, data, sole_value(mapping, path)?, path)?]
+                    }
                     _ => return Err(mismatch(path, "a structure")),
                 };
                 // A fixed buffer always has its declared length.
@@ -1603,7 +2356,7 @@ impl Encoder<'_> {
     ) -> Result<Vec<usize>> {
         let path = REGISTRY_FIELD;
         let Value::Object(registry) = value else {
-            return Err(unsupported(
+            return Err(needs_code(
                 "behaviour holds managed references and no registry of their objects",
             ));
         };
@@ -1641,12 +2394,7 @@ impl Encoder<'_> {
                 string(get(kind, "ns"), path)?,
                 string(get(kind, "asm"), path)?,
             ];
-            out.extend_from_slice(&id.to_le_bytes());
-            for part in &name {
-                out.extend_from_slice(&(part.len() as u32).to_le_bytes());
-                out.extend_from_slice(part.as_bytes());
-                out.resize(out.len().next_multiple_of(4), 0);
-            }
+            registry_entry(out, id, &name);
             let [class, namespace, assembly] = &name;
             if id == -2 {
                 // The entry of the null reference has neither class nor data.
@@ -1694,7 +2442,7 @@ impl Encoder<'_> {
         out.resize(out.len().next_multiple_of(4), 0);
         self.held.sort_unstable();
         if self.held != listed {
-            return Err(unsupported(
+            return Err(needs_code(
                 "registry of managed references that does not hold exactly the objects referred to",
             ));
         }
@@ -1801,7 +2549,9 @@ impl Encoder<'_> {
                     values.push((Cow::Owned(child.name.clone()), made.unwrap_or(Val::Zero)));
                     continue;
                 }
-                return Err(unsupported(format!(
+                // The part keeps what the struct held before the text was
+                // read, which the constructor of the class tells.
+                return Err(needs_code(format!(
                     "behaviour field {path} is not in the authored document"
                 )));
             };

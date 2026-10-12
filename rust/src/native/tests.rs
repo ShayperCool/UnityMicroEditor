@@ -1173,6 +1173,7 @@ fn native_adoption_rejects_wrong_worker_environment_before_publishing() {
         pending_native_paths: Vec::new(),
         script_assemblies: BTreeMap::new(),
         behaviour_layouts: BTreeMap::new(),
+        behaviour_code: Default::default(),
         model_clips: BTreeMap::new(),
         additive_references: BTreeMap::new(),
         atlas_batch: BTreeMap::new(),
