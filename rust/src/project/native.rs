@@ -765,11 +765,16 @@ impl Inner {
             }
         } else if controller {
             // A controller also publishes its state machine behaviours, each
-            // as an object of its script class.
+            // as an object of its script class, and the avatar masks stored
+            // in its file.
+            let masks = objects
+                .iter()
+                .filter(|o| o.type_name == "UnityEngine.AvatarMask")
+                .count();
             let (main, behaviours) = if profile == ".controller" {
                 (
                     "UnityEngine.RuntimeAnimatorController",
-                    objects.len().saturating_sub(1),
+                    objects.len().saturating_sub(1 + masks),
                 )
             } else {
                 ("UnityEngine.AnimatorOverrideController", 0)

@@ -604,10 +604,53 @@ fn fits(targets: &Targets, reference: &playerbake::ObjectReference<'_>) -> bool 
         .is_none_or(|classes| classes.contains(&declared))
 }
 
+/// The reply of the code runner to a request, as recorded under
+/// `<root>/code` by the hash of the request. The SDK helper gave these
+/// replies for the classes under `Scripts`; `compiler_behaviour_objects_sdk`
+/// checks that it still does. With `UNITY_PLAYERBAKE_CODE_RUNNER` set to a
+/// command that takes the path of a request and prints the reply, a request
+/// without a record is run and recorded.
+fn recorded_code(
+    root: &Path,
+    request: &serde_json::Value,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let key = unity_micro_editor::sha256(&serde_json::to_vec(request)?);
+    let path = root.join("code").join(format!("{key}.json"));
+    if let Ok(record) = fs::read(&path) {
+        let record: serde_json::Value = serde_json::from_slice(&record)?;
+        assert_eq!(&record["request"], request);
+        return Ok(Some(record["reply"].clone()));
+    }
+    let Some(runner) = std::env::var_os("UNITY_PLAYERBAKE_CODE_RUNNER") else {
+        return Ok(None);
+    };
+    fs::create_dir_all(root.join("code"))?;
+    let asked = root.join("code").join(format!("{key}.request"));
+    fs::write(&asked, serde_json::to_vec(request)?)?;
+    let output = std::process::Command::new(runner).arg(&asked).output()?;
+    fs::remove_file(&asked)?;
+    anyhow::ensure!(
+        output.status.success(),
+        "code runner failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reply: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let record = serde_json::json!({ "request": request, "reply": reply });
+    fs::write(&path, serde_json::to_vec(&record)?)?;
+    Ok(Some(reply))
+}
+
 /// Stands in for the bundles the fixtures were built into.
-struct BundlePointers<'a>(&'a BuiltBehaviours, &'a Targets);
+struct BundlePointers<'a>(&'a BuiltBehaviours, &'a Targets, &'a Path);
 
 impl playerbake::References for BundlePointers<'_> {
+    fn run_object(
+        &mut self,
+        request: &serde_json::Value,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        recorded_code(self.2, request)
+    }
+
     fn pointer(
         &mut self,
         reference: &playerbake::ObjectReference<'_>,
@@ -670,6 +713,9 @@ impl playerbake::ControllerSources for BehaviourFixtures {
             },
             layout,
         }))
+    }
+    fn run_object(&self, request: &serde_json::Value) -> anyhow::Result<Option<serde_json::Value>> {
+        recorded_code(&self.root, request)
     }
     fn reference(
         &self,
@@ -916,7 +962,7 @@ fn compare_behaviours(root: &Path) -> (usize, usize, Vec<(String, String)>) {
                 let object = layout.object(
                     &document.data,
                     script.local_id,
-                    &mut BundlePointers(&built, &fixtures.targets),
+                    &mut BundlePointers(&built, &fixtures.targets, root),
                 );
                 object.ok().map(|object| hex(&object.data))
             };
@@ -1022,7 +1068,7 @@ fn compare_behaviour_objects(root: &Path) -> (usize, usize, Vec<(String, String)
                 let object = layout.object(
                     &document.data,
                     script.identity.local_id,
-                    &mut BundlePointers(&built, &fixtures.targets),
+                    &mut BundlePointers(&built, &fixtures.targets, root),
                 )?;
                 Ok((layout, object))
             });
@@ -1077,36 +1123,120 @@ fn compare_behaviour_objects(root: &Path) -> (usize, usize, Vec<(String, String)
 /// `N03_Typed` and `T01_Filled` hold objects by managed reference: in plain
 /// fields and lists, shared, null, in a cycle, from a class stored inline
 /// and from one another.
+///
+/// The controllers of `GRest` hold objects that are what the code of their
+/// classes leaves, which the SDK helper ran (`code`, see `recorded_code`).
+/// `K01_Count` and `K01h_CountHand` count the serialization callbacks a build
+/// runs: on the behaviour, on classes and structs it stores inline, in lists,
+/// through a base class, and on objects it holds by managed reference; the
+/// second lacks some of those objects, which then never hear that they were
+/// read. `E04_CallbackHand` is the first fixture that showed the callbacks.
+/// `K05h_NullsHand` records what a callback finds in fields the text lacks.
+/// `K06_Wrap` and its hand-edited twin hold a dictionary that is a class of
+/// its own, a wrapper that upgrades old data and an event whose call names
+/// its types by full assembly names, which the engine's own callback
+/// shortens. `K02h_Missing` and `K02p_Partial` lack managed reference fields:
+/// a constructor's object gets an ID of the build's, renumbered in the
+/// fixture from 0x7000000000000000 as the baker numbers them, since no two
+/// builds agree on those IDs. `K03h_Missing` and `K03p_Partial` lack fields
+/// that constructors set through calls, branches, loops, shared objects,
+/// private constructors and constructors with arguments.
 #[test]
 fn behaviours_match_the_engine_build() {
     let (matched, failed, refused) = compare_behaviours(&fixture("behaviours"));
     assert_eq!(failed, 0);
-    assert_eq!(matched, 33);
-    // The documents of two lack fields that their classes construct in ways
-    // the reader does not follow; the class of the third has serialization
-    // callbacks, and its reference object shows that the build ran them: it
-    // holds what they set, not what the text holds.
+    assert_eq!(matched, 41);
+    // The documents of these lack fields of a class whose constructor makes
+    // a curve or a gradient, which only the engine does.
+    let engine = "needs the engine: a call into the engine in UnityEngine.AnimationCurve";
     let reasons: Vec<(&str, &str)> = refused
         .iter()
         .map(|(name, reason)| {
-            let known = [
-                "what its class constructs it with is not known",
-                "has serialization callbacks",
-            ];
-            let reason = known.into_iter().find(|known| reason.contains(known));
-            (name.as_str(), reason.unwrap_or("another reason"))
+            let known = reason.contains(engine);
+            (name.as_str(), if known { engine } else { "another reason" })
         })
         .collect();
-    let unknown = "what its class constructs it with is not known";
     assert_eq!(
         reasons,
         [
-            ("D01_Stripped", unknown),
-            ("F02_Missing", unknown),
-            ("E04_CallbackHand", "has serialization callbacks"),
+            ("D01_Stripped", engine),
+            ("F02_Missing", engine),
+            ("K03h_Missing", engine),
+            ("K03p_Partial", engine),
         ],
         "{refused:#?}"
     );
+}
+
+/// The avatar masks stored in a controller's file are objects of the baked
+/// file, published beside the controller, the one hidden in the Project
+/// window as well: the Editor's importer holds both, and a session checks
+/// what a baked file publishes against it. The reference bundle holds the
+/// visible one, whose bytes are compared.
+#[test]
+fn baked_controller_carries_the_masks_of_its_file() {
+    let root = fixture("behaviours");
+    let fixtures = BehaviourFixtures::open(root.clone());
+    let source = root.join("Assets/GMask/M01_Embedded.controller");
+    let baked = playerbake::bake_controller(&fs::read(&source).unwrap(), &fixtures)
+        .unwrap()
+        .baked;
+    let masks: Vec<&str> = baked
+        .objects
+        .iter()
+        .filter(|(_, class)| class == "UnityEngine.AvatarMask")
+        .map(|(file_id, _)| file_id.as_str())
+        .collect();
+    assert_eq!(masks, ["3158504355398234554", "7453294008069960692"]);
+    let built = fs::read(source.with_extension("behaviours.json")).unwrap();
+    let built: serde_json::Value = serde_json::from_slice(&built).unwrap();
+    let objects = playerbake::read_serialized(&baked.file).unwrap();
+    let extra = built["extra"].as_object().unwrap();
+    assert_eq!(extra.len(), 1);
+    for (file_id, engine) in extra {
+        let object = objects
+            .iter()
+            .find(|object| object.local_id.to_string() == *file_id)
+            .unwrap();
+        assert_eq!(object.tree.class_id, 319);
+        assert_eq!(hex(&object.data), engine["data"].as_str().unwrap());
+    }
+}
+
+/// A caller that cannot run the code of the project gets the reason why the
+/// text alone does not tell the object.
+#[test]
+fn behaviours_that_need_their_code_are_refused_without_it() {
+    let root = fixture("behaviours");
+    for (class, reason) in [
+        (
+            "SmbCount",
+            "class SmbCount has serialization callbacks, which a build runs",
+        ),
+        (
+            "SmbEvent",
+            "class SmbEvent has serialization callbacks, which a build runs",
+        ),
+        (
+            "SmbRefPlain",
+            "behaviour field r is a managed reference that is not in the authored document",
+        ),
+        (
+            "SmbCtor",
+            "behaviour field baseCall is not in the authored document, and what its class constructs it with is not known",
+        ),
+    ] {
+        let layout = fs::read(root.join(format!("layouts/{class}.json"))).unwrap();
+        let layout: playerbake::ScriptLayout = serde_json::from_slice(&layout).unwrap();
+        let refused = playerbake::ScriptType::new(&layout)
+            .unwrap()
+            .object(&serde_json::Map::new(), 1, &mut NoReferences)
+            .unwrap_err();
+        assert_eq!(
+            refused.downcast::<Unsupported>().unwrap().to_string(),
+            reason
+        );
+    }
 }
 
 /// Every behaviour document of the fixtures on its own, and every object of
@@ -1121,18 +1251,15 @@ fn behaviours_match_the_engine_build() {
 fn behaviour_objects_match_the_engine_build() {
     let (matched, failed, refused) = compare_behaviour_objects(&fixture("behaviours"));
     assert_eq!(failed, 0);
-    assert_eq!(matched, 166);
+    assert_eq!(matched, 205);
     // The documents of `D01_Stripped` and `F02_Missing` lack fields their
-    // classes serialize. Twelve of them are filled in with what the
-    // constructors set; six lack a field set in a way the reader does not
-    // follow, such as an array with elements. One class cannot be laid out
-    // at all: it has serialization callbacks.
-    let reasons = [
-        "what its class constructs it with is not known",
-        "has serialization callbacks",
-    ];
-    let count = |reason: &str| refused.iter().filter(|(_, r)| r.contains(reason)).count();
-    assert_eq!(reasons.map(count), [6, 1], "{refused:#?}");
+    // classes serialize. Twelve of them are filled in with the constants the
+    // constructors store, three more with what running the constructors
+    // leaves. The constructors of three classes make a curve or a gradient,
+    // which takes the engine, and five objects of them stay refused.
+    let engine = "needs the engine: a call into the engine in UnityEngine.AnimationCurve";
+    assert_eq!(refused.len(), 5, "{refused:#?}");
+    assert!(refused.iter().all(|(_, reason)| reason.contains(engine)));
 }
 
 #[test]
@@ -1350,6 +1477,22 @@ fn text_of_another_type_reads_as_the_engine_reads_it() {
             field("f", primitive("float"), Some("1.5")),
             field("d", primitive("double"), Some("2.5")),
             field("s", json!({"kind": "string"}), Some("hello")),
+            field("arr", json!({"kind": "array", "element": primitive("int")}), None),
+            field("strs", json!({"kind": "array", "element": {"kind": "string"}}), None),
+            field(
+                "items",
+                json!({"kind": "array", "element": {"kind": "struct", "name": "Item", "fields": [
+                    field("hp", primitive("int"), Some("100")),
+                ]}}),
+                None,
+            ),
+            field("v", json!({"kind": "unity", "name": "Vector3"}), None),
+            field("mask", json!({"kind": "unity", "name": "LayerMask"}), None),
+            field(
+                "clip",
+                json!({"kind": "object", "className": "AnimationClip", "namespace": "UnityEngine"}),
+                None,
+            ),
         ],
     }))
     .unwrap();
@@ -1422,6 +1565,41 @@ fn text_of_another_type_reads_as_the_engine_reads_it() {
     assert_eq!(read("d", sequence()), Val::D(2.5));
     assert_eq!(read("s", structure()), Val::Str(String::new()));
     assert_eq!(read("s", sequence()), Val::Str(String::new()));
+    // Of a hex dump that ends inside an element the whole elements are
+    // read. A mapping where a list is declared is read as its values: a
+    // number for a number, and for a class a new element, which a number is
+    // not read into.
+    let numbers = |values: &[i64]| Val::Seq(values.iter().map(|&value| Val::I(value)).collect());
+    assert_eq!(read("arr", json!("07000000080000")), numbers(&[7]));
+    assert_eq!(read("arr", json!({"a": "1"})), numbers(&[1]));
+    assert_eq!(
+        read("strs", json!([{"a": "1"}, "x"])),
+        Val::Seq(vec![Val::Str(String::new()), Val::str("x")])
+    );
+    match read("items", json!({"hp": "1"})) {
+        Val::Seq(items) => {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].field("hp"), Some(&Val::I(100)));
+        }
+        other => panic!("{other:?}"),
+    }
+    // A number or a sequence where an engine struct or a reference is
+    // declared reads as nothing.
+    let unread = layout
+        .object(&serde_json::Map::new(), 1, &mut NoReferences)
+        .unwrap();
+    for (name, authored) in [
+        ("v", json!("5")),
+        ("v", sequence()),
+        ("mask", json!("7")),
+        ("clip", json!("5")),
+        ("clip", json!(["1"])),
+    ] {
+        let mut document = serde_json::Map::new();
+        document.insert(name.to_string(), authored.clone());
+        let object = layout.object(&document, 1, &mut NoReferences).unwrap();
+        assert_eq!(object.data, unread.data, "{name}: {authored}");
+    }
     // A field the text lacks is as the constructor left it.
     assert_eq!(read("i0", json!("3")), Val::I(3));
     let object = layout
