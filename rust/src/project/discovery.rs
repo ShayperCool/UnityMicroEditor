@@ -660,7 +660,9 @@ impl Inner {
                 bail!("authored native dependency closure exceeds supported source bound");
             }
             match lexpath::lower_ext(&logical).as_str() {
-                extension if super::native::model_profile(extension) => {
+                extension
+                    if super::native::model_profile(extension) || extension == ".spriteatlasv2" =>
+                {
                     heavy.insert(logical);
                     continue;
                 }

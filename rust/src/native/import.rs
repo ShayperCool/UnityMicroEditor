@@ -320,7 +320,22 @@ pub fn run_project_import_with(
                 report.success = true;
                 report.stage = "project-artifacts-validated".into();
             }
-            extracted.err()
+            // A store that had to be killed may not have written the index
+            // of what it holds.
+            let killed = report
+                .data_store
+                .as_ref()
+                .is_some_and(|store| store.forced_stop);
+            extracted.err().map(|error| {
+                if killed {
+                    wrap(
+                        "Unity.DataStore did not stop by itself and was killed; the import has to be repeated",
+                        error,
+                    )
+                } else {
+                    error
+                }
+            })
         }
     };
     report.elapsed_seconds = JsonF64(started.elapsed().as_secs_f64());

@@ -121,7 +121,7 @@ pub(crate) fn adoption_inputs(
     let mut inputs = BTreeMap::new();
     let mut guids = std::collections::HashSet::new();
     for asset in prepared.assets() {
-        let input = cold_input(opts, environment_sha256, &asset.path)?;
+        let input = cold_input(opts, environment_sha256, &asset.path, "")?;
         match resolve_project_import_source(&opts.project, &asset.path) {
             Ok(physical)
                 if input.guid == asset.guid

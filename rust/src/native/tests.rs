@@ -1175,6 +1175,8 @@ fn native_adoption_rejects_wrong_worker_environment_before_publishing() {
         behaviour_layouts: BTreeMap::new(),
         model_clips: BTreeMap::new(),
         additive_references: BTreeMap::new(),
+        atlas_batch: BTreeMap::new(),
+        atlas_identity: BTreeMap::new(),
     };
     let environment = read_worker_environment(&opts.project).unwrap();
     for name in [
@@ -1869,4 +1871,115 @@ fn import_results_become_the_current_revisions_of_the_context() {
     other.remove("ImportResultIDToImportStats");
     write(&database, lmdb::build(&other).unwrap());
     assert!(commit_import_results(&project.1, &[record(9)]).is_err());
+}
+
+#[test]
+fn sprite_atlas_sources_list_their_textures_folders_included() {
+    let project = Temp::new();
+    let meta = |guid: &str| format!("fileFormatVersion: 2\nguid: {guid}\n");
+    let guids = [
+        ("Assets/Art/a.png", "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"),
+        ("Assets/Art/Folder", "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"),
+        (
+            "Assets/Art/Folder/b.png",
+            "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        ),
+        (
+            "Assets/Art/Folder/Deep/c.tga",
+            "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+        ),
+        (
+            "Assets/Art/Folder/notes.txt",
+            "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+        ),
+        (
+            "Assets/Art/unpacked.png",
+            "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        ),
+        (
+            "Assets/Main.spriteatlasv2",
+            "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        ),
+        (
+            "Assets/Variant.spriteatlasv2",
+            "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        ),
+    ];
+    for (path, guid) in guids {
+        if !path.ends_with("Folder") {
+            write(&project.path(path), path);
+        }
+        write(&project.path(&format!("{path}.meta")), meta(guid));
+    }
+    // A hidden file and one the Editor ignores are no members.
+    write(&project.path("Assets/Art/Folder/.hidden.png"), "x");
+    write(&project.path("Assets/Art/Folder/old.png~"), "x");
+    let atlas = |packables: &str, variant: u8| {
+        format!(
+            "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!612988286 &1\nSpriteAtlasAsset:\n  serializedVersion: 2\n  m_MasterAtlas: {{fileID: 0}}\n  m_ImporterData:\n    packables:\n{packables}  m_IsVariant: {variant}\n  m_ScriptablePacker: {{fileID: 0}}\n"
+        )
+    };
+    // A texture, a sprite of the same texture, a folder and a missing asset.
+    write(
+        &project.path("Assets/Main.spriteatlasv2"),
+        atlas(
+            "    - {fileID: 2800000, guid: a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1, type: 3}\n    - {fileID: 21300000, guid: a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1, type: 3}\n    - {fileID: 102900000, guid: f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0, type: 3}\n    - {fileID: 2800000, guid: 99999999999999999999999999999999, type: 3}\n",
+            0,
+        ),
+    );
+    write(
+        &project.path("Assets/Variant.spriteatlasv2"),
+        atlas(
+            "    - {fileID: 2800000, guid: e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5, type: 3}\n",
+            1,
+        ),
+    );
+    let mut path_of = |guid: &str| {
+        guids
+            .iter()
+            .find(|(_, known)| *known == guid)
+            .map_or(String::new(), |(path, _)| path.to_string())
+    };
+    let atlases = super::atlas::read_atlas_sources(&project.1, &mut path_of).unwrap();
+    assert_eq!(atlases.len(), 2);
+    let main = &atlases[0];
+    assert_eq!(main.revision.path, "Assets/Main.spriteatlasv2");
+    assert_eq!(main.revision.guid, "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a");
+    assert_eq!(main.refusal, "");
+    assert_eq!(
+        main.members
+            .iter()
+            .map(|member| member.path.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "Assets/Art/Folder/Deep/c.tga",
+            "Assets/Art/Folder/b.png",
+            "Assets/Art/a.png"
+        ]
+    );
+    assert_eq!(
+        main.batch().last().map(String::as_str),
+        Some("Assets/Main.spriteatlasv2")
+    );
+    let ingredients = main.ingredients();
+    assert_eq!(ingredients.len(), 6);
+    assert_eq!(ingredients["Assets/Art/a.png"], sha256(b"Assets/Art/a.png"));
+    assert_eq!(
+        ingredients["Assets/Art/a.png.meta"],
+        sha256(meta("a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1").as_bytes())
+    );
+    assert_eq!(atlases[1].refusal, "a variant atlas is not supported");
+    // An atlas whose sprites a build leaves for the game to bind.
+    write(
+        &project.path("Assets/Main.spriteatlasv2.meta"),
+        format!(
+            "{}SpriteAtlasImporter:\n  bindAsDefault: 0\n",
+            meta("1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a")
+        ),
+    );
+    let atlases = super::atlas::read_atlas_sources(&project.1, &mut path_of).unwrap();
+    assert_eq!(
+        atlases[0].refusal,
+        "an atlas that is not included in the build is not supported"
+    );
 }

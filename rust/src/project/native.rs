@@ -30,6 +30,7 @@ pub(crate) fn native_content_class(type_name: &str) -> i32 {
         "UnityEngine.Texture3D" => 117,
         "UnityEngine.Texture2DArray" => 187,
         "UnityEngine.Sprite" => 213,
+        "UnityEngine.U2D.SpriteAtlas" => 687078895,
         "UnityEngine.AudioClip" => 83,
         "UnityEngine.GameObject" => 1,
         "UnityEngine.Transform" => 4,
@@ -409,6 +410,8 @@ impl Inner {
         let audio = crate::runtimeartifact::audio_profile(profile.trim_start_matches('.'));
         let text = crate::runtimeartifact::text_profile(profile.trim_start_matches('.'));
         let ui = matches!(profile.as_str(), ".uss" | ".uxml" | ".ttf" | ".otf");
+        // Packed by the importer; its textures are sources of their own.
+        let atlas = profile == ".spriteatlasv2";
         let shader = profile == ".shader";
         // Baked by this tool from the authored source; see `playerbake`.
         let clip = profile == ".anim";
@@ -452,6 +455,12 @@ impl Inner {
                 // A baked shader holds the files it includes and the
                 // keywords of the materials that use it.
                 ".shader" => source == logical,
+                // A packed atlas holds the sprites of its textures, and a
+                // texture is bound to the atlas that packs it.
+                ".spriteatlasv2" => crate::runtimeartifact::texture_profile(
+                    lexpath::lower_ext(source).trim_start_matches('.'),
+                ),
+                _ if texture => lexpath::equal_fold(lexpath::ext(source), ".spriteatlasv2"),
                 _ => false,
             };
             if !guarded || !valid_native_hex(expected, 64) {
@@ -488,6 +497,7 @@ impl Inner {
             && !scripted
             && !video
             && !texture
+            && !atlas
             && !ui
             && !shader
             && !clip
@@ -548,9 +558,10 @@ impl Inner {
                 }
             }
         }
-        if texture && !expected.is_empty() {
+        if (texture || atlas) && !expected.is_empty() {
             // The sprites of a texture come and go with its importer
-            // settings, and so does its shape.
+            // settings, and so does its shape; an atlas gets a texture per
+            // packed page.
             expected = r
                 .content
                 .objects
@@ -592,7 +603,7 @@ impl Inner {
                 expected.insert("8300000".into(), "UnityEngine.AudioClip".into());
             } else if text {
                 expected.insert("4900000".into(), "UnityEngine.TextAsset".into());
-            } else if texture {
+            } else if texture || atlas {
                 for value in r.content.objects.iter() {
                     expected.insert(value.file_id.clone(), value.type_name.clone());
                 }
@@ -676,6 +687,22 @@ impl Inner {
                 || !r.model_graph.is_empty()
             {
                 bail!("texture replacement must contain one texture and its sprites");
+            }
+        } else if atlas {
+            let count =
+                |type_name: &str| objects.iter().filter(|o| o.type_name == type_name).count();
+            let pages = count("UnityEngine.Texture2D");
+            if count("UnityEngine.U2D.SpriteAtlas") != 1
+                || pages == 0
+                || pages + 1 != objects.len()
+                || !r.model_graph.is_empty()
+                || !r.model_graph_sha256.is_empty()
+                || !r.content.resources.is_empty()
+                || !r.content.dependencies.is_empty()
+            {
+                bail!(
+                    "sprite atlas replacement must contain one SpriteAtlas and its packed textures"
+                );
             }
         } else if shader {
             if objects.len() != 1
@@ -904,6 +931,7 @@ impl Inner {
         let extension = lexpath::ext(&owned.source_path).to_ascii_lowercase();
         if new_source
             || extension == ".mixer"
+            || extension == ".spriteatlasv2"
             || crate::runtimeartifact::texture_profile(extension.trim_start_matches('.'))
         {
             for value in owned.content.objects.iter() {

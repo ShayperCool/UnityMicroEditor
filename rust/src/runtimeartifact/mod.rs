@@ -1,6 +1,7 @@
 //! Projects Unity 6000.6.3f1 native worker artifacts into Linux Mono
 //! ContentFiles. Supported native data stays byte-for-byte unchanged.
 mod adapt;
+mod atlas;
 mod builtin_lighting;
 mod builtin_shader;
 mod builtin_shader_cmd;
@@ -20,6 +21,7 @@ pub use adapt::{
     AudioMetadata, ExternalReference, Metadata, Object, RemovedObject, Resource, adapt,
     audio_profile, read_native_audio_resource, text_profile,
 };
+pub use atlas::{PackedAtlas, adapt_sprite_atlas, bind_packed_sprites};
 pub use builtin_lighting::{BuiltinLightingIdentity, inspect_builtin_lighting};
 pub use builtin_shader::{BuiltinShaderIdentity, ReadAt, inspect_builtin_shader};
 pub use builtin_shader_cmd::{BuiltinShaderOptions, builtin_shader_command, extract_builtin};

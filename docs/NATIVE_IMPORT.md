@@ -1,6 +1,6 @@
 # Native import
 
-Heavy content (models, audio, video, textures, text assets, input actions) is imported by Unity's own AssetImportWorker, driven by this tool's coordinator. The main Editor process, its GUI and a pre-imported `Library` are not needed for a worker run. Scenes and authored prefabs do not go through this path; the runtime loader reads them from source.
+Heavy content (models, audio, video, textures, sprite atlases, text assets, input actions) is imported by Unity's own AssetImportWorker, driven by this tool's coordinator. The main Editor process, its GUI and a pre-imported `Library` are not needed for a worker run. Scenes and authored prefabs do not go through this path; the runtime loader reads them from source.
 
 Only Unity `6000.6.3f1` on Linux x64 is supported. The coordinator starts `Unity` in AssetImportWorker mode and a separate `Unity.DataStore` from the installed engine. The importers themselves stay inside Unity's executable.
 
@@ -51,7 +51,7 @@ unity-micro-editor native-environment --project /absolute/project
 
 ## During a run
 
-Before expanding a scene, the runner walks the GUID references of the selected scene, its runtime prefabs and their authored dependencies. New or changed models (FBX, OBJ, COLLADA, Blender), audio files, VP8 video, textures, text assets and `.inputactions` files are imported in batches of up to 32 assets per worker; the sections below list the source formats and the importer settings each covers. An unchanged baseline, catalog or cache entry is skipped, as is a PNG or JPEG in the supported raw profile.
+Before expanding a scene, the runner walks the GUID references of the selected scene, its runtime prefabs and their authored dependencies. New or changed models (FBX, OBJ, COLLADA, Blender), audio files, VP8 video, textures, importer-based sprite atlases, text assets and `.inputactions` files are imported in batches of up to 32 assets per worker; the sections below list the source formats and the importer settings each covers. An unchanged baseline, catalog or cache entry is skipped, as is a PNG or JPEG in the supported raw profile.
 
 Each cache entry records an `environmentSha256`. The fingerprint covers the pinned protocol revision, the Unity path, the exact SHA-256 of `ProjectSettings.asset`, the parsed settings and the wire environment. An index with no fingerprint, or a different one, is skipped and its assets are imported again. Changing this environment while a runner is live requires restarting the runner.
 
@@ -160,6 +160,46 @@ The adapter then turns the artifact into a ContentFile. An object of a script cl
 Proven in a Player as a new asset: the `InputActionAsset` (map and actions found by name, enabled) and an `InputActionReference` sub-object resolving its action. Other scripted importers are not enabled; the route is general but each needs its own verification.
 
 The cache key of such an import covers the compilation record, so another compilation imports again.
+
+## Sprite atlases
+
+A `.spriteatlasv2` is packed by an importer, `SpriteAtlasImporter`, when the project's sprite packer mode is Sprite Atlas V2 (`m_SpritePackerMode: 5` in `EditorSettings.asset`); in any other mode the importer leaves an atlas without a packed result. A standalone worker runs that importer, and its artifact is byte-identical to the Editor's (compared for an atlas of five sprites from three textures, one of them a sheet, and for an atlas of one sprite).
+
+### Importing with dependencies
+
+The importer packs the sprites of other assets, so it needs their artifacts. It asks the worker's database for them; a worker that does not find them answers the import with error 6 and the addresses it lacks, and the Editor imports those and asks again. The coordinator does the same with two workers of one run:
+
+1. The first worker imports the textures the atlas packs.
+2. The coordinator writes what that worker returned into the `Library/ArtifactDB` the worker left in the context, as the Editor commits an import: the result becomes the current revision of its address (`CurrentRevisions`, `ImportAddressToImportResultIDs`), and the three blobs of the response become the records of the result (`ImportResultIDToArtifactDependencies`, `ImportResultIDToArtifactMetaInfo`, `ImportResultIDToImportStats`). The key of an address is the XXH3-128 of its GUID, importer ID and importer hash (`ArtifactDBWriteTxn::SetCurrentRevision`). The database is written only between workers, when no process has it open.
+3. The second worker imports the atlas. It finds the textures' revisions in the database and reads their files from the DataStore, which stays up between the two.
+
+`project-import` does this for a `.spriteatlasv2` given together with its textures.
+
+### The Player form
+
+The importer leaves the packed result in an Editor-only object: the `SpriteAtlas` of the artifact has an empty render data map, and a `CachedSpriteAtlasRuntimeData` beside it holds one frame per packed sprite. A build writes it otherwise, and so does the adapter (`rust/src/runtimeartifact/atlas.rs`):
+
+- The atlas gets the cached frames as its `m_RenderDataMap`. The file holds the atlas and its packed textures; the importer, the source asset and the cached result are dropped.
+- A packed sprite, in the file of its texture, gets its key into that map (`m_RenderDataKey`: the texture's GUID and the sprite's local ID), the atlas tag (`m_AtlasTags`), a pointer to the atlas (`m_SpriteAtlas`) and no texture of its own (`m_RD.texture`). The atlas becomes the one file the texture's file refers to, so the Player loads it first.
+
+Both were compared with AssetBundles built by the pinned Editor from the same sources, field by field through the type trees: the map of a built atlas equals the cached frames, entry for entry and in the same order, and a built packed sprite differs from the imported one in those four fields and nothing else. `rust/tests/testdata/native` holds the worker's artifacts of a one-sprite atlas and the serialized file of its build. One deliberate difference from a build remains: the texture's own `Texture2D` stays in its file, for a material or a script that refers to the texture directly; a build drops it when nothing but the packed sprites uses it.
+
+### In a session
+
+No scene refers to an atlas. A sprite belongs to one because the atlas lists its texture, one of its sprites, or a folder above it. So each walk reads the project's `.spriteatlasv2` sources (`rust/src/native/atlas.rs`), and an atlas that packs a texture the scene uses, or one a session already published, is imported in one batch with all of its textures. The batch is imported again when the atlas, its `.meta`, one of the textures or a texture's `.meta` changes, or when the atlas gains or loses a texture; a texture that an atlas no longer packs is imported again on its own. The atlas records the textures it was packed from, and a bound texture the revision of the atlas, so a cache entry made from other revisions is not replayed.
+
+In a Player, as new assets (`Temp/e2e/kinds3`): a `SpriteRenderer` drew a sprite of a single-sprite texture and a sprite of a sheet through a camera, each reporting `packed=True` and the atlas texture (`sactx-0-256x512-DXT5|BC3-atlas2-...`, 256x512) as its texture, with the pixels of the sprite; a script field of type `SpriteAtlas` held the atlas with its five sprites.
+
+Refused, with the reason named:
+
+- a variant atlas, an atlas with a scriptable packer (project code), and an atlas that is not included in the build (`bindAsDefault: 0`), whose sprites a build leaves for the game to bind;
+- a texture two atlases pack; an atlas of more than 31 textures, which one import batch does not hold; an atlas that packs a texture whose importer settings are outside the [verified list](#textures);
+- a packed frame with an alpha or secondary texture, and an atlas texture with streamed data;
+- an artifact without a packed result, which is what the importer leaves in a project whose packer mode is not Sprite Atlas V2.
+
+### Atlases packed by a build
+
+A `.spriteatlas` (the first format) is not packed by its import: the worker, like the Editor, runs `NativeFormatImporter` over it and yields the authored asset. The Editor packs it when it builds a Player or an AssetBundle, in Sprite Atlas V2 mode as well: a bundle built from a sprite texture that such an atlas lists holds the packed atlas and the sprite bound to it. Nothing outside the Editor's build does that packing, so the tool does not deliver such an atlas, and its sprites are drawn from their own textures. To deliver one, the coordinator would have to give the worker a `.spriteatlasv2` made from the authored asset (the same packables, with the texture, packing and platform settings moved into the importer's `.meta`, under the atlas's GUID), and the result would have to be compared with a build of the first format; neither was done.
 
 ## Text assets
 
@@ -452,7 +492,7 @@ Unchanged UXML, USS and font assets are extracted from an existing Unity import 
 
 - The wire protocol, LMDB schema and DataStore layout were derived for one Unity version and are not a stable public API. A worker version mismatch is refused, and another engine version needs its own verification.
 - There is no proven general support for animation inside models, skinned meshes, complex model settings, texture formats of other platform families, custom AssetPostprocessors or every dependency of an arbitrary project. A project with an `AssetPostprocessor` for textures imports them in the Editor through that script; a standalone worker has no script assemblies and does not run it.
-- Video other than VP8 `.webm`, ScriptedImporter assets other than `.inputactions` and compute shaders are not imported; a scene that refers to a new one needs a catalog built by the Editor.
+- Video other than VP8 `.webm`, ScriptedImporter assets other than `.inputactions`, sprite atlases of the first format (`.spriteatlas`) and compute shaders are not imported; a scene that refers to a new one needs a catalog built by the Editor.
 - `.obj`, `.dae`, `.blend` and `.inputactions` need files of an Editor run of the project (the shader name table, the script assemblies); a project that was only ever prepared with a reused host and never opened in an Editor has none, and such an import is refused with that reason.
 - A model's generated material uses the built-in `Standard` shader and depends on the host holding it.
 - A shader is delivered only in the cases listed under [Shaders](#shaders); a shader of a project with a scriptable render pipeline and a compute shader still need a catalog built by the Editor.
@@ -474,7 +514,8 @@ The coordinator lives in `rust/src/native/`, with the wire format, LMDB reader a
 | `rust/src/native/artifact.rs` | Extracting stored files and checking content keys |
 | `rust/src/native/environment.rs` | The import environment fingerprint |
 | `rust/src/native/scripted.rs` | What an import takes from an Editor run: compiled importers and the shader name table |
-| `rust/src/runtimeartifact/scripted.rs`, `video.rs` | The Player form of a scripted importer's objects and of a video clip |
+| `rust/src/native/atlas.rs` | The project's sprite atlases, the textures they pack and the batches they are imported in |
+| `rust/src/runtimeartifact/scripted.rs`, `video.rs`, `atlas.rs` | The Player form of a scripted importer's objects, of a video clip, and of a sprite atlas and its sprites |
 | `rust/src/native/baked.rs`, `rust/src/playerbake/` | Assets baked from authored YAML without a worker |
 | `rust/src/playerbake/shader.rs`, `shader/`, `rust/src/native/shader_compiler.rs` | Shaders: variants, program tables, the client of `UnityShaderCompiler` |
 
