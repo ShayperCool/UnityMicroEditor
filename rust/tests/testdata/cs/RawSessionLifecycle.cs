@@ -57,8 +57,9 @@ namespace UnityEngine.SceneManagement
         private static int next = 1;
         public static Scene CreateScene(string name)
         { var value = new Scene { handle = next++ }; loaded.Add(value.handle); return value; }
+        public static event Action<Scene> sceneUnloaded;
         public static AsyncOperation UnloadSceneAsync(Scene scene)
-        { loaded.Remove(scene.handle); return new AsyncOperation(); }
+        { if (loaded.Remove(scene.handle)) sceneUnloaded?.Invoke(scene); return new AsyncOperation(); }
     }
 }
 namespace UnityMicroEditor.Raw
@@ -95,9 +96,10 @@ namespace UnityMicroEditor.Raw
             private bool released;
             internal ImportContext(RawSceneManifest manifest, Dictionary<string, Type> types, NativeAssetCache cache)
             { this.manifest = manifest; }
-            internal Scene Load(bool initializers = true, Action commit = null, bool preloads = true)
+            // A valid target is a scene another owner loaded; the content is built into it.
+            internal Scene Load(bool initializers = true, Action commit = null, bool preloads = true, Scene target = default)
             {
-                Scene scene = SceneManager.CreateScene("Source scene");
+                Scene scene = target.IsValid() ? target : SceneManager.CreateScene("Source scene");
                 var source = new GameObject("Session") { scene = scene };
                 owned.Add(source); created.Add(source);
                 try
@@ -175,9 +177,18 @@ internal static class Program
         Check(!RawSceneLoader.created[4].alive && currentRoot.alive && observer.alive,
             "Failed additive activation leaked a DDOL root or destroyed unrelated objects");
 
+        // A scene the game loaded itself and the session filled: its owner's unload retires the content.
+        Scene host = SceneManager.CreateScene("Host scene");
+        RawProjectContent.LoadSceneInto(ShipGUID, host);
+        GameObject adoptedRoot = RawSceneLoader.created[5];
+        Check(adoptedRoot.alive && host.isLoaded, "Adopted scene was not filled in place");
+        SceneManager.UnloadSceneAsync(host);
+        Check(!adoptedRoot.alive && !host.isLoaded && currentRoot.alive && observer.alive,
+            "Unload of an adopted scene leaked its content or destroyed unrelated objects");
+
         Check(RawProjectContent.TryLoadScene(ShipGUID, out Scene childA), "Child could not load again");
         Scene childB = session.LoadAdditive(ship, RawReloadIdentity.HashFile(ship));
-        RawSceneLoader.created[5].onDestroy = () => session.UnloadAdditive(childB);
+        RawSceneLoader.created[6].onDestroy = () => session.UnloadAdditive(childB);
         currentRoot.onDestroy = () => RawProjectContent.UnloadScene(childA);
         RawSceneLoader.releasingNative = () =>
         { foreach (GameObject value in RawSceneLoader.created) Check(!value.alive, "Native assets were released before source callbacks completed"); };
