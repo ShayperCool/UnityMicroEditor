@@ -84,6 +84,17 @@ graph and identical authored GameObject, Transform and renderer fields. Geometry
 may change while IDs, types and those fields remain stable. Skinned/Animator
 graphs, topology changes and other native asset profiles need a refreshed catalog.
 
+An inherited object of a prefab has the local ID the Editor's import gives it
+(compared with the pinned Editor's prefab artifacts): the ID of its stripped
+document in that prefab, whatever that ID is, and otherwise the instance ID XOR
+the ID the object has in the instance's source asset, without the sign bit.
+When another document of the prefab already has that derived ID, the Editor
+imports the object under an ID the sources do not determine. Such an object is
+expanded and loaded, but has no local ID here, as has an object named by two
+stripped documents; a reference to either through an enclosing prefab or scene
+is refused as unresolved. Two objects without stripped documents whose derived
+IDs are equal are refused, and the error names both.
+
 Native dependency discovery scans bounded lines and hashes each entire source.
 The ordinary text/YAML parser bound stays unchanged. Larger `.anim` sources may
 be scanned up to 1 GiB only when a current public raw cooked catalog proves the

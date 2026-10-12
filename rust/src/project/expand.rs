@@ -22,6 +22,9 @@ pub(crate) struct Expanded {
     pub source_path: String,
     pub guid: String,
     pub targets: BTreeSet<String>,
+    /// The local ID in the asset whose expansion last returned this object;
+    /// empty when the sources do not determine it.
+    pub identity: String,
     pub removed: bool,
     pub missing_script: bool,
 }
@@ -661,6 +664,7 @@ impl Inner {
                 source_path: logical.into(),
                 guid: guid.clone(),
                 targets: BTreeSet::from([target_key(&guid, &d.file_id)]),
+                identity: d.file_id.clone(),
                 ..Expanded::default()
             });
         }
@@ -693,6 +697,9 @@ impl Inner {
                 source_guid,
             });
         }
+        // A stripped document is the identity the Editor keeps for the object it
+        // names. Two of them for one object leave it without a known identity.
+        let mut placeholders: HashMap<usize, Option<&str>> = HashMap::new();
         for d in documents.iter().filter(|d| d.stripped) {
             let instance_id = file_id(d.get("m_PrefabInstance"));
             let reference = object(d.get("m_CorrespondingSourceObject"));
@@ -711,27 +718,50 @@ impl Inner {
             };
             mapping.insert(d.file_id.clone(), arena[target].file_id.clone());
             arena[target].targets.insert(target_key(&guid, &d.file_id));
+            placeholders
+                .entry(target)
+                .and_modify(|identity| *identity = None)
+                .or_insert(Some(&d.file_id));
         }
         let prefab = lexpath::lower_ext(logical) == ".prefab";
         if prefab {
-            for &o in &children {
-                let mut identity = 0i64;
-                let local = arena[o]
-                    .file_id
-                    .strip_prefix(prefix)
-                    .unwrap_or(&arena[o].file_id);
-                for part in local.split(':') {
-                    identity ^= strconv::parse_int(part, 10)?;
+            // The Editor imports an inherited object under its stripped document's
+            // ID, or else under the instance ID XOR the ID the object has in the
+            // instance's source asset. When a document of this file already has
+            // that ID, the Editor gives the object another one that the sources do
+            // not determine, so the object has no identity here.
+            let authored: HashSet<&str> = documents.iter().map(|d| d.file_id.as_str()).collect();
+            let mut derived: HashMap<String, usize> = HashMap::new();
+            for instance in &instances {
+                let instance_id = strconv::parse_int(&instance.document.file_id, 10)?;
+                for &o in &instance.objects {
+                    if let Some(placeholder) = placeholders.get(&o) {
+                        arena[o].identity = placeholder.unwrap_or_default().into();
+                        continue;
+                    }
+                    if arena[o].identity.is_empty() {
+                        continue;
+                    }
+                    let source = strconv::parse_int(&arena[o].identity, 10)?;
+                    let id = ((instance_id ^ source) & i64::MAX).to_string();
+                    if authored.contains(id.as_str()) {
+                        arena[o].identity.clear();
+                        continue;
+                    }
+                    if let Some(&other) = derived.get(&id) {
+                        bail!(
+                            "inherited prefab identity collision {id} in {logical}: {} ({}) and {} ({})",
+                            arena[other].file_id,
+                            arena[other].source_path,
+                            arena[o].file_id,
+                            arena[o].source_path
+                        );
+                    }
+                    derived.insert(id.clone(), o);
+                    mapping.insert(id.clone(), arena[o].file_id.clone());
+                    arena[o].targets.insert(target_key(&guid, &id));
+                    arena[o].identity = id;
                 }
-                let id = (identity & i64::MAX).to_string();
-                if let Some(previous) = mapping.get(&id)
-                    && !previous.is_empty()
-                    && *previous != arena[o].file_id
-                {
-                    bail!("inherited prefab identity collision {id} in {logical}");
-                }
-                mapping.insert(id.clone(), arena[o].file_id.clone());
-                arena[o].targets.insert(target_key(&guid, &id));
             }
         }
         for (&o, d) in own.iter().zip(&own_documents) {
