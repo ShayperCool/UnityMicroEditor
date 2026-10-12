@@ -44,6 +44,7 @@ tar = { version = "0.4", default-features = false }
 url = "2"
 sha1 = "0.10"
 lz4-sys = "1.11.1"
+str0m = { version = "0.24.1", default-features = false, features = ["rust-crypto"] }
 
 [build-dependencies]
 cc = "1"

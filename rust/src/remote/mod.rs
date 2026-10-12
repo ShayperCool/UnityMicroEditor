@@ -10,11 +10,14 @@
 mod encoder;
 mod http;
 mod input;
+mod publish;
 #[cfg(test)]
 mod tests;
+mod webrtc;
 
 pub use encoder::{Encoded, Encoder, Factory, Parameters, codec_string, hardware};
 pub use input::{key_name, translate};
+pub use publish::{Publisher, expand, find_url, split_words};
 
 use crate::{agentcontrol::Controller, cancel::Context, sysutil};
 use axum::body::Bytes;
@@ -22,7 +25,7 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     io::{Read, Write},
-    net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream},
+    net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
@@ -31,7 +34,7 @@ use std::{
     time::{Duration, Instant},
 };
 use subtle::ConstantTimeEq;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 /// The largest frame side the encoder accepts.
 const MAXIMUM_SIDE: usize = 4096;
@@ -70,19 +73,40 @@ impl Player for Controller {
 }
 
 /// Zero or empty members select the defaults: `127.0.0.1:0` (a free loopback
-/// port), 60 frames per second, at most 1920 pixels wide, 12000 kbit/s.
+/// port), the `websocket` transport, 60 frames per second, at most 1920 pixels
+/// wide, 12000 kbit/s, no publish command.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Options {
     pub listen: String,
+    /// `websocket`: frames over the page's WebSocket, decoded with WebCodecs
+    /// (one HTTP port; the page needs localhost or HTTPS). `webrtc`: an RTP
+    /// video track over UDP (works on a plain-HTTP page).
+    pub transport: String,
+    /// `webrtc`: the local IP its UDP socket binds and announces. Empty
+    /// selects the listener's address, or this machine's outbound address
+    /// when the listener takes every interface.
+    pub webrtc_address: String,
+    /// `webrtc`: the UDP port, 0 for a free one.
+    pub webrtc_port: u16,
     pub fps: u32,
     pub max_width: u32,
     pub bitrate_kbps: u32,
+    /// A command started with the session and stopped with it; see [`Publisher`].
+    pub publish: String,
+    /// Finds the public address in the command's output instead of the default search.
+    pub publish_pattern: String,
 }
 impl Options {
     /// The options with every default filled in, or what is out of range.
     pub fn normalized(mut self) -> Result<Options, String> {
         if self.listen.is_empty() {
             self.listen = "127.0.0.1:0".into();
+        }
+        if self.transport.is_empty() {
+            self.transport = "websocket".into();
+        }
+        if !matches!(self.transport.as_str(), "websocket" | "webrtc") {
+            return Err("transport must be websocket or webrtc".into());
         }
         let defaults = [
             (&mut self.fps, 60),
@@ -110,11 +134,21 @@ impl Options {
 /// One encoded frame in the form viewers receive it.
 pub(crate) struct Packet {
     pub keyframe: bool,
+    /// Microseconds since the session started.
+    pub timestamp: u64,
     pub wire: Bytes,
+    // Where the access unit starts in `wire`.
+    offset: usize,
+}
+impl Packet {
+    /// The H.264 Annex-B access unit.
+    pub(crate) fn data(&self) -> &[u8] {
+        &self.wire[self.offset..]
+    }
 }
 // flags, encoder epoch, microseconds since the session started, picture size
 // and the codec string a decoder is configured with, then the access unit.
-fn wire(
+fn packet(
     keyframe: bool,
     epoch: u32,
     timestamp: u64,
@@ -122,7 +156,7 @@ fn wire(
     height: u16,
     codec: &str,
     data: &[u8],
-) -> Bytes {
+) -> Packet {
     let mut out = Vec::with_capacity(18 + codec.len() + data.len());
     out.push(keyframe as u8);
     out.extend_from_slice(&epoch.to_le_bytes());
@@ -131,8 +165,14 @@ fn wire(
     out.extend_from_slice(&height.to_le_bytes());
     out.push(codec.len() as u8);
     out.extend_from_slice(codec.as_bytes());
+    let offset = out.len();
     out.extend_from_slice(data);
-    out.into()
+    Packet {
+        keyframe,
+        timestamp,
+        wire: out.into(),
+        offset,
+    }
 }
 
 #[derive(Default)]
@@ -166,8 +206,11 @@ pub(crate) struct Shared {
     generations: AtomicU64,
     epochs: AtomicU32,
     viewers: AtomicUsize,
+    viewer_ids: AtomicU64,
     keyframe: AtomicBool,
     closed: AtomicBool,
+    // The WebRTC task and the UDP address it serves, with that transport.
+    rtc: Option<(mpsc::UnboundedSender<webrtc::Command>, SocketAddr)>,
 }
 impl Shared {
     fn notify(&self) {
@@ -193,16 +236,50 @@ impl Shared {
     fn send_viewers(&self) {
         self.send(&json!({"viewers": self.viewers.load(Ordering::Relaxed)}));
     }
-    pub(crate) fn viewer_joined(&self) {
+    /// Counts a viewer in and returns the id its messages carry.
+    pub(crate) fn viewer_joined(&self) -> u64 {
         self.viewers.fetch_add(1, Ordering::Relaxed);
         self.request_keyframe();
         self.send_viewers();
         self.notify();
+        self.viewer_ids.fetch_add(1, Ordering::Relaxed) + 1
     }
-    pub(crate) fn viewer_left(&self) {
+    pub(crate) fn viewer_left(&self, viewer: u64) {
+        if let Some((commands, _)) = &self.rtc {
+            let _ = commands.send(webrtc::Command::Leave(viewer));
+        }
         self.viewers.fetch_sub(1, Ordering::Relaxed);
         self.send_viewers();
         self.notify();
+    }
+    /// Whether viewers get the video as a WebRTC track instead of WebSocket frames.
+    pub(crate) fn uses_webrtc(&self) -> bool {
+        self.rtc.is_some()
+    }
+    /// A viewer's WebRTC offer; the reply is the message to send back.
+    pub(crate) async fn viewer_offer(&self, viewer: u64, offer: Value) -> String {
+        let outcome = match &self.rtc {
+            None => Err("this session does not use WebRTC".to_string()),
+            Some((commands, _)) => {
+                let (reply, answer) = oneshot::channel();
+                let command = webrtc::Command::Offer {
+                    viewer,
+                    offer,
+                    reply,
+                };
+                match commands.send(command) {
+                    Ok(()) => answer
+                        .await
+                        .unwrap_or_else(|_| Err("the session ended".into())),
+                    Err(_) => Err("the session ended".into()),
+                }
+            }
+        };
+        match outcome {
+            Ok(answer) => json!({"answer": answer}),
+            Err(error) => json!({"rtcError": error}),
+        }
+        .to_string()
     }
     /// A text message of a viewer: input events, a keyframe request after a
     /// decoder error, or the release of everything it holds down.
@@ -231,6 +308,7 @@ impl Shared {
             "cursorLocked": status.cursor_locked,
             "viewport": {"width": status.viewport.0, "height": status.viewport.1},
             "viewers": self.viewers.load(Ordering::Relaxed),
+            "transport": self.options.transport,
             "encoder": status.encoder,
             "error": if status.error.is_empty() { &status.attach_error } else { &status.error },
         })
@@ -249,6 +327,8 @@ impl Shared {
             "running": true,
             "url": self.url(),
             "listen": self.address.to_string(),
+            "transport": self.options.transport,
+            "webrtcAddress": self.rtc.as_ref().map(|(_, address)| address.to_string()),
             "playerConnected": status.player_connected,
             "playerPid": status.player_pid,
             "viewers": self.viewers.load(Ordering::Relaxed),
@@ -273,6 +353,15 @@ impl Shared {
 pub struct Session {
     shared: Arc<Shared>,
     runtime: Option<tokio::runtime::Runtime>,
+    publisher: Option<Publisher>,
+}
+
+// The address this machine's traffic to other hosts leaves from. Connecting a
+// UDP socket selects the route without sending anything.
+fn outbound_address() -> Option<IpAddr> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
+    socket.local_addr().ok().map(|address| address.ip())
 }
 impl Session {
     /// Binds the listeners and starts serving. The Player is asked to connect
@@ -304,6 +393,28 @@ impl Session {
             .enable_all()
             .build()
             .map_err(|error| error.to_string())?;
+        let mut rtc = None;
+        let mut rtc_task = None;
+        if options.transport == "webrtc" {
+            let ip = match options.webrtc_address.as_str() {
+                "" if !address.ip().is_unspecified() => address.ip(),
+                "" => outbound_address().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                given => given
+                    .parse()
+                    .map_err(|_| "webrtcAddress must be a literal local IP address".to_string())?,
+            };
+            let media = SocketAddr::new(ip, options.webrtc_port);
+            let socket = UdpSocket::bind(media).map_err(|error| {
+                format!("listen udp {media}: bind: {}", sysutil::errno_text(&error))
+            })?;
+            socket
+                .set_nonblocking(true)
+                .map_err(|error| error.to_string())?;
+            let media = socket.local_addr().map_err(|error| error.to_string())?;
+            let (commands, receiver) = mpsc::unbounded_channel();
+            rtc = Some((commands, media));
+            rtc_task = Some((socket, media, receiver));
+        }
         let shared = Arc::new(Shared {
             options,
             token: sysutil::new_id(),
@@ -319,8 +430,10 @@ impl Session {
             generations: AtomicU64::new(0),
             epochs: AtomicU32::new(0),
             viewers: AtomicUsize::new(0),
+            viewer_ids: AtomicU64::new(0),
             keyframe: AtomicBool::new(false),
             closed: AtomicBool::new(false),
+            rtc,
         });
         listener
             .set_nonblocking(true)
@@ -333,6 +446,11 @@ impl Session {
             runtime.spawn(async move {
                 let _ = axum::serve(listener, router).await;
             });
+            if let Some((socket, media, commands)) = rtc_task {
+                let socket =
+                    tokio::net::UdpSocket::from_std(socket).map_err(|error| error.to_string())?;
+                runtime.spawn(webrtc::run(shared.clone(), socket, media, commands));
+            }
         }
         {
             let shared = shared.clone();
@@ -342,10 +460,23 @@ impl Session {
             let shared = shared.clone();
             thread::spawn(move || attach(&shared, player.as_ref()));
         }
-        Ok(Session {
+        let mut session = Session {
             shared,
             runtime: Some(runtime),
-        })
+            publisher: None,
+        };
+        if !session.shared.options.publish.is_empty() {
+            let options = &session.shared.options;
+            let publisher = Publisher::start(
+                &options.publish,
+                &options.publish_pattern,
+                session.shared.address,
+            )?;
+            // Tunnels announce their address within seconds; `status` shows one that comes later.
+            publisher.wait(Duration::from_secs(20));
+            session.publisher = Some(publisher);
+        }
+        Ok(session)
     }
     pub fn options(&self) -> &Options {
         &self.shared.options
@@ -356,7 +487,12 @@ impl Session {
     }
     /// The reply of `remote_session`.
     pub fn status(&self) -> Value {
-        self.shared.report()
+        let mut report = self.shared.report();
+        if let Some(publisher) = &self.publisher {
+            report["publicUrl"] = publisher.url(&self.shared.token).into();
+            report["publish"] = publisher.report(&self.shared.token);
+        }
+        report
     }
 }
 impl Drop for Session {
@@ -616,18 +752,15 @@ fn pump(shared: &Shared, stream: &mut TcpStream) -> Result<(), String> {
                         if current.codec.is_empty() {
                             continue;
                         }
-                        let packet = Packet {
-                            keyframe: encoded.keyframe,
-                            wire: wire(
-                                encoded.keyframe,
-                                current.epoch,
-                                timestamp,
-                                width,
-                                height,
-                                &current.codec,
-                                &encoded.data,
-                            ),
-                        };
+                        let packet = packet(
+                            encoded.keyframe,
+                            current.epoch,
+                            timestamp,
+                            width,
+                            height,
+                            &current.codec,
+                            &encoded.data,
+                        );
                         let mut status = shared.status.lock().unwrap();
                         status.frames += 1;
                         status.bytes += encoded.data.len() as u64;

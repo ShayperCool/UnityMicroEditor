@@ -121,6 +121,8 @@ pub struct Options {
     pub no_editor: bool,
     /// Project actions run as durable detached jobs.
     pub asynchronous: bool,
+    /// The publish command of remote sessions that name none.
+    pub remote_publish: String,
     pub controller: Option<Controller>,
     pub lifetime: Option<Context>,
 }
@@ -159,6 +161,8 @@ pub(crate) struct Inner {
     pub jobs: Mutex<Jobs>,
     pub job_wait: (Mutex<usize>, Condvar),
     pub progress: Mutex<progress::Progress>,
+    /// The publish command of remote sessions that name none.
+    pub remote_publish: String,
     /// The remote session of this service's Player, while one is served.
     pub remote: Mutex<Option<crate::remote::Session>>,
 }
@@ -187,6 +191,7 @@ impl Service {
             jobs: Mutex::default(),
             job_wait: (Mutex::new(0), Condvar::new()),
             progress: Mutex::default(),
+            remote_publish: options.remote_publish,
             remote: Mutex::default(),
         }))
     }
