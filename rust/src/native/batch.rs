@@ -421,6 +421,87 @@ fn adapt_cold_atlas(
     Ok((result, packed))
 }
 
+/// The host binding of a model that names objects built into the engine and
+/// has no generated material to bind.
+const NO_HOST_BINDING: &str = "none";
+
+fn names_builtin_objects<'a>(mut guids: impl Iterator<Item = &'a str>) -> bool {
+    guids.any(|guid| guid == runtimeartifact::BUILTIN_EXTRA_GUID)
+}
+
+/// Whether a model may be replayed for the host Player this importer feeds:
+/// its generated materials were bound to the shaders of that Player. A model
+/// that names built-in objects and records no binding was adapted before
+/// materials were bound, and its material leads nowhere in a Player.
+pub(crate) fn host_binding_current(opts: &NativeOptions, entry: &NativeReplacement) -> bool {
+    match entry.host_binding.as_str() {
+        "" => {
+            cold_runtime_profile(&entry.source_path) != Some("fbx")
+                || !names_builtin_objects(
+                    entry
+                        .content
+                        .dependencies
+                        .iter()
+                        .map(|dependency| dependency.guid.as_str()),
+                )
+        }
+        NO_HOST_BINDING => true,
+        identity => super::host_shaders::host_shaders(&opts.player)
+            .is_ok_and(|shaders| shaders.identity == identity),
+    }
+}
+
+/// Gives the materials a model importer generated the shaders of the host
+/// Player, and returns the binding to record: what stands for those shaders,
+/// `none` for a model that names built-in objects without such a material,
+/// nothing for any other asset. A build writes a generated material with the
+/// shader the Editor gave it; where the session cannot show the same, the
+/// model is refused.
+fn bind_generated_materials(
+    opts: &NativeOptions,
+    logical: &str,
+    output: &mut Vec<u8>,
+    metadata: &mut runtimeartifact::Metadata,
+) -> Result<String> {
+    if cold_runtime_profile(logical) != Some("fbx")
+        || !names_builtin_objects(
+            metadata
+                .external_references
+                .iter()
+                .map(|external| external.guid.as_str()),
+        )
+    {
+        return Ok(String::new());
+    }
+    // With the legacy material mode the Editor names the built-in shader in
+    // every project; otherwise a render pipeline's importer script makes the
+    // material, and a standalone worker does not run it.
+    let pipeline = super::host_shaders::names_render_pipeline(&opts.project)
+        && !resolve_project_import_source(&opts.project, logical)
+            .and_then(|source| read_file(&format!("{source}.meta")))
+            .is_ok_and(|meta| String::from_utf8_lossy(&meta).contains("materialImportMode: 1"));
+    let mut shaders = None;
+    let bound = runtimeartifact::bind_builtin_shaders(output, metadata, &mut |used| {
+        if pipeline {
+            bail!(
+                "the project has a scriptable render pipeline, whose importer script makes the material {} of a model in the Editor (the Universal pipeline gives it its Lit shader); a standalone worker does not run that script and names a built-in shader instead. Assign the model's materials from the project or import it without materials",
+                used.material
+            );
+        }
+        if shaders.is_none() {
+            shaders = Some(super::host_shaders::host_shaders(&opts.player)?);
+        }
+        shaders.as_ref().unwrap().resolve(used)
+    })?;
+    if let Some(bound) = bound {
+        *output = bound;
+    }
+    Ok(shaders.map_or_else(
+        || NO_HOST_BINDING.to_string(),
+        |shaders| shaders.identity.clone(),
+    ))
+}
+
 /// Projects one imported asset to its runtime artifact and descriptor.
 /// `atlas` is the sprite atlas imported with it, if any: a texture whose
 /// sprites the atlas packs is bound to it.
@@ -451,6 +532,8 @@ pub(crate) fn adapt_cold_asset(
     };
     let (mut output, mut metadata) =
         adapted.map_err(|e| wrap(&format!("adapt native {}", input.path), e))?;
+    let host_binding = bind_generated_materials(opts, &input.path, &mut output, &mut metadata)
+        .map_err(|e| wrap(&format!("generated material of {}", input.path), e))?;
     let packed = atlas.filter(|(_, packed)| {
         cold_runtime_profile(&input.path) == Some("texture")
             && packed.sprites.iter().any(|(guid, _)| *guid == asset.guid)
@@ -485,6 +568,7 @@ pub(crate) fn adapt_cold_asset(
         ..Default::default()
     };
     result.config_source_sha256 = warm_texture_configuration(&opts.project, &input.path)?;
+    result.host_binding = host_binding;
     if let Some((atlas, _)) = packed {
         // Bound to this revision of the atlas.
         result

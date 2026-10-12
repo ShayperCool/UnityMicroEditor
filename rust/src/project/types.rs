@@ -225,6 +225,12 @@ wire_struct! {
         pub compiled_shader_snapshot: Option<CompiledShaderSnapshot>,
         #[serde(rename = "meshCpuProjection", skip_serializing_if = "Option::is_none")]
         pub mesh_cpu_projection: Option<NativeMeshCPUProjection>,
+        /// For a model that names objects built into the engine: what stands
+        /// for the shaders of the host Player its generated materials were
+        /// bound to, or `none` when it has no such material. A generated
+        /// material takes its built-in shader from a file of that Player.
+        #[serde(skip_serializing_if = "blank")]
+        pub host_binding: String,
     }
 }
 wire_struct! {

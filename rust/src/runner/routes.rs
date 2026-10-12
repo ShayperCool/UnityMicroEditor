@@ -248,7 +248,7 @@ pub fn prepare_content_routes(
                 extra_assets: Vec::new(),
                 script_types: script_types.clone(),
             })?;
-            let mut route_options = opts.native();
+            let mut route_options = opts.native(&baseline.player);
             route_options.output = sysutil::join(&[&opts.output, "content", &guid]);
             let importer = NativeProjectImporter::new(route_options, Arc::new(session))?;
             importers.insert(

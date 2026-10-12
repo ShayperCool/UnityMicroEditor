@@ -932,6 +932,7 @@ fn native_replay_fixture() -> Replay {
             project,
             output,
             editor: String::new(),
+            player: String::new(),
         },
         session: Arc::new(session),
         entries,
@@ -1387,6 +1388,7 @@ fn native_mesh_cpu_cache_upgrade_actual_index() {
         project,
         output: output.clone(),
         editor: String::new(),
+        player: String::new(),
     };
     let (mut models, mut meshes) = (0, 0);
     let mut first: Option<NativeReplacement> = None;

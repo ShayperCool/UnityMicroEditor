@@ -3,6 +3,7 @@
 mod adapt;
 mod atlas;
 mod builtin_lighting;
+mod builtin_reference;
 mod builtin_shader;
 mod builtin_shader_cmd;
 mod files;
@@ -23,6 +24,9 @@ pub use adapt::{
 };
 pub use atlas::{PackedAtlas, adapt_sprite_atlas, bind_packed_sprites};
 pub use builtin_lighting::{BuiltinLightingIdentity, inspect_builtin_lighting};
+pub use builtin_reference::{
+    BUILTIN_EXTRA_GUID, BuiltinShaderUse, HostShader, bind_builtin_shaders,
+};
 pub use builtin_shader::{BuiltinShaderIdentity, ReadAt, inspect_builtin_shader};
 pub use builtin_shader_cmd::{BuiltinShaderOptions, builtin_shader_command, extract_builtin};
 pub use mesh_cpu::{MeshCpuFlags, MeshCpuProjection, read_mesh_cpu_flags, retain_model_mesh_cpu};

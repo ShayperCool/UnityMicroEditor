@@ -536,6 +536,7 @@ pub fn prepare_agent_project_with_native(
                     project: project.clone(),
                     output: source_output.clone(),
                     editor: editor.to_string(),
+                    player: preparation.player.clone(),
                 },
                 session.clone(),
             )?;
