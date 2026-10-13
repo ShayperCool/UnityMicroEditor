@@ -105,6 +105,8 @@ patch Game.HotReload.Islands -unsafe+ "$here/Patches/PatchIslands.cs"
 patch Game.HotReload.Lazy -unsafe+ "$here/Patches/PatchLazy.cs"
 patch Game.HotReload.Eager -unsafe+ "$here/Patches/PatchEager.cs"
 patch Game.HotReload.Local -unsafe+ "$here/Patches/PatchLocal.cs"
+patch Game.HotReload.Menu1 -unsafe+ "$here/Patches/PatchMenu1.cs"
+patch Game.HotReload.Menu2 -unsafe+ "$here/Patches/PatchMenu2.cs"
 patch Game.HotReload.Bulk -unsafe+ "$out/gen/PatchBulk.cs"
 csc -target:library "-reference:$out/applier/UnityMicroEditor.HotReload.dll" "-reference:$out/Game.dll" "-out:$out/probe/FieldStore.Probe.dll" "$here/Patches/FieldStoreProbe.cs"
 

@@ -9,6 +9,10 @@ namespace UnityMicroEditor.HotReload
     // reference to this tool: InvokeOnHotReload and OnHotReload run after every applied patch,
     // InvokeOnHotReloadLocal runs a method when its own body changed. Only what the loaded game
     // assemblies declare is found; an attribute on a method added by a patch is not visible.
+    //
+    // The lifecycle rewrite of the compiler turns Awake, OnEnable, OnDisable and OnDestroy into an
+    // entry that keeps the attributes and a helper __UnityPlay_<name> that holds the body. A patch
+    // replaces the helper, so a local attribute on such a method stands for its helper as well.
     internal sealed class Callbacks
     {
         private sealed class Callback
@@ -25,6 +29,7 @@ namespace UnityMicroEditor.HotReload
         }
 
         private const BindingFlags Declared = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance | BindingFlags.DeclaredOnly;
+        private const string LifecycleHelper = "__UnityPlay_";
 
         private readonly Host host;
         private readonly Dictionary<Assembly, Scan> scans = new Dictionary<Assembly, Scan>();
@@ -62,7 +67,8 @@ namespace UnityMicroEditor.HotReload
             if (method.IsStatic) { Invoke(method, null, arguments); return; }
             if (!host.Enumerable(method.DeclaringType))
             { Skip(method, "Live instances can only be found for UnityEngine.Object types; declare the method static."); return; }
-            foreach (object target in host.Instances(method.DeclaringType)) Invoke(method, target, arguments);
+            // An earlier callback of this pass may have destroyed an object that was live when the pass began.
+            foreach (object target in host.Instances(method.DeclaringType)) if (host.Alive(target)) Invoke(method, target, arguments);
         }
 
         private void Invoke(MethodBase method, object target, object[] arguments)
@@ -112,11 +118,28 @@ namespace UnityMicroEditor.HotReload
                         }
                     }
                     catch (Exception) { continue; }   // an attribute whose type does not load is not one of ours
-                    if (local) scan.Local.Add(method.MetadataToken);
+                    if (local)
+                    {
+                        scan.Local.Add(method.MetadataToken);
+                        MethodInfo helper = Helper(method, methods);
+                        if (helper != null) scan.Local.Add(helper.MetadataToken);
+                    }
                     if (global) scan.Global.Add(Describe(method));
                 }
             }
             return scan;
+        }
+
+        // The rewrite appends underscores until the name is free, so the helper is the longest match.
+        private static MethodInfo Helper(MethodInfo entry, MethodInfo[] methods)
+        {
+            if (entry.IsStatic || entry.GetParameters().Length != 0) return null;
+            string name = LifecycleHelper + entry.Name;
+            MethodInfo helper = null;
+            foreach (MethodInfo method in methods)
+                if (!method.IsStatic && method.Name.StartsWith(name, StringComparison.Ordinal) && method.Name.Substring(name.Length).Trim('_').Length == 0
+                    && method.GetParameters().Length == 0 && (helper == null || method.Name.Length > helper.Name.Length)) helper = method;
+            return helper;
         }
 
         private Callback Describe(MethodInfo method)

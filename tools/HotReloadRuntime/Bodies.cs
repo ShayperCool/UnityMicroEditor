@@ -9,7 +9,10 @@ namespace UnityMicroEditor.HotReload
     // and compiled into every later patch assembly. Whether its body changed with the generation
     // being applied is read off the IL of the two replacements: the same instructions naming the
     // same members, where a member of one patch assembly matches its namesake in the other.
-    // Only callbacks depend on the answer, and whatever cannot be decided counts as changed.
+    // What only the patches define belongs to the body that names it: a lambda, a local function,
+    // an added method or a state machine is compared by its own code as well, because nothing
+    // else tells its edit from the generation before. Only callbacks depend on the answer, and
+    // whatever cannot be decided counts as changed.
     internal static class Bodies
     {
         /// <summary>The two patch assemblies of one comparison.</summary>
@@ -19,20 +22,25 @@ namespace UnityMicroEditor.HotReload
             // The patch builder names the types of a generation after it. The one name segment
             // in which corresponding types differ must be the same for every type compared.
             internal string LeftMark, RightMark;
+            // Methods and state machines of the left patch that are compared or being compared.
+            // A second visit adds nothing, and it ends the recursion of code that names itself.
+            internal readonly HashSet<MethodBase> Methods = new HashSet<MethodBase>();
+            internal readonly HashSet<Type> Machines = new HashSet<Type>();
         }
+
+        private const BindingFlags Declared = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance | BindingFlags.DeclaredOnly;
 
         private static Dictionary<short, OperandType> operands;
 
         internal static bool Same(MethodBase left, MethodBase right)
         {
-            try { return Compare(left, right); }
+            try { return Compare(left, right, new Pair { Left = left.Module.Assembly, Right = right.Module.Assembly }); }
             catch (Exception) { return false; }
         }
 
-        private static bool Compare(MethodBase left, MethodBase right)
+        private static bool Compare(MethodBase left, MethodBase right, Pair pair)
         {
             MethodBody first = left.GetMethodBody(), second = right.GetMethodBody();
-            var pair = new Pair { Left = left.Module.Assembly, Right = right.Module.Assembly };
             if (first == null || second == null || first.InitLocals != second.InitLocals || first.LocalVariables.Count != second.LocalVariables.Count
                 || first.ExceptionHandlingClauses.Count != second.ExceptionHandlingClauses.Count) return false;
             for (int index = 0; index < first.LocalVariables.Count; index++)
@@ -99,7 +107,24 @@ namespace UnityMicroEditor.HotReload
             if (parameters.Length != others.Length) return false;
             for (int index = 0; index < parameters.Length; index++)
                 if (!SameType(parameters[index].ParameterType, others[index].ParameterType, pair)) return false;
-            return !(method is MethodInfo info) || SameType(info.ReturnType, ((MethodInfo)match).ReturnType, pair);
+            if (method is MethodInfo info && !SameType(info.ReturnType, ((MethodInfo)match).ReturnType, pair)) return false;
+            // A method of the game is redirected on its own and listed on its own. One that only
+            // the patches define runs as part of the bodies that name it.
+            if (method.Module.Assembly != pair.Left || match.Module.Assembly != pair.Right || !pair.Methods.Add(method)) return true;
+            return Compare(method, match, pair);
+        }
+
+        // An iterator or async method only makes its state machine: the code that was written in it
+        // is MoveNext, which no instruction of the method names.
+        private static bool SameMachine(Type left, Type right, Pair pair)
+        {
+            if (!typeof(System.Collections.IEnumerator).IsAssignableFrom(left) && !typeof(System.Runtime.CompilerServices.IAsyncStateMachine).IsAssignableFrom(left)) return true;
+            if (!pair.Machines.Add(left)) return true;
+            MethodInfo[] methods = left.GetMethods(Declared), others = right.GetMethods(Declared);
+            if (methods.Length != others.Length) return false;
+            for (int index = 0; index < methods.Length; index++)
+                if (!SameMember(methods[index], others[index], pair)) return false;
+            return true;
         }
 
         private static bool SameType(Type left, Type right, Pair pair)
@@ -123,9 +148,12 @@ namespace UnityMicroEditor.HotReload
                 if (differing >= 0) return false;
                 differing = index;
             }
-            if (differing < 0) return true;
-            if (pair.LeftMark == null) { pair.LeftMark = names[differing]; pair.RightMark = others[differing]; }
-            return pair.LeftMark == names[differing] && pair.RightMark == others[differing];
+            if (differing >= 0)
+            {
+                if (pair.LeftMark == null) { pair.LeftMark = names[differing]; pair.RightMark = others[differing]; }
+                if (pair.LeftMark != names[differing] || pair.RightMark != others[differing]) return false;
+            }
+            return SameMachine(left, right, pair);
         }
 
         private static bool SameTypes(Type[] left, Type[] right, Pair pair)

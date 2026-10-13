@@ -68,7 +68,7 @@ csc $GAME -unsafe- $ENGINE -out:$O/Game.Core.dll Game/Core.cs
 sed -E 's/\b(private|protected|internal)\b/public/g' Game/Game.cs > $O/ref/Game.cs
 csc $GAME -unsafe- -define:REFERENCE $ENGINE -out:$O/ref/Game.dll $O/ref/Game.cs $O/gen/Bulk.cs
 # patches; Denied is the one without the SkipVerification declaration
-for p in 1:Patch1 2:Patch2 Stale:PatchStale Broken:PatchBroken Shapes:PatchShapes Islands:PatchIslands Lazy:PatchLazy Eager:PatchEager Local:PatchLocal; do
+for p in 1:Patch1 2:Patch2 Stale:PatchStale Broken:PatchBroken Shapes:PatchShapes Islands:PatchIslands Lazy:PatchLazy Eager:PatchEager Local:PatchLocal Menu1:PatchMenu1 Menu2:PatchMenu2; do
   csc $GAME -unsafe+ $ENGINE -reference:$O/ref/Game.dll -reference:$O/Game.Core.dll -out:$O/patches/Game.HotReload.${p%%:*}.dll Patches/${p##*:}.cs
 done
 csc $GAME -unsafe+ $ENGINE -reference:$O/ref/Game.dll -reference:$O/Game.Core.dll -out:$O/patches/Game.HotReload.Bulk.dll $O/gen/PatchBulk.cs
@@ -110,6 +110,7 @@ The last argument of `run` says whether this JIT inlines (`on`) and so what the 
 - **Atomicity**: one bad token of either side, a token of another table, a method listed twice, an assembly without the `SkipVerification` declaration, a replacement the JIT refuses next to a good one, a method that is no replacement and does not compile, seven signature mismatches, generic and bodiless originals. After each of them the first eight bytes of all watched methods are what they were, the generation is unchanged and no callback ran.
 - **Generations**: a second generation that retargets, adds a first redirect and drops twelve methods; an empty descriptor (the bytes of every method are the original ones again); the first patch assembly applied again after a restore.
 - **Callbacks**: static and per live object, attributes of another namespace, the patch list with original, previous and new method, an unchanged body left out, local callbacks only for changed bodies, a throwing callback and two that cannot be called.
+- **What only a patch defines**: two generations with the same members in the same order that differ in a lambda, in a helper only the patch has and in the body of an iterator. Each difference is a change of the method that names it (its local callback runs, the patch list names it); a method whose lambda and helper are the same code is not. A local attribute on a lifecycle entry runs the `__UnityPlay_` helper that holds its body. An object that a callback of the pass destroyed is not called by the rest of it.
 - **First redirects**, each way and its bookkeeping:
   - the first byte and an island, for bodies that start with `push rbp`: only that byte changes; a retarget stores the slot and leaves the body alone; a restore puts the byte back; the next first redirect finds its island;
   - an island across the end of a page, two more in its second page, and a later one in a page that is already mapped (the harness compiles filler methods until the JIT's next body lies where its island crosses a page end);

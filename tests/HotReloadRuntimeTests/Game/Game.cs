@@ -174,6 +174,37 @@ namespace Game
         public void Update() { Updates++; }
     }
 
+    // Local callbacks whose change lies in what only a patch defines: a lambda, a helper, an
+    // iterator. OnEnable is as the lifecycle rewrite of the compiler leaves it: the attribute
+    // stays on the entry the engine calls, the body is in the helper a patch replaces.
+    public class Menu : MonoBehaviour
+    {
+        public static int Rebuilt, Kept, Counted;
+        public string Shown = "", Enabled = "";
+        public int Refreshed;
+        public Menu Closes;
+
+        [InvokeOnHotReloadLocal]
+        public void Build() { Func<string> click = () => "click0"; Shown = click(); }
+
+        [InvokeOnHotReloadLocal]
+        public static void Rebuild() { Rebuilt++; }
+
+        [InvokeOnHotReloadLocal]
+        public static void Keep() { Kept++; }
+
+        [InvokeOnHotReloadLocal]
+        public static void Count() { Counted++; }
+
+        [InvokeOnHotReloadLocal]
+        private void OnEnable() { __UnityPlay_OnEnable(); }
+        private void __UnityPlay_OnEnable() { Enabled = "enabled0"; }
+
+        // A callback that rebuilds what it shows may destroy an object the same pass still lists.
+        [InvokeOnHotReload]
+        private void Refresh() { Refreshed++; if (Closes != null) UnityEngine.Object.Destroy(Closes); }
+    }
+
     public class Plain
     {
         // No way to find live instances of a plain class: skipped and counted.
