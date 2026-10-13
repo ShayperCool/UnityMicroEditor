@@ -1254,6 +1254,8 @@ internal static class Program
                 if (primaryTypes.Length == 1) scriptTypes.Add(request.Sources[index].OriginalPath, primaryTypes[0]);
                 var rewriter = new LifecycleRewriter(model, mono, callbacks, runtimeInitializers, request);
                 var rewritten = rewriter.Visit(trees[index].GetRoot())!.ToFullString();
+                // The compiler reads the copy; errors, traces and caller information name the source.
+                if (rewriter.LineDirectives) rewritten = $"#line 1 \"{trees[index].FilePath}\"\n" + rewritten;
                 activeAndEnabledReads += rewriter.ActiveAndEnabledReads;
                 setActiveCalls += rewriter.SetActiveCalls;
                 transformRootReads += rewriter.TransformRootReads;
@@ -1362,6 +1364,10 @@ internal static class Program
         private readonly Request request;
         private readonly Dictionary<int, IdentifierNameSyntax> conditionalReceivers = new();
         private readonly HashSet<string> usedIdentifiers;
+        /// Whether the output names the lines of its source with `#line`. A source that sets
+        /// its own lines, or whose path a directive cannot hold, is left to say what it says.
+        private readonly bool lineDirectives;
+        public bool LineDirectives => lineDirectives;
         private int nextReceiver;
         public int ActiveAndEnabledReads { get; private set; }
         public int SetActiveCalls { get; private set; }
@@ -1374,7 +1380,11 @@ internal static class Program
         { this.model = model; this.mono = mono; this.callbacks = callbacks;
           this.runtimeInitializers = runtimeInitializers; this.request = request;
           usedIdentifiers = model.SyntaxTree.GetRoot().DescendantTokens()
-              .Where(token => token.IsKind(SyntaxKind.IdentifierToken)).Select(token => token.ValueText).ToHashSet(); }
+              .Where(token => token.IsKind(SyntaxKind.IdentifierToken)).Select(token => token.ValueText).ToHashSet();
+          string path = model.SyntaxTree.FilePath;
+          lineDirectives = path.Length != 0 && path.IndexOfAny(new[] { '"', '\n', '\r' }) < 0
+              && !model.SyntaxTree.GetRoot().DescendantTrivia(descendIntoTrivia: true).Any(trivia =>
+                  trivia.IsKind(SyntaxKind.LineDirectiveTrivia) || trivia.IsKind(SyntaxKind.LineSpanDirectiveTrivia)); }
 
         private bool IsMonoBehaviour(INamedTypeSymbol? type)
         {
@@ -1653,7 +1663,7 @@ internal static class Program
                 var ordinary = (ClassDeclarationSyntax)base.VisitClassDeclaration(node)!;
                 var ordinaryMembers = ordinary.Members.ToList();
                 AddRuntimeInitializers(node, type, ordinaryMembers);
-                return ordinary.WithMembers(SyntaxFactory.List(ordinaryMembers));
+                return Appended(ordinary, ordinaryMembers, ordinary.Members.Count);
             }
             var nativeBaseCallbacks = new Dictionary<string, IMethodSymbol>();
             var seenBasePhases = new HashSet<string>();
@@ -1690,23 +1700,35 @@ internal static class Program
                 // What stands in front of the method stays with the entry. Without a modifier it
                 // hangs on the return type, and a directive there (#region, #if, #endif) would
                 // end up behind the helper's `private`, in the middle of a line.
+                // The body moves into the helper with what it needs to compile: `unsafe` is the
+                // one modifier that says something about the body.
+                var helperModifiers = new List<SyntaxToken> { SyntaxFactory.Token(SyntaxKind.PrivateKeyword).WithTrailingTrivia(SyntaxFactory.Space) };
+                if (method.Modifiers.Any(SyntaxKind.UnsafeKeyword))
+                    helperModifiers.Add(SyntaxFactory.Token(SyntaxKind.UnsafeKeyword).WithTrailingTrivia(SyntaxFactory.Space));
                 var helper = visitedMethod.WithIdentifier(SyntaxFactory.Identifier(helperName))
                     .WithAttributeLists(default)
                     .WithReturnType(visitedMethod.ReturnType.WithLeadingTrivia(default(SyntaxTriviaList)))
-                    .WithModifiers(SyntaxFactory.TokenList(SyntaxFactory.Token(SyntaxKind.PrivateKeyword)
-                        .WithTrailingTrivia(SyntaxFactory.Space)))
+                    .WithModifiers(SyntaxFactory.TokenList(helperModifiers))
                     .WithLeadingTrivia(default(SyntaxTriviaList));
                 var location = method.GetLocation().GetLineSpan();
-                string escapedPath = location.Path.Replace("\\", "\\\\").Replace("\"", "\\\"");
-                if (helper.Body is not null)
-                    helper = helper.WithBody(helper.Body.WithOpenBraceToken(helper.Body.OpenBraceToken.WithTrailingTrivia(
-                        SyntaxFactory.ParseTrailingTrivia($"\n#line {helper.Body.OpenBraceToken.GetLocation().GetLineSpan().StartLinePosition.Line + 1} \"{escapedPath}\"\n"))));
-                helper = helper.WithTrailingTrivia(SyntaxFactory.ParseTrailingTrivia("\n#line default\n"));
+                // The entry and the head of the helper stand where the head of the method stood,
+                // and the body follows on a line of its own. The directive in front of it gives
+                // that line the number it has in the source, for the body and all that follows.
+                if (lineDirectives)
+                {
+                    if (helper.Body is not null)
+                        helper = helper.WithBody(helper.Body.WithOpenBraceToken(helper.Body.OpenBraceToken.WithLeadingTrivia(
+                            Resume(method.Body!.OpenBraceToken).AddRange(helper.Body.OpenBraceToken.LeadingTrivia))));
+                    else if (helper.ExpressionBody is not null)
+                        helper = helper.WithExpressionBody(helper.ExpressionBody.WithArrowToken(helper.ExpressionBody.ArrowToken.WithLeadingTrivia(
+                            Resume(method.ExpressionBody!.ArrowToken).AddRange(helper.ExpressionBody.ArrowToken.LeadingTrivia))));
+                }
                 members.Add(method.WithBody(Wrapper(phase, helperName, order)).WithExpressionBody(null).WithSemicolonToken(default));
                 members.Add(helper);
                 callbacks.Add(new CallbackInfo(type.ToDisplayString(), phase, location.Path, order));
                 if (IsScriptableObject(type)) ScriptableObjectCallbacks++;
             }
+            int authored = members.Count;
             // An explicitly approved host package base cannot be transformed.
             // Wrap an accessible inherited message in the source subclass and
             // call its original implementation only after graph hydration.
@@ -1748,7 +1770,29 @@ internal static class Program
                 callbacks.Add(new CallbackInfo(type.ToDisplayString(), "Awake", node.SyntaxTree.FilePath, order, true));
             }
             AddRuntimeInitializers(node, type, members);
+            return Appended(node, members, authored);
+        }
+
+        /// The class with the members the rewrite adds behind the authored ones. They stand on
+        /// the line of the closing brace, so no line of the file moves. What stood in front of
+        /// that brace (`#endregion`, `#endif`, a comment) stays in front of them: a directive
+        /// needs a line of its own, and an added member must not fall into a conditional block.
+        private static ClassDeclarationSyntax Appended(ClassDeclarationSyntax node, List<MemberDeclarationSyntax> members, int authored)
+        {
+            if (members.Count > authored)
+            {
+                members[authored] = members[authored].WithLeadingTrivia(node.CloseBraceToken.LeadingTrivia);
+                node = node.WithCloseBraceToken(node.CloseBraceToken.WithLeadingTrivia(default(SyntaxTriviaList)));
+            }
             return node.WithMembers(SyntaxFactory.List(members));
+        }
+
+        /// A `#line` directive that gives the line of `token` its number in the source file.
+        /// `token` belongs to the tree as it was read.
+        private SyntaxTriviaList Resume(SyntaxToken token)
+        {
+            int line = token.SyntaxTree!.GetLineSpan(new Microsoft.CodeAnalysis.Text.TextSpan(token.FullSpan.Start, 0)).StartLinePosition.Line + 1;
+            return SyntaxFactory.ParseLeadingTrivia($"\n#line {line} \"{token.SyntaxTree.FilePath}\"\n");
         }
 
         private static void Reject(SyntaxNode node, string message)
