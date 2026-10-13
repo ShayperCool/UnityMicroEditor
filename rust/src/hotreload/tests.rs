@@ -409,6 +409,8 @@ enum Reply {
         restored: u64,
         callback_errors: u64,
     },
+    /// Success with one redirect less than the descriptor lists.
+    ApplyShort,
     /// `success: false`, nothing written.
     Refuse(Vec<(&'static str, &'static str, &'static str, &'static str)>),
     /// The bridge's own answer: no list of failures.
@@ -476,6 +478,13 @@ impl FakePlayer {
                             assembly["patchSha256"]
                         );
                     }
+                    // The applier counts one per redirect of the descriptor.
+                    let redirects: usize = descriptor["assemblies"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|assembly| assembly["detours"].as_array().unwrap().len())
+                        .sum();
                     let generation = value["generation"].as_u64().unwrap();
                     assert!(generation > applied, "a generation must be newer");
                     seen.lock().unwrap().push((value.clone(), descriptor));
@@ -492,8 +501,14 @@ impl FakePlayer {
                             applied = generation;
                             ack["success"] = true.into();
                             ack["appliedGeneration"] = generation.into();
+                            ack["detoursApplied"] = redirects.into();
                             ack["detoursRestored"] = restored.into();
                             ack["callbackErrors"] = callback_errors.into();
+                        }
+                        Reply::ApplyShort => {
+                            ack["success"] = true.into();
+                            ack["appliedGeneration"] = generation.into();
+                            ack["detoursApplied"] = (redirects - 1).into();
                         }
                         Reply::Refuse(failures) => {
                             ack["error"] = failures[0].3.into();
@@ -511,9 +526,13 @@ impl FakePlayer {
                         Reply::WrongPid => {
                             ack["success"] = true.into();
                             ack["appliedGeneration"] = generation.into();
+                            ack["detoursApplied"] = redirects.into();
                             ack["pid"] = 1.into();
                         }
-                        Reply::WrongGeneration => ack["success"] = true.into(),
+                        Reply::WrongGeneration => {
+                            ack["success"] = true.into();
+                            ack["detoursApplied"] = redirects.into();
+                        }
                         Reply::Garbage => ack = json!({"requestId":id,"pid":"many"}),
                         Reply::Silent => continue,
                         Reply::Exit => {
@@ -555,7 +574,11 @@ enum Build {
     /// A patch of the named assemblies with these members.
     Patch(Vec<(&'static str, Vec<&'static str>)>),
     PatchWithNote(&'static str),
+    /// The verdict `patch` without an assembly that carries one.
+    PatchOfNothing,
     Unchanged,
+    /// Nothing to patch, and something the Player does not take over.
+    UnchangedWithNotes(Vec<Reason>),
     Unsupported(Vec<Reason>),
     Fail(&'static str),
     Garbage,
@@ -694,6 +717,11 @@ impl Rig {
                 patched["notes"] = json!([{"code":code,"member":"Game.A::f","message":"note"}]);
                 result("patch", vec![patched], 1)
             }
+            Build::PatchOfNothing => result(
+                "patch",
+                vec![assembly(listed[0], "unchanged", &[], true)],
+                1,
+            ),
             Build::Unchanged => result(
                 "unchanged",
                 listed
@@ -702,6 +730,11 @@ impl Rig {
                     .collect(),
                 0,
             ),
+            Build::UnchangedWithNotes(notes) => {
+                let mut noted = assembly(listed[0], "unchanged", &[], true);
+                noted["notes"] = serde_json::to_value(&notes).unwrap();
+                result("unchanged", vec![noted], 0)
+            }
             Build::Unsupported(reasons) => {
                 let mut refused = assembly(listed[0], "unsupported", &[], true);
                 refused["unsupported"] = serde_json::to_value(&reasons).unwrap();
@@ -747,6 +780,13 @@ impl Rig {
     }
     fn file(&self, generation: u64, name: &str) -> String {
         sysutil::join(&[&self.run, "hot-reload", &generation.to_string(), name])
+    }
+    /// What the builder run of `generation` gives when it finds nothing to patch.
+    fn unchanged(&self, generation: u64, notes: Vec<Reason>) -> Outcome {
+        Outcome::Unchanged(Unchanged {
+            notes,
+            report: self.file(generation, "report.json"),
+        })
     }
 }
 
@@ -853,22 +893,57 @@ fn a_patch_is_applied_recorded_and_followed_by_the_next_generation() {
 fn equal_bytes_need_neither_builder_nor_player() {
     let mut rig = Rig::new();
     let player = FakePlayer::start(&rig.run, Vec::new());
-    assert_eq!(rig.attempt(&player), Outcome::Unchanged);
+    assert_eq!(
+        rig.attempt(&player),
+        Outcome::Unchanged(Unchanged::default())
+    );
     assert!(rig.requests.borrow().is_empty());
     assert!(!fs::exists(sysutil::join(&[&rig.run, "hot-reload"])).unwrap());
     // A difference without meaning, such as a comment: nothing is sent, and
     // the generation of the builder run is not used again.
     rig.compile("Assembly-CSharp", 1);
     rig.builds(vec![Build::Unchanged, Build::Unchanged]);
-    assert_eq!(rig.attempt(&player), Outcome::Unchanged);
+    assert_eq!(rig.attempt(&player), rig.unchanged(1, Vec::new()));
     assert_eq!(
         read_json(&rig.file(1, "report.json"))["outcome"],
         "unchanged"
     );
-    assert_eq!(rig.attempt(&player), Outcome::Unchanged);
+    assert_eq!(rig.attempt(&player), rig.unchanged(2, Vec::new()));
     assert_eq!(rig.requests.borrow()[1]["generation"], 2);
     assert!(player.seen().is_empty());
     assert!(!fs::exists(PlayerCode::request_path(&rig.run)).unwrap());
+    assert_eq!(
+        (rig.code.applied_generation(), rig.code.refused()),
+        (0, false)
+    );
+}
+
+#[test]
+fn the_notes_of_a_change_that_needs_no_patch_reach_the_caller() {
+    // A field made public: no body differs, so there is nothing to send.
+    // What the builder says about it is all the caller ever learns.
+    let notes = vec![
+        Reason::new(
+            "accessibility_changed",
+            "Game.A::speed",
+            "Field Game.A::speed changed accessibility; Unity serialization and reflection keep the loaded accessibility until a full recompile.",
+        ),
+        Reason::new("runtime_initializer_removed", "Game.A::Boot()", "removed"),
+    ];
+    let mut rig = Rig::new();
+    let player = FakePlayer::start(&rig.run, Vec::new());
+    rig.compile("Assembly-CSharp", 1);
+    rig.builds(vec![Build::UnchangedWithNotes(notes.clone())]);
+    let outcome = rig.attempt(&player);
+    assert_eq!(outcome, rig.unchanged(1, notes.clone()));
+    // The report the outcome names holds the builder's result in full.
+    let report = read_json(&rig.file(1, "report.json"));
+    assert_eq!(report["outcome"], "unchanged");
+    assert_eq!(
+        report["result"]["assemblies"][0]["notes"],
+        serde_json::to_value(&notes).unwrap()
+    );
+    assert!(player.seen().is_empty());
     assert_eq!(
         (rig.code.applied_generation(), rig.code.refused()),
         (0, false)
@@ -929,7 +1004,10 @@ fn a_reverted_edit_restores_the_loaded_code_with_an_empty_descriptor() {
         (2, false, "")
     );
     // Nothing is applied any more, so equal bytes are simply unchanged.
-    assert_eq!(rig.attempt(&player), Outcome::Unchanged);
+    assert_eq!(
+        rig.attempt(&player),
+        Outcome::Unchanged(Unchanged::default())
+    );
     assert_eq!(rig.requests.borrow().len(), 2);
 }
 
@@ -996,6 +1074,7 @@ fn a_failing_builder_is_a_refusal_with_its_text() {
         Build::Fail("The assembly /x.dll does not exist."),
         Build::Garbage,
         Build::Torn,
+        Build::PatchOfNothing,
     ]);
     for (generation, expected) in [
         (
@@ -1004,6 +1083,12 @@ fn a_failing_builder_is_a_refusal_with_its_text() {
         ),
         (2, "patch builder result is not its JSON"),
         (3, "patch assembly differs from the hash of its result"),
+        // An empty descriptor would restore the loaded code and be
+        // acknowledged; it is not what a patch verdict means.
+        (
+            4,
+            "patch builder result has the verdict patch and no patched assembly",
+        ),
     ] {
         let Outcome::Unsupported(refusal) = rig.attempt(&player) else {
             panic!("generation {generation} must be refused");
@@ -1127,13 +1212,18 @@ fn an_uncertain_player_needs_a_restart() {
             "acknowledged code generation 0 for the request of generation 1",
         ),
         (Reply::Garbage, "acknowledgement is unreadable"),
+        // A Player that says it applied a patch it did not apply in full.
+        (
+            Reply::ApplyShort,
+            "the Player acknowledged 1 of the 2 redirects of code generation 1",
+        ),
     ] {
         let mut rig = Rig::new();
         let player = FakePlayer::start(&rig.run, vec![reply]);
         rig.compile("Assembly-CSharp", 1);
         rig.builds(vec![Build::Patch(vec![(
             "Assembly-CSharp",
-            vec!["Game.A::M()"],
+            vec!["Game.A::M()", "Game.A::N()"],
         )])]);
         match rig.attempt(&player) {
             Outcome::RestartRequired(failure) => {
@@ -1309,7 +1399,7 @@ fn netcode_assemblies_are_named_to_the_builder() {
     rig.compile("Game.Core", 1);
     rig.current[1].netcode = true;
     rig.builds(vec![Build::Unchanged]);
-    assert_eq!(rig.attempt(&player), Outcome::Unchanged);
+    assert_eq!(rig.attempt(&player), rig.unchanged(1, Vec::new()));
     assert_eq!(
         rig.requests.borrow()[0]["assemblies"],
         json!([{"name":"Game.Core","loaded":rig.code.loaded()[1].path,"current":rig.current[1].path,"netcode":true}])
@@ -1374,6 +1464,66 @@ fn setup_reports_a_missing_sdk_and_ends_with_its_session() {
     ));
     assert!(started.elapsed() < Duration::from_secs(5));
     assert!(ctx.error().is_none(), "the setup must not end its session");
+}
+
+/// A patch builder that does not end is stopped at its deadline and is a
+/// failed build like any other; the session's own end stays what it is.
+#[test]
+fn a_builder_that_does_not_end_is_stopped() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_guard, root) = temp();
+    let stuck = write(
+        &sysutil::join(&[&root, "dotnet"]),
+        b"#!/bin/sh\necho started\nexec sleep 600\n",
+    );
+    fs::set_permissions(&stuck, fs::Permissions::from_mode(0o700)).unwrap();
+    let tools = Tools {
+        sdk: Sdk {
+            dotnet: stuck,
+            csc: String::new(),
+        },
+        patcher: sysutil::join(&[&root, "HotReloadPatcher.dll"]),
+        ..Tools::default()
+    };
+    let request = write(&sysutil::join(&[&root, "1/request.json"]), b"{}");
+    let started = Instant::now();
+    let error = tools
+        .build_within(&Context::background(), &request, Duration::from_secs(1))
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "the patch builder did not finish within 1s and was stopped"
+    );
+    let waited = started.elapsed();
+    assert!(
+        (Duration::from_secs(1)..Duration::from_secs(20)).contains(&waited),
+        "{waited:?}"
+    );
+    // The end of the session is not a deadline of the builder.
+    let ctx = Context::background().with_cancel();
+    ctx.cancel();
+    let error = tools
+        .build_within(&ctx, &request, Duration::from_secs(600))
+        .unwrap_err();
+    assert!(!error.to_string().contains("did not finish"), "{error}");
+    // A run that ends in time is not touched by the limit.
+    let quick = write(
+        &sysutil::join(&[&root, "quick"]),
+        b"#!/bin/sh\nprintf '{\"verdict\":\"unchanged\"}'\n",
+    );
+    fs::set_permissions(&quick, fs::Permissions::from_mode(0o700)).unwrap();
+    let tools = Tools {
+        sdk: Sdk {
+            dotnet: quick,
+            csc: String::new(),
+        },
+        ..tools
+    };
+    assert_eq!(
+        tools.build(&Context::background(), &request).unwrap(),
+        b"{\"verdict\":\"unchanged\"}"
+    );
+    assert!(BUILD_TIMEOUT >= Duration::from_secs(30));
 }
 
 // SDK tests
@@ -1698,9 +1848,12 @@ public static class RawLifecycle {
         "Temp/native-host/Host_Data/ScriptingAssemblies.json",
         r#"{"names":["UnityMicroEditor.dll"],"types":[16]}"#,
     );
+    // `Awake` has no access modifier and follows a directive, as scripts
+    // with regions have it: the helper made of it must not take the
+    // directive along.
     let probe = |awake: u32, update: u32, tail: &str| {
         format!(
-            "using UnityEngine;\npublic class Probe : MonoBehaviour\n{{\n    public int seed = 3;\n    private int frames;\n    private void Awake() {{ seed += {awake}; }}\n    private void Update() {{ frames += {update}; }}\n    public int Frames() {{ return frames; }}\n}}\n{tail}"
+            "using UnityEngine;\npublic class Probe : MonoBehaviour\n{{\n    public int seed = 3;\n    private int frames;\n    #region Unity messages\n    void Awake() {{ seed += {awake}; }}\n    #endregion\n    private void Update() {{ frames += {update}; }}\n    public int Frames() {{ return frames; }}\n}}\n{tail}"
         )
     };
     let source = file("Assets/Probe.cs", &probe(1, 1, ""));
@@ -1848,7 +2001,7 @@ public static class RawLifecycle {
             },
         )
         .unwrap(),
-        Outcome::Unchanged
+        Outcome::Unchanged(Unchanged::default())
     );
 
     // Two bodies change. `Awake` is the lifecycle helper's wrapper; what the
@@ -1923,16 +2076,42 @@ public static class RawLifecycle {
 
     // A comment on the loaded code changes the bytes and nothing else: the
     // builder says so and the Player is not asked.
-    assert_eq!(
-        edit(
-            &mut compiler,
-            &mut code,
-            probe(1, 1, "// another comment\n")
-        ),
-        Outcome::Unchanged
-    );
+    match edit(
+        &mut compiler,
+        &mut code,
+        probe(1, 1, "// another comment\n"),
+    ) {
+        Outcome::Unchanged(unchanged) => {
+            assert!(unchanged.notes.is_empty(), "{unchanged:?}");
+            assert_eq!(read_json(&unchanged.report)["outcome"], "unchanged");
+        }
+        other => panic!("{other:?}"),
+    }
     assert_eq!(player.seen().len(), 3);
     assert_eq!(code.applied_generation(), 4);
+
+    // A field made public, as one does to have Unity serialize it. No body
+    // differs and nothing is sent, but the Player keeps the old
+    // accessibility: the builder's note must come back with the outcome.
+    let public = probe(1, 1, "").replace("private int frames;", "public int frames;");
+    assert!(public.contains("public int frames;"));
+    match edit(&mut compiler, &mut code, public) {
+        Outcome::Unchanged(unchanged) => {
+            assert_eq!(unchanged.notes.len(), 1, "{unchanged:?}");
+            let note = &unchanged.notes[0];
+            assert_eq!(
+                (note.code.as_str(), note.member.as_str()),
+                ("accessibility_changed", "Probe::frames")
+            );
+            assert!(note.message.contains("until a full recompile"), "{note:?}");
+            let report = read_json(&unchanged.report);
+            assert_eq!(report["result"]["verdict"], "unchanged");
+            assert_eq!(report["result"]["summary"]["notes"], 1);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(player.seen().len(), 3);
+    assert!(!code.refused() && !code.redirected());
 }
 
 /// A `Managed` directory as a staged host has it, as far as the applier
@@ -2054,6 +2233,32 @@ fn hot_reload_applier_compiles_sdk() {
     let ctx = Context::background();
     let sdk = Sdk::locate(&editor).unwrap();
     let managed = synthetic_managed(&ctx, &sdk, &editor, &root);
+    // A game may name its own types as it likes. Types without a namespace
+    // that are called like those the applier uses of the class library must
+    // not reach its compilation.
+    let game = write(
+        &sysutil::join(&[&root, "game/Game.cs"]),
+        b"public class Console { }\npublic class Stopwatch { }\npublic class Process { }\npublic class Volatile { }\npublic class File { }\npublic class Math { }\n",
+    );
+    let bcl = sysutil::join(&[
+        &sysutil::dir(&editor),
+        "Data/MonoBleedingEdge/lib/mono/unityaot-linux/mscorlib.dll",
+    ]);
+    compiler_command(
+        &ctx,
+        &root,
+        &sdk.dotnet,
+        &[
+            &sdk.csc,
+            "-nologo",
+            "-target:library",
+            "-nostdlib+",
+            &format!("-reference:{bcl}"),
+            &format!("-out:{managed}/Assembly-CSharp.dll"),
+            &game,
+        ],
+    )
+    .unwrap();
     check_applier(
         &ctx,
         &sdk,
@@ -2061,6 +2266,15 @@ fn hot_reload_applier_compiles_sdk() {
         &managed,
         &sysutil::join(&[&root, "hot-reload/applier"]),
     );
+    // Only the engine's core module and the bridge are named of `Managed`.
+    let response = glob(&sysutil::join(&[&root, "hot-reload/applier/*/compile.rsp"])).unwrap();
+    let response = fs::read_to_string(&response[0]).unwrap();
+    let named: Vec<&str> = response
+        .lines()
+        .filter(|line| line.contains(&managed))
+        .map(|line| line.trim_matches('"').rsplit('/').next().unwrap())
+        .collect();
+    assert_eq!(named, APPLIER_REFERENCES);
     // Without a bridge there is nothing to compile against.
     fs::remove_file(sysutil::join(&[&managed, "UnityMicroEditor.dll"])).unwrap();
     let error = stage_applier(

@@ -140,6 +140,16 @@ pub struct Patched {
     pub report: String,
 }
 
+/// A compile the Player needs no patch for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Unchanged {
+    /// What the Player still does not take over until it restarts, in the
+    /// builder's words: a changed accessibility, a removed start-up method.
+    pub notes: Vec<Reason>,
+    /// Empty when no byte differed and the builder did not run.
+    pub report: String,
+}
+
 /// A patch that left the Player unusable, or a Player that did not answer.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Failure {
@@ -151,9 +161,9 @@ pub struct Failure {
 pub enum Outcome {
     /// The Player runs the newest compiled code.
     Patched(Patched),
-    /// The newest compile has no semantic difference from what the Player
-    /// runs; nothing was sent to it.
-    Unchanged,
+    /// The newest compile needs no patch in the Player, which runs it but
+    /// for the notes; nothing was sent to it.
+    Unchanged(Unchanged),
     /// The edit cannot be patched. Nothing was sent to the Player.
     Unsupported(Refusal),
     /// The Player refused the patch before it wrote anything and keeps
@@ -389,7 +399,7 @@ impl PlayerCode {
         };
         if assemblies.is_empty() {
             self.refused = false;
-            return Ok(Outcome::Unchanged);
+            return Ok(Outcome::Unchanged(Unchanged::default()));
         }
         let generation = self.next_generation;
         self.next_generation += 1;
@@ -406,7 +416,7 @@ impl PlayerCode {
         });
         let (name, error) = match &outcome {
             Outcome::Patched(_) => ("patched", ""),
-            Outcome::Unchanged => ("unchanged", ""),
+            Outcome::Unchanged(_) => ("unchanged", ""),
             Outcome::Unsupported(_) => ("unsupported", failed.as_str()),
             Outcome::ApplyFailed(_) => ("apply_failed", ""),
             Outcome::RestartRequired(failure) => ("restart_required", failure.error.as_str()),
@@ -460,12 +470,28 @@ impl PlayerCode {
         }
         let patch = (result.verdict == VERDICT_PATCH).then_some(&result);
         if patch.is_none() && !self.redirected() {
-            return Ok(Outcome::Unchanged);
+            // A verdict without a patch still has notes, and they are all
+            // the caller learns about what the Player does not take over.
+            return Ok(Outcome::Unchanged(Unchanged {
+                notes: result.notes(),
+                report: files.path("report.json"),
+            }));
         }
         let game: Vec<String> = attempt.current.iter().map(|a| a.name.clone()).collect();
         // Without a patch the list is empty, and the Player restores the
         // methods the applied generation redirected.
         let descriptor = Descriptor::new(generation, &game, patch)?;
+        // An empty list restores the loaded code, which no patch means.
+        if patch.is_some() && descriptor.assemblies.is_empty() {
+            return Err(anyhow!(
+                "patch builder result has the verdict patch and no patched assembly"
+            ));
+        }
+        let redirects: u64 = descriptor
+            .assemblies
+            .iter()
+            .map(|assembly| assembly.detours.len() as u64)
+            .sum();
         for assembly in &descriptor.assemblies {
             if file_hash(&assembly.patch)? != assembly.patch_sha256 {
                 return Err(anyhow!(
@@ -576,6 +602,14 @@ impl PlayerCode {
                 ack.applied_generation
             ))));
         }
+        // The applier counts one per listed redirect. Another number is a
+        // Player that runs something else than the patch it was sent.
+        if ack.detours_applied != redirects {
+            return Ok(Outcome::RestartRequired(files.failure(format!(
+                "the Player acknowledged {} of the {redirects} redirects of code generation {generation}",
+                ack.detours_applied
+            ))));
+        }
         self.applied_generation = generation;
         self.patched = descriptor
             .assemblies
@@ -600,7 +634,7 @@ impl PlayerCode {
         Ok(Outcome::Patched(Patched {
             generation,
             assemblies: self.patched.clone(),
-            patched_methods: patch.map_or(0, |result| result.summary.patched_methods),
+            patched_methods: redirects,
             added_methods: patch.map_or(0, |result| result.summary.added_methods),
             added_fields: patch.map_or(0, |result| result.summary.added_fields),
             restored_methods: ack.detours_restored,

@@ -68,6 +68,13 @@ use std::{
 };
 use window::{Compiled, Loop, Restarted, Scene, Steps, Window};
 
+/// The watch loop for the tests of the controller, which reads what it prints.
+#[cfg(test)]
+pub(crate) mod testing {
+    pub(crate) use super::Event;
+    pub(crate) use super::window::{Compiled, Loop, Restarted, Scene, Steps, Window};
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LaunchOptions {
     pub project: String,
@@ -444,7 +451,7 @@ pub(crate) fn run_flags() -> FlagSet {
     flags.string(
         "hot-reload-fallback",
         "restart",
-        "what a C# change that cannot be patched does: restart the Player, or report it and keep the Player until a recompile command",
+        "what a C# change that cannot be patched does: restart the Player, or report it and keep the Player until a recompile command (report requires -commands-stdin)",
     );
     flags.bool(
         "commands-stdin",
@@ -525,6 +532,11 @@ pub(crate) fn launch_options(args: &[String]) -> Result<LaunchOptions> {
     }
     if no_hot_reload && flags.is_set("hot-reload-fallback") {
         bail!("--hot-reload-fallback has no effect with --no-hot-reload");
+    }
+    // A reported edit waits for a `recompile` command, which only arrives
+    // on standard input.
+    if fallback == Fallback::Report && !opts.commands_stdin {
+        bail!("--hot-reload-fallback report requires --commands-stdin");
     }
     // Code is patched into a Player that is watched; nothing else starts one
     // that outlives an edit.
@@ -733,11 +745,15 @@ impl Steps for Live<'_> {
 
     fn compile(&mut self, ctx: &Context, paths: Option<&[String]>) -> Result<Compiled> {
         let affected = paths.is_none_or(|paths| self.compiler.compiler_changes(paths));
+        // The whole step: the compile's own time leaves out the source and
+        // revision hashes around it, which a patched edit waits for as well.
+        let started = Instant::now();
         Ok(match self.compiler.compile(ctx, paths)? {
             Some(update) => {
-                let seconds = update.elapsed();
                 self.pending_compile = Some(update);
-                Compiled::Updated { seconds }
+                Compiled::Updated {
+                    seconds: started.elapsed().as_secs_f64(),
+                }
             }
             None if affected => Compiled::Unchanged,
             None => Compiled::Unaffected,
@@ -1013,6 +1029,10 @@ impl Steps for Live<'_> {
         self.prepared = next;
         Ok(Scene::Updated(event))
     }
+
+    fn changes_pending(&self) -> bool {
+        self.watcher.pending()
+    }
 }
 
 fn run_session(
@@ -1244,57 +1264,75 @@ fn run_session(
             }
             return require_player_report(&live.player().report);
         }
-        let mut window = match watcher.try_recv() {
-            Some(change) => {
-                if let Some(error) = change.error {
-                    bail!(error);
-                }
-                Window {
-                    paths: vec![change.path],
-                    changed_at: change.at,
-                    changed_wall: change.wall,
-                    recompile: None,
-                }
-            }
-            None => match commands.try_recv() {
-                Some(command) => Window {
-                    paths: Vec::new(),
-                    changed_at: command.at,
-                    changed_wall: command.wall,
-                    recompile: Some(command.request_id),
-                },
-                None => {
-                    wake.wait(seen, None);
-                    continue;
-                }
-            },
+        let Some(mut window) = open_window(&watcher, &commands)? else {
+            wake.wait(seen, None);
+            continue;
         };
-        let debounce = Instant::now() + Duration::from_millis(35);
-        loop {
-            let seen = wake.seen();
-            if let Some(next) = watcher.try_recv() {
-                if let Some(error) = next.error {
-                    bail!(error);
-                }
-                window.paths.push(next.path);
-                continue;
-            }
-            // One command a window: the next one gets a restart and an
-            // answer of its own.
-            if window.recompile.is_none()
-                && let Some(command) = commands.try_recv()
-            {
-                window.recompile = Some(command.request_id);
-                continue;
-            }
-            if Instant::now() >= debounce {
-                break;
-            }
-            if ctx.error().is_some() {
-                return Ok(());
-            }
-            wake.wait(seen, Some(debounce));
+        if !fill_window(ctx, wake, &watcher, &commands, &mut window)? {
+            return Ok(());
         }
         state.window(ctx, &mut live, &window)?;
+    }
+}
+
+/// How long a window waits for more changes of the same save.
+const DEBOUNCE: Duration = Duration::from_millis(35);
+
+/// The window that the next source change opens, or the next command when
+/// no source changed. `None` when there is neither.
+pub(crate) fn open_window(watcher: &ProjectWatcher, commands: &Commands) -> Result<Option<Window>> {
+    if let Some(change) = watcher.try_recv() {
+        if let Some(error) = change.error {
+            bail!(error);
+        }
+        return Ok(Some(Window {
+            paths: vec![change.path],
+            changed_at: change.at,
+            changed_wall: change.wall,
+            recompile: None,
+        }));
+    }
+    Ok(commands.try_recv().map(|command| Window {
+        paths: Vec::new(),
+        changed_at: command.at,
+        changed_wall: command.wall,
+        recompile: Some(command.request_id),
+    }))
+}
+
+/// Adds what arrives until the debounce is over: every source change, and
+/// a command when the window has none. False when the run ended meanwhile.
+pub(crate) fn fill_window(
+    ctx: &Context,
+    wake: &Wake,
+    watcher: &ProjectWatcher,
+    commands: &Commands,
+    window: &mut Window,
+) -> Result<bool> {
+    let debounce = Instant::now() + DEBOUNCE;
+    loop {
+        let seen = wake.seen();
+        if let Some(next) = watcher.try_recv() {
+            if let Some(error) = next.error {
+                bail!(error);
+            }
+            window.paths.push(next.path);
+            continue;
+        }
+        // One command a window: the next one gets a restart and an answer
+        // of its own.
+        if window.recompile.is_none()
+            && let Some(command) = commands.try_recv()
+        {
+            window.recompile = Some(command.request_id);
+            continue;
+        }
+        if Instant::now() >= debounce {
+            return Ok(true);
+        }
+        if ctx.error().is_some() {
+            return Ok(false);
+        }
+        wake.wait(seen, Some(debounce));
     }
 }

@@ -6,7 +6,7 @@ use super::{Event, err_text};
 use crate::{
     cancel::Context,
     compiler::{self, CompileUpdate},
-    hotreload::{Failure, Fallback, Outcome, Patched, Reason, Refusal, bounded},
+    hotreload::{Failure, Fallback, Outcome, Patched, Reason, Refusal, Unchanged, bounded},
 };
 use anyhow::Result;
 use std::time::{Instant, SystemTime};
@@ -90,6 +90,9 @@ pub(crate) trait Steps {
     fn merged_recompile(&mut self) -> Option<String>;
     /// Brings the running Player to the revision `prepare` published.
     fn scene(&mut self, ctx: &Context, window: &Window, started: Instant) -> Result<Scene>;
+    /// Whether source changes arrived that this window did not take: the
+    /// next window handles them.
+    fn changes_pending(&self) -> bool;
 }
 
 /// Why the next decision restarts the Player on the newest compile.
@@ -117,14 +120,20 @@ pub(crate) struct Loop {
     /// The newest compiled code is not in the Player and cannot be patched
     /// into it; only a restart applies it.
     refused: Option<Refusal>,
+    /// The newest compiled code needed no patch, and the Player still does
+    /// not take over all of it: the builder's notes, until the next compile
+    /// or restart.
+    noted: Option<Unchanged>,
 }
 
-/// What a window has printed, or still owes, about the Player's code.
+/// What a window says when its work is done.
 #[derive(Default)]
 struct Tail {
-    /// `code-patched` was printed.
+    /// The events of the window, in the order they are printed.
+    events: Vec<Event>,
+    /// `code-patched` is one of them.
     patched: bool,
-    /// The refusal that stands is printed when the window ends.
+    /// The refusal that stands is the last of them.
     refusal: bool,
 }
 
@@ -251,6 +260,7 @@ impl Loop {
             managed_rejected: false,
             restart: None,
             refused: None,
+            noted: None,
         }
     }
 
@@ -267,16 +277,44 @@ impl Loop {
 
     /// States the Player's code on a scene confirmation. A scene update
     /// proves nothing about it, and a reader must not take one for the
-    /// arrival of a refused edit.
+    /// arrival of a refused edit. The notes of a compile that needed no
+    /// patch are repeated for as long as they stand.
     fn stated(&self, event: Event) -> Event {
-        match self.hot_reload {
-            true => event.with("fullRecompileRequired", &self.refused.is_some()),
-            false => event,
+        if !self.hot_reload {
+            return event;
+        }
+        let event = event.with("fullRecompileRequired", &self.refused.is_some());
+        match &self.noted {
+            Some(noted) => event
+                .with("notes", &listed(&noted.notes))
+                .with("notesCount", &noted.notes.len())
+                .with("hotReloadReport", &noted.report),
+            None => event,
+        }
+    }
+
+    /// States the code on the rejection of a scene part that left the
+    /// Player running. A scene that uses a type only the refused code has
+    /// fails for that reason alone, and a reader that stops at this event
+    /// must be led to the recompile, with the reasons that stand. Without a
+    /// refusal it says so too: a window that took one back may end here.
+    fn blocked(&self, event: Event) -> Event {
+        match &self.refused {
+            Some(refusal) if self.hot_reload => event
+                .with("fullRecompileRequired", &true)
+                .with("unsupported", &listed(&refusal.reasons))
+                .with("unsupportedCount", &refusal.reasons.len())
+                .with("report", &refusal.report),
+            _ => self.stated(event),
         }
     }
 
     /// Handles one window. An error ends the run; everything else is an
-    /// event and leaves the session running.
+    /// event and leaves the session running. The events are printed when
+    /// the work of the window is done, so that none is read while a part of
+    /// the same save is still on its way into the Player. `pending` marks an
+    /// event that is not the last word: another one of this window follows
+    /// it, or source changes arrived meanwhile and the next window answers.
     pub fn window<S: Steps>(
         &mut self,
         ctx: &Context,
@@ -284,15 +322,24 @@ impl Loop {
         window: &Window,
     ) -> Result<()> {
         let mut tail = Tail::default();
-        self.apply(ctx, steps, window, &mut tail)?;
+        let outcome = self.apply(ctx, steps, window, &mut tail);
         // The refusal is the last terminal event of its window, also after a
         // scene part that was applied or rejected.
-        if tail.refusal
+        if outcome.is_ok()
+            && tail.refusal
             && let Some(refusal) = &self.refused
         {
-            steps.emit(refusal_event(refusal, &window.paths));
+            tail.events.push(refusal_event(refusal, &window.paths));
         }
-        Ok(())
+        let queued = steps.changes_pending();
+        let last = tail.events.len().saturating_sub(1);
+        for (index, event) in tail.events.into_iter().enumerate() {
+            steps.emit(match index < last || queued {
+                true => event.with("pending", &true),
+                false => event,
+            });
+        }
+        outcome
     }
 
     fn apply<S: Steps>(
@@ -304,11 +351,11 @@ impl Loop {
     ) -> Result<()> {
         let paths = &window.paths[..];
         let request = window.recompile.as_deref();
-        let reject = |steps: &mut S, error: &anyhow::Error| {
-            steps.emit(rejected_event(error, paths, request));
+        let reject = |tail: &mut Tail, error: &anyhow::Error| {
+            tail.events.push(rejected_event(error, paths, request));
         };
         if let Err(error) = steps.invalidate(paths) {
-            reject(steps, &error);
+            reject(tail, &error);
             return Ok(());
         }
         let started = Instant::now();
@@ -318,7 +365,7 @@ impl Loop {
             Ok(compiled) => compiled,
             Err(error) => {
                 self.managed_rejected = true;
-                reject(steps, &error);
+                reject(tail, &error);
                 return Ok(());
             }
         };
@@ -337,10 +384,10 @@ impl Loop {
                 };
                 match outcome {
                     Outcome::Patched(patch) => {
-                        self.refused = None;
+                        (self.refused, self.noted) = (None, None);
                         tail.patched = true;
                         let (pid, revision) = (steps.pid(), steps.revision());
-                        steps.emit(patched_event(
+                        tail.events.push(patched_event(
                             &patch,
                             window,
                             pid,
@@ -349,8 +396,13 @@ impl Loop {
                             patch_started.elapsed().as_secs_f64(),
                         ));
                     }
-                    Outcome::Unchanged => self.refused = None,
+                    Outcome::Unchanged(unchanged) => {
+                        self.refused = None;
+                        self.noted = (!unchanged.notes.is_empty()).then_some(unchanged);
+                    }
                     Outcome::Unsupported(refusal) | Outcome::ApplyFailed(refusal) => {
+                        // Nothing of the newest compile is in the Player.
+                        self.noted = None;
                         match self.fallback {
                             Fallback::Restart => self.restart = Some(Cause::Unsupported(refusal)),
                             Fallback::Report => {
@@ -384,14 +436,22 @@ impl Loop {
                 self.restart.get_or_insert(Cause::Plain);
                 if let Err(error) = steps.bind_newest(ctx) {
                     self.managed_rejected = true;
-                    reject(steps, &error);
+                    reject(tail, &error);
                     return Ok(());
                 }
             }
             let equal = match steps.prepare(ctx, window, newest, again) {
                 Ok(equal) => equal,
+                // What was prepared for the running Player is a scene part.
+                // A command prepares for a new process, so its answer stays
+                // plain: an event that states a refusal answers none.
+                Err(error) if !newest => {
+                    let event = self.blocked(rejected_event(&error, paths, request));
+                    tail.events.push(event);
+                    return Ok(());
+                }
                 Err(error) => {
-                    reject(steps, &error);
+                    reject(tail, &error);
                     return Ok(());
                 }
             };
@@ -407,13 +467,13 @@ impl Loop {
             // Mono cannot unload or replace an already loaded assembly identity.
             let restarted = steps.restart(ctx, window)?;
             let cause = self.restart.take();
-            self.refused = None;
+            (self.refused, self.noted) = (None, None);
             tail.refusal = false;
             let merged = match request {
                 Some(_) => None,
                 None => steps.merged_recompile(),
             };
-            steps.emit(restart_event(
+            tail.events.push(restart_event(
                 restarted,
                 cause,
                 request.or(merged.as_deref()),
@@ -421,12 +481,13 @@ impl Loop {
             return Ok(());
         }
         match steps.scene(ctx, window, started)? {
-            // The code event of this window already is its confirmation; a
-            // second one would answer a wait for the edit after it.
+            // The code event of this window already is its confirmation.
             Scene::Unchanged(_) if tail.patched || tail.refusal => {}
-            Scene::Unchanged(event) | Scene::Updated(event) => steps.emit(self.stated(event)),
+            Scene::Unchanged(event) | Scene::Updated(event) => {
+                tail.events.push(self.stated(event));
+            }
             Scene::Rejected { event, fatal } => {
-                steps.emit(event);
+                tail.events.push(self.blocked(event));
                 if let Some(error) = fatal {
                     return Err(error);
                 }
