@@ -193,6 +193,244 @@ fn remote_session_forwards_its_settings_and_rejects_unknown_actions() {
 }
 
 #[test]
+fn hot_reload_is_a_runtime_tool_that_forwards_status_and_recompile() {
+    let (_guard, project) = project_fixture();
+    let source_only = server(&project, |_| {});
+    assert!(source_only.tool("hot_reload").is_none());
+    assert_eq!(source_only.instructions(), INSTRUCTIONS);
+    let (_, capabilities) = call(&source_only, "project_capabilities", json!({}));
+    assert!(capabilities["data"].get("hotReload").is_none());
+
+    let received: Arc<Mutex<Vec<(String, Value)>>> = Arc::default();
+    let seen = received.clone();
+    let server = server(&project, |options| {
+        options.runtime = handler(move |name, raw| {
+            let input: Value = serde_json::from_slice(raw).unwrap();
+            seen.lock().unwrap().push((name.to_string(), input.clone()));
+            match (name, input["action"].as_str()) {
+                ("hot_reload", Some("status")) => value(
+                    json!({"enabled": true, "codeGeneration": 2, "fullRecompileRequired": false, "unsupported": [], "unsupportedCount": 0, "phase": "ready"}),
+                ),
+                ("hot_reload", _) => {
+                    value(json!({"phase": "ready", "pid": 31, "revision": "rev-1"}))
+                }
+                _ => value(
+                    json!({"success": true, "pid": 31, "revision": "rev-1", "result": {"tools": [{"name": "game.reset", "binding": "static", "readOnly": false, "inputSchema": {"type": "object"}}]}}),
+                ),
+            }
+        });
+    });
+    let tool = server.tool("hot_reload").expect("hot_reload is not listed");
+    assert!(!tool.read_only && !tool.idempotent && tool.output_schema.is_some());
+    assert_eq!(
+        serde_json::from_str::<Value>(&tool.input_schema).unwrap(),
+        json!({"type": "object", "additionalProperties": false, "required": ["action"], "properties": {
+            "action": {"type": "string", "description": "status,recompile"},
+            "requestId": {"type": "string", "description": "recompile: identity of the command, default a new one; a repeated id returns the outcome of its command; ASCII letters, digits or hyphens, at most 64"},
+        }})
+    );
+    // A server names only tools it has. The C# write tools describe the
+    // session's part where a session exists, and stay as they were without one.
+    let session_tools: Vec<String> = server
+        .tools()
+        .into_iter()
+        .map(|tool| tool.name)
+        .filter(|name| source_only.tool(name).is_none())
+        .collect();
+    assert!(session_tools.contains(&"session_control".to_string()));
+    for tool in source_only.tools() {
+        let foreign = session_tools
+            .iter()
+            .find(|name| tool.description.contains(name.as_str()));
+        assert!(
+            foreign.is_none() && !tool.description.contains("full_recompile_required"),
+            "{} names {foreign:?}, which this server lacks: {}",
+            tool.name,
+            tool.description
+        );
+    }
+    assert!(
+        source_only
+            .tool("script_edit")
+            .unwrap()
+            .description
+            .ends_with("Does not run the compiler.")
+    );
+    // An added type restarts the Player without the error in two of the
+    // three session policies, so the text does not promise the error.
+    let create = server.tool("script_create").unwrap().description;
+    assert!(
+        create.contains("onUnsupportedEdit restart") && create.contains("hotReload false"),
+        "{create}"
+    );
+    // What an agent reads first names the error and the call that answers it.
+    let session = server.tool("session_control").unwrap();
+    assert!(
+        tool.description.contains("full_recompile_required")
+            && tool.description.contains("resets game state"),
+        "{}",
+        tool.description
+    );
+    for text in [
+        &session.description,
+        &server.tool("script_edit").unwrap().description,
+        &server.tool("script_create").unwrap().description,
+        &server.instructions(),
+    ] {
+        assert!(
+            text.contains("full_recompile_required") && text.contains("hot_reload"),
+            "{text}"
+        );
+    }
+    assert!(
+        session.description.contains("hotReload")
+            && session.description.contains("onUnsupportedEdit")
+    );
+    // Neither wait reports success for a Player that runs the previous code,
+    // and `wait` ends with an edit although no Player becomes ready for it.
+    for promise in [
+        "neither wait nor wait_update succeeds, whatever afterSequence is",
+        "with the same outcome of an edit as wait_update, so it does not outlast one",
+    ] {
+        assert!(
+            session.description.contains(promise),
+            "{}",
+            session.description
+        );
+    }
+    assert!(
+        tool.description
+            .contains("returns its outcome afterwards, without a second restart"),
+        "{}",
+        tool.description
+    );
+    let (_, capabilities) = call(&server, "project_capabilities", json!({}));
+    let advertised = &capabilities["data"]["hotReload"];
+    assert_eq!(advertised["errorCode"], "full_recompile_required");
+    assert_eq!(
+        advertised["recompile"],
+        json!({"tool": "hot_reload", "arguments": {"action": "recompile"}})
+    );
+    assert!(advertised["launchArguments"]["onUnsupportedEdit"].is_string());
+
+    let (result, status) = call(&server, "hot_reload", json!({"action": "status"}));
+    assert!(
+        !result.is_error && status["data"]["codeGeneration"] == 2,
+        "{status}"
+    );
+    assert_eq!(
+        *received.lock().unwrap(),
+        [("hot_reload".to_string(), json!({"action": "status"}))],
+        "status read the tool catalog or changed its arguments"
+    );
+    received.lock().unwrap().clear();
+    // A recompile replaces the Player, so its tools are read again.
+    let (result, recompiled) = call(
+        &server,
+        "hot_reload",
+        json!({"action": "recompile", "requestId": "rc-7"}),
+    );
+    assert!(
+        !result.is_error && recompiled["data"]["projectToolsRefreshed"] == true,
+        "{recompiled}"
+    );
+    assert_eq!(
+        received.lock().unwrap()[0],
+        (
+            "hot_reload".to_string(),
+            json!({"action": "recompile", "requestId": "rc-7"})
+        )
+    );
+    assert!(server.tool("project.game.reset").is_some());
+    received.lock().unwrap().clear();
+    for arguments in [
+        json!({"action": "apply"}),
+        json!({"action": "recompile", "force": true}),
+        json!({"requestId": "rc-8"}),
+        json!({"action": "recompile", "requestId": 8}),
+    ] {
+        let (result, reply) = call(&server, "hot_reload", arguments.clone());
+        assert!(result.is_error, "{arguments}: {reply}");
+    }
+    assert!(
+        received.lock().unwrap().is_empty(),
+        "forwarded a rejected call"
+    );
+}
+
+#[test]
+fn full_recompile_required_reaches_the_client_as_a_typed_error_with_details() {
+    use crate::{
+        agentcontrol::{Failure, Typed},
+        sysutil,
+    };
+    let details = json!({
+        "unsupported": [{"code": "type_added", "member": "Game.Boss", "message": "a type was added"}],
+        "unsupportedCount": 1,
+        "report": "/owned/report.json",
+        "next": {"tool": "hot_reload", "arguments": {"action": "recompile"}},
+    });
+    // The controller's own failure keeps its code and details.
+    let failure = Failure {
+        error: sysutil::Error::new("cannot be applied to the running Player"),
+        reply: None,
+        typed: Some(Typed {
+            code: "full_recompile_required",
+            details: details.clone(),
+        }),
+    };
+    let HandlerError::Typed(typed) = HandlerError::from(failure) else {
+        panic!("the code of a controller failure was dropped");
+    };
+    assert_eq!(
+        (typed.code.as_str(), typed.message.as_str(), &typed.details),
+        (
+            "full_recompile_required",
+            "cannot be applied to the running Player",
+            &Some(details.clone())
+        )
+    );
+    let untyped = Failure {
+        error: sysutil::Error::new("CS1002: ; expected"),
+        reply: None,
+        typed: None,
+    };
+    assert!(matches!(
+        HandlerError::from(untyped),
+        HandlerError::Failed(message) if message == "CS1002: ; expected"
+    ));
+
+    let (_guard, project) = project_fixture();
+    let rejection = typed.clone();
+    let server = server(&project, |options| {
+        options.runtime = handler(move |name, _| match name {
+            "session_control" => Err(HandlerError::Typed(rejection.clone())),
+            _ => Err(HandlerError::failed("CS1002: ; expected")),
+        });
+    });
+    let (result, reply) = call(
+        &server,
+        "session_control",
+        json!({"action": "wait_update", "afterSequence": 4}),
+    );
+    assert!(
+        result.is_error && reply["success"] == false && reply.get("data").is_none(),
+        "{reply}"
+    );
+    assert_eq!(
+        reply["error"],
+        json!({"code": "full_recompile_required", "message": "cannot be applied to the running Player", "details": details})
+    );
+    // The compile error of a recompile keeps the untyped form of a rejected update.
+    let (result, reply) = call(&server, "hot_reload", json!({"action": "recompile"}));
+    assert!(result.is_error, "{reply}");
+    assert_eq!(
+        reply["error"],
+        json!({"code": "operation_failed", "message": "CS1002: ; expected"})
+    );
+}
+
+#[test]
 fn cli_requires_project_and_loopback_listener() {
     assert!(
         parse_options(Vec::new()).is_err(),

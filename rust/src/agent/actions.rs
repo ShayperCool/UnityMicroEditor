@@ -7,6 +7,7 @@ use super::{
 };
 use crate::{
     agentcontrol::{self, Reply},
+    authoring::AuthoringError,
     cancel::{Context, Source, select},
     compiler::{self, CompileManifest},
     editorbridge::{self, Client, Request, Response},
@@ -360,7 +361,17 @@ impl RuntimeOutcome {
                 value: failure
                     .reply
                     .map_or(RuntimeValue::Nil, RuntimeValue::Controller),
-                error: Some(failure.error.into()),
+                // A failure with a code, such as `full_recompile_required`,
+                // reaches the agent as a typed error with its details.
+                error: Some(match failure.typed {
+                    Some(typed) => AuthoringError {
+                        code: typed.code.into(),
+                        message: failure.error.message().into(),
+                        details: Some(typed.details),
+                    }
+                    .into(),
+                    None => failure.error.into(),
+                }),
             },
         }
     }

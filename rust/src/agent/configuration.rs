@@ -305,7 +305,10 @@ impl Service {
         let RuntimeValue::Controller(Reply::State(state)) = &outcome.value else {
             return outcome;
         };
+        // An edit that hot reload refused is answered by a recompile of the
+        // prepared graph, whatever its text says; it never needs a preparation.
         if state.phase != "ready"
+            || state.code_refused()
             || !requires_new_graph(&state.update_error)
             || outcome.error.as_ref().is_some_and(context_error)
         {

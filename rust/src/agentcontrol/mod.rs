@@ -20,7 +20,7 @@ use std::{
             process::CommandExt,
         },
     },
-    process::{Command, Stdio},
+    process::{ChildStdin, Command, Stdio},
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
@@ -30,9 +30,12 @@ use std::{
     time::Duration,
 };
 
+mod hotreload;
 mod journal;
 
 pub use crate::sysutil::{Error, ErrorKind, Result};
+use hotreload::Refused;
+pub use hotreload::{HotReload, LastPatch, LastRestart, Reason};
 
 const STDERR_LOG: &str = "agent-runner-stderr.log";
 const RUNNER_STDERR_MAXIMUM: usize = 8 * 1024;
@@ -80,6 +83,9 @@ pub struct State {
     /// project must be prepared again before its sources take effect.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub preparation_required: bool,
+    /// What hot reload did to the code of this Player; absent at its default.
+    #[serde(skip_serializing_if = "HotReload::is_default")]
+    pub hot_reload: HotReload,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub last_error: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -96,7 +102,8 @@ pub struct State {
     pub launch: Launch,
 }
 /// Per-launch additions to the runner command: the game's own arguments
-/// (the CLI's `-- args`) and the additive runtime content it may address.
+/// (the CLI's `-- args`), the additive runtime content it may address and how
+/// C# edits reach the running Player.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Launch {
@@ -109,6 +116,13 @@ pub struct Launch {
     /// `false` leaves the project's Addressables keys to the host's built content.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub addressables: Option<bool>,
+    /// `false` restarts the Player on every C# edit instead of patching it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hot_reload: Option<bool>,
+    /// `restart` lets the runner restart the Player by itself for an edit that
+    /// cannot be applied live; the default `report` waits for a recompile.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub on_unsupported_edit: String,
 }
 impl Launch {
     fn is_empty(&self) -> bool {
@@ -116,10 +130,20 @@ impl Launch {
             && self.content_scenes.is_empty()
             && self.content_prefabs.is_empty()
             && self.addressables.is_none()
+            && self.hot_reload.is_none()
+            && self.on_unsupported_edit.is_empty()
     }
-    /// Reads `gameArguments`, `contentScenes`, `contentPrefabs` and `addressables` from the
-    /// `arguments` of a start/reset. A list that is given replaces the
-    /// previous one; `None` when the request names none of them.
+    /// The runner's `--hot-reload-fallback` value.
+    fn fallback(&self) -> &'static str {
+        match self.on_unsupported_edit.as_str() {
+            "restart" => "restart",
+            _ => "report",
+        }
+    }
+    /// Reads `gameArguments`, `contentScenes`, `contentPrefabs`, `addressables`,
+    /// `hotReload` and `onUnsupportedEdit` from the `arguments` of a
+    /// start/reset. A value that is given replaces the previous one; `None`
+    /// when the request names none of them.
     fn from_arguments(previous: &Launch, raw: Option<&Vec<u8>>) -> Result<Option<Launch>> {
         let Some(raw) = raw else {
             return Ok(None);
@@ -132,11 +156,31 @@ impl Launch {
         let mut launch = previous.clone();
         let mut given = false;
         for member in &members {
-            if member.key == "addressables" {
-                launch.addressables = match &member.value {
+            let switch = match member.key.as_str() {
+                "addressables" => Some(&mut launch.addressables),
+                "hotReload" => Some(&mut launch.hot_reload),
+                _ => None,
+            };
+            if let Some(switch) = switch {
+                *switch = match &member.value {
                     Json::Null => None,
                     Json::Bool(enabled) => Some(*enabled),
-                    _ => return Err(Error::new("addressables must be a boolean")),
+                    _ => return Err(Error::new(format!("{} must be a boolean", member.key))),
+                };
+                given = true;
+                continue;
+            }
+            if member.key == "onUnsupportedEdit" {
+                launch.on_unsupported_edit = match &member.value {
+                    Json::Null => String::new(),
+                    Json::String(policy) if policy == "report" || policy == "restart" => {
+                        policy.clone()
+                    }
+                    _ => {
+                        return Err(Error::new(
+                            "onUnsupportedEdit must be \"report\" or \"restart\"",
+                        ));
+                    }
                 };
                 given = true;
                 continue;
@@ -198,12 +242,21 @@ pub struct Event {
     pub data: Map<String, Value>,
 }
 
+/// The code and details of a failure that callers act on by code. The MCP
+/// layer reports it as a typed error instead of `operation_failed`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Typed {
+    pub code: &'static str,
+    pub details: Value,
+}
+
 /// A session state returned together with the error that ended the call (`stop`
 /// after a caller timeout, `wait` on failure/rejection).
 #[derive(Debug, Clone)]
 pub struct StateError {
     pub state: Box<State>,
     pub error: Error,
+    pub typed: Option<Typed>,
 }
 impl std::fmt::Display for StateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -227,6 +280,7 @@ pub enum Reply {
 pub struct Failure {
     pub error: Error,
     pub reply: Option<Reply>,
+    pub typed: Option<Typed>,
 }
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -236,7 +290,11 @@ impl std::fmt::Display for Failure {
 impl std::error::Error for Failure {}
 impl From<Error> for Failure {
     fn from(error: Error) -> Self {
-        Self { error, reply: None }
+        Self {
+            error,
+            reply: None,
+            typed: None,
+        }
     }
 }
 impl From<StateError> for Failure {
@@ -244,6 +302,7 @@ impl From<StateError> for Failure {
         Self {
             error: failure.error,
             reply: Some(Reply::State(failure.state)),
+            typed: failure.typed,
         }
     }
 }
@@ -289,6 +348,10 @@ struct Inner {
     preparation_update_pending: bool,
     launched: u64,
     launch: Launch,
+    /// The runner's standard input, which carries its commands.
+    commands: Option<ChildStdin>,
+    /// The `recompile` commands written to this runner, oldest first.
+    recompiles: VecDeque<hotreload::Recompile>,
 }
 impl Inner {
     fn notify(&mut self) {
@@ -378,6 +441,8 @@ impl Controller {
             preparation_update_pending: false,
             launched: 0,
             launch: Launch::default(),
+            commands: None,
+            recompiles: VecDeque::new(),
         };
         let controller = Controller(Arc::new(Shared {
             options,
@@ -494,6 +559,14 @@ impl Controller {
         if inner.launch.addressables == Some(false) {
             command.arg("--no-addressables");
         }
+        // The runner would restart the Player by itself for an edit it cannot
+        // apply live. Here the caller decides when the game loses its state.
+        if inner.launch.hot_reload == Some(false) {
+            command.arg("--no-hot-reload");
+        } else {
+            command.args(["--hot-reload-fallback", inner.launch.fallback()]);
+        }
+        command.arg("--commands-stdin");
         if !inner.launch.game_arguments.is_empty() {
             command.arg("--").args(&inner.launch.game_arguments);
         }
@@ -512,7 +585,7 @@ impl Controller {
         command
             .current_dir(&options.project)
             .process_group(0)
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(writer)
             .stderr(child_stderr);
         // SAFETY: the hook runs between fork and exec and only makes
@@ -538,8 +611,8 @@ impl Controller {
         let observer = self.clone();
         let observed = done.clone();
         thread::spawn(move || observer.observe(command, id, stdout, stderr, observed, spawned));
-        let pid = match started.recv() {
-            Ok(Ok(pid)) => pid,
+        let (pid, commands) = match started.recv() {
+            Ok(Ok(started)) => started,
             Ok(Err(error)) => {
                 let error = Error::os("fork/exec", &options.runner, &error);
                 inner.state.phase = "failed".into();
@@ -549,7 +622,12 @@ impl Controller {
             }
             Err(_) => return Err(Error::new("runner launch thread ended unexpectedly")),
         };
+        if let Some(commands) = &commands {
+            hotreload::nonblocking(commands);
+        }
         inner.command = Some(Runner { id, pid });
+        inner.commands = commands;
+        inner.recompiles.clear();
         inner.done = Some(done);
         inner.stop_requested = false;
         inner.player = ProcessIdentity::default();
@@ -560,6 +638,7 @@ impl Controller {
             session_id: new_id(),
             last_sequence: inner.state.last_sequence,
             runner_stderr_path: sysutil::join(&[&options.output, STDERR_LOG]),
+            hot_reload: HotReload::launched(inner.launch.hot_reload != Some(false)),
             launch: inner.launch.clone(),
             ..State::default()
         };
@@ -575,7 +654,7 @@ impl Controller {
         stdout: PipeReader,
         stderr: File,
         done: Flag,
-        spawned: mpsc::Sender<io::Result<i64>>,
+        spawned: mpsc::Sender<io::Result<(i64, Option<ChildStdin>)>>,
     ) {
         let child = command.spawn();
         // The parent copies of the child's descriptors must close before reading.
@@ -591,7 +670,8 @@ impl Controller {
             id,
             pid: i64::from(child.id()),
         };
-        let _ = spawned.send(Ok(runner.pid));
+        // Taken before the wait below, which would close it.
+        let _ = spawned.send(Ok((runner.pid, child.stdin.take())));
         let abandon = Arc::new(AtomicBool::new(false));
         let (read_done, read_result) = mpsc::channel();
         {
@@ -634,6 +714,7 @@ impl Controller {
         if inner.command == Some(runner) {
             signal_owned_player(&inner.player, libc::SIGKILL);
             inner.command = None;
+            inner.forget_code();
             if failure(&inner) {
                 inner.state.phase = "failed".into();
                 let reason = read_error
@@ -859,6 +940,11 @@ impl Controller {
                 }
                 inner.last_ready_baseline = inner.baseline.clone();
                 inner.last_ready_scene = inner.scene.clone();
+                inner.state.hot_reload.restarted(sequence, &event);
+                // The runner names a restart without a new compilation
+                // `content-updated`; a requested one is that whenever the
+                // sources did not change since the last compilation.
+                inner.answer_recompile(sequence, &event, None);
             }
             "updated" => {
                 let ack = event.get("ack").and_then(Value::as_object);
@@ -881,10 +967,13 @@ impl Controller {
                 inner.state.last_error.clear();
                 inner.state.update_error.clear();
                 inner.state.preparation_required = false;
+                inner.state.hot_reload.confirmed(&event);
             }
+            // A confirmation that was under way when a stop began is still one
+            // of the Player being stopped, not a protocol error of the session.
             "unchanged" => {
                 let revision = text(event.get("revision"));
-                if inner.state.phase != "ready"
+                if !matches!(inner.state.phase.as_str(), "ready" | "stopping")
                     || inner.state.pid < 1
                     || number_pid(event.get("pid")) != inner.state.pid
                     || !valid_id(&revision)
@@ -898,6 +987,30 @@ impl Controller {
                 inner.state.last_error.clear();
                 inner.state.update_error.clear();
                 inner.state.preparation_required = false;
+                inner.state.hot_reload.confirmed(&event);
+            }
+            // The same Player with new method bodies: neither its PID nor
+            // its scene revision changes, only the code generation. It is
+            // accepted in the phases of `unchanged`.
+            "code-patched" => {
+                let revision = text(event.get("revision"));
+                let generation = hotreload::count(event.get("codeGeneration")).unwrap_or(0);
+                if !matches!(inner.state.phase.as_str(), "ready" | "stopping")
+                    || inner.state.pid < 1
+                    || number_pid(event.get("pid")) != inner.state.pid
+                    || !valid_id(&revision)
+                    || revision != inner.state.revision
+                    || generation < 1
+                {
+                    return Err(Error::new(
+                        "runner code patch does not confirm the accepted Player revision/PID and a code generation",
+                    ));
+                }
+                inner.state.hot_reload.patched(sequence, generation, &event);
+                inner.state.last_update_sequence = sequence;
+                inner.state.last_error.clear();
+                inner.state.update_error.clear();
+                inner.state.preparation_required = false;
             }
             "update-rejected" => {
                 let mut message = text(event.get("error"));
@@ -905,10 +1018,17 @@ impl Controller {
                     message = "runner rejected the source update".into();
                 }
                 inner.state.last_error = message.clone();
-                inner.state.update_error = message;
+                inner.state.update_error = message.clone();
                 inner.state.preparation_required =
                     event.get("preparationRequired") == Some(&Value::Bool(true));
                 inner.state.last_update_rejected_sequence = sequence;
+                // A restart needs no patch, so a refusal is about a source
+                // edit and never the answer to a `recompile` command.
+                if event.get("fullRecompileRequired") == Some(&Value::Bool(true)) {
+                    inner.state.hot_reload.refused(sequence, &event, &message);
+                } else {
+                    inner.answer_recompile(sequence, &event, Some(&message));
+                }
             }
             _ => {}
         }
@@ -939,6 +1059,7 @@ impl Controller {
             Some(1) => Err(StateError {
                 state: Box::new(self.status()),
                 error: ctx.error().expect("selected context is done").into(),
+                typed: None,
             }),
             _ => Ok(self.status()),
         }
@@ -953,9 +1074,12 @@ impl Controller {
         outcome.map(drop).map_err(|failure| failure.error)
     }
 
-    /// Blocks until the session is ready (`ready`) or acknowledged/rejected a
-    /// source update (`!ready`) with a sequence above `after`, or it failed,
-    /// stopped, or `ctx` ended.
+    /// Blocks until the session answered for what followed sequence `after`,
+    /// or it failed, stopped, or `ctx` ended. A confirmed or rejected source
+    /// update answers an update wait (`!ready`). A readiness wait needs a
+    /// ready Player, and that Player becoming ready answers it too. Neither
+    /// succeeds while hot reload refused an edit whose code is not in the
+    /// Player: both fail with the typed `full_recompile_required`.
     pub fn wait(
         &self,
         ctx: &Context,
@@ -967,34 +1091,54 @@ impl Controller {
                 let inner = self.lock();
                 (inner.state.clone(), inner.changed.clone())
             };
-            let finished = state.phase == "failed"
-                || state.phase == "stopped"
-                || ready && state.phase == "ready" && state.last_ready_sequence > after
-                || !ready
-                    && (state.last_update_sequence > after
-                        || state.last_update_rejected_sequence > after);
-            if finished {
+            let ended = state.phase == "failed" || state.phase == "stopped";
+            let confirmed =
+                state.last_update_sequence > after || ready && state.last_ready_sequence > after;
+            let rejected = state.last_update_rejected_sequence > after;
+            // An edit that was patched in, refused or rejected starts no
+            // Player, and a readiness wait must not outlast it.
+            let answered = (confirmed || rejected) && (!ready || state.phase == "ready");
+            if ended || answered {
+                // A rejection is the outcome while no update followed it. The
+                // Player that became ready before one still answers a
+                // readiness wait.
+                let rejection = rejected
+                    && state.last_update_rejected_sequence > state.last_update_sequence
+                    && !(ready && state.last_ready_sequence > after);
                 let message = if state.phase == "failed" {
                     state.last_error.clone()
                 } else if state.phase == "stopped" {
                     "runtime session stopped before the requested readiness/update".into()
-                } else if !ready
-                    && state.last_update_rejected_sequence > after
-                    && state.last_update_rejected_sequence > state.last_update_sequence
-                {
+                } else if rejection && !state.code_refused() {
                     state.update_error.clone()
+                } else if state.hot_reload.full_recompile_required {
+                    // Success would say that the Player runs the caller's C#
+                    // edit. A scene update confirmed since proves nothing
+                    // about the code, whatever the caller has read before.
+                    let told = match state.last_update_sequence > after {
+                        true => Refused::UpdatedAfter(after),
+                        false => Refused::Edit,
+                    };
+                    let (error, typed) = state.hot_reload.refusal(told);
+                    return Err(StateError {
+                        state: Box::new(state),
+                        error,
+                        typed: Some(typed),
+                    });
                 } else {
                     return Ok(state);
                 };
                 return Err(StateError {
                     state: Box::new(state),
                     error: Error::new(message),
+                    typed: None,
                 });
             }
             if select(&[Source::Context(ctx), Source::Flag(&changed)], None) == Some(0) {
                 return Err(StateError {
                     state: Box::new(self.status()),
                     error: ctx.error().expect("selected context is done").into(),
+                    typed: None,
                 });
             }
         }
@@ -1026,12 +1170,17 @@ impl Controller {
             }
         }
         let mut operation = operation.to_string();
-        if operation == "session_control" {
+        let prefix = match operation.as_str() {
+            "session_control" => Some("session"),
+            "hot_reload" => Some("hot_reload"),
+            _ => None,
+        };
+        if let Some(prefix) = prefix {
             let mut action = String::new();
             unmarshal(args.get("action"), |value| {
                 jsondoc::set_string(&mut action, value, Target::VALUE)
             })?;
-            operation = format!("session_{action}");
+            operation = format!("{prefix}_{action}");
         }
         match operation.as_str() {
             "session_status" => return Ok(Reply::State(Box::new(self.status()))),
@@ -1052,6 +1201,7 @@ impl Controller {
                     Err(error) => Err(Failure {
                         error,
                         reply: Some(Reply::State(Box::default())),
+                        typed: None,
                     }),
                 };
             }
@@ -1070,6 +1220,7 @@ impl Controller {
                     Err(error) => Err(Failure {
                         error,
                         reply: Some(Reply::State(Box::default())),
+                        typed: None,
                     }),
                 };
             }
@@ -1085,6 +1236,16 @@ impl Controller {
                     after,
                     operation == "session_wait",
                 )?)));
+            }
+            "hot_reload_status" => return Ok(Reply::Value(self.hot_reload())),
+            "hot_reload_recompile" => {
+                let mut id = new_id();
+                if let Some(value) = args.get("requestId") {
+                    unmarshal(Some(value), |value| {
+                        jsondoc::set_string(&mut id, value, Target::VALUE)
+                    })?;
+                }
+                return Ok(Reply::State(Box::new(self.recompile(ctx, &id)?)));
             }
             "runtime_query" | "runtime_command" => {
                 let selected = unmarshal(args.get("operation"), |value| {

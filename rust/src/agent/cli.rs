@@ -149,6 +149,7 @@ pub fn run_mcp_cli(arguments: Vec<String>) -> Result<()> {
                 "sourceAuthoring": "raw_source",
                 "runtime": "unity_mono_player",
                 "compiler": "dotnet_sdk",
+                "hotReload": "patch_assembly_method_detour",
                 "projectPreparation": "authored_source",
                 "projectBuild": "unity_editor_proxy",
                 "prefabApplyRevertUnpack": "raw_source",
