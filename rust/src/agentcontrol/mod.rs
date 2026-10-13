@@ -79,6 +79,11 @@ pub struct State {
     pub last_update_rejected_sequence: u64,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub update_error: String,
+    /// The runner's last answer was not its last word: it is still working
+    /// on source changes that were saved before it. No wait is answered
+    /// until it has said how they ended.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub update_pending: bool,
     /// The rejected update cannot be applied to this Player at all: the
     /// project must be prepared again before its sources take effect.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -854,6 +859,20 @@ impl Controller {
             inner.event_bytes -= inner.event_sizes.pop_front().unwrap_or(0);
             inner.state.events.remove(0);
         }
+        // The answers of a watch window. One that the runner marks `pending`
+        // is followed by another: of the same window, or of the next one,
+        // which handles source changes that were saved meanwhile.
+        if matches!(
+            name.as_str(),
+            "code-updated"
+                | "content-updated"
+                | "updated"
+                | "unchanged"
+                | "code-patched"
+                | "update-rejected"
+        ) {
+            inner.state.update_pending = event.get("pending") == Some(&Value::Bool(true));
+        }
         match name.as_str() {
             "ready" | "code-updated" | "content-updated" => {
                 let (report, manifest) = (text(event.get("report")), text(event.get("manifest")));
@@ -1027,6 +1046,9 @@ impl Controller {
                 if event.get("fullRecompileRequired") == Some(&Value::Bool(true)) {
                     inner.state.hot_reload.refused(sequence, &event, &message);
                 } else {
+                    // The rejection of a scene part says when no refusal
+                    // stands, as a confirmation does.
+                    inner.state.hot_reload.confirmed(&event);
                     inner.answer_recompile(sequence, &event, Some(&message));
                 }
             }
@@ -1096,8 +1118,12 @@ impl Controller {
                 state.last_update_sequence > after || ready && state.last_ready_sequence > after;
             let rejected = state.last_update_rejected_sequence > after;
             // An edit that was patched in, refused or rejected starts no
-            // Player, and a readiness wait must not outlast it.
-            let answered = (confirmed || rejected) && (!ready || state.phase == "ready");
+            // Player, and a readiness wait must not outlast it. An answer the
+            // runner marked as not its last is none: the changes it is still
+            // working on may be the caller's.
+            let answered = (confirmed || rejected)
+                && (!ready || state.phase == "ready")
+                && !state.update_pending;
             if ended || answered {
                 // A rejection is the outcome while no update followed it. The
                 // Player that became ready before one still answers a

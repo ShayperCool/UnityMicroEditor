@@ -111,12 +111,17 @@ wait succeeds while that member is true, whatever `afterSequence` is.
 `hot_reload` with `action: recompile` then restarts the Player on the newest
 compiled code and resets game state; it returns the new
 session state, or the compiler's text when the sources do not compile, which
-keeps the Player. `status` returns the `hotReload` state, also while no session
-runs. The session options `hotReload: false` (restart on every C# edit) and
+keeps the Player. A change that is applied, or needs no patch, can still leave
+something the Player takes over only after a recompile, such as the
+accessibility of a field: `hotReload.lastPatch.notes` and `hotReload.notes`
+list it. While the session still works on saved source changes the state has
+`updatePending: true` and neither wait returns, so one wait after several
+edits gives the outcome of the last. `status` returns the `hotReload` state,
+also while no session runs. The session options `hotReload: false` (restart on every C# edit) and
 `onUnsupportedEdit: "restart"` (restart instead of the error) select the other
 behaviors. The session state omits `hotReload` while it has nothing to report:
-hot reload is enabled, no patch is applied, no edit is refused, no recompile is
-pending and hot reload did not restart this Player.
+hot reload is enabled, no patch is applied, no edit is refused, no note
+stands, no recompile is pending and hot reload did not restart this Player.
 [AGENT_MCP.md](AGENT_MCP.md) describes the flow and its limits.
 
 `project_tools` publishes public attributed/registered methods as
@@ -177,7 +182,9 @@ Error codes of hot reload:
 
 Both waits return `full_recompile_required` until the code is in the Player:
 for every `afterSequence`, and also after a later scene update, which the
-message then reports as applied. A C# compile error keeps the code
+message then reports as applied, or a later scene edit that was rejected
+because it needs the new code; `session_control(status).updateError` then has
+that rejection's own text. A C# compile error keeps the code
 `operation_failed` with the compiler's text, from `wait_update` and from
 `hot_reload(recompile)` alike. So does a `recompile` whose runner no longer
 reads commands; its message names `session_control(reset)`. A `requestId` of

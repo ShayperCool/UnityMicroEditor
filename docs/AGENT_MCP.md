@@ -289,6 +289,12 @@ commit, call `wait_update` with `afterSequence`. A scene `updated` ACK, a
 `code-patched` confirmation, or confirmed `code-updated`/`content-updated`
 readiness, proves application rather than behavior.
 Read the current PID/revision, inspect values, check logs, and run an assertion.
+Several edits may precede one `wait_update`. The runner handles saves in the
+order they arrive, and an answer it gives while a later save is already queued
+is marked as not its last: the session state then has `updatePending: true`,
+and neither `wait_update` nor `wait` returns until the last queued save was
+applied or rejected. The reply is the outcome of that last one, so a compile
+error of the first of two files that the second file repairs is not reported.
 `wait` with the same `afterSequence` ends with the same outcome of an edit once
 a Player is ready, although a C# edit that is applied live starts no Player. It
 also returns when a Player becomes ready: after a start or a restart.
@@ -363,6 +369,7 @@ game loses its state.
 | --- | --- | --- |
 | Applied live | Success; same `pid` and `revision`; the last event is `code-patched` | `hotReload.codeGeneration` is the patch generation, `hotReload.lastPatch` summarizes it |
 | No difference in the compiled code | Success | Unchanged |
+| Nothing to patch, but not all of the change is in the Player (a field or method made `public`, a removed `[RuntimeInitializeOnLoadMethod]`) | Success | `hotReload.notes` lists it, with `notesCount` and `notesReport`, until the next compile or restart |
 | Cannot be applied live | Error `full_recompile_required` | `hotReload.fullRecompileRequired: true` with `unsupported`, `unsupportedCount` and `report`; `updateError` |
 | Does not compile | Error `operation_failed` with the compiler's text, as before | `updateError` |
 | Needs a new source graph | Pending preparation, as before | `preparationRequired: true` |
@@ -405,6 +412,16 @@ in `tools/HotReloadPatcher` defines the codes. The same list stays in
 `session_control(status)` and `hot_reload(status)` as
 `hotReload.unsupported` until the code is applied.
 
+A new script is the common case. `script_create` adds a type, so `wait_update`
+fails with `full_recompile_required` and the reason `type_added`. A scene edit
+that attaches the new component before the recompile is rejected for the
+running Player, which does not have the type. `wait_update` and `wait` then
+still answer `full_recompile_required` with the same reasons, and
+`session_control(status).updateError` holds the scene's own error
+(`unresolved managed component type ...`). Both edits can be made before the
+one recompile: the Player it starts has the type and loads the scene with the
+component.
+
 Then call the tool the reply names:
 
 ```json
@@ -427,7 +444,7 @@ leaves the recompile pending.
 
 | `hot_reload` action | Result |
 | --- | --- |
-| `status` | `enabled`, `onUnsupportedEdit`, `codeGeneration`, `fullRecompileRequired`, `unsupported`, `unsupportedCount`, `report`, `lastPatch`, `lastRestart`, `pendingRecompile` and the session `phase`. Without a session it reports what the next launch uses, with `codeGeneration: 0`. |
+| `status` | `enabled`, `onUnsupportedEdit`, `codeGeneration`, `fullRecompileRequired`, `unsupported`, `unsupportedCount`, `report`, `lastPatch`, `notes`, `notesCount`, `notesReport`, `lastRestart`, `pendingRecompile` and the session `phase`. Without a session it reports what the next launch uses, with `codeGeneration: 0`. |
 | `recompile` | The session state after the restart. Optional `requestId` identifies the command. |
 
 `lastRestart` is present when hot reload caused the start of this Player
@@ -454,15 +471,24 @@ Player and an edit that compiled after that restart was refused: the message
 says so, and the next `recompile` needs a new `requestId`.
 
 What a patch does not change is reported in `hotReload.lastPatch.notes`, with
-the same `code`, `member` and `message` members:
+the same `code`, `member` and `message` members. A change that needed no patch
+at all can leave such notes too; they are in `hotReload.notes`, which is absent
+when there are none. Only a recompile applies what a note names:
 
+- A field or method whose accessibility changed keeps the loaded one for
+  reflection and for Unity serialization (`accessibility_changed`). A field
+  made `public` so that Unity serializes it is therefore not filled from the
+  scene until `hot_reload(recompile)`; `wait_update` succeeds and the note says
+  so.
 - An added field has its default value in objects that existed before the
   patch; an added serialized field is not filled from the scene until a restart.
 - A changed field initializer or constructor affects objects created later.
 - A coroutine or `async` method that is already running finishes on the old
   code; new calls run the new code.
 - A delegate created before the patch can keep the old body of an edited
-  lambda.
+  lambda. A method marked `[InvokeOnHotReloadLocal]` is run again whenever its
+  own code, a lambda or local function in it, or a method a patch added that it
+  calls has changed, which is the place to build such delegates anew.
 - An attribute on an added member is not visible until a recompile. An added
   `[AgentTool]` method is therefore not in the tool catalog, and an added
   `[RuntimeInitializeOnLoadMethod]` does not run.
@@ -487,6 +513,11 @@ Launch options, in `arguments` of `session_control(start)` or `reset`:
 | `hotReload` | `true` | `false` turns hot reload off for the session: every C# edit restarts the Player and reports `code-updated`, as before hot reload existed. `hot_reload(recompile)` still works. |
 | `onUnsupportedEdit` | `report` | `report` keeps the Player and fails `wait_update` with `full_recompile_required`. `restart` lets the runner restart the Player by itself for such an edit: `wait_update` succeeds with a new `pid`, and `hotReload.lastRestart` has `reason: "hot_reload_unsupported"` and the reasons. |
 
+Like the other launch options, a value that is given stays for the later
+launches of this server, so a `start` after a session with `hotReload: false`
+has it off until `hotReload` is given again; `null` restores the default. The
+session state shows the values in `launch`.
+
 The runtime package declares `[InvokeOnHotReload]` and
 `[InvokeOnHotReloadLocal]` for game code that has to react to a patch.
 
@@ -498,9 +529,10 @@ Limits:
   to know which code an observation ran on.
 - `hotReload.fullRecompileRequired` is cleared by an applied patch
   (`code-patched`), by a restart of the Player, or by an `updated` or
-  `unchanged` event in which the runner states `fullRecompileRequired: false`,
-  for example after the refused edit was reverted. A scene update without that
-  statement does not clear it, and neither wait succeeds until it is cleared.
+  `unchanged` event, or the rejection of a scene edit, in which the runner
+  states `fullRecompileRequired: false`, for example after the refused edit was
+  reverted. A scene update without that statement does not clear it, and
+  neither wait succeeds until it is cleared.
   To keep the Player and its game state for a while, confirm a scene edit with
   `status`: `lastUpdateSequence` and `revision` advance.
 - A compile error after a refused edit leaves `fullRecompileRequired` set:
@@ -509,7 +541,11 @@ Limits:
 - A change with a scene part and a refused C# part can show
   `fullRecompileRequired: true` with an empty `unsupported` list for a moment:
   the runner stated it on the scene update and lists the reasons right after.
-  The error message says so, and `hot_reload(status)` has them then.
+  `updatePending` is true for that moment and no wait returns in it.
+- `updatePending` follows what the runner has seen of the project. A save that
+  reaches the watcher in the instant an answer is printed is not counted, so
+  take `lastSequence` before the first edit of a group and wait once after the
+  last one.
 - `wait` and `wait_update` differ in one case: a Player that became ready after
   `afterSequence` answers `wait` also when a compile error followed, which
   `wait_update` reports. Neither has a time limit of its own.
