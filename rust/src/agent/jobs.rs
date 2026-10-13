@@ -563,7 +563,7 @@ impl Service {
         let Some(progress) = self.preparation_progress() else {
             return self.controller_handle(ctx, name, raw);
         };
-        let state = controller.status();
+        let state = controller.status_reply();
         let reply = if action == "status" {
             state_members(&state).map(|mut reply| {
                 reply.insert("preparation".into(), Any::Object(progress));

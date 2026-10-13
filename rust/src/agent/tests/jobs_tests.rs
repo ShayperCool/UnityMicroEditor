@@ -316,6 +316,169 @@ fn restarted_service(project: &str, controller: &Controller, lifetime: &Context)
     })
 }
 
+/// Sources that were prepared before under the identity the recovery gives
+/// them (an edit that was undone and made again, a branch switched back) have
+/// a confirmed receipt and no job, so no job activates their preparation. The
+/// recovery does, and restarts the session on it.
+#[test]
+fn recovery_continues_on_the_preparation_the_sources_already_have() {
+    let (_guard, project) = review_project();
+    write(&join(&[&project, "Assets/Main.unity"]), "selected scene");
+    let (active, _, _) = preparation_fixture(&project, "active-test");
+    let revision = configuration_revision(
+        &project,
+        &[ConfigurationSelection {
+            scene: active.scene.clone(),
+            baseline: active.baseline.clone(),
+        }],
+    )
+    .unwrap();
+    let identity = format!(
+        "config-{}",
+        &crate::sha256(format!("{}\n{revision}", active.scene).as_bytes())[..40]
+    );
+    let (known, _, _) = preparation_fixture(&project, &identity);
+    let raw = marshal(&Any::Object(obj([
+        ("scene", active.scene.clone().into()),
+        ("requestId", identity.clone().into()),
+        ("activate", true.into()),
+    ])))
+    .unwrap();
+    // An earlier server prepared these sources.
+    let earlier = plain_service(&project);
+    let confirmed = known.clone();
+    let outcome = wait_job(
+        &earlier,
+        "project_prepare",
+        &raw,
+        &run(move |_, _, _| json_reply(&confirmed)),
+    );
+    earlier.close();
+    outcome.unwrap();
+    // A runner that stays, and writes down what it was started with.
+    let (_runner_guard, directory) = temp_dir();
+    let runner = join(&[&directory, "runner"]);
+    write_mode(
+        &runner,
+        "#!/bin/sh\necho \"$@\" >> \"$0.arguments\"\nexec sleep 60\n",
+        0o700,
+    );
+    let started = || -> Vec<String> {
+        fs::read_to_string(format!("{runner}.arguments"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+    let launches = |count: usize| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while started().len() < count {
+            assert!(
+                Instant::now() < deadline,
+                "the runner was started {:?}",
+                started()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        started()
+    };
+    let lifetime = ctx().with_cancel();
+    let controller = Controller::new(
+        &lifetime,
+        agentcontrol::Options {
+            project: project.clone(),
+            runner: runner.clone(),
+            output: join(&[&project, "Library/UnityMicroEditor/agent"]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    controller
+        .configure_prepared(&active.baseline, &active.scene)
+        .unwrap();
+    let service = Service::new(Options {
+        project: project.clone(),
+        scene: active.scene.clone(),
+        baseline: active.baseline.clone(),
+        lifetime: Some(lifetime.clone()),
+        controller: Some(controller.clone()),
+        asynchronous: true,
+        ..Default::default()
+    });
+    let before = controller.start().unwrap();
+    assert!(launches(1)[0].contains(&format!("--baseline {}", active.baseline)));
+    // What the session answers after the edit that left the prepared graph.
+    let state = agentcontrol::State {
+        phase: "ready".into(),
+        pid: 1234,
+        session_id: before.session_id.clone(),
+        update_error:
+            "new managed configuration requires a fresh managed graph: Assets/Lib/Lib.asmdef".into(),
+        ..Default::default()
+    };
+    let recover = |action: &str| {
+        let outcome = service.recover_configuration(
+            &ctx(),
+            "session_control",
+            &bytes(&json!({"action": action})),
+            actions::RuntimeOutcome {
+                value: actions::RuntimeValue::Controller(agentcontrol::Reply::State(Box::new(
+                    state.clone(),
+                ))),
+                error: None,
+            },
+        );
+        decoded(&outcome.finish().unwrap())
+    };
+    // Not behind a project action that runs: the receipt is shown and stays.
+    let held = service.0.mu.lock().unwrap();
+    let busy = recover("status");
+    assert!(
+        busy["preparationRequired"] == true
+            && busy["preparation"]["requestId"] == identity.as_str()
+            && service.baseline() == active.baseline
+            && started().len() == 1,
+        "{busy}"
+    );
+    drop(held);
+    let status = recover("status");
+    assert_eq!(
+        (service.baseline(), service.scene()),
+        (known.baseline.clone(), active.scene.clone()),
+        "the recovery left the session on the preparation of other sources: {status}"
+    );
+    let after = controller.status();
+    assert!(
+        after.session_id != before.session_id && after.phase == "starting",
+        "the session was not restarted: {} {}",
+        after.session_id,
+        after.phase
+    );
+    assert!(
+        launches(2)[1].contains(&format!("--baseline {}", known.baseline)),
+        "{:?}",
+        started()
+    );
+    // The reply is the session as it continues: nothing is required any more.
+    assert!(
+        status.get("preparationRequired").is_none()
+            && status["sessionId"] == after.session_id.as_str()
+            && status["preparation"]["requestId"] == identity.as_str(),
+        "{status}"
+    );
+    // A later call finds that preparation selected and starts nothing.
+    let waited = recover("wait_update");
+    assert!(
+        waited["status"] == "result_pending" && waited.get("message").is_none(),
+        "{waited}"
+    );
+    assert_eq!(controller.status().session_id, after.session_id);
+    assert_eq!(started().len(), 2);
+    service.close();
+    let _ = controller.close();
+    lifetime.cancel();
+}
+
 #[test]
 fn confirmed_preparation_restores_activation_after_restart() {
     let (_guard, project) = review_project();
