@@ -24,6 +24,12 @@ pub struct Reason {
     pub member: String,
     #[serde(deserialize_with = "nz")]
     pub message: String,
+    /// Of a note about a method the patch carries: what that method runs,
+    /// as the builder's short hash. A note with the same code, member and
+    /// revision as one of the outcome before only still stands; any other
+    /// is about code that changed since.
+    #[serde(deserialize_with = "nz", skip_serializing_if = "String::is_empty")]
+    pub revision: String,
 }
 impl Reason {
     pub fn new(code: &str, member: &str, message: &str) -> Self {
@@ -31,6 +37,7 @@ impl Reason {
             code: code.into(),
             member: member.into(),
             message: message.into(),
+            revision: String::new(),
         }
     }
 }

@@ -333,6 +333,9 @@ pub struct Tools {
     /// The session output, the owner of both caches.
     pub output: String,
     pub patcher: String,
+    /// The time one run of the patch builder gets; `BUILD_TIMEOUT` when none
+    /// is given.
+    pub limit: Option<Duration>,
 }
 impl Tools {
     fn patcher_cache(output: &str) -> String {
@@ -357,6 +360,7 @@ impl Tools {
             managed: managed.into(),
             output: output.into(),
             patcher,
+            limit: None,
         };
         let applier = tools.applier(ctx)?;
         Ok((tools, applier))
@@ -376,7 +380,7 @@ impl Tools {
 
     /// Runs the patch builder on a request file; the output is its result.
     pub fn build(&self, ctx: &Context, request: &str) -> Result<Vec<u8>> {
-        self.build_within(ctx, request, BUILD_TIMEOUT)
+        self.build_within(ctx, request, self.limit.unwrap_or(BUILD_TIMEOUT))
     }
 
     /// [`Tools::build`] with the time the builder gets. When it is over the

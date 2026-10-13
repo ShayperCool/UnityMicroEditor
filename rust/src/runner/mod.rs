@@ -71,8 +71,12 @@ use window::{Compiled, Loop, Restarted, Scene, Steps, Window};
 /// The watch loop for the tests of the controller, which reads what it prints.
 #[cfg(test)]
 pub(crate) mod testing {
-    pub(crate) use super::Event;
-    pub(crate) use super::window::{Compiled, Loop, Restarted, Scene, Steps, Window};
+    pub(crate) use super::commands::Commands;
+    pub(crate) use super::window::{
+        Compiled, Loop, Restarted, Scene, Steps, Window, ready_event, scene_rejected_event,
+        unchanged_event, updated_event,
+    };
+    pub(crate) use super::{Event, watch};
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -745,15 +749,10 @@ impl Steps for Live<'_> {
 
     fn compile(&mut self, ctx: &Context, paths: Option<&[String]>) -> Result<Compiled> {
         let affected = paths.is_none_or(|paths| self.compiler.compiler_changes(paths));
-        // The whole step: the compile's own time leaves out the source and
-        // revision hashes around it, which a patched edit waits for as well.
-        let started = Instant::now();
         Ok(match self.compiler.compile(ctx, paths)? {
             Some(update) => {
                 self.pending_compile = Some(update);
-                Compiled::Updated {
-                    seconds: started.elapsed().as_secs_f64(),
-                }
+                Compiled::Updated
             }
             None if affected => Compiled::Unchanged,
             None => Compiled::Unaffected,
@@ -910,16 +909,8 @@ impl Steps for Live<'_> {
         )?);
         self.player().wait_ready(ctx, READY_BUDGET)?;
         let (pid, report) = (self.player().pid(), self.player().report.clone());
-        let event = Event::new("content-updated")
-            .with("paths", &window.paths)
-            .with("manifest", &next.prepared.manifest)
-            .with("contentRoutes", &next.routes)
-            .seconds(
-                "sourceToReadySeconds",
-                window.changed_at.elapsed().as_secs_f64(),
-            )
-            .with("pid", &pid)
-            .with("report", &report);
+        let event =
+            window::ready_event(window, &next.prepared.manifest, &next.routes, pid, &report);
         let compile = self.pending_compile.take();
         if let Some(pending) = &compile {
             self.active_compile = Some(pending.clone());
@@ -948,13 +939,12 @@ impl Steps for Live<'_> {
         let next = self.next.take().expect("prepared revision").prepared;
         let pid = self.pid();
         if scene_runtime_equal(&self.prepared.manifest, &next.manifest)? {
-            return Ok(Scene::Unchanged(
-                Event::new("unchanged")
-                    .with("paths", &window.paths)
-                    .seconds("prepareSeconds", next.elapsed_seconds)
-                    .with("pid", &pid)
-                    .with("revision", &self.prepared.revision),
-            ));
+            return Ok(Scene::Unchanged(window::unchanged_event(
+                window,
+                next.elapsed_seconds,
+                pid,
+                &self.prepared.revision,
+            )));
         }
         let data = read_file(&next.manifest)?;
         let id = random_id();
@@ -997,9 +987,7 @@ impl Steps for Live<'_> {
         let ack = reply.ack.unwrap_or_default();
         let field = |key: &str| ack.get(key).unwrap_or(&Value::Null);
         if let Some(error) = reply.error {
-            let event = Event::new("update-rejected")
-                .with("error", &err_text(&error))
-                .raw("ack", ack_json);
+            let event = window::scene_rejected_event(&err_text(&error), ack_json);
             let kept = field("restartRequired").is_false()
                 && field("loadedRevision").as_str() == Some(self.prepared.revision.as_str());
             let fatal = (!kept).then(|| {
@@ -1016,22 +1004,10 @@ impl Steps for Live<'_> {
         {
             bail!("Player acknowledged an incompatible live revision or process");
         }
-        let event = Event::new("updated")
-            .with("paths", &window.paths)
-            .seconds("prepareSeconds", next.elapsed_seconds)
-            .seconds("elapsedSeconds", started.elapsed().as_secs_f64())
-            .seconds(
-                "sourceToAckSeconds",
-                window.changed_at.elapsed().as_secs_f64(),
-            )
-            .raw("ack", ack_json)
-            .with("cache", &next.cache);
+        let event =
+            window::updated_event(window, next.elapsed_seconds, started, ack_json, &next.cache);
         self.prepared = next;
         Ok(Scene::Updated(event))
-    }
-
-    fn changes_pending(&self) -> bool {
-        self.watcher.pending()
     }
 }
 
@@ -1250,28 +1226,70 @@ fn run_session(
         active_compile: initial_compile,
         hot,
     };
-    // When several sources are ready at once the order is cancellation,
-    // Player exit, source change, command.
+    watch(
+        ctx,
+        wake,
+        &watcher,
+        &commands,
+        &mut state,
+        &mut live,
+        |live| {
+            let result = live.player().take_done()?;
+            live.player().exited = true;
+            Some(match result {
+                Some(error) => Err(anyhow!(error)),
+                None => require_player_report(&live.player().report),
+            })
+        },
+    )
+}
+
+/// The loop of a watched session: one window after another until the run
+/// ends, the Player exits (`exited` then gives the result) or a window
+/// fails. When several sources are ready at once the order is cancellation,
+/// Player exit, source change, command.
+///
+/// A `sync` command is answered between two windows, by the event `synced`,
+/// once every source change that the watcher had been told of when the
+/// loop saw the command has gone through a window. Whoever reads `synced`
+/// has therefore read the events of everything saved before the command.
+pub(crate) fn watch<S: Steps>(
+    ctx: &Context,
+    wake: &Wake,
+    watcher: &ProjectWatcher,
+    commands: &Commands,
+    state: &mut Loop,
+    steps: &mut S,
+    mut exited: impl FnMut(&mut S) -> Option<Result<()>>,
+) -> Result<()> {
+    // Request ids, each with the number of changes to hand out first.
+    let mut syncs: std::collections::VecDeque<(String, u64)> = Default::default();
     loop {
         let seen = wake.seen();
         if ctx.error().is_some() {
             return Ok(());
         }
-        if let Some(result) = live.player().take_done() {
-            live.player().exited = true;
-            if let Some(error) = result {
-                bail!(error);
-            }
-            return require_player_report(&live.player().report);
+        if let Some(result) = exited(steps) {
+            return result;
         }
-        let Some(mut window) = open_window(&watcher, &commands)? else {
+        for id in commands.take_syncs() {
+            syncs.push_back((id, watcher.flush()));
+        }
+        while syncs
+            .front()
+            .is_some_and(|(_, changes)| watcher.taken() >= *changes)
+        {
+            let (id, _) = syncs.pop_front().expect("a waiting sync");
+            steps.emit(Event::new("synced").with("requestId", &id));
+        }
+        let Some(mut window) = open_window(watcher, commands)? else {
             wake.wait(seen, None);
             continue;
         };
-        if !fill_window(ctx, wake, &watcher, &commands, &mut window)? {
+        if !fill_window(ctx, wake, watcher, commands, &mut window)? {
             return Ok(());
         }
-        state.window(ctx, &mut live, &window)?;
+        state.window(ctx, steps, &window, &|| watcher.pending())?;
     }
 }
 
