@@ -24,6 +24,8 @@ namespace UnityMicroEditor.HotReload
         /// <summary>Whether live instances of the type can be found.</summary>
         internal abstract bool Enumerable(Type type);
         internal abstract object[] Instances(Type type);
+        /// <summary>Whether an object that Instances returned still exists.</summary>
+        internal abstract bool Alive(object instance);
         /// <summary>Whether a callback parameter of this type receives the list of patched methods.</summary>
         internal abstract bool TakesPatches(Type parameter);
         internal abstract object Patches(List<Change> changes);
@@ -67,6 +69,8 @@ namespace UnityMicroEditor.HotReload
             return live.ToArray();
         }
 
+        internal override bool Alive(object instance) { return !(instance is UnityEngine.Object value) || value != null; }
+
         internal override bool TakesPatches(Type parameter) { return parameter == patches; }
 
         internal override object Patches(List<Change> changes)
@@ -85,6 +89,7 @@ namespace UnityMicroEditor.HotReload
         internal override void Report(Exception error, object context) { Console.Error.WriteLine("code-reload callback failed: " + error); }
         internal override bool Enumerable(Type type) { return false; }
         internal override object[] Instances(Type type) { return new object[0]; }
+        internal override bool Alive(object instance) { return true; }
         internal override bool TakesPatches(Type parameter) { return false; }
         internal override object Patches(List<Change> changes) { return null; }
     }

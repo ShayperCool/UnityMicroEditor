@@ -58,7 +58,7 @@ internal static class Program
     private static int passed, failed, requests, fillers;
     private static MethodInfo[] fill;
     private static long generation, applied;
-    private static Patch patch1, patch2, patchCore, patchDenied, patchStale, patchBroken, patchShapes, patchIslands, patchLazy, patchEager, patchLocal, patchBulk;
+    private static Patch patch1, patch2, patchCore, patchDenied, patchStale, patchBroken, patchShapes, patchIslands, patchLazy, patchEager, patchLocal, patchBulk, patchMenu1, patchMenu2;
     // Methods whose first eight bytes every check of "nothing was written" compares, and those bytes as the JIT compiled them.
     private static readonly List<MethodBase> watched = new List<MethodBase>();
     private static readonly List<long> compiled = new List<long>();
@@ -87,7 +87,7 @@ internal static class Program
         patch1 = Load("Game.HotReload.1"); patch2 = Load("Game.HotReload.2"); patchCore = Load("Game.Core.HotReload.1");
         patchDenied = Load("Game.HotReload.Denied"); patchStale = Load("Game.HotReload.Stale"); patchBroken = Load("Game.HotReload.Broken"); patchShapes = Load("Game.HotReload.Shapes");
         patchIslands = Load("Game.HotReload.Islands"); patchLazy = Load("Game.HotReload.Lazy"); patchEager = Load("Game.HotReload.Eager"); patchLocal = Load("Game.HotReload.Local");
-        patchBulk = Load("Game.HotReload.Bulk");
+        patchBulk = Load("Game.HotReload.Bulk"); patchMenu1 = Load("Game.HotReload.Menu1"); patchMenu2 = Load("Game.HotReload.Menu2");
         // The bridge reads the applier from bytes on the first valid request. No file of its name is on the search path.
         applierPath = Path.Combine(output, "applier", "UnityMicroEditor.HotReload.dll");
         applierHash = Hash(applierPath);
@@ -331,13 +331,15 @@ internal static class Program
         // Eight global calls as before; the patched Tick on two objects. LocalText has the body it had in generation 1.
         Equal(Json.Integer(ack, "callbacksInvoked") + "/" + Json.Integer(ack, "callbackErrors"), "10/3", "callbacks of generation 2");
         Equal(Reloads.Local + "/" + first.Ticks + "/" + Reloads.Simple, "100/1010/2", "a local callback runs only when its own body changed");
-        Equal(Reloads.Last.Count, 18, "the patch list: six changed or newly patched bodies and twelve restored methods");
+        Equal(Reloads.Last.Count, 19, "the patch list: seven changed or newly patched bodies and twelve restored methods");
         entry = Reloads.Last.Find(patch => patch.originalMethod == health);
         Check(entry != null && From(entry.previousMethod) == "Game.HotReload.1" && From(entry.newMethod) == "Game.HotReload.2", "a second patch: previous is the older replacement");
         entry = Reloads.Last.Find(patch => patch.originalMethod == describe);
         Check(entry != null && From(entry.previousMethod) == "Game.HotReload.1" && entry.newMethod == describe, "a restored method: new is the original again");
-        // Animal.Speak has the same body in both patches (a lambda, a generic list, a try block); only the helper it calls changed.
-        Check(Reloads.Last.Find(patch => patch.originalMethod == localText || patch.originalMethod == animal) == null, "a body that is the same as in the generation before is not listed");
+        Check(Reloads.Last.Find(patch => patch.originalMethod == localText) == null, "a body that is the same as in the generation before is not listed");
+        // Animal.Speak has the same text in both patches (a lambda, a generic list, a try block), and the helper its lambda calls changed.
+        entry = Reloads.Last.Find(patch => patch.originalMethod == animal);
+        Check(entry != null && From(entry.previousMethod) == "Game.HotReload.1" && From(entry.newMethod) == "Game.HotReload.2", "a body whose helper in the patch changed is listed as changed");
         Equal(UnityEngine.Debug.Warnings.FindAll(warning => warning.Contains("callback-skipped")).Count, 2, "skipped callbacks are reported once");
 
         Console.WriteLine("an empty descriptor restores everything");
@@ -357,6 +359,8 @@ internal static class Program
         Applied(Send(5, new List<object>()), 5, 0, 19, "generation 5 restores everything");
         Check(Same(Words(), expected = pristine), "original bytes after the second restore");
 
+        Generations();
+
         Islands(twice);
         Large();
         Initializers(twice);
@@ -365,6 +369,46 @@ internal static class Program
         Check(Same(Words(), expected = Compiled()), "every method they redirected has exactly its original bytes");
         Stress(work, "Work", new long[] { 22, 23, 24 }, cycles, null);
         Check(Same(Words(), Compiled()), "original bytes after the stress loop");
+    }
+
+    // ------------------------------------------------------------------ what only a patch defines
+
+    // Whether a method changed with a generation is read off the two replacements. What a
+    // replacement names of its own patch is part of it: a lambda, a helper, the state machine of an
+    // iterator. Two generations with the same members in the same order differ in exactly those.
+    private static void Generations()
+    {
+        Console.WriteLine("callbacks follow a change in what only the patch defines");
+        MethodBase build = Method(typeof(Menu), "Build"), rebuild = Method(typeof(Menu), "Rebuild"), keep = Method(typeof(Menu), "Keep"),
+            count = Method(typeof(Menu), "Count"), enable = Method(typeof(Menu), "__UnityPlay_OnEnable");
+        Menu shown = new Menu(), closed = new Menu();
+        Func<Patch, string, List<object>> menus = (patch, space) => new List<object> { Target("Game", patch,
+            Detour(build, patch, space + ".Menus::Build"), Detour(rebuild, patch, space + ".Menus::Rebuild"), Detour(keep, patch, space + ".Menus::Keep"),
+            Detour(count, patch, space + ".Menus::Count"), Detour(enable, patch, space + ".Menus::Enable")) };
+
+        Dictionary<string, object> ack = Send(++generation, menus(patchMenu1, "Patch.M1"));
+        Applied(ack, generation, 5, 0, "the first of two generations with the same members");
+        Equal(shown.Shown + "/" + Menu.Rebuilt + "/" + Menu.Kept + "/" + Menu.Counted, "click1/10/1/1", "a first redirect runs every local callback with its new body");
+        Equal(shown.Enabled + "/" + closed.Enabled, "enabled1/enabled1", "a local attribute on a lifecycle entry runs the helper that holds its body, on every live object");
+        Equal(shown.Refreshed + "/" + closed.Refreshed, "1/1", "the instance callback ran on both objects");
+
+        // The first object's callback destroys the second one while the pass still lists it.
+        shown.Closes = closed;
+        shown.Enabled = string.Empty;
+        ack = Send(++generation, menus(patchMenu2, "Patch.M2"));
+        Applied(ack, generation, 5, 0, "the second generation retargets the five methods");
+        Equal(shown.Shown + "/" + Menu.Rebuilt + "/" + Menu.Counted, "click2/110/6", "a changed lambda, a changed helper and a changed iterator are changes of the method that names them");
+        Equal(Menu.Kept + "/" + shown.Enabled, "1/", "a body whose lambda and helper are the same code did not change");
+        var listed = new List<string>();
+        foreach (MethodPatch patch in Reloads.Last) listed.Add(patch.originalMethod.Name);
+        listed.Sort(StringComparer.Ordinal);
+        Equal(string.Join(",", listed), "Build,Count,Rebuild", "the patch list names exactly the three changed methods");
+        Equal(shown.Refreshed + "/" + closed.Refreshed + "/" + Json.Integer(ack, "callbackErrors"), "2/1/3", "an object that a callback of the pass destroyed is not called by the rest of it");
+
+        ack = Send(++generation, new List<object>());
+        Applied(ack, generation, 0, 5, "an empty descriptor restores the five methods");
+        Equal(shown.Shown + "/" + Menu.Rebuilt + "/" + Menu.Kept + "/" + Menu.Counted + "/" + shown.Enabled, "click0/111/2/7/enabled0", "the local callbacks of a restore ran the original bodies");
+        UnityEngine.Object.Destroy(shown);
     }
 
     // ------------------------------------------------------------------ first redirects
