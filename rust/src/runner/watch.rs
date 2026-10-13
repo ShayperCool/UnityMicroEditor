@@ -198,6 +198,11 @@ impl ProjectWatcher {
     pub fn pending(&self) -> bool {
         !self.shared.queue.lock().unwrap().is_empty()
     }
+    /// How many changes are held for the next windows.
+    #[cfg(test)]
+    pub fn queued(&self) -> usize {
+        self.shared.queue.lock().unwrap().len()
+    }
 
     /// Waits for the next change for at most `timeout`.
     pub fn recv_timeout(&self, timeout: Duration) -> Option<SourceChange> {

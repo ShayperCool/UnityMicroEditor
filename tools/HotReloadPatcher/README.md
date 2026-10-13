@@ -12,6 +12,8 @@ dotnet HotReloadPatcher.dll --explain <request.json> <member id> # what the comp
 
 A request that cannot be read (bad JSON, a missing or invalid assembly, an unreadable previous result) is a message on stderr and exit code 1. An edit that cannot be patched is a normal result with the verdict `unsupported`. So is a failure of the tool on one assembly: the reason is `internal_error` with the exception, and nothing is written.
 
+A result with the verdict `unchanged` can still have notes: a changed accessibility of a field or method and a removed start-up method leave every body as it was, and the Player keeps the loaded form until it restarts. Whether such a difference is a note or a refusal follows one line: what the Player still runs correctly for the code that was compiled is a note, also when Unity would serialize or find something else after a restart (an added serialized field is a note for the same reason). The runner prints the notes of such a result on its `unchanged` or `updated` event.
+
 The request and the result are described at the top of `Program.cs`. Two of their members serve patches that follow each other in one Player:
 
 - Each assembly of a result lists its `patchMembers`: the methods that only the patch defines (added methods, lambdas, local functions, closure and state machine methods), each with a hash of the code it can run. Replacements of loaded methods are not listed: callers and delegates name the loaded method, and every patch redirects it anew.

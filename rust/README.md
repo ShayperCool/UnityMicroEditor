@@ -82,7 +82,10 @@ The SDK tests of hot reload (`hot_reload_*_sdk`, with `UME_LIFECYCLE_SDK`)
 build the patch builder and compile the applier through the functions a
 session uses, run the builder on compiled revisions of a fixture, and run the
 C# harnesses `tests/HotReloadPatcherTests` and `tests/HotReloadRuntimeTests`
-from a staging copy. With `UME_HOT_RELOAD_HOST` naming the Player executable
+from a staging copy. The applier is compiled beside a game assembly whose
+types without a namespace are named like those of the class library, and the
+compiled revisions go through the lifecycle helper with a callback that has
+no access modifier and follows `#region`. With `UME_HOT_RELOAD_HOST` naming the Player executable
 of a prepared host, the applier is also compiled against a staged copy of
 that host. None of them starts a Player.
 
@@ -122,18 +125,52 @@ Verified with Unity `6000.6.3f1`, one machine, one project:
   was a stand-in; the applier compiled against a staged copy of a prepared
   host with the bridge of this tree. The decisions of a watch window (patch,
   fallback, refusal, recompile, mixed changes) ran with stand-ins for the
-  compiler, the importer and the Player.
+  compiler, the importer and the Player. The lines that loop prints are read
+  by the controller in its own tests, so the two sides are not tested against
+  events written by hand.
+- Hot reload with a real Player, on 2026-10-13, on private copies of
+  `Samples/RawProject` with added scripts and scene objects. `run --watch` in
+  both fallback modes and an MCP stdio session patched edited method bodies
+  into the running Player (same PID, game state kept, the new behaviour in the
+  Player log), refused edits outside the supported set with their reasons,
+  restarted on `recompile`, and replaced a Player that did not answer.
+  Patched in a Player: bodies of instance, static and struct methods, property
+  accessors, constructors, lambdas, coroutines and the lifecycle methods the
+  helper rewrites; added methods; an added instance and an added static field;
+  a removed `Update`; a method that another thread called in a loop meanwhile;
+  twenty edits in a row and 54 generations in one process. A body that uses
+  generics over game and engine types, closures, an iterator, an `async`
+  method, string and enum switches, array data and `stackalloc` printed the
+  same result patched and in a restarted Player. `[InvokeOnHotReload]` and
+  `[InvokeOnHotReloadLocal]` callbacks ran. A copy with a second assembly
+  (`.asmdef`) was patched in both assemblies, and a member added to one and
+  used from the other in the same change was refused. A session with
+  `--no-hot-reload` showed the scene patch, the scene reload, the restart on a
+  C# edit and the compile error and its repair as before the watch loop was
+  rearranged. After the review of that stage, on the same day: a field made
+  `public` gave `unchanged` with the builder's note, in the runner and in the
+  state `wait_update` returns; a `[InvokeOnHotReloadLocal]` method ran again
+  for the first, second and third edit of its lambda, and one on `OnEnable`
+  for an edit of its body; a script with `#region` in front of a lifecycle
+  method without access modifier compiled and ran; two files saved 0.4 s
+  apart ended with one answer that was not marked `pending`, and one
+  `wait_update` after two `script_edit` calls returned with both in the
+  Player.
 
 Not verified: a project with native models, audio, UI or Netcode through the
 whole cycle; `build-project` against a real Editor; `project_tools`; attaching
-to an interactive Editor; the GitHub Actions workflow itself; hot reload in a
-session with a real Player. The watch loop of `run` was rearranged for hot
-reload and has not run against Unity since; the cycle and the times below are
-those of the loop before it.
+to an interactive Editor; the GitHub Actions workflow itself. Of hot reload:
+a project with Netcode, content routes or Addressables, and a game large
+enough to occupy the addresses the applier's islands need.
 
 Measured on 2026-10-08 (AMD Ryzen 7 5700X3D, rustc 1.99.0) by a client driving
 the MCP server, median of five sessions: `session_control start` to Player
 ready 10.06 s; scene edit to patch applied 0.24 s; C# edit to recompiled Player
 ready 8.09 s; stop 1.27 s. `auto-prepare` from scratch took 414 s in a single
 run that shared the machine with another session. Unity, the Mono Player and
-Roslyn dominate these times; the tool's own share is small.
+Roslyn dominate these times; the tool's own share is small. These are the
+times of the watch loop before hot reload. On 2026-10-13 a C# body edit in a
+`run --watch` session reached the running Player in 3.4 s (median of eight,
+3.1 s at best), against 6.6 s for the restart of the same edit with
+`--no-hot-reload`; [docs/RUNNER.md](../docs/RUNNER.md#measured) says where
+the time goes.

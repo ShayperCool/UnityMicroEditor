@@ -16,7 +16,13 @@ use std::{
     fs,
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     thread::JoinHandle,
+    time::Duration,
 };
+
+/// How long one run of the patch builder may take. It reads two assemblies
+/// and writes one in a fraction of a second; a run that does not end would
+/// stop the watch loop, which waits for it before it handles the next edit.
+pub const BUILD_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The sources of the patch builder. The project file compiles every `.cs`
 /// beside it, so a source missing here would be left out of the build and
@@ -181,10 +187,18 @@ struct Artifact {
     sha256: String,
 }
 
+/// What the applier names of a Player's `Managed`: the engine's object and
+/// log, and the bridge's `MethodPatch`. Nothing of the game: a game type
+/// without a namespace would hide the class library type of its name
+/// (`Console`, `Stopwatch`) in the applier's sources.
+pub(crate) const APPLIER_REFERENCES: [&str; 2] =
+    ["UnityEngine.CoreModule.dll", "UnityMicroEditor.dll"];
+
 /// Compiles (or reuses) the applier with the bridge's session flags against
-/// the staged Player's `Managed`, which holds the session's bridge. The
-/// result is cached under `cache` by content and stays outside the Player:
-/// the bridge loads it from bytes, by the path and hash of a request.
+/// the class library and the two assemblies of the staged Player's `Managed`
+/// it uses, one of them the session's bridge. The result is cached under
+/// `cache` by content and stays outside the Player: the bridge loads it from
+/// bytes, by the path and hash of a request.
 pub fn stage_applier(
     ctx: &Context,
     sdk: &Sdk,
@@ -208,23 +222,27 @@ pub fn stage_applier(
             &data,
             "MonoBleedingEdge/lib/mono/unityaot-linux/Facades/*.dll",
         ]),
-        join(&[managed, "*.dll"]),
     ] {
         for file in glob_lossy(&pattern) {
-            let base = sysutil::base(&file);
-            // Patches name the applier by its assembly name; a stale copy in
-            // the Player must not become a reference of the new one.
-            if base == format!("{RUNTIME_ASSEMBLY}.dll") || !seen.insert(base) {
-                continue;
+            if seen.insert(sysutil::base(&file)) {
+                references.push(file);
             }
+        }
+    }
+    for name in APPLIER_REFERENCES {
+        let file = join(&[managed, name]);
+        if !fs::metadata(&file).is_ok_and(|info| info.is_file()) {
+            match name == "UnityMicroEditor.dll" {
+                true => bail!("staged Player lacks the runtime bridge: {bridge}"),
+                false => bail!("staged Player lacks {name}: {file}"),
+            }
+        }
+        if seen.insert(name.to_string()) {
             references.push(file);
         }
     }
-    if !seen.contains("UnityMicroEditor.dll") {
-        bail!("staged Player lacks the runtime bridge: {bridge}");
-    }
     let mut input = format!(
-        "unity-play-hot-reload-applier-v1\0{editor}\0{}\0",
+        "unity-play-hot-reload-applier-v2\0{editor}\0{}\0",
         file_hash(&bridge)?
     )
     .into_bytes();
@@ -358,12 +376,28 @@ impl Tools {
 
     /// Runs the patch builder on a request file; the output is its result.
     pub fn build(&self, ctx: &Context, request: &str) -> Result<Vec<u8>> {
-        Ok(compiler_command(
-            ctx,
+        self.build_within(ctx, request, BUILD_TIMEOUT)
+    }
+
+    /// [`Tools::build`] with the time the builder gets. When it is over the
+    /// builder is stopped and the run fails like any other failed build.
+    pub fn build_within(&self, ctx: &Context, request: &str, limit: Duration) -> Result<Vec<u8>> {
+        let limited = ctx.with_timeout(limit);
+        let output = compiler_command(
+            &limited,
             &sysutil::dir(request),
             &self.sdk.dotnet,
             &[&self.patcher, request],
-        )?)
+        );
+        let expired = limited.error().is_some() && ctx.error().is_none();
+        limited.cancel();
+        match output {
+            Err(_) if expired => bail!(
+                "the patch builder did not finish within {}s and was stopped",
+                limit.as_secs()
+            ),
+            output => Ok(output?),
+        }
     }
 }
 

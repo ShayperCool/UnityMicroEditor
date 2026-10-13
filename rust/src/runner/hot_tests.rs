@@ -11,11 +11,11 @@ use super::{
 };
 use crate::{
     compiler::NilVec,
-    hotreload::{Failure, Fallback, Outcome, Patched, Reason, Refusal},
+    hotreload::{Failure, Fallback, Outcome, Patched, Reason, Refusal, Unchanged},
 };
 use anyhow::anyhow;
 use serde_json::{Value as Json, json};
-use std::{collections::VecDeque, io::Write, time::Duration};
+use std::{collections::VecDeque, fs, io::Write, sync::Arc, time::Duration};
 
 fn strings(items: &[&str]) -> Vec<String> {
     items.iter().map(|item| item.to_string()).collect()
@@ -112,6 +112,11 @@ fn hot_reload_flags() {
                 "restart",
             ],
             "--hot-reload-fallback has no effect with --no-hot-reload",
+        ),
+        // A reported edit waits for a command that has no way in.
+        (
+            &["--watch", "--hot-reload-fallback", "report"],
+            "--hot-reload-fallback report requires --commands-stdin",
         ),
         (
             &["--watch", "--hot-reload"],
@@ -439,6 +444,10 @@ struct Script {
     prepare_error: Option<&'static str>,
     merged: Option<String>,
     pending: bool,
+    /// Source changes arrived that the window did not take.
+    queued: bool,
+    /// How many steps had run when each event was printed.
+    printed_after: Vec<usize>,
     /// The session's bindings describe the newest compile, not what the
     /// running Player loaded.
     bound_newest: bool,
@@ -459,6 +468,8 @@ impl Script {
             prepare_error: None,
             merged: None,
             pending: false,
+            queued: false,
+            printed_after: Vec::new(),
             bound_newest: false,
             pid: 100,
             revision: 1,
@@ -494,11 +505,13 @@ impl Script {
     }
     fn clear(&mut self) -> Vec<Json> {
         self.calls.clear();
+        self.printed_after.clear();
         std::mem::take(&mut self.events)
     }
 }
 impl Steps for Script {
     fn emit(&mut self, event: Event) {
+        self.printed_after.push(self.calls.len());
         self.events.push(event_json(&event));
     }
     fn invalidate(&mut self, _: &[String]) -> Result<()> {
@@ -623,6 +636,9 @@ impl Steps for Script {
             },
         )
     }
+    fn changes_pending(&self) -> bool {
+        self.queued
+    }
 }
 
 fn run(state: &mut Loop, steps: &mut Script, window: &Window) {
@@ -698,6 +714,9 @@ fn a_patched_edit_keeps_the_player_and_its_bindings() {
             calls(&["code-patched"])
         )
     );
+    // It is printed when the window is done with the scene part as well: a
+    // reader that acts on it finds no step of this window still running.
+    assert_eq!(steps.printed_after, [4]);
     let event = steps.clear().remove(0);
     assert_eq!(
         (&event["pid"], &event["revision"]),
@@ -708,6 +727,8 @@ fn a_patched_edit_keeps_the_player_and_its_bindings() {
         (&json!(1), &json!(1.5))
     );
     assert_eq!(event["paths"], json!(["/p/Assets/A.cs"]));
+    // The last word of its window, and nothing is queued behind it.
+    assert!(event.get("pending").is_none());
     assert!(state.restart().is_none() && state.refused().is_none() && steps.pending);
 
     // A later scene edit: same Player, loaded bindings, and the code is current.
@@ -775,16 +796,25 @@ fn a_mixed_window_patches_first_and_then_reloads_the_scene() {
             calls(&["code-patched", "updated"])
         )
     );
+    // Both are printed when both parts are in the Player, and the first one
+    // says that it is not the answer for this save.
+    assert_eq!(steps.printed_after, [4, 4]);
     let events = steps.clear();
     assert_eq!(events[1]["fullRecompileRequired"], false);
     assert_eq!(
         (&events[0]["pid"], &events[1]["pid"]),
         (&json!(100), &json!(100))
     );
-    // A scene part that fails is the last word of its window.
-    for (reload, prepare_error) in [
-        (Reload::Rejected, None),
-        (Reload::Unchanged, Some("import failed")),
+    assert_eq!(
+        (&events[0]["revision"], events[0].get("pending")),
+        (&json!("revision1"), Some(&json!(true)))
+    );
+    assert!(events[1].get("pending").is_none());
+    // A scene part that fails is the last word of its window. The code part
+    // was applied, and the rejection says that no refusal stands.
+    for (reload, prepare_error, steps_run) in [
+        (Reload::Rejected, None, 4),
+        (Reload::Unchanged, Some("import failed"), 3),
     ] {
         steps
             .compiles
@@ -799,9 +829,216 @@ fn a_mixed_window_patches_first_and_then_reloads_the_scene() {
         );
         let (_, names) = steps.take();
         assert_eq!(names, calls(&["code-patched", "update-rejected"]));
-        assert!(steps.clear()[1].get("fullRecompileRequired").is_none());
+        assert_eq!(steps.printed_after, [steps_run, steps_run]);
+        let events = steps.clear();
+        assert_eq!(events[0]["pending"], true);
+        assert_eq!(events[1]["fullRecompileRequired"], false);
+        assert!(events[1].get("pending").is_none() && events[1].get("unsupported").is_none());
         steps.reloads.clear();
     }
+}
+
+#[test]
+fn an_event_is_pending_while_source_changes_are_queued() {
+    // A save that arrived while the window worked is handled by the next
+    // one. Whatever this window says is then not the answer for it, also
+    // when a part of that save was already read by this window.
+    let mut state = Loop::new(true, Fallback::Report);
+    let mut steps = Script::new().updated().patched(Outcome::Patched(patch(1)));
+    steps.queued = true;
+    run(&mut state, &mut steps, &window(&["/p/Assets/A.cs"]));
+    let events = steps.clear();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        (&events[0]["event"], &events[0]["pending"]),
+        (&json!("code-patched"), &json!(true))
+    );
+    // Every kind of answer: a scene update, a rejection, a compile error, a
+    // refusal with its scene part, a restart.
+    steps.reloads.push_back(Reload::Updated);
+    run(&mut state, &mut steps, &window(&["/p/Assets/S.unity"]));
+    steps.reloads.push_back(Reload::Rejected);
+    run(&mut state, &mut steps, &window(&["/p/Assets/S.unity"]));
+    steps.compiles.push_back(Err(
+        "runtime source changed while snapshotting: /p/Assets/B.cs",
+    ));
+    run(&mut state, &mut steps, &window(&["/p/Assets/A.cs"]));
+    steps
+        .compiles
+        .push_back(Ok(Compiled::Updated { seconds: 1.0 }));
+    steps
+        .patches
+        .push_back(Ok(Outcome::Unsupported(refusal(&["type_added"]))));
+    steps.reloads.push_back(Reload::Updated);
+    run(
+        &mut state,
+        &mut steps,
+        &window(&["/p/Assets/A.cs", "/p/Assets/S.unity"]),
+    );
+    steps.compiles.push_back(Ok(Compiled::Unchanged));
+    run(&mut state, &mut steps, &recompile(&[], "r-1"));
+    let events = steps.clear();
+    let names: Vec<&str> = events
+        .iter()
+        .map(|event| event["event"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "updated",
+            "update-rejected",
+            "update-rejected",
+            "updated",
+            "update-rejected",
+            "code-updated"
+        ]
+    );
+    assert!(events.iter().all(|event| event["pending"] == true));
+    // The command is answered by its restart all the same.
+    assert_eq!(events[5]["requestId"], "r-1");
+    // Nothing is queued any more: the next answer is the last word.
+    steps.queued = false;
+    run(&mut state, &mut steps, &window(&["/p/Assets/S.unity"]));
+    let event = steps.clear().remove(0);
+    assert_eq!(event["event"], "unchanged");
+    assert!(event.get("pending").is_none());
+}
+
+#[test]
+fn notes_of_a_compile_that_needs_no_patch_are_stated_while_they_stand() {
+    let noted = || {
+        Outcome::Unchanged(Unchanged {
+            notes: (0..18)
+                .map(|index| {
+                    Reason::new(
+                        "accessibility_changed",
+                        &format!("Game.A::f{index}"),
+                        "Field changed accessibility.",
+                    )
+                })
+                .collect(),
+            report: "/out/runs/r/hot-reload/1/report.json".into(),
+        })
+    };
+    let stated = |event: &Json| {
+        assert_eq!(event["fullRecompileRequired"], false, "{event}");
+        assert_eq!(event["notes"].as_array().unwrap().len(), LIST_MAXIMUM);
+        assert_eq!(event["notes"][0]["code"], "accessibility_changed");
+        assert_eq!(event["notes"][0]["member"], "Game.A::f0");
+        assert_eq!(event["notesCount"], 18);
+        assert_eq!(
+            event["hotReloadReport"],
+            "/out/runs/r/hot-reload/1/report.json"
+        );
+    };
+    let plain = |event: &Json| {
+        assert!(
+            event.get("notes").is_none()
+                && event.get("notesCount").is_none()
+                && event.get("hotReloadReport").is_none(),
+            "{event}"
+        );
+    };
+    let mut state = Loop::new(true, Fallback::Report);
+    let mut steps = Script::new().updated().patched(noted());
+    run(&mut state, &mut steps, &window(&["/p/Assets/A.cs"]));
+    // Nothing was patched, so the confirmation of the window is printed,
+    // and it carries what the builder said.
+    assert_eq!(
+        steps.take(),
+        (
+            calls(&["compile", "patch", "prepare-loaded", "scene"]),
+            calls(&["unchanged"])
+        )
+    );
+    stated(&steps.clear()[0]);
+    // They stand for the Player's code, so later scene answers repeat them:
+    // applied, unchanged, rejected in the Player or before it.
+    for (reload, prepare_error, name) in [
+        (Reload::Updated, None, "updated"),
+        (Reload::Unchanged, None, "unchanged"),
+        (Reload::Rejected, None, "update-rejected"),
+        (Reload::Unchanged, Some("import failed"), "update-rejected"),
+    ] {
+        steps.reloads.push_back(reload);
+        steps.prepare_error = prepare_error;
+        run(&mut state, &mut steps, &window(&["/p/Assets/S.unity"]));
+        let event = steps.clear().remove(0);
+        assert_eq!(event["event"], name);
+        stated(&event);
+        steps.reloads.clear();
+    }
+    // A compile error says nothing about the code, and takes nothing back.
+    steps.compiles.push_back(Err("error CS1002: ; expected"));
+    run(&mut state, &mut steps, &window(&["/p/Assets/A.cs"]));
+    let event = steps.clear().remove(0);
+    plain(&event);
+    assert!(event.get("fullRecompileRequired").is_none());
+    steps.compiles.push_back(Ok(Compiled::Unchanged));
+    run(&mut state, &mut steps, &window(&["/p/Assets/A.cs"]));
+    stated(&steps.clear()[0]);
+
+    // What ends them: a patch, a compile without notes, a refusal, a restart.
+    steps
+        .compiles
+        .push_back(Ok(Compiled::Updated { seconds: 1.0 }));
+    steps.patches.push_back(Ok(Outcome::Patched(patch(2))));
+    run(&mut state, &mut steps, &window(&["/p/Assets/A.cs"]));
+    // The patch has notes of its own, here none.
+    let event = steps.clear().remove(0);
+    assert_eq!(
+        (&event["event"], &event["notesCount"]),
+        (&json!("code-patched"), &json!(0))
+    );
+    run(&mut state, &mut steps, &window(&["/p/Assets/S.unity"]));
+    plain(&steps.clear()[0]);
+
+    for ending in [
+        Outcome::Unchanged(Unchanged::default()),
+        Outcome::Unsupported(refusal(&["type_added"])),
+    ] {
+        steps
+            .compiles
+            .push_back(Ok(Compiled::Updated { seconds: 1.0 }));
+        steps.patches.push_back(Ok(noted()));
+        run(&mut state, &mut steps, &window(&["/p/Assets/A.cs"]));
+        stated(&steps.clear()[0]);
+        steps
+            .compiles
+            .push_back(Ok(Compiled::Updated { seconds: 1.0 }));
+        steps.patches.push_back(Ok(ending));
+        run(&mut state, &mut steps, &window(&["/p/Assets/A.cs"]));
+        steps.clear().iter().for_each(plain);
+        run(&mut state, &mut steps, &window(&["/p/Assets/S.unity"]));
+        steps.clear().iter().for_each(plain);
+    }
+    // The refusal of the last round stands; a recompile ends it, and the
+    // new process has neither a refusal nor notes.
+    steps.compiles.push_back(Ok(Compiled::Unchanged));
+    run(&mut state, &mut steps, &recompile(&[], "r-1"));
+    steps.clear();
+    steps
+        .compiles
+        .push_back(Ok(Compiled::Updated { seconds: 1.0 }));
+    steps.patches.push_back(Ok(noted()));
+    run(&mut state, &mut steps, &window(&["/p/Assets/A.cs"]));
+    stated(&steps.clear()[0]);
+    steps.routes.push_back(false);
+    run(&mut state, &mut steps, &window(&["/p/Assets/B.unity"]));
+    assert_eq!(steps.take().1, calls(&["code-updated"]));
+    plain(&steps.clear()[0]);
+    run(&mut state, &mut steps, &window(&["/p/Assets/S.unity"]));
+    let event = steps.clear().remove(0);
+    plain(&event);
+    assert_eq!(event["fullRecompileRequired"], false);
+
+    // A session without hot reload says nothing of this.
+    let mut state = Loop::new(false, Fallback::Restart);
+    let mut steps = Script::new().reload(Reload::Rejected);
+    run(&mut state, &mut steps, &window(&["/p/Assets/S.unity"]));
+    let event = steps.clear().remove(0);
+    plain(&event);
+    assert!(event.get("fullRecompileRequired").is_none());
 }
 
 #[test]
@@ -937,6 +1174,37 @@ fn fallback_report_keeps_the_player_and_refuses_last() {
     );
     assert!(state.refused().is_some());
 
+    // A later scene edit that fails, before the Player or in it. The scene
+    // may use a type only the refused code has, so its rejection is not
+    // plain: it states the refusal with the reasons that stand, in the one
+    // event a reader may stop at.
+    for (reload, prepare_error, error) in [
+        (Reload::Rejected, None, "Player rejected revision: x"),
+        (
+            Reload::Unchanged,
+            Some("unresolved managed component type 0123 in Assets/S.unity"),
+            "unresolved managed component type 0123 in Assets/S.unity",
+        ),
+    ] {
+        steps.reloads.push_back(reload);
+        steps.prepare_error = prepare_error;
+        run(&mut state, &mut steps, &window(&["/p/Assets/S.unity"]));
+        let events = steps.clear();
+        assert_eq!(events.len(), 1, "{error}");
+        let event = &events[0];
+        assert_eq!(
+            (&event["event"], &event["error"]),
+            (&json!("update-rejected"), &json!(error))
+        );
+        assert_eq!(event["fullRecompileRequired"], true, "{error}");
+        assert_eq!(event["unsupportedCount"], 2, "{error}");
+        assert_eq!(event["unsupported"][0]["code"], "type_added", "{error}");
+        assert_eq!(event["report"], "/out/runs/r/hot-reload/1/report.json");
+        assert!(state.refused().is_some() && state.restart().is_none());
+        assert_eq!(steps.pid, 100);
+    }
+    steps.reloads.clear();
+
     // A second edit that still cannot be patched: the newest reasons replace
     // the first ones.
     steps
@@ -963,6 +1231,68 @@ fn fallback_report_keeps_the_player_and_refuses_last() {
     steps.clear();
     run(&mut state, &mut steps, &window(&["/p/Assets/S.unity"]));
     assert_eq!(steps.clear()[0]["fullRecompileRequired"], false);
+    // Without a refusal a rejected scene part says so and has no reasons.
+    steps.reloads.push_back(Reload::Rejected);
+    run(&mut state, &mut steps, &window(&["/p/Assets/S.unity"]));
+    let event = steps.clear().remove(0);
+    assert_eq!(
+        (&event["event"], &event["error"]),
+        (
+            &json!("update-rejected"),
+            &json!("Player rejected revision: x")
+        )
+    );
+    assert_eq!(event["fullRecompileRequired"], false);
+    assert!(event.get("unsupported").is_none() && event.get("report").is_none());
+    steps.prepare_error = Some("import failed");
+    run(&mut state, &mut steps, &window(&["/p/Assets/S.unity"]));
+    assert_eq!(
+        steps.clear().remove(0),
+        json!({"event":"update-rejected","error":"import failed","paths":["/p/Assets/S.unity"],"fullRecompileRequired":false})
+    );
+}
+
+#[test]
+fn a_refusal_that_is_taken_back_is_stated_also_when_the_scene_part_fails() {
+    // The refused edit is reverted in a save whose scene part fails. No
+    // confirmation is printed in that window, so its rejection must say that
+    // the Player runs the newest code again: nothing else would, and a
+    // caller told to recompile would restart the Player for nothing.
+    for (reload, prepare_error) in [
+        (Reload::Rejected, None),
+        (
+            Reload::Unchanged,
+            Some("prepare prefab: unsupported component"),
+        ),
+    ] {
+        let mut state = Loop::new(true, Fallback::Report);
+        let mut steps = Script::new()
+            .updated()
+            .patched(Outcome::Unsupported(refusal(&["type_added"])));
+        run(&mut state, &mut steps, &window(&["/p/Assets/A.cs"]));
+        assert_eq!(steps.clear()[0]["fullRecompileRequired"], true);
+        steps
+            .compiles
+            .push_back(Ok(Compiled::Updated { seconds: 1.0 }));
+        steps
+            .patches
+            .push_back(Ok(Outcome::Unchanged(Unchanged::default())));
+        steps.reloads.push_back(reload);
+        steps.prepare_error = prepare_error;
+        run(
+            &mut state,
+            &mut steps,
+            &window(&["/p/Assets/A.cs", "/p/Assets/P.prefab"]),
+        );
+        let events = steps.clear();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            (&events[0]["event"], &events[0]["fullRecompileRequired"]),
+            (&json!("update-rejected"), &json!(false))
+        );
+        assert!(events[0].get("unsupported").is_none());
+        assert!(state.refused().is_none());
+    }
 }
 
 #[test]
@@ -987,16 +1317,22 @@ fn a_mixed_window_in_report_mode_ends_with_the_refusal() {
         let events = steps.clear();
         assert_eq!(events.len(), 2, "{expected}");
         assert_eq!(events[0]["event"], expected);
-        // A waiter that wakes on the scene part already sees the refusal.
-        if expected == "updated" {
-            assert_eq!(events[0]["fullRecompileRequired"], true);
-        } else {
-            assert!(events[0].get("fullRecompileRequired").is_none());
+        // A waiter that wakes on the scene part already sees the refusal,
+        // and with the rejection of a scene part its reasons.
+        assert_eq!(events[0]["fullRecompileRequired"], true, "{expected}");
+        if expected == "update-rejected" {
+            assert_eq!(events[0]["unsupported"][0]["code"], "type_added");
+            assert_eq!(events[0]["unsupportedCount"], 1);
+            assert_eq!(events[0]["report"], events[1]["report"]);
+            assert_ne!(events[0]["error"], events[1]["error"]);
         }
         assert_eq!(
             (&events[1]["event"], &events[1]["fullRecompileRequired"]),
             (&json!("update-rejected"), &json!(true))
         );
+        // The refusal is the answer; what comes before it says so.
+        assert_eq!(events[0]["pending"], true, "{expected}");
+        assert!(events[1].get("pending").is_none());
         assert_eq!(
             events[1]["paths"],
             json!(["/p/Assets/A.cs", "/p/Assets/S.unity"])
@@ -1119,7 +1455,9 @@ fn a_compile_error_keeps_the_code_state_and_a_later_compile_heals() {
     steps
         .compiles
         .push_back(Ok(Compiled::Updated { seconds: 1.0 }));
-    steps.patches.push_back(Ok(Outcome::Unchanged));
+    steps
+        .patches
+        .push_back(Ok(Outcome::Unchanged(Unchanged::default())));
     run(&mut state, &mut steps, &window(&["/p/Assets/A.cs"]));
     assert_eq!(
         steps.take(),
@@ -1224,6 +1562,33 @@ fn recompile_restarts_on_the_newest_code_and_answers_with_its_request() {
     assert!(state.restart().is_none());
     run(&mut state, &mut steps, &window(&["/p/Assets/S.unity"]));
     assert_eq!(steps.take().1, calls(&["unchanged"]));
+
+    // The answer to a command is plain also while a refusal stands: an event
+    // that states a refusal answers no command.
+    steps
+        .compiles
+        .push_back(Ok(Compiled::Updated { seconds: 1.0 }));
+    steps
+        .patches
+        .push_back(Ok(Outcome::Unsupported(refusal(&["type_added"]))));
+    run(&mut state, &mut steps, &window(&["/p/Assets/A.cs"]));
+    steps.clear();
+    steps.compiles.push_back(Ok(Compiled::Unchanged));
+    steps.prepare_error = Some("import failed");
+    run(&mut state, &mut steps, &recompile(&[], "r-6"));
+    let events = steps.clear();
+    // The refusal that stands is said again after it, as after every check
+    // of the sources that finds nothing new.
+    assert_eq!(
+        events[0],
+        json!({"event":"update-rejected","error":"import failed","paths":[],"requestId":"r-6","pending":true})
+    );
+    assert_eq!(
+        (&events[1]["event"], &events[1]["fullRecompileRequired"]),
+        (&json!("update-rejected"), &json!(true))
+    );
+    assert!(events[1].get("requestId").is_none() && events[1].get("pending").is_none());
+    assert!(state.refused().is_some());
 }
 
 #[test]
@@ -1386,4 +1751,171 @@ fn commands_arrive_through_a_pipe_and_wake_the_loop() {
     std::thread::sleep(Duration::from_millis(50));
     assert!(commands.try_recv().is_none());
     assert!(Commands::none().try_recv().is_none());
+}
+
+// The windows of the main loop
+
+/// A watched project directory, a command pipe and what wakes the loop.
+struct Inputs {
+    _guard: tempfile::TempDir,
+    assets: String,
+    ctx: Context,
+    wake: Arc<Wake>,
+    watcher: ProjectWatcher,
+    commands: Commands,
+    writer: std::io::PipeWriter,
+}
+impl Inputs {
+    fn new() -> Self {
+        let (guard, project) = crate::sysutil::testing::temp_dir();
+        let assets = sysutil::join(&[&project, "Assets"]);
+        fs::create_dir(&assets).unwrap();
+        let ctx = Context::background().with_cancel();
+        let wake = Wake::new();
+        let watcher = ProjectWatcher::new(&ctx, &wake, &project).unwrap();
+        let (reader, writer) = std::io::pipe().unwrap();
+        let commands = Commands::read(reader, &wake);
+        Self {
+            _guard: guard,
+            assets,
+            ctx,
+            wake,
+            watcher,
+            commands,
+            writer,
+        }
+    }
+    /// Saves a source file in place and returns once the watcher holds
+    /// both of its events, the creation and the end of the write.
+    fn save(&self, name: &str) -> String {
+        let path = sysutil::join(&[&self.assets, name]);
+        let held = self.watcher.queued();
+        fs::write(&path, "changed").unwrap();
+        self.until("the source change", || self.watcher.queued() >= held + 2);
+        path
+    }
+    /// Sends a `recompile` command; the reader thread takes it in its own time.
+    fn command(&mut self, id: &str) {
+        writeln!(
+            self.writer,
+            "{{\"command\":\"recompile\",\"requestId\":\"{id}\"}}"
+        )
+        .unwrap();
+    }
+    fn until(&self, what: &str, reached: impl Fn() -> bool) {
+        let limit = Instant::now() + Duration::from_secs(10);
+        while !reached() {
+            assert!(Instant::now() < limit, "{what} did not arrive");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    /// The next window as the main loop makes it, once something opens one,
+    /// with each path once.
+    fn next(&self) -> Window {
+        let limit = Instant::now() + Duration::from_secs(10);
+        let mut window = loop {
+            let seen = self.wake.seen();
+            if let Some(window) = open_window(&self.watcher, &self.commands).unwrap() {
+                break window;
+            }
+            assert!(Instant::now() < limit, "nothing opened a window");
+            self.wake
+                .wait(seen, Some(Instant::now() + Duration::from_millis(50)));
+        };
+        assert!(
+            fill_window(
+                &self.ctx,
+                &self.wake,
+                &self.watcher,
+                &self.commands,
+                &mut window
+            )
+            .unwrap()
+        );
+        window.paths.dedup();
+        window
+    }
+}
+
+#[test]
+fn a_window_takes_the_changes_of_one_save_and_at_most_one_command() {
+    let mut inputs = Inputs::new();
+    assert!(
+        open_window(&inputs.watcher, &inputs.commands)
+            .unwrap()
+            .is_none()
+    );
+    // A command alone opens a window without paths.
+    inputs.command("only");
+    let window = inputs.next();
+    assert_eq!(
+        (window.paths.len(), window.recompile.as_deref()),
+        (0, Some("only"))
+    );
+    // Two files of one save are one window, and no command comes with it.
+    let (first, second) = (inputs.save("A.cs"), inputs.save("B.cs"));
+    let window = inputs.next();
+    assert_eq!(window.paths, [first.clone(), second]);
+    assert!(window.recompile.is_none());
+    assert!(window.changed_at.elapsed() < Duration::from_secs(10));
+    // A source change and commands that are ready together: the change
+    // opens the window, which takes one command; the second command gets a
+    // window, a restart and an answer of its own.
+    inputs.command("one");
+    inputs.command("two");
+    // Both lines are with the reader before the window is opened.
+    std::thread::sleep(Duration::from_millis(100));
+    let third = inputs.save("C.cs");
+    let window = inputs.next();
+    assert_eq!(
+        (window.paths.clone(), window.recompile.as_deref()),
+        (vec![third], Some("one"))
+    );
+    let window = inputs.next();
+    assert_eq!(
+        (window.paths.len(), window.recompile.as_deref()),
+        (0, Some("two"))
+    );
+    // A command that arrives within the debounce of a change joins it.
+    let fourth = inputs.save("D.cs");
+    let mut window = open_window(&inputs.watcher, &inputs.commands)
+        .unwrap()
+        .expect("the change opens a window");
+    inputs.command("late");
+    std::thread::sleep(Duration::from_millis(5));
+    assert!(
+        fill_window(
+            &inputs.ctx,
+            &inputs.wake,
+            &inputs.watcher,
+            &inputs.commands,
+            &mut window
+        )
+        .unwrap()
+    );
+    window.paths.dedup();
+    assert_eq!(window.paths, [fourth]);
+    // The reader thread may be slower than the debounce; then the command
+    // opens the next window.
+    if window.recompile.is_none() {
+        window = inputs.next();
+    }
+    assert_eq!(window.recompile.as_deref(), Some("late"));
+    // What the watch loop asks at the end of a window.
+    assert!(!inputs.watcher.pending());
+    inputs.save("E.cs");
+    assert!(inputs.watcher.pending());
+    // The end of the run ends the wait for more.
+    let mut window = inputs.next();
+    inputs.ctx.cancel();
+    assert!(
+        !fill_window(
+            &inputs.ctx,
+            &inputs.wake,
+            &inputs.watcher,
+            &inputs.commands,
+            &mut window
+        )
+        .unwrap()
+    );
 }
