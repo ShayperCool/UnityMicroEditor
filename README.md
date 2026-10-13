@@ -7,7 +7,7 @@ It runs on Linux with one pinned Unity version. Coverage of Editor features is p
 ## How it works
 
 - **Scenes and prefabs.** The tool reads `.unity`, `.prefab`, `.meta`, ScriptableObjects and their dependencies. A C# loader inside the Player builds the scene graph through Unity APIs, restores fields and references, and releases lifecycle callbacks once the graph is ready. Scenes are not baked into AssetBundles.
-- **Code.** The tool resolves packages and derives the Player assembly graph from `.asmdef`/`.asmref` files. Roslyn from the Unity installation's SDK compiles the assemblies.
+- **Code.** The tool resolves packages and derives the Player assembly graph from `.asmdef`/`.asmref` files. Roslyn from the Unity installation's SDK compiles the assemblies. In a watched session a saved C# edit is patched into the running Player where that can be done exactly, and the game keeps its state; other edits are named with their reason and need a restart of the Player.
 - **Heavy content.** Models, audio, video, textures, text assets and input actions go through Unity's own AssetImportWorker. The coordinator writes a compatible `SourceAssetDB`, verifies the worker's artifacts, and publishes a runtime content cache. A `.shader` of a built-in pipeline project is parsed by the worker and compiled with the engine's own `UnityShaderCompiler`. Some unchanged native content and other compiled shaders come from previously verified Unity output.
 - **Host.** A Mono Player built once per engine and package profile runs all of the above.
 
@@ -101,7 +101,7 @@ Preparation and sessions do not need the package in the game project. To use the
 
 ## Limits
 
-- Small GameObject and Transform edits patch the running Player. Wider scene and prefab edits rebuild the scene. C# changes recompile the affected assemblies and restart the Player.
+- Small GameObject and Transform edits patch the running Player. Wider scene and prefab edits rebuild the scene. C# changes recompile the affected assemblies; changed method bodies, added non-virtual methods and added fields of classes are patched into the running Player, and every other C# change (a new type, generic code, a new Unity message and the like) restarts it. [docs/RUNNER.md](docs/RUNNER.md#hot-reload-of-c) has the rules and the limits.
 - Fresh import works for FBX, OBJ, COLLADA and Blender models, VP8 `.webm` video, `.inputactions`, and the audio, texture and text source formats and importer settings listed in [docs/NATIVE_IMPORT.md](docs/NATIVE_IMPORT.md): textures in the desktop formats including BC7, with platform overrides, as sprites, normal maps, cubemaps, arrays and volumes, and importer-based sprite atlases (`.spriteatlasv2`) with the sprites they pack. UI and font paths, and texture formats of other platform families, need exact artifacts from an existing Unity import. Video in any other codec or container is not imported on Linux, by this tool or by the Editor, and a `.blend` is converted by Blender, which has to be on `PATH`. Shaders are compiled independently only for the built-in render pipeline, within the limits listed there; general animation import is not done.
 - `build-project` and the MCP `project_build` tool proxy to the real Editor; they are not an independent build pipeline.
 - Editor windows, custom inspectors and EditMode test execution are out of scope.
@@ -116,7 +116,7 @@ Preparation and sessions do not need the package in the game project. To use the
 - `engine-profile.json`: the pinned engine profile embedded in the executable.
 - `Packages/com.unitymicroeditor.runtime/`: the Unity package with the loader, runtime bridge and Editor utilities.
 - `HostProject/`: the minimal host project.
-- `tools/`: C# helpers run through the SDK: lifecycle instrumentation, Netcode post-processing and the importer that saves material variants as their inspector leaves them.
+- `tools/`: C# helpers run through the SDK: lifecycle instrumentation, Netcode post-processing, the importer that saves material variants as their inspector leaves them, and the two programs of C# hot reload (`HotReloadPatcher` builds a patch, `HotReloadRuntime` applies it inside the Player).
 - `tests/`: standalone C# regression projects. Rust unit tests sit next to their code, integration tests in `rust/tests/`.
 - `Samples/RawProject/`: a small authored project used as a fixture.
 - `Integrations/EditorParity/`: an isolated Unity Editor reference and the `parity-*` commands for comparing it with the Player.
