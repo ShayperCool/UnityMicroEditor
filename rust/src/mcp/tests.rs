@@ -282,22 +282,48 @@ fn hot_reload_is_a_runtime_tool_that_forwards_status_and_recompile() {
             "{text}"
         );
     }
-    assert!(
-        session.description.contains("hotReload")
-            && session.description.contains("onUnsupportedEdit")
-    );
-    // Neither wait reports success for a Player that runs the previous code,
-    // and `wait` ends with an edit although no Player becomes ready for it.
+    // The launch options and the arguments of a wait are described with the
+    // arguments, where a caller that builds a call reads them.
+    let schema = &session.input_schema;
+    for text in [
+        "hotReload (default true",
+        "onUnsupportedEdit (report, the default, or restart",
+        "status.lastSequence read before the first of the edits",
+        "the error code wait_timeout",
+        "the newest session events",
+    ] {
+        assert!(schema.contains(text), "{text}: {schema}");
+    }
+    // What the description promises: one wait covers what was saved before
+    // it and nothing saved while it runs; neither wait reports success for a
+    // Player that runs the previous code, a compile error included; a
+    // success that left something out says so first; launch options stay.
     for promise in [
-        "neither wait nor wait_update succeeds, whatever afterSequence is",
-        "with the same outcome of an edit as wait_update, so it does not outlast one",
+        "returns the outcome of every change that was saved before the call",
+        "an edit made while the call runs is not covered",
+        "reports an edit as wait_update does",
+        "the reply starts with attention and hotReload.newNotes lists the parts",
+        "while hotReload.fullRecompileRequired is true neither wait succeeds",
+        "A compile error fails both waits",
+        "stay for later launches of this server; null restores a default",
     ] {
         assert!(
             session.description.contains(promise),
-            "{}",
+            "{promise}: {}",
             session.description
         );
     }
+    // It is read by every agent on every list of tools.
+    assert!(
+        session.description.len() < 1500,
+        "{}",
+        session.description.len()
+    );
+    assert!(
+        server
+            .instructions()
+            .contains("the reply starts with attention")
+    );
     assert!(
         tool.description
             .contains("returns its outcome afterwards, without a second restart"),

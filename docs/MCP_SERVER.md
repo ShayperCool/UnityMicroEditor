@@ -101,8 +101,13 @@ after the end of the frame; preserve the request identity while waiting.
 compiled by the running session and applied to the running Player when
 possible; the Player keeps its process and game state, and
 `session_control(wait_update)` succeeds with the same PID and an advanced
-`hotReload.codeGeneration`. `session_control(wait)` ends with the same outcome
-of an edit once a Player is ready, and also returns for a start or a restart.
+`hotReload.codeGeneration`. `session_control(wait)` reports an edit in the
+same way once a Player is ready, and also returns for a start or a restart.
+Both waits first ask the runner to say when it has answered every source
+change that was saved before the call, so one wait after several edits gives
+the outcome of the last, however far apart they were saved; an edit made while
+the call runs is not covered. `timeoutSeconds` bounds a wait, which then fails
+with `wait_timeout`.
 An edit that cannot be applied live is refused, not approximated: the Player
 keeps the previous code, both waits fail with the error code
 `full_recompile_required`, and the session state has
@@ -112,12 +117,15 @@ wait succeeds while that member is true, whatever `afterSequence` is.
 compiled code and resets game state; it returns the new
 session state, or the compiler's text when the sources do not compile, which
 keeps the Player. A change that is applied, or needs no patch, can still leave
-something the Player takes over only after a recompile, such as the
-accessibility of a field: `hotReload.lastPatch.notes` and `hotReload.notes`
-list it. While the session still works on saved source changes the state has
-`updatePending: true` and neither wait returns, so one wait after several
-edits gives the outcome of the last. `status` returns the `hotReload` state,
-also while no session runs. The session options `hotReload: false` (restart on every C# edit) and
+something the Player takes over only after a recompile, such as the body of a
+coroutine that is running: the reply of the wait then starts with `attention`
+and `hotReload.newNotes` lists it, while `hotReload.lastPatch.notes` and
+`hotReload.notes` hold every note that stands. While the runner has marked an
+answer as not its last the state has `updatePending: true` and neither wait
+returns. A session reply lists the newest events of the session and a wait
+those after `afterSequence`; `events` sets how many. The events of a reply
+leave out `notes`, the standing list that the state holds. `status` returns the
+`hotReload` state, also while no session runs. The session options `hotReload: false` (restart on every C# edit) and
 `onUnsupportedEdit: "restart"` (restart instead of the error) select the other
 behaviors. The session state omits `hotReload` while it has nothing to report:
 hot reload is enabled, no patch is applied, no edit is refused, no note
@@ -176,17 +184,18 @@ Error codes of hot reload:
 
 | Code | Returned by | Meaning and `error.details` |
 | --- | --- | --- |
-| `full_recompile_required` | `session_control(wait_update)` and `session_control(wait)`; `hot_reload(recompile)` when an edit compiled after its restart was refused | The C# edit compiled but cannot be applied to the running Player, which keeps the previous code. `unsupported` (at most 16 of `{code, member, message}`), `unsupportedCount`, `report` (file with the complete result) and `next`, the call that applies the edit: `{"tool": "hot_reload", "arguments": {"action": "recompile"}}`. |
+| `full_recompile_required` | `session_control(wait_update)` and `session_control(wait)`; `hot_reload(recompile)` when an edit compiled after its restart was refused | The C# edit compiled but cannot be applied to the running Player, which keeps the previous code. `unsupported` (at most 16 of `{code, member, message}`), `unsupportedCount`, `report` (file with the complete result) and `next`, the call that applies the edit: `{"tool": "hot_reload", "arguments": {"action": "recompile"}}`. `rejected` (`{error, sequence}`) when the running Player rejected a scene or asset change after `afterSequence` while the refusal stands. |
+| `wait_timeout` | `session_control(wait_update)` and `session_control(wait)` with `timeoutSeconds`, or when the request's own deadline passes | The wait ended without an answer; nothing was decided and the same call can be repeated. `afterSequence`, `phase`, `lastSequence`, `lastUpdateSequence`, `lastUpdateRejectedSequence`, `updatePending`, and `runnerAnswered`: false while the runner has not said that it answered every change saved before the call. |
 | `session_not_ready` | `hot_reload(recompile)` | No Player is ready. `phase` of the session. |
 | `recompile_pending` | `hot_reload(recompile)` | Another recompile has not been answered. `requestId` of the pending one. |
 
 Both waits return `full_recompile_required` until the code is in the Player:
 for every `afterSequence`, and also after a later scene update, which the
-message then reports as applied, or a later scene edit that was rejected
-because it needs the new code; `session_control(status).updateError` then has
-that rejection's own text. A C# compile error keeps the code
-`operation_failed` with the compiler's text, from `wait_update` and from
-`hot_reload(recompile)` alike. So does a `recompile` whose runner no longer
+message then reports as applied, or a later scene edit that the running Player
+rejected; the message and `details.rejected` then have that rejection's own
+text, and `session_control(status).updateError` has it too. A C# compile error
+keeps the code `operation_failed` with the compiler's text, from both waits
+and from `hot_reload(recompile)` alike. So does a `recompile` whose runner no longer
 reads commands; its message names `session_control(reset)`. A `requestId` of
 `recompile` names one command: a repeated id returns that command's outcome
 and does not restart the Player again.
