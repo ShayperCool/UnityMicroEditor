@@ -7,6 +7,7 @@ use super::{
 };
 use crate::{
     cancel::Context,
+    hotreload::{self, PlayerCode},
     jsondoc::{self, Target},
     native::stage_native_resources,
     project::{Map, Value, lexpath, value},
@@ -17,7 +18,10 @@ use std::{
     fs::{File, OpenOptions},
     os::unix::{fs::OpenOptionsExt, process::CommandExt},
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -32,6 +36,8 @@ pub struct Player {
     pub exited: bool,
     log: Option<File>,
     done: Arc<Mutex<Option<Option<String>>>>,
+    /// Set when the process has exited; `done` is emptied by its receiver.
+    gone: Arc<AtomicBool>,
     wake: Arc<Wake>,
 }
 
@@ -92,6 +98,14 @@ pub fn start_player(
         if opts.watch {
             args.extend(["--unity-cli-raw-reload".into(), request.to_string()]);
         }
+        if opts.hot_reload {
+            let code_request = PlayerCode::request_path(run_directory);
+            // A request or acknowledgement of an earlier process is not this one's.
+            for stale in [code_request.clone(), format!("{code_request}.ack.json")] {
+                let _ = std::fs::remove_file(stale);
+            }
+            args.extend([hotreload::PLAYER_ARGUMENT.into(), code_request]);
+        }
     } else {
         args.push("-batchmode".into());
     }
@@ -113,6 +127,12 @@ pub fn start_player(
     if std::env::var_os("DISPLAY").is_none_or(|display| display.is_empty()) {
         command.env("DISPLAY", ":0");
     }
+    // A redirect does not reach the copies an inlining JIT made of a method.
+    // Options the caller set for the Player's Mono are passed on as they are.
+    if opts.interactive && opts.hot_reload && std::env::var_os(hotreload::MONO_ARGUMENTS).is_none()
+    {
+        command.env(hotreload::MONO_ARGUMENTS, hotreload::MONO_ARGUMENTS_VALUE);
+    }
     // SAFETY: only async-signal-safe calls between fork and exec.
     let parent = unsafe { libc::getpid() };
     unsafe {
@@ -133,6 +153,7 @@ pub fn start_player(
         .spawn()
         .map_err(|e| os_error("fork/exec", &path, &e))?;
     let done = Arc::new(Mutex::new(None));
+    let gone = Arc::new(AtomicBool::new(false));
     let player = Player {
         pid: child.id() as i32,
         path,
@@ -141,6 +162,7 @@ pub fn start_player(
         exited: false,
         log: Some(log),
         done: done.clone(),
+        gone: gone.clone(),
         wake: wake.clone(),
     };
     let wake = wake.clone();
@@ -149,6 +171,7 @@ pub fn start_player(
             Ok(status) => sysutil::exit_error(status),
             Err(error) => Some(format!("wait: {}", sysutil::errno_text(&error))),
         };
+        gone.store(true, Ordering::SeqCst);
         *done.lock().unwrap() = Some(result);
         wake.notify();
     });
@@ -218,6 +241,13 @@ impl Player {
     /// A non-blocking receive of the exit result.
     pub fn take_done(&mut self) -> Option<Option<String>> {
         self.done.lock().unwrap().take()
+    }
+
+    /// Tells whether the process has exited, without taking the exit result
+    /// from the loop that owns the Player.
+    pub fn exit_probe(&self) -> impl Fn() -> bool + use<> {
+        let gone = self.gone.clone();
+        move || gone.load(Ordering::SeqCst)
     }
 
     fn wait_done(&mut self, timeout: Duration) -> bool {
