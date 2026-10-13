@@ -50,6 +50,17 @@ pub struct HotReload {
     pub notes_count: u64,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub notes_report: String,
+    /// The notes that the last change of the Player's code brought and the
+    /// code before it did not have: what of that edit is not in effect. At
+    /// most 16; `new_notes_count` counts all, and `new_notes_sequence` is the
+    /// event that brought them. Notes that stood before are in
+    /// `last_patch.notes` or `notes`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub new_notes: Vec<Reason>,
+    #[serde(skip_serializing_if = "no_count")]
+    pub new_notes_count: u64,
+    #[serde(skip_serializing_if = "no_count")]
+    pub new_notes_sequence: u64,
     /// Why this Player process was started, when hot reload caused it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_restart: Option<LastRestart>,
@@ -64,6 +75,12 @@ pub struct HotReload {
     /// error does not keep it: later updates and rejections replace that.
     #[serde(skip)]
     refused_summary: String,
+    /// The scene or asset change that the running Player rejected while the
+    /// refusal stands: the sequence of its event and its own error. A scene
+    /// that only lacks the refused code fails with it, and so does one that
+    /// is wrong by itself; the caller is given the text to tell them apart.
+    #[serde(skip)]
+    scene_rejected: (u64, String),
 }
 impl Default for HotReload {
     fn default() -> Self {
@@ -78,10 +95,14 @@ impl Default for HotReload {
             notes: Vec::new(),
             notes_count: 0,
             notes_report: String::new(),
+            new_notes: Vec::new(),
+            new_notes_count: 0,
+            new_notes_sequence: 0,
             last_restart: None,
             pending_recompile: String::new(),
             refused_sequence: 0,
             refused_summary: String::new(),
+            scene_rejected: (0, String::new()),
         }
     }
 }
@@ -136,7 +157,8 @@ pub struct LastRestart {
 pub(super) enum Refused<'a> {
     /// Nothing but the refusal answers the caller's wait.
     Edit,
-    /// An update was confirmed after this sequence, the caller's mark.
+    /// A scene or asset update was confirmed after this sequence, the
+    /// caller's mark.
     UpdatedAfter(u64),
     /// The `recompile` command with this id restarted the Player before the
     /// refused edit compiled. It is answered, so the next one needs another id.
@@ -232,6 +254,7 @@ impl HotReload {
         self.code_generation = generation;
         self.clear_refusal();
         self.clear_notes();
+        self.take_new_notes(sequence, event);
         let number = |key: &str| count(event.get(key)).unwrap_or(0);
         let notes = reasons(event.get("notes"));
         self.last_patch = Some(LastPatch {
@@ -253,10 +276,20 @@ impl HotReload {
         self.full_recompile_required = true;
         self.clear_notes();
         self.refused_sequence = sequence;
-        self.refused_summary = bounded(summary);
+        // The rejection of a scene part repeats the reasons beside an error
+        // of its own; the sentence of the refusal is the refusal's.
+        if event.get("part").and_then(Value::as_str) == Some("scene") {
+            self.scene_rejected = (sequence, bounded(summary));
+        } else {
+            self.refused_summary = bounded(summary);
+        }
         self.unsupported = reasons(event.get("unsupported"));
         self.unsupported_count = total(event, "unsupportedCount", self.unsupported.len());
         self.report = text(event, "report");
+    }
+    /// `updated` or `unchanged`: the Player runs the scene as it is saved.
+    pub(super) fn scene_applied(&mut self) {
+        self.scene_rejected = (0, String::new());
     }
     /// `updated` or `unchanged`, or the rejection of a scene part. A scene
     /// update proves nothing about the code, so the runner states it: `false`
@@ -264,7 +297,7 @@ impl HotReload {
     /// cannot be patched into it. With `false` come the notes of a compile
     /// that needed no patch, for as long as they stand. An event without the
     /// statement leaves the state as it is.
-    pub(super) fn confirmed(&mut self, event: &Map<String, Value>) {
+    pub(super) fn confirmed(&mut self, sequence: u64, event: &Map<String, Value>) {
         match event.get("fullRecompileRequired") {
             Some(Value::Bool(false)) => {
                 self.clear_refusal();
@@ -274,6 +307,16 @@ impl HotReload {
                     0 => String::new(),
                     _ => text(event, "hotReloadReport"),
                 };
+                // The compile of this window needed no patch and brought
+                // notes; or the notes of such a compile have ended, and with
+                // them what was new about them. Those of a patch are its own.
+                let of_patch = self
+                    .last_patch
+                    .as_ref()
+                    .is_some_and(|patch| patch.sequence == self.new_notes_sequence);
+                if event.contains_key("newNotes") || self.notes_count == 0 && !of_patch {
+                    self.take_new_notes(sequence, event);
+                }
             }
             // The reasons come with the rejection of the same change, which
             // the runner may print after this event.
@@ -288,18 +331,54 @@ impl HotReload {
         self.notes.clear();
         self.notes_count = 0;
         self.notes_report.clear();
+        self.new_notes.clear();
+        self.new_notes_count = 0;
+        self.new_notes_sequence = 0;
+    }
+    fn take_new_notes(&mut self, sequence: u64, event: &Map<String, Value>) {
+        self.new_notes = reasons(event.get("newNotes"));
+        self.new_notes_count = total(event, "newNotesCount", self.new_notes.len());
+        self.new_notes_sequence = match self.new_notes_count {
+            0 => 0,
+            _ => sequence,
+        };
     }
     fn clear_refusal(&mut self) {
         self.full_recompile_required = false;
         self.refused_sequence = 0;
         self.refused_summary.clear();
+        self.scene_rejected = (0, String::new());
         self.unsupported.clear();
         self.unsupported_count = 0;
         self.report.clear();
     }
 
+    /// What a caller reads first when its wait or recompile succeeded and
+    /// the answer, an event after `after`, brought notes: the edit is
+    /// applied, and a part of the saved code is still not in effect. Empty
+    /// when the answer brought none.
+    pub(super) fn attention(&self, after: u64) -> String {
+        let Some(first) = self.new_notes.first() else {
+            return String::new();
+        };
+        if self.new_notes_sequence <= after {
+            return String::new();
+        }
+        let more = match self.new_notes_count.saturating_sub(1) {
+            0 => String::new(),
+            more => format!(" (and {more} more in hotReload.newNotes)"),
+        };
+        format!(
+            "Not all of the saved code is in effect in the running Player: {} [{}]{more}. The rest of the edit is applied. hot_reload with action \"recompile\" restarts the Player on the saved code; game state is reset.",
+            first.message.trim_end_matches('.'),
+            first.code
+        )
+    }
+
     /// The failure that reports the refusal that stands to a caller.
-    pub(super) fn refusal(&self, told: Refused) -> (Error, Typed) {
+    /// `scene_after`: a scene or asset change that the Player rejected after
+    /// this sequence is named with its own error.
+    pub(super) fn refusal(&self, told: Refused, scene_after: u64) -> (Error, Typed) {
         let first = self.unsupported.first().cloned().unwrap_or_default();
         let code = match first.code.as_str() {
             "" => String::new(),
@@ -331,21 +410,35 @@ impl HotReload {
             "The C# edit compiled but cannot be applied to the running Player: {reason}. The Player still runs the previous code"
         );
         const NEXT: &str = "Call hot_reload with action \"recompile\" to restart the Player on the new code; game state is reset.";
+        // The Player's own words for a scene it would not load. A scene that
+        // only lacks the refused code is applied by the recompile; one that
+        // is wrong by itself fails the recompile with this text again.
+        let scene = Some(&self.scene_rejected).filter(|(sequence, _)| *sequence > scene_after);
+        let rejected = match scene {
+            Some((_, error)) => format!(
+                " A scene or asset change saved since was rejected by the running Player: {}. If it only needs the new code, the recompile applies it.",
+                error.trim_end_matches('.')
+            ),
+            None => String::new(),
+        };
         let message = match told {
-            Refused::Edit => format!("{refused}. {NEXT}"),
+            Refused::Edit => format!("{refused}.{rejected} {NEXT}"),
             Refused::UpdatedAfter(sequence) => format!(
-                "{refused}; the other source changes confirmed after sequence {sequence} are applied. {NEXT}"
+                "{refused}; a scene or asset change confirmed after sequence {sequence} is applied.{rejected} {NEXT}"
             ),
             Refused::Recompiled(id) => format!(
-                "Recompile {id} restarted the Player, and a C# edit compiled after it cannot be applied to the running Player: {reason}. Call hot_reload with action \"recompile\" and a new requestId to restart the Player on the new code; game state is reset."
+                "Recompile {id} restarted the Player, and a C# edit compiled after it cannot be applied to the running Player: {reason}.{rejected} Call hot_reload with action \"recompile\" and a new requestId to restart the Player on the new code; game state is reset."
             ),
         };
-        let details = json!({
+        let mut details = json!({
             "unsupported": self.unsupported,
             "unsupportedCount": self.unsupported_count,
             "report": self.report,
             "next": {"tool": "hot_reload", "arguments": {"action": "recompile"}},
         });
+        if let Some((sequence, error)) = scene {
+            details["rejected"] = json!({"error": error, "sequence": sequence});
+        }
         (
             Error::new(message),
             Typed {
@@ -443,8 +536,10 @@ impl Controller {
         };
         let mut reply = serde_json::to_value(&state).expect("hot reload state serializes");
         reply["phase"] = inner.state.phase.as_str().into();
-        if state.enabled {
-            reply["onUnsupportedEdit"] = inner.launch.fallback().into();
+        // What the next launch uses, also while hot reload is off for it.
+        reply["onUnsupportedEdit"] = inner.launch.fallback().into();
+        if inner.state.update_pending {
+            reply["updatePending"] = true.into();
         }
         reply
     }
@@ -571,15 +666,31 @@ impl Controller {
                         )),
                         None,
                     )),
+                    // No recompile applies a change that has left the
+                    // prepared graph; the caller is told what does.
+                    Some(rejection) if state.preparation_required => Err(failed(
+                        state,
+                        Error::new(format!(
+                            "{rejection}. The change needs a new preparation of the project, which no recompile does: session_control(wait_update) or session_control(status) queues it and the session continues on it when it is done"
+                        )),
+                        None,
+                    )),
                     Some(rejection) => Err(failed(state, Error::new(rejection), None)),
                     // The restart cleared every earlier refusal, so this one is
                     // of an edit compiled after it. Success would hide it.
                     None if state.hot_reload.full_recompile_required => {
-                        let (error, typed) =
-                            state.hot_reload.refusal(Refused::Recompiled(request_id));
+                        let (error, typed) = state
+                            .hot_reload
+                            .refusal(Refused::Recompiled(request_id), sent.answered);
                         Err(failed(state, error, Some(typed)))
                     }
-                    None => Ok(state),
+                    None => {
+                        // A C# edit that was patched in after the restart may
+                        // have brought notes.
+                        let mut state = state;
+                        state.attention = state.hot_reload.attention(sent.answered);
+                        Ok(state)
+                    }
                 };
             }
             if select(&[Source::Context(ctx), Source::Flag(&changed)], None) == Some(0) {

@@ -234,13 +234,19 @@ After Player readiness, call `project_tools`, then invoke the generated tool:
   "name": "project.game.set_counter",
   "arguments": {
     "parameters": {"value": 7},
-    "target": {"path": "/Counter"},
+    "target": {"path": "Counter"},
     "requestId": "set-counter-001",
     "expectedPid": 12345,
     "expectedRevision": "REVISION_FROM_RUNTIME_STATUS"
   }
 }
 ```
+
+A target `path` is the object's path as `runtime_query(hierarchy)` prints it:
+the names from the root joined with `/`, without a leading slash (`/` in a name
+is written `~1`, `~` is written `~0`). `runtime_query(logs)` returns the newest
+log entries the Player keeps, at most 128, each with its stack trace;
+`arguments.afterSequence` limits the reply to the entries after that one.
 
 The catalog binds omitted PID/revision guards to the Player generation that
 published the schema. Reacquire tools and targets after replacement. Removed or
@@ -289,26 +295,66 @@ commit, call `wait_update` with `afterSequence`. A scene `updated` ACK, a
 `code-patched` confirmation, or confirmed `code-updated`/`content-updated`
 readiness, proves application rather than behavior.
 Read the current PID/revision, inspect values, check logs, and run an assertion.
-Several edits may precede one `wait_update`. The runner handles saves in the
-order they arrive, and an answer it gives while a later save is already queued
-is marked as not its last: the session state then has `updatePending: true`,
-and neither `wait_update` nor `wait` returns until the last queued save was
-applied or rejected. The reply is the outcome of that last one, so a compile
-error of the first of two files that the second file repairs is not reported.
-`wait` with the same `afterSequence` ends with the same outcome of an edit once
-a Player is ready, although a C# edit that is applied live starts no Player. It
-also returns when a Player becomes ready: after a start or a restart.
+
+Several edits may precede one `wait_update`: take `lastSequence` before the
+first of them and wait once after the last. Every `wait_update` and `wait`
+first asks the runner to say when it has answered every source change that was
+saved before the call, and returns only after that. The reply is therefore the
+outcome of the last save, whether the saves were milliseconds or minutes
+apart, and a compile error of the first of two files that the second file
+repairs is not reported. Two things are left to the caller. A save must have
+returned before the wait is called: an edit made while the call runs, for
+example a `script_edit` sent in parallel with it, may not be covered. And
+`afterSequence` matters: without it any earlier update or rejection of the
+session counts as the answer when the saves changed nothing the runner reads.
+`status` does not ask the runner; right after a save it shows the state from
+before it.
+
+`wait` reports an edit exactly as `wait_update` does and in addition needs a
+ready Player: it also returns when a Player becomes ready after a start or a
+restart. A wait has no time limit of its own. `timeoutSeconds` gives it one;
+when it is over the call fails with the error code `wait_timeout`, whose
+message and `details` (`phase`, `lastSequence`, `lastUpdateSequence`,
+`lastUpdateRejectedSequence`, `updatePending`, `runnerAnswered`,
+`afterSequence`) say what the session was doing. Nothing was decided, and the
+same call can be made again.
+
 A C# edit is applied to the running Player when possible and keeps game state.
 An edit that cannot be applied live fails `wait_update` and `wait` with
 `full_recompile_required`; `hot_reload(recompile)` then restarts the Player and
 resets game state (see [Hot reload](#hot-reload)). Ordinary compile failures
-retain the last confirmed Player. A graph/configuration rejection, for example a
-new `.cs` in an assembly the prepared graph does not hold, cannot be applied to
-the running Player at all. The session state then has `preparationRequired:
-true` next to `updateError`, and both `wait_update` and `status` queue a fresh
-source preparation automatically (`status` keeps its normal shape and adds
-`preparationReason` and `preparation`). The old Player remains available while
-it compiles, and replacement occurs only after successful preparation.
+retain the last confirmed Player and fail both waits with the compiler's text.
+A graph/configuration rejection cannot be applied to the running Player at
+all: an added or removed `.asmdef`, a deleted script file, a new `.cs` in an
+assembly the prepared graph does not hold, a changed package. The session
+state then has `preparationRequired: true` next to `updateError`, and `status`,
+`wait_update` and `wait` queue a fresh source preparation automatically.
+`status` keeps its normal shape and adds `preparationReason` and `preparation`;
+the waits answer `result_pending` with the phase `preparing_configuration`.
+The old Player remains available while it compiles, and replacement occurs
+only after successful preparation. A session that could not start because the
+sources have left the prepared graph (a `reset` after such an edit ends with
+the phase `failed` and the runner's text about a fresh managed graph) is
+recovered the same way by the next `status` or wait. Sources the project was
+prepared for before (an edit that was undone and made again, a branch switched
+back) need no new preparation: the call that finds theirs restarts the session
+on it at once. `status` then returns the session as it starts, without
+`preparationRequired`, and a wait answers `result_pending` once more, with a
+`message` that says so. When the preparation cannot be queued,
+`status` still returns the session state, with `preparationError`, and the
+waits fail with the rejection and the calls that are left: `project_prepare`
+with the scene and `activate: true`, or `session_control(reset)`.
+
+A reply with the session state lists the newest 8 of the session's events in
+`events`, a wait those after its `afterSequence` (at most 16) and
+`hot_reload(recompile)` those of its restart. `eventsOmitted` counts the kept
+events that are not listed, and the argument `events` (0 to 64) asks for
+another number. Two members of the runner's events are left out of a reply:
+the hashes of every source that a `code-updated` event carries, and `notes`,
+the list of everything that stands since the Player started, which every
+event of a patch repeats. That list is in the state, as `hotReload.notes` and
+`hotReload.lastPatch.notes`; an event keeps `notesCount`, the `newNotes` it
+brought itself and the report.
 
 All source mutations require a stable `operationId`. Exact retry returns its
 original durable result; changed arguments with that ID conflict. Stale source or
@@ -367,21 +413,24 @@ game loses its state.
 
 | The C# edit | `session_control(wait_update)` | Session state |
 | --- | --- | --- |
-| Applied live | Success; same `pid` and `revision`; the last event is `code-patched` | `hotReload.codeGeneration` is the patch generation, `hotReload.lastPatch` summarizes it |
-| No difference in the compiled code | Success | Unchanged |
-| Nothing to patch, but not all of the change is in the Player (a field or method made `public`, a removed `[RuntimeInitializeOnLoadMethod]`) | Success | `hotReload.notes` lists it, with `notesCount` and `notesReport`, until the next compile or restart |
+| Applied live | Success; same `pid` and `revision`; the last event is `code-patched` | `hotReload.codeGeneration` is the patch generation, `hotReload.lastPatch` describes the patch |
+| Applied live, and a part of it is not in effect yet (a running coroutine, a value of an existing object) | Success; the reply starts with `attention` | `hotReload.newNotes` lists the parts, with `newNotesCount` and `newNotesSequence` |
+| No difference in the compiled code, no patch applied | Success | Unchanged |
+| No difference in the compiled code while a patch is applied (a comment, a blank line) | Success; the last event is `code-patched` | `hotReload.codeGeneration` advances; the game's reload callbacks do not run |
+| Nothing to patch, but not all of the change is in the Player (a method made `public`, a removed `[RuntimeInitializeOnLoadMethod]`) | Success; the reply starts with `attention` | `hotReload.notes` lists it, with `notesCount` and `notesReport`, until the next compile or restart |
 | Cannot be applied live | Error `full_recompile_required` | `hotReload.fullRecompileRequired: true` with `unsupported`, `unsupportedCount` and `report`; `updateError` |
 | Does not compile | Error `operation_failed` with the compiler's text, as before | `updateError` |
-| Needs a new source graph | Pending preparation, as before | `preparationRequired: true` |
+| Needs a new source graph (an `.asmdef` added or removed, a script file deleted) | Pending preparation, as before | `preparationRequired: true` |
 
 `wait_update` and `wait` report success only for a Player that runs the newest
 compiled code. While `hotReload.fullRecompileRequired` is true both fail with
-`full_recompile_required`, whatever `afterSequence` is: also for a caller that
-has read the refusal, and also when a scene edit was applied since. The message
-then adds that the other source changes confirmed after `afterSequence` are
-applied, and `status` shows them as `lastUpdateSequence` and `revision`. Only a
-compile error that nothing followed is reported first: no recompile can
-succeed until the sources compile.
+`full_recompile_required` at once, whatever `afterSequence` is: also for a
+caller that has read the refusal and passes its sequence, and also when a
+scene edit was applied since. The message then adds that a scene or asset
+change confirmed after `afterSequence` is applied, and `status` shows it as
+`lastUpdateSequence` and `revision`. Only a compile error that nothing
+followed is reported first: no recompile can succeed until the sources
+compile.
 
 The `full_recompile_required` reply names the first reason and the call to
 make:
@@ -405,6 +454,14 @@ make:
 }
 ```
 
+When the running Player rejected a scene or asset change after
+`afterSequence` while the refusal stands, the message names it (`A scene or
+asset change saved since was rejected by the running Player: ...`) and
+`details.rejected` holds `{"error", "sequence"}` of that rejection. A scene
+that only lacks the refused code is applied by the recompile. A scene that is
+wrong by itself fails the recompile with the same text, and the Player is
+kept.
+
 `unsupported` holds at most 16 entries; `unsupportedCount` counts all of them
 and `report` names the file with the complete result. Each entry has a
 lower_snake_case reason `code`, the `member` and a `message`. The patch builder
@@ -416,11 +473,11 @@ A new script is the common case. `script_create` adds a type, so `wait_update`
 fails with `full_recompile_required` and the reason `type_added`. A scene edit
 that attaches the new component before the recompile is rejected for the
 running Player, which does not have the type. `wait_update` and `wait` then
-still answer `full_recompile_required` with the same reasons, and
-`session_control(status).updateError` holds the scene's own error
-(`unresolved managed component type ...`). Both edits can be made before the
-one recompile: the Player it starts has the type and loads the scene with the
-component.
+still answer `full_recompile_required` with the same reasons, and the reply
+has the scene's own error (`unresolved managed component type ...`) in its
+message and in `details.rejected`; `session_control(status).updateError`
+holds it too. Both edits can be made before the one recompile: the Player it
+starts has the type and loads the scene with the component.
 
 Then call the tool the reply names:
 
@@ -444,8 +501,8 @@ leaves the recompile pending.
 
 | `hot_reload` action | Result |
 | --- | --- |
-| `status` | `enabled`, `onUnsupportedEdit`, `codeGeneration`, `fullRecompileRequired`, `unsupported`, `unsupportedCount`, `report`, `lastPatch`, `notes`, `notesCount`, `notesReport`, `lastRestart`, `pendingRecompile` and the session `phase`. Without a session it reports what the next launch uses, with `codeGeneration: 0`. |
-| `recompile` | The session state after the restart. Optional `requestId` identifies the command. |
+| `status` | `enabled`, `onUnsupportedEdit`, `codeGeneration`, `fullRecompileRequired`, `unsupported`, `unsupportedCount`, `report`, `lastPatch`, `notes`, `notesCount`, `notesReport`, `newNotes`, `newNotesCount`, `newNotesSequence`, `lastRestart`, `pendingRecompile`, `updatePending` while it is true, and the session `phase`. Without a session it reports what the next launch uses, with `codeGeneration: 0`. `onUnsupportedEdit` is named also while hot reload is off. |
+| `recompile` | The session state after the restart, with the events of the restart. Optional `requestId` identifies the command. |
 
 `lastRestart` is present when hot reload caused the start of this Player
 process: `sequence`, `reason` (`requested`, `hot_reload_unsupported` or
@@ -454,7 +511,10 @@ process: `sequence`, `reason` (`requested`, `hot_reload_unsupported` or
 
 `recompile` fails with `session_not_ready` when no Player is ready, and with
 `recompile_pending` when another recompile has not been answered; that reply's
-`details.requestId` is the pending one. A request the client gave up on keeps
+`details.requestId` is the pending one. A change that needs a new source graph
+is not applied by a recompile either: the reply is the runner's rejection with
+the sentence that `session_control(wait_update)` or `status` queues the
+preparation. A request the client gave up on keeps
 running: `hotReload.pendingRecompile` shows it, and
 `session_control(wait_update)` returns when the restart is confirmed.
 
@@ -470,21 +530,42 @@ its last 16 commands, and a new session starts without any.
 Player and an edit that compiled after that restart was refused: the message
 says so, and the next `recompile` needs a new `requestId`.
 
-What a patch does not change is reported in `hotReload.lastPatch.notes`, with
-the same `code`, `member` and `message` members. A change that needed no patch
-at all can leave such notes too; they are in `hotReload.notes`, which is absent
-when there are none. Only a recompile applies what a note names:
+An edit that is applied can leave a part of the saved code out of effect.
+The builder says so in notes, each with `code`, `member` and `message`, and
+the session shows them in three places:
 
-- A field or method whose accessibility changed keeps the loaded one for
-  reflection and for Unity serialization (`accessibility_changed`). A field
-  made `public` so that Unity serializes it is therefore not filled from the
-  scene until `hot_reload(recompile)`; `wait_update` succeeds and the note says
-  so.
+- `hotReload.newNotes`: the notes that the last change of the Player's code
+  brought. A wait or a recompile whose answer brought them puts a sentence
+  about the first of them in `attention`, the first member of its reply.
+  This is what to read after an edit.
+- `hotReload.lastPatch.notes`: all notes of the applied patch. A patch holds
+  every edit since the Player started, so these and
+  `hotReload.lastPatch.members` describe all of them, not the last edit. The
+  new notes lead the list, which holds 16; `notesCount` counts all and
+  `report` names the builder's result with every one (a file under the
+  session output; read it from the file system, the asset tools do not).
+- `hotReload.notes`: the notes of a change that needed no patch, absent when
+  there are none.
+
+Only a recompile applies what a note names:
+
+- A method whose accessibility changed keeps the loaded one for reflection
+  (`accessibility_changed`). A field that is made `public` or private so that
+  Unity starts or stops serializing it is not a note but a refusal
+  (`serialization_changed`), like `[SerializeField]` added to it: nothing of
+  such an edit is in the Player before a restart.
 - An added field has its default value in objects that existed before the
-  patch; an added serialized field is not filled from the scene until a restart.
+  patch, also when the source gives it an initializer; an added serialized
+  field is not filled from the scene until a restart. A field whose type
+  changed is stored anew and loses its value (`field_value_reset`); a renamed
+  field, and the field behind an auto-property that became a full property,
+  are a removed and an added field.
 - A changed field initializer or constructor affects objects created later.
+- A changed `Awake` or `Start` of an engine object is not run again for the
+  objects that exist (`started_objects_keep_state`).
 - A coroutine or `async` method that is already running finishes on the old
-  code; new calls run the new code.
+  code; new calls run the new code. A coroutine that never ends keeps its old
+  loop until a recompile.
 - A delegate created before the patch can keep the old body of an edited
   lambda. A method marked `[InvokeOnHotReloadLocal]` is run again whenever its
   own code, a lambda or local function in it, or a method a patch added that it
@@ -496,15 +577,22 @@ when there are none. Only a recompile applies what a note names:
 Edits that are applied live, as the patch builder classifies them: bodies of
 non-generic methods in non-generic types, including property accessors,
 constructors, lambdas, iterators and `async` methods; added non-virtual
-methods; added instance fields of classes and added static fields without an
-initializer; added or changed constants. Edits that need a recompile: anything
-in a generic type or generic method; added, removed or renamed types; enum,
-base type and interface changes; added or removed virtual, abstract, override
-or interface methods; a changed static constructor or static field
-initializer; attribute changes on existing members; a Unity message such as
-`Update` added to an existing class; a field added to a struct. The builder
-treats an edit as patchable only when it can prove it, so the reply, not this
-list, decides.
+methods; a changed signature, name or `static` of a non-virtual method
+together with its callers; removed methods, where a removed `void` Unity
+message stops running at once; added instance fields of classes and added
+static fields without an initializer; added or changed constants and default
+parameter values, which also reach the callers in files that were not edited
+and in other assemblies. Edits that need a recompile: anything in a generic
+type or generic method, also an edit that lies only in a lambda or local
+function of one; added, removed or renamed types; enum, base type and
+interface changes; added or removed virtual, abstract, override or interface
+methods and a method made virtual; a changed static constructor or static
+field initializer; attribute changes on existing members; a field whose
+accessibility changes what Unity serializes; a Unity message such as `Update`
+added to an existing class; a field added to a struct; an anonymous type the
+loaded assembly lacks; a method or type added to one assembly and used from
+another in the same change. The builder treats an edit as patchable only when
+it can prove it, so the reply, not this list, decides.
 
 Launch options, in `arguments` of `session_control(start)` or `reset`:
 
@@ -516,10 +604,14 @@ Launch options, in `arguments` of `session_control(start)` or `reset`:
 Like the other launch options, a value that is given stays for the later
 launches of this server, so a `start` after a session with `hotReload: false`
 has it off until `hotReload` is given again; `null` restores the default. The
-session state shows the values in `launch`.
+session state shows the values in `launch`, and `hot_reload(status)` names
+what the next launch uses.
 
 The runtime package declares `[InvokeOnHotReload]` and
-`[InvokeOnHotReloadLocal]` for game code that has to react to a patch.
+`[InvokeOnHotReloadLocal]` for game code that has to react to a patch. They
+run when a patch changed code the Player runs: not for a comment or a blank
+line saved while a patch is applied, and with a list that leaves out a removed
+Unity message.
 
 Limits:
 
@@ -542,13 +634,13 @@ Limits:
   `fullRecompileRequired: true` with an empty `unsupported` list for a moment:
   the runner stated it on the scene update and lists the reasons right after.
   `updatePending` is true for that moment and no wait returns in it.
-- `updatePending` follows what the runner has seen of the project. A save that
-  reaches the watcher in the instant an answer is printed is not counted, so
-  take `lastSequence` before the first edit of a group and wait once after the
-  last one.
-- `wait` and `wait_update` differ in one case: a Player that became ready after
-  `afterSequence` answers `wait` also when a compile error followed, which
-  `wait_update` reports. Neither has a time limit of its own.
+- `updatePending` in `status` follows what the runner has printed. It is true
+  while an answer was marked as not the last; it is not true yet for a save
+  the runner has not answered at all. Only a wait asks the runner.
+- While saves by anyone keep arriving, every answer is marked and a wait is
+  held; give it `timeoutSeconds` and repeat it on `wait_timeout`.
+- A runner that takes no commands cannot say whether it has seen the last
+  save, so both waits fail with a message that names `session_control(reset)`.
 - When a patch leaves the Player unusable, the runner restarts it by itself on
   the newest code. `hotReload.lastRestart` then has `reason:
   "hot_reload_failed"` and the `error`, and game state is lost.
@@ -560,7 +652,10 @@ Limits:
   `operation_failed` and a message that names `session_control(reset)`. The
   session stays `ready` on its old code until then.
 - Changes of packages, assembly definitions or other compiler configuration
-  are not hot reload: they queue a new preparation, as described above.
+  are not hot reload: they queue a new preparation, as described above. So
+  does a deleted script file, unlike an added one, which is a refused edit.
+- A stack trace of patched code names `HotReload.G<generation>.<type>.<method>`
+  with the file and line of the source under `Assets`.
 
 ## Game arguments and runtime content
 
