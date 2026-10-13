@@ -179,10 +179,10 @@ namespace Game
     // stays on the entry the engine calls, the body is in the helper a patch replaces.
     public class Menu : MonoBehaviour
     {
-        public static int Rebuilt, Kept, Counted;
+        public static int Rebuilt, Kept, Counted, Steadied, Walked, Strolled, Waited;
         public string Shown = "", Enabled = "";
         public int Refreshed;
-        public Menu Closes;
+        public Menu Closes, Fades;
 
         [InvokeOnHotReloadLocal]
         public void Build() { Func<string> click = () => "click0"; Shown = click(); }
@@ -196,13 +196,67 @@ namespace Game
         [InvokeOnHotReloadLocal]
         public static void Count() { Counted++; }
 
+        // Their patches call methods that call themselves and each other, and an async method.
+        [InvokeOnHotReloadLocal]
+        public static void Steady() { Steadied++; }
+
+        [InvokeOnHotReloadLocal]
+        public static void Walk() { Walked++; }
+
+        [InvokeOnHotReloadLocal]
+        public static void Stroll() { Strolled++; }
+
+        [InvokeOnHotReloadLocal]
+        public static void Wait() { Waited++; }
+
         [InvokeOnHotReloadLocal]
         private void OnEnable() { __UnityPlay_OnEnable(); }
         private void __UnityPlay_OnEnable() { Enabled = "enabled0"; }
 
-        // A callback that rebuilds what it shows may destroy an object the same pass still lists.
+        // A callback that rebuilds what it shows may destroy an object the same pass still lists:
+        // at once, or at the end of the frame, until which the object exists.
         [InvokeOnHotReload]
-        private void Refresh() { Refreshed++; if (Closes != null) UnityEngine.Object.Destroy(Closes); }
+        private void Refresh()
+        {
+            Refreshed++;
+            if (Closes != null) UnityEngine.Object.DestroyImmediate(Closes);
+            if (Fades != null) UnityEngine.Object.Destroy(Fades);
+        }
+    }
+
+    // The helper of the lifecycle rewrite is `__UnityPlay_OnEnable_` here, because the game
+    // declares the shorter name itself. A method that only starts like a helper is none, and
+    // a method that is no lifecycle callback has none.
+    public class Crowded : MonoBehaviour
+    {
+        public string Enabled = "";
+        public int Own, Later, Fooed;
+
+        [InvokeOnHotReloadLocal]
+        private void OnEnable() { __UnityPlay_OnEnable_(); }
+        private void __UnityPlay_OnEnable_() { Enabled = "crowded0"; }
+        private void __UnityPlay_OnEnable() { Own++; }
+        private void __UnityPlay_OnEnableLater() { Later++; }
+
+        [InvokeOnHotReloadLocal]
+        private void Foo() { Fooed++; }
+        private void __UnityPlay_Foo() { }
+    }
+
+    // A virtual lifecycle callback: an object whose class overrides it runs its own.
+    public class Panel : MonoBehaviour
+    {
+        public string Seen = "";
+
+        [InvokeOnHotReloadLocal]
+        protected virtual void OnEnable() { __UnityPlay_OnEnable(); }
+        private void __UnityPlay_OnEnable() { Seen += "panel0;"; }
+    }
+
+    public class QuietPanel : Panel
+    {
+        protected override void OnEnable() { __UnityPlay_OnEnable(); }
+        private void __UnityPlay_OnEnable() { Seen += "quiet;"; }
     }
 
     public class Plain
