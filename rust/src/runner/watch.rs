@@ -194,6 +194,11 @@ impl ProjectWatcher {
         event
     }
 
+    /// Whether a change waits to be received.
+    pub fn pending(&self) -> bool {
+        !self.shared.queue.lock().unwrap().is_empty()
+    }
+
     /// Waits for the next change for at most `timeout`.
     pub fn recv_timeout(&self, timeout: Duration) -> Option<SourceChange> {
         let limit = Instant::now() + timeout;

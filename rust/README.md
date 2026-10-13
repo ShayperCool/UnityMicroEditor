@@ -25,7 +25,8 @@ embeds `../engine-profile.json`.
 | `native/` | Native import coordinator: worker, DataStore, adoption and the runtime content cache |
 | `compiler/` | Roslyn driver, script type inventory, Netcode post-processing, host staging |
 | `sourcegraph/` | The Player assembly graph derived from `.asmdef`/`.asmref` and the engine profile |
-| `runner/` | `run`: launcher, prepared revisions, patches, routes and the watcher |
+| `hotreload/` | C# hot reload: builds of the patch builder and the applier, the documents of a code patch, one attempt against the running Player and the code state of a Player process |
+| `runner/` | `run`: launcher, prepared revisions, patches, routes, the watcher, the command reader and the decisions of one watch window (`window`) |
 | `agent/` | `auto-prepare`, `build-project`, component defaults and the other agent commands |
 | `parity/` | The `parity-*` clients of `Integrations/EditorParity` |
 | `util`, `paths`, `flags`, `cancel`, `jsondoc`, `sysutil` | Shared helpers, including the encodings described under "Formats" |
@@ -77,6 +78,14 @@ tests are skipped unless `UME_LIFECYCLE_SDK`, `UME_DECLARATION_SDK` or
 `UME_NETCODE_SDK` names the matching Unity executable; see
 [CONTRIBUTING.md](../CONTRIBUTING.md).
 
+The SDK tests of hot reload (`hot_reload_*_sdk`, with `UME_LIFECYCLE_SDK`)
+build the patch builder and compile the applier through the functions a
+session uses, run the builder on compiled revisions of a fixture, and run the
+C# harnesses `tests/HotReloadPatcherTests` and `tests/HotReloadRuntimeTests`
+from a staging copy. With `UME_HOT_RELOAD_HOST` naming the Player executable
+of a prepared host, the applier is also compiled against a staged copy of
+that host. None of them starts a Player.
+
 ## Known limits
 
 - Where several faults occur at once, the one reported first follows a fixed
@@ -107,10 +116,20 @@ Verified with Unity `6000.6.3f1`, one machine, one project:
   stdio session then started the Mono Player, applied a scene edit as a live
   patch, recompiled and restarted on a C# edit (the Player log showed the new
   code), and stopped cleanly.
+- Hot reload, without a Player: the SDK tests above pass. The patch builder,
+  built by the session's function, patched a compiled fixture, refused an
+  added type and restored a reverted edit through a whole attempt whose Player
+  was a stand-in; the applier compiled against a staged copy of a prepared
+  host with the bridge of this tree. The decisions of a watch window (patch,
+  fallback, refusal, recompile, mixed changes) ran with stand-ins for the
+  compiler, the importer and the Player.
 
 Not verified: a project with native models, audio, UI or Netcode through the
 whole cycle; `build-project` against a real Editor; `project_tools`; attaching
-to an interactive Editor; the GitHub Actions workflow itself.
+to an interactive Editor; the GitHub Actions workflow itself; hot reload in a
+session with a real Player. The watch loop of `run` was rearranged for hot
+reload and has not run against Unity since; the cycle and the times below are
+those of the loop before it.
 
 Measured on 2026-10-08 (AMD Ryzen 7 5700X3D, rustc 1.99.0) by a client driving
 the MCP server, median of five sessions: `session_control start` to Player

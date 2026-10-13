@@ -2,6 +2,7 @@
 //! scripts, prepares the scene, owns one Player process and, with `--watch`,
 //! turns source changes into live patches, reloads or Player restarts.
 mod addressables;
+mod commands;
 mod json;
 mod noop;
 mod patch;
@@ -9,7 +10,10 @@ mod player;
 mod prepared;
 mod routes;
 mod watch;
+mod window;
 
+#[cfg(test)]
+mod hot_tests;
 #[cfg(test)]
 mod oracle_tests;
 #[cfg(test)]
@@ -42,16 +46,18 @@ use crate::{
     cancel::{self, Context, Flag, Source},
     compiler::{self, CompileUpdate, Compiler, NilVec},
     flags::FlagSet,
+    hotreload::{self, Fallback, Outcome, PlayerCode},
     jsondoc::{self, Target},
     native::{
         JsonF64, NativeOptions, NativeProjectImporter, apply_builtin_shaders,
         stage_native_resources,
     },
-    project::{self, Session, Value, lexpath, value},
+    project::{self, Prepared, Session, Value, lexpath, value},
     sha256, sysutil,
     util::{atomic_json, canonical_destination, default_unity_editor, lock_session, random_id},
 };
 use anyhow::{Result, anyhow, bail};
+use commands::Commands;
 use serde::Serialize;
 use serde_json::value::RawValue;
 use std::{
@@ -60,6 +66,7 @@ use std::{
     thread::JoinHandle,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use window::{Compiled, Loop, Restarted, Scene, Steps, Window};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LaunchOptions {
@@ -83,6 +90,12 @@ pub struct LaunchOptions {
     pub interactive: bool,
     pub prepare_only: bool,
     pub control: bool,
+    /// C# edits are patched into the running Player; otherwise, and for an
+    /// edit that cannot be patched, the Player restarts.
+    pub hot_reload: bool,
+    pub hot_reload_fallback: Fallback,
+    /// Commands are read from standard input.
+    pub commands_stdin: bool,
     pub frames: i64,
     pub width: i64,
     pub height: i64,
@@ -217,6 +230,14 @@ impl Event {
     }
     pub fn seconds(self, key: &'static str, seconds: f64) -> Self {
         self.with(key, &JsonF64(seconds))
+    }
+    /// The line `emit` prints, without its newline.
+    #[cfg(test)]
+    pub fn line(&self) -> String {
+        jsondoc::marshal(&self.0)
+            .ok()
+            .and_then(|data| String::from_utf8(data).ok())
+            .unwrap_or_default()
     }
     pub fn emit(self) {
         crate::util::emit_event(&self.0);
@@ -361,9 +382,8 @@ fn unix_milliseconds(time: SystemTime) -> i64 {
     }
 }
 
-/// The `run` command. The caller prints the error and exits with
-/// status 1.
-pub fn run_cli(args: &[String]) -> Result<()> {
+/// The flags of `run`. Their usage text is printed for a flag error.
+pub(crate) fn run_flags() -> FlagSet {
     let mut flags = FlagSet::new("run");
     flags.string("project", ".", "source project");
     flags.string(
@@ -416,6 +436,21 @@ pub fn run_cli(args: &[String]) -> Result<()> {
         false,
         "watch sources and update the running Player",
     );
+    flags.bool(
+        "no-hot-reload",
+        false,
+        "restart the Player for every C# change instead of patching the running one",
+    );
+    flags.string(
+        "hot-reload-fallback",
+        "restart",
+        "what a C# change that cannot be patched does: restart the Player, or report it and keep the Player until a recompile command",
+    );
+    flags.bool(
+        "commands-stdin",
+        false,
+        "read JSON command lines from standard input: {\"command\":\"recompile\",\"requestId\":\"<id>\"} restarts the Player on the newest compiled code",
+    );
     flags.bool("interactive", false, "keep the Player window open");
     flags.bool(
         "prepare-only",
@@ -431,9 +466,18 @@ pub fn run_cli(args: &[String]) -> Result<()> {
     flags.int("width", 960, "window width");
     flags.int("height", 540, "window height");
     flags.int("fps", 60, "frame cap");
+    flags
+}
+
+/// The options of a `run` command line, with the checks that need no file.
+pub(crate) fn launch_options(args: &[String]) -> Result<LaunchOptions> {
+    let mut flags = run_flags();
     let (runner_args, game_args) = split_game_arguments(args);
     validate_game_arguments(&game_args)?;
     flags.parse(runner_args)?;
+    let Some(fallback) = Fallback::parse(&flags.get_string("hot-reload-fallback")) else {
+        bail!("--hot-reload-fallback must be restart or report");
+    };
     let mut opts = LaunchOptions {
         project: flags.get_string("project"),
         baseline: flags.get_string("baseline"),
@@ -453,6 +497,9 @@ pub fn run_cli(args: &[String]) -> Result<()> {
         interactive: flags.get_bool("interactive"),
         prepare_only: flags.get_bool("prepare-only"),
         control: flags.get_bool("control"),
+        hot_reload: false,
+        hot_reload_fallback: fallback,
+        commands_stdin: flags.get_bool("commands-stdin"),
         frames: flags.get_int("frames"),
         width: flags.get_int("width"),
         height: flags.get_int("height"),
@@ -472,6 +519,23 @@ pub fn run_cli(args: &[String]) -> Result<()> {
     if opts.control && (!opts.interactive || opts.prepare_only) {
         bail!("--control requires an interactive Player run");
     }
+    let no_hot_reload = flags.get_bool("no-hot-reload");
+    if !opts.watch && (opts.commands_stdin || flags.is_set("hot-reload-fallback")) {
+        bail!("--commands-stdin and --hot-reload-fallback require --watch");
+    }
+    if no_hot_reload && flags.is_set("hot-reload-fallback") {
+        bail!("--hot-reload-fallback has no effect with --no-hot-reload");
+    }
+    // Code is patched into a Player that is watched; nothing else starts one
+    // that outlives an edit.
+    opts.hot_reload = opts.watch && !no_hot_reload && !opts.prepare_only;
+    Ok(opts)
+}
+
+/// The `run` command. The caller prints the error and exits with
+/// status 1.
+pub fn run_cli(args: &[String]) -> Result<()> {
+    let mut opts = launch_options(args)?;
     let project = lexpath::abs(&opts.project)?;
     let project = sysutil::eval_symlinks(&project)?;
     opts.project = project.clone();
@@ -608,6 +672,349 @@ fn drop_addressable_scene(opts: &mut LaunchOptions, guid: &str, error: &anyhow::
     true
 }
 
+/// What `prepare` published for the decision of a window.
+struct Next {
+    prepared: Prepared,
+    routes: String,
+    /// The Player the revision and the routes are bound to.
+    player: String,
+}
+
+/// Hot reload of a session: its two programs and the code of the running
+/// Player process.
+struct Hot {
+    tools: hotreload::Tools,
+    code: PlayerCode,
+}
+
+/// A watched session between two windows: what the steps of a window work on.
+struct Live<'a> {
+    wake: &'a Arc<Wake>,
+    opts: &'a mut LaunchOptions,
+    baseline: &'a BaselineBuild,
+    watcher: &'a ProjectWatcher,
+    commands: &'a Commands,
+    /// Always the newest accepted graph.
+    compiler: Compiler,
+    session: Arc<Session>,
+    native_importer: NativeProjectImporter,
+    content_importers: ContentImporters,
+    failed_scene: String,
+    initializers: Value,
+    /// The script types of the bindings the session holds.
+    script_types: compiler::NilMap<String>,
+    addressable_sources: Vec<String>,
+    /// The revision the running Player confirmed last.
+    prepared: Prepared,
+    next: Option<Next>,
+    owned: StopOnDrop,
+    run_directory: String,
+    request: String,
+    /// The newest compile, which no Player process has loaded.
+    pending_compile: Option<CompileUpdate>,
+    /// The compile the running Player was started with.
+    active_compile: Option<CompileUpdate>,
+    hot: Option<Hot>,
+}
+impl Live<'_> {
+    fn player(&mut self) -> &mut Player {
+        self.owned.0.as_mut().expect("owned Player")
+    }
+}
+impl Steps for Live<'_> {
+    fn emit(&mut self, event: Event) {
+        event.emit();
+    }
+
+    fn invalidate(&mut self, paths: &[String]) -> Result<()> {
+        self.session.invalidate(paths);
+        apply_builtin_shaders(&self.session, &self.opts.builtin_shaders)
+    }
+
+    fn compile(&mut self, ctx: &Context, paths: Option<&[String]>) -> Result<Compiled> {
+        let affected = paths.is_none_or(|paths| self.compiler.compiler_changes(paths));
+        Ok(match self.compiler.compile(ctx, paths)? {
+            Some(update) => {
+                let seconds = update.elapsed();
+                self.pending_compile = Some(update);
+                Compiled::Updated { seconds }
+            }
+            None if affected => Compiled::Unchanged,
+            None => Compiled::Unaffected,
+        })
+    }
+
+    fn compile_pending(&self) -> bool {
+        self.pending_compile.is_some()
+    }
+
+    fn patch_code(&mut self, ctx: &Context, window: &Window) -> Result<Outcome> {
+        let Some(Hot { tools, code }) = &mut self.hot else {
+            bail!("hot reload is not set up for this session");
+        };
+        let current = match hotreload::newest_assemblies(&self.compiler) {
+            Ok(current) => current,
+            Err(error) => {
+                return Ok(Outcome::Unsupported(hotreload::Refusal {
+                    reasons: vec![hotreload::Reason::new(
+                        hotreload::CODE_BUILDER_FAILED,
+                        "",
+                        &err_text(&error),
+                    )],
+                    report: String::new(),
+                }));
+            }
+        };
+        let player = self.owned.0.as_ref().expect("owned Player");
+        let exited = player.exit_probe();
+        code.attempt(
+            ctx,
+            &hotreload::Attempt {
+                current: &current,
+                build: &|ctx, request| tools.build(ctx, request),
+                exited: &exited,
+                pid: player.pid(),
+                source_changed: window.changed_wall,
+                timeout: hotreload::ACK_TIMEOUT,
+            },
+        )
+    }
+
+    fn pid(&self) -> i32 {
+        self.owned.0.as_ref().expect("owned Player").pid()
+    }
+
+    fn revision(&self) -> String {
+        self.prepared.revision.clone()
+    }
+
+    fn bind_newest(&mut self, ctx: &Context) -> Result<()> {
+        let Some(pending) = &self.pending_compile else {
+            return Ok(());
+        };
+        self.script_types = self.compiler.script_type_names(ctx)?;
+        // A baked controller lays its behaviours out as the new
+        // assemblies declare them.
+        self.native_importer.script_assemblies = self.compiler.script_assemblies();
+        let layouts = self.compiler.behaviour_layouts(ctx, &self.script_types)?;
+        self.native_importer.behaviour_code = self.compiler.behaviour_code.clone();
+        self.native_importer.set_behaviour_layouts(ctx, layouts)?;
+        apply_compiled_bindings(&self.session, pending, &self.script_types);
+        Ok(())
+    }
+
+    fn prepare(
+        &mut self,
+        ctx: &Context,
+        window: &Window,
+        newest: bool,
+        again: bool,
+    ) -> Result<bool> {
+        let prepared = self.native_importer.prepare(ctx)?;
+        let running = self.player().path.clone();
+        let player = match (&self.pending_compile, newest) {
+            (Some(pending), true) => pending.player.clone(),
+            _ => running,
+        };
+        if !again
+            && window.paths.iter().any(|path| {
+                self.addressable_sources
+                    .iter()
+                    .any(|source| path.ends_with(source))
+            })
+        {
+            // The served keys are fixed when the session starts.
+            Event::new("addressables-changed")
+                .with("paths", &window.paths)
+                .with(
+                    "message",
+                    "Addressables groups changed; restart the session to serve the new entries",
+                )
+                .emit();
+        }
+        let mut routes = self.opts.raw_routes.clone();
+        if self.opts.has_content_routes() {
+            let mut next_baseline = self.baseline.clone();
+            next_baseline.player = player.clone();
+            // The routes of the running Player keep the bindings it was
+            // started with: it checks the assemblies a manifest names
+            // against those it loaded.
+            let compiled = match newest {
+                true => self
+                    .pending_compile
+                    .as_ref()
+                    .or(self.active_compile.as_ref()),
+                false => self.active_compile.as_ref(),
+            };
+            routes = prepare_content_routes(
+                ctx,
+                self.opts,
+                &next_baseline,
+                compiled,
+                &self.initializers,
+                &self.script_types,
+                Some(&self.native_importer),
+                &mut self.content_importers,
+                &window.paths,
+                &mut self.failed_scene,
+            )?;
+        }
+        let equal = content_routes_runtime_equal(&self.opts.raw_routes, &routes)?;
+        self.next = Some(Next {
+            prepared,
+            routes,
+            player,
+        });
+        Ok(equal)
+    }
+
+    fn restart(&mut self, ctx: &Context, window: &Window) -> Result<Restarted> {
+        let next = self.next.take().expect("prepared revision");
+        // Additive content routes are also fixed for one Player lifetime.
+        // Publish a new immutable revision after stopping our instance.
+        self.opts.raw_routes = next.routes.clone();
+        self.player().stop();
+        self.run_directory = sysutil::join(&[&self.opts.output, "runs", &random_id()]);
+        mkdir_all(&self.run_directory)?;
+        self.request = sysutil::join(&[&self.run_directory, "reload-request.json"]);
+        // One Player process loads one applier. A new process takes the
+        // current one; the one before stays usable when that cannot be built.
+        let applier = self.hot.as_ref().map(|hot| {
+            hot.tools
+                .applier(ctx)
+                .unwrap_or_else(|_| hot.code.applier().clone())
+        });
+        self.owned.0 = Some(start_player(
+            self.wake,
+            self.opts,
+            &next.player,
+            &next.prepared.manifest,
+            &self.run_directory,
+            &self.request,
+        )?);
+        self.player().wait_ready(ctx, READY_BUDGET)?;
+        let (pid, report) = (self.player().pid(), self.player().report.clone());
+        let event = Event::new("content-updated")
+            .with("paths", &window.paths)
+            .with("manifest", &next.prepared.manifest)
+            .with("contentRoutes", &next.routes)
+            .seconds(
+                "sourceToReadySeconds",
+                window.changed_at.elapsed().as_secs_f64(),
+            )
+            .with("pid", &pid)
+            .with("report", &report);
+        let compile = self.pending_compile.take();
+        if let Some(pending) = &compile {
+            self.active_compile = Some(pending.clone());
+        }
+        if let (Some(hot), Some(applier)) = (&mut self.hot, applier) {
+            // A process whose assemblies cannot be read is patched with
+            // nothing: every edit then takes the fallback.
+            let loaded =
+                hotreload::loaded_assemblies(&self.compiler, &next.player).unwrap_or_default();
+            hot.code = PlayerCode::new(&self.run_directory, applier, loaded);
+        }
+        self.prepared = next.prepared;
+        Ok(Restarted { event, compile })
+    }
+
+    fn merged_recompile(&mut self) -> Option<String> {
+        // A change the watcher holds is newer than what the new process
+        // loaded; its window answers the command.
+        if self.watcher.pending() {
+            return None;
+        }
+        self.commands.try_recv().map(|command| command.request_id)
+    }
+
+    fn scene(&mut self, ctx: &Context, window: &Window, started: Instant) -> Result<Scene> {
+        let next = self.next.take().expect("prepared revision").prepared;
+        let pid = self.pid();
+        if scene_runtime_equal(&self.prepared.manifest, &next.manifest)? {
+            return Ok(Scene::Unchanged(
+                Event::new("unchanged")
+                    .with("paths", &window.paths)
+                    .seconds("prepareSeconds", next.elapsed_seconds)
+                    .with("pid", &pid)
+                    .with("revision", &self.prepared.revision),
+            ));
+        }
+        let data = read_file(&next.manifest)?;
+        let id = random_id();
+        let mut reload = value::map([
+            ("schemaVersion", Value::Int(1)),
+            ("requestId", id.as_str().into()),
+            ("manifest", next.manifest.as_str().into()),
+            ("manifestSha256", sha256(&data).into()),
+            ("revision", next.revision.as_str().into()),
+            (
+                "requestedUtcUnixMilliseconds",
+                Value::Int(unix_milliseconds(SystemTime::now())),
+            ),
+            (
+                "sourceChangedUtcUnixMilliseconds",
+                Value::Int(unix_milliseconds(window.changed_wall)),
+            ),
+        ]);
+        if let Some((patch, patch_hash)) =
+            make_scene_patch(&self.prepared.manifest, &next.manifest)?
+        {
+            reload.insert("patch".into(), patch.into());
+            reload.insert("patchSha256".into(), patch_hash.into());
+        }
+        stage_native_resources(&next.manifest, &self.run_directory)?;
+        atomic_json(
+            &self.request,
+            &RawValue::from_string(value::compact_map(&reload)?)?,
+        )?;
+        let reply = wait_reload_ack(
+            ctx,
+            &format!("{}.ack.json", self.request),
+            &id,
+            Duration::from_secs(20),
+        );
+        let ack_json = match &reply.ack {
+            Some(ack) => value::compact_map(ack)?,
+            None => "null".into(),
+        };
+        let ack = reply.ack.unwrap_or_default();
+        let field = |key: &str| ack.get(key).unwrap_or(&Value::Null);
+        if let Some(error) = reply.error {
+            let event = Event::new("update-rejected")
+                .with("error", &err_text(&error))
+                .raw("ack", ack_json);
+            let kept = field("restartRequired").is_false()
+                && field("loadedRevision").as_str() == Some(self.prepared.revision.as_str());
+            let fatal = (!kept).then(|| {
+                wrap(
+                    "live Player revision is uncertain or requires a restart",
+                    error,
+                )
+            });
+            return Ok(Scene::Rejected { event, fatal });
+        }
+        if field("loadedRevision").as_str() != Some(next.revision.as_str())
+            || !field("restartRequired").is_false()
+            || *field("pid") != Value::Float(f64::from(pid))
+        {
+            bail!("Player acknowledged an incompatible live revision or process");
+        }
+        let event = Event::new("updated")
+            .with("paths", &window.paths)
+            .seconds("prepareSeconds", next.elapsed_seconds)
+            .seconds("elapsedSeconds", started.elapsed().as_secs_f64())
+            .seconds(
+                "sourceToAckSeconds",
+                window.changed_at.elapsed().as_secs_f64(),
+            )
+            .raw("ack", ack_json)
+            .with("cache", &next.cache);
+        self.prepared = next;
+        Ok(Scene::Updated(event))
+    }
+}
+
 fn run_session(
     ctx: &Context,
     opts: &mut LaunchOptions,
@@ -621,8 +1028,23 @@ fn run_session(
         true => Some(ProjectWatcher::new(ctx, wake, &project)?),
         false => None,
     };
+    // Read from the start, so that a sender never waits on a full pipe.
+    let commands = match opts.commands_stdin {
+        true => Commands::read(std::io::stdin(), wake),
+        false => Commands::none(),
+    };
     let staged_player = compiler::stage_host(ctx, &opts.output, &opts.editor, &baseline.player)?;
     baseline.player = staged_player.clone();
+    // The patch builder and the applier are built beside the startup compile
+    // and the Player start, which take longer than both.
+    let setup = opts.hot_reload.then(|| {
+        hotreload::Setup::start(
+            ctx,
+            &opts.editor,
+            &compiler::player_managed(&staged_player),
+            &output,
+        )
+    });
     let mut compiler = Compiler::new(
         &project,
         &opts.baseline,
@@ -634,11 +1056,11 @@ fn run_session(
     if let Some(compiled) = &initial_compile {
         baseline.player = compiled.player.clone();
     }
-    let mut script_types = compiler.script_type_names(ctx)?;
+    let script_types = compiler.script_type_names(ctx)?;
     let addressable_sources = adopt_addressables(opts);
     let assemblies = compiler::player_assembly_paths(&baseline.player, &baseline.manifest)?;
     let initializers = json::read_runtime_initializers(&baseline.manifest)?;
-    let (session, mut native_importer, mut prepared) = loop {
+    let (session, native_importer, prepared) = loop {
         let session = Arc::new(Session::new(project::Options {
             project: project.clone(),
             manifest: baseline.manifest.clone(),
@@ -717,9 +1139,9 @@ fn run_session(
             .emit();
         return Ok(());
     }
-    let mut run_directory = sysutil::join(&[&output, "runs", &random_id()]);
+    let run_directory = sysutil::join(&[&output, "runs", &random_id()]);
     mkdir_all(&run_directory)?;
-    let mut request = sysutil::join(&[&run_directory, "reload-request.json"]);
+    let request = sysutil::join(&[&run_directory, "reload-request.json"]);
     let mut owned = StopOnDrop(Some(start_player(
         wake,
         opts,
@@ -734,13 +1156,40 @@ fn run_session(
         };
     }
     player!().wait_ready(ctx, READY_BUDGET)?;
-    Event::new("ready")
+    // A session whose patch programs cannot be built is not a failed one:
+    // its C# edits restart the Player, as they do without hot reload.
+    let hot = match setup.map(hotreload::Setup::finish) {
+        Some(Ok((tools, applier))) => {
+            let loaded =
+                hotreload::loaded_assemblies(&compiler, &baseline.player).unwrap_or_default();
+            Some(Hot {
+                tools,
+                code: PlayerCode::new(&run_directory, applier, loaded),
+            })
+        }
+        Some(Err(error)) => {
+            if let Some(canceled) = ctx.error() {
+                return Err(canceled.into());
+            }
+            opts.hot_reload = false;
+            Event::new("hot-reload-unavailable")
+                .with("error", &err_text(&error))
+                .with("message", "C# changes restart the Player in this session")
+                .emit();
+            None
+        }
+        None => None,
+    };
+    let mut ready = Event::new("ready")
         .with("pid", &player!().pid())
         .with("manifest", &prepared.manifest)
         .seconds("prepareSeconds", prepared.elapsed_seconds)
         .seconds("startupSeconds", started.elapsed().as_secs_f64())
-        .with("report", &player!().report)
-        .emit();
+        .with("report", &player!().report);
+    if opts.watch {
+        ready = ready.with("hotReload", &hot.is_some());
+    }
+    ready.emit();
     let Some(watcher) = watcher else {
         loop {
             let seen = wake.seen();
@@ -757,32 +1206,69 @@ fn run_session(
             wake.wait(seen, None);
         }
     };
-    let mut pending_compile: Option<CompileUpdate> = None;
-    let mut active_compile = initial_compile;
-    let mut managed_rejected = false;
+    let mut state = Loop::new(hot.is_some(), opts.hot_reload_fallback);
+    let mut live = Live {
+        wake,
+        opts,
+        baseline,
+        watcher: &watcher,
+        commands: &commands,
+        compiler,
+        session,
+        native_importer,
+        content_importers,
+        failed_scene,
+        initializers,
+        script_types,
+        addressable_sources,
+        prepared,
+        next: None,
+        owned,
+        run_directory,
+        request,
+        pending_compile: None,
+        active_compile: initial_compile,
+        hot,
+    };
     // When several sources are ready at once the order is cancellation,
-    // Player exit, source change.
+    // Player exit, source change, command.
     loop {
         let seen = wake.seen();
         if ctx.error().is_some() {
             return Ok(());
         }
-        if let Some(result) = player!().take_done() {
-            player!().exited = true;
+        if let Some(result) = live.player().take_done() {
+            live.player().exited = true;
             if let Some(error) = result {
                 bail!(error);
             }
-            return require_player_report(&player!().report);
+            return require_player_report(&live.player().report);
         }
-        let Some(change) = watcher.try_recv() else {
-            wake.wait(seen, None);
-            continue;
+        let mut window = match watcher.try_recv() {
+            Some(change) => {
+                if let Some(error) = change.error {
+                    bail!(error);
+                }
+                Window {
+                    paths: vec![change.path],
+                    changed_at: change.at,
+                    changed_wall: change.wall,
+                    recompile: None,
+                }
+            }
+            None => match commands.try_recv() {
+                Some(command) => Window {
+                    paths: Vec::new(),
+                    changed_at: command.at,
+                    changed_wall: command.wall,
+                    recompile: Some(command.request_id),
+                },
+                None => {
+                    wake.wait(seen, None);
+                    continue;
+                }
+            },
         };
-        if let Some(error) = change.error {
-            bail!(error);
-        }
-        let mut paths = vec![change.path];
-        let (changed_at, changed_wall) = (change.at, change.wall);
         let debounce = Instant::now() + Duration::from_millis(35);
         loop {
             let seen = wake.seen();
@@ -790,7 +1276,15 @@ fn run_session(
                 if let Some(error) = next.error {
                     bail!(error);
                 }
-                paths.push(next.path);
+                window.paths.push(next.path);
+                continue;
+            }
+            // One command a window: the next one gets a restart and an
+            // answer of its own.
+            if window.recompile.is_none()
+                && let Some(command) = commands.try_recv()
+            {
+                window.recompile = Some(command.request_id);
                 continue;
             }
             if Instant::now() >= debounce {
@@ -801,230 +1295,6 @@ fn run_session(
             }
             wake.wait(seen, Some(debounce));
         }
-        let rejected = |error: &anyhow::Error| {
-            let text = err_text(error);
-            let mut event = Event::new("update-rejected")
-                .with("error", &text)
-                .with("paths", &paths);
-            // The Player keeps its old code until the project is prepared again.
-            if compiler::requires_new_graph(&text) {
-                event = event.with("preparationRequired", &true);
-            }
-            event.emit();
-        };
-        session.invalidate(&paths);
-        if let Err(error) = apply_builtin_shaders(&session, &opts.builtin_shaders) {
-            rejected(&error);
-            continue;
-        }
-        let update_started = Instant::now();
-        let compile_paths = (!managed_rejected).then_some(&paths[..]);
-        let compiled = match compiler.compile(ctx, compile_paths) {
-            Ok(compiled) => compiled,
-            Err(error) => {
-                managed_rejected = true;
-                rejected(&error);
-                continue;
-            }
-        };
-        managed_rejected = false;
-        if compiled.is_some() {
-            pending_compile = compiled;
-        }
-        if let Some(pending) = &pending_compile {
-            match compiler.script_type_names(ctx) {
-                Ok(next) => script_types = next,
-                Err(error) => {
-                    managed_rejected = true;
-                    rejected(&error);
-                    continue;
-                }
-            }
-            // A baked controller lays its behaviours out as the new
-            // assemblies declare them.
-            native_importer.script_assemblies = compiler.script_assemblies();
-            if let Err(error) = compiler
-                .behaviour_layouts(ctx, &script_types)
-                .and_then(|layouts| {
-                    native_importer.behaviour_code = compiler.behaviour_code.clone();
-                    native_importer.set_behaviour_layouts(ctx, layouts)
-                })
-            {
-                managed_rejected = true;
-                rejected(&error);
-                continue;
-            }
-            apply_compiled_bindings(&session, pending, &script_types);
-        }
-        let next = match native_importer.prepare(ctx) {
-            Ok(next) => next,
-            Err(error) => {
-                rejected(&error);
-                continue;
-            }
-        };
-        let next_player = match &pending_compile {
-            Some(pending) => pending.player.clone(),
-            None => player!().path.clone(),
-        };
-        if paths.iter().any(|path| {
-            addressable_sources
-                .iter()
-                .any(|source| path.ends_with(source))
-        }) {
-            // The served keys are fixed when the session starts.
-            Event::new("addressables-changed")
-                .with("paths", &paths)
-                .with(
-                    "message",
-                    "Addressables groups changed; restart the session to serve the new entries",
-                )
-                .emit();
-        }
-        let mut next_routes = opts.raw_routes.clone();
-        if opts.has_content_routes() {
-            let mut next_baseline = baseline.clone();
-            next_baseline.player = next_player.clone();
-            next_routes = match prepare_content_routes(
-                ctx,
-                opts,
-                &next_baseline,
-                pending_compile.as_ref().or(active_compile.as_ref()),
-                &initializers,
-                &script_types,
-                Some(&native_importer),
-                &mut content_importers,
-                &paths,
-                &mut failed_scene,
-            ) {
-                Ok(routes) => routes,
-                Err(error) => {
-                    rejected(&error);
-                    continue;
-                }
-            };
-        }
-        let routes_equal = match content_routes_runtime_equal(&opts.raw_routes, &next_routes) {
-            Ok(equal) => equal,
-            Err(error) => {
-                rejected(&error);
-                continue;
-            }
-        };
-        if pending_compile.is_some() || !routes_equal {
-            // Mono cannot unload or replace an already loaded assembly identity.
-            // Additive content routes are also fixed for one Player lifetime.
-            // Publish a new immutable revision after stopping our instance.
-            opts.raw_routes = next_routes.clone();
-            player!().stop();
-            run_directory = sysutil::join(&[&output, "runs", &random_id()]);
-            mkdir_all(&run_directory)?;
-            request = sysutil::join(&[&run_directory, "reload-request.json"]);
-            owned.0 = Some(start_player(
-                wake,
-                opts,
-                &next_player,
-                &next.manifest,
-                &run_directory,
-                &request,
-            )?);
-            player!().wait_ready(ctx, READY_BUDGET)?;
-            let mut event = Event::new("content-updated")
-                .with("paths", &paths)
-                .with("manifest", &next.manifest)
-                .with("contentRoutes", &next_routes)
-                .seconds("sourceToReadySeconds", changed_at.elapsed().as_secs_f64())
-                .with("pid", &player!().pid())
-                .with("report", &player!().report);
-            if let Some(pending) = pending_compile.take() {
-                event = event
-                    .with("event", "code-updated")
-                    .with("sourceHashes", &pending.source_hashes)
-                    .with("compiledAssemblies", &pending.compiled_assemblies)
-                    .with("declarationChanged", &pending.declaration_changed)
-                    .with("compileSeconds", &pending.elapsed_seconds);
-                active_compile = Some(pending);
-            }
-            event.emit();
-            prepared = next;
-            continue;
-        }
-        if scene_runtime_equal(&prepared.manifest, &next.manifest)? {
-            Event::new("unchanged")
-                .with("paths", &paths)
-                .seconds("prepareSeconds", next.elapsed_seconds)
-                .with("pid", &player!().pid())
-                .with("revision", &prepared.revision)
-                .emit();
-            continue;
-        }
-        let data = read_file(&next.manifest)?;
-        let id = random_id();
-        let mut reload = value::map([
-            ("schemaVersion", Value::Int(1)),
-            ("requestId", id.as_str().into()),
-            ("manifest", next.manifest.as_str().into()),
-            ("manifestSha256", sha256(&data).into()),
-            ("revision", next.revision.as_str().into()),
-            (
-                "requestedUtcUnixMilliseconds",
-                Value::Int(unix_milliseconds(SystemTime::now())),
-            ),
-            (
-                "sourceChangedUtcUnixMilliseconds",
-                Value::Int(unix_milliseconds(changed_wall)),
-            ),
-        ]);
-        if let Some((patch, patch_hash)) = make_scene_patch(&prepared.manifest, &next.manifest)? {
-            reload.insert("patch".into(), patch.into());
-            reload.insert("patchSha256".into(), patch_hash.into());
-        }
-        stage_native_resources(&next.manifest, &run_directory)?;
-        atomic_json(
-            &request,
-            &RawValue::from_string(value::compact_map(&reload)?)?,
-        )?;
-        let reply = wait_reload_ack(
-            ctx,
-            &format!("{request}.ack.json"),
-            &id,
-            Duration::from_secs(20),
-        );
-        let ack_json = match &reply.ack {
-            Some(ack) => value::compact_map(ack)?,
-            None => "null".into(),
-        };
-        let ack = reply.ack.unwrap_or_default();
-        let field = |key: &str| ack.get(key).unwrap_or(&Value::Null);
-        if let Some(error) = reply.error {
-            Event::new("update-rejected")
-                .with("error", &err_text(&error))
-                .raw("ack", ack_json)
-                .emit();
-            if field("restartRequired").is_false()
-                && field("loadedRevision").as_str() == Some(prepared.revision.as_str())
-            {
-                continue;
-            }
-            return Err(wrap(
-                "live Player revision is uncertain or requires a restart",
-                error,
-            ));
-        }
-        if field("loadedRevision").as_str() != Some(next.revision.as_str())
-            || !field("restartRequired").is_false()
-            || *field("pid") != Value::Float(f64::from(player!().pid()))
-        {
-            bail!("Player acknowledged an incompatible live revision or process");
-        }
-        Event::new("updated")
-            .with("paths", &paths)
-            .seconds("prepareSeconds", next.elapsed_seconds)
-            .seconds("elapsedSeconds", update_started.elapsed().as_secs_f64())
-            .seconds("sourceToAckSeconds", changed_at.elapsed().as_secs_f64())
-            .raw("ack", ack_json)
-            .with("cache", &next.cache)
-            .emit();
-        prepared = next;
+        state.window(ctx, &mut live, &window)?;
     }
 }
