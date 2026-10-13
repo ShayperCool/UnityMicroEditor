@@ -58,7 +58,7 @@ internal static class Program
     private static int passed, failed, requests, fillers;
     private static MethodInfo[] fill;
     private static long generation, applied;
-    private static Patch patch1, patch2, patchCore, patchDenied, patchStale, patchBroken, patchShapes, patchIslands, patchLazy, patchEager, patchLocal, patchBulk, patchMenu1, patchMenu2;
+    private static Patch patch1, patch2, patchCore, patchDenied, patchStale, patchBroken, patchShapes, patchIslands, patchLazy, patchEager, patchLocal, patchBulk, patchMenu1, patchMenu2, patchHelpers;
     // Methods whose first eight bytes every check of "nothing was written" compares, and those bytes as the JIT compiled them.
     private static readonly List<MethodBase> watched = new List<MethodBase>();
     private static readonly List<long> compiled = new List<long>();
@@ -88,6 +88,7 @@ internal static class Program
         patchDenied = Load("Game.HotReload.Denied"); patchStale = Load("Game.HotReload.Stale"); patchBroken = Load("Game.HotReload.Broken"); patchShapes = Load("Game.HotReload.Shapes");
         patchIslands = Load("Game.HotReload.Islands"); patchLazy = Load("Game.HotReload.Lazy"); patchEager = Load("Game.HotReload.Eager"); patchLocal = Load("Game.HotReload.Local");
         patchBulk = Load("Game.HotReload.Bulk"); patchMenu1 = Load("Game.HotReload.Menu1"); patchMenu2 = Load("Game.HotReload.Menu2");
+        patchHelpers = Load("Game.HotReload.Helpers");
         // The bridge reads the applier from bytes on the first valid request. No file of its name is on the search path.
         applierPath = Path.Combine(output, "applier", "UnityMicroEditor.HotReload.dll");
         applierHash = Hash(applierPath);
@@ -131,7 +132,7 @@ internal static class Program
         Animal pet = new Dog(), young = new Puppy();
         IGreeter polite = new Formal(), friendly = new Greeter();
         Ticker first = new Ticker(), second = new Ticker(), gone = new Ticker();
-        UnityEngine.Object.Destroy(gone);
+        UnityEngine.Object.DestroyImmediate(gone);
         int created = Player.Created;
 
         // Some originals run before they are patched, others (Describe, Stats, Spread) are first called afterwards.
@@ -380,35 +381,76 @@ internal static class Program
     {
         Console.WriteLine("callbacks follow a change in what only the patch defines");
         MethodBase build = Method(typeof(Menu), "Build"), rebuild = Method(typeof(Menu), "Rebuild"), keep = Method(typeof(Menu), "Keep"),
-            count = Method(typeof(Menu), "Count"), enable = Method(typeof(Menu), "__UnityPlay_OnEnable");
-        Menu shown = new Menu(), closed = new Menu();
+            count = Method(typeof(Menu), "Count"), enable = Method(typeof(Menu), "__UnityPlay_OnEnable"), steady = Method(typeof(Menu), "Steady"),
+            walk = Method(typeof(Menu), "Walk"), stroll = Method(typeof(Menu), "Stroll"), wait = Method(typeof(Menu), "Wait");
+        Menu shown = new Menu(), closed = new Menu(), fading = new Menu();
         Func<Patch, string, List<object>> menus = (patch, space) => new List<object> { Target("Game", patch,
             Detour(build, patch, space + ".Menus::Build"), Detour(rebuild, patch, space + ".Menus::Rebuild"), Detour(keep, patch, space + ".Menus::Keep"),
-            Detour(count, patch, space + ".Menus::Count"), Detour(enable, patch, space + ".Menus::Enable")) };
+            Detour(count, patch, space + ".Menus::Count"), Detour(enable, patch, space + ".Menus::Enable"), Detour(steady, patch, space + ".Menus::Steady"),
+            Detour(walk, patch, space + ".Menus::Walk"), Detour(stroll, patch, space + ".Menus::Stroll"), Detour(wait, patch, space + ".Menus::Wait")) };
 
+        int simple = Reloads.Simple;
         Dictionary<string, object> ack = Send(++generation, menus(patchMenu1, "Patch.M1"));
-        Applied(ack, generation, 5, 0, "the first of two generations with the same members");
+        Applied(ack, generation, 9, 0, "the first of two generations with the same members");
         Equal(shown.Shown + "/" + Menu.Rebuilt + "/" + Menu.Kept + "/" + Menu.Counted, "click1/10/1/1", "a first redirect runs every local callback with its new body");
+        Equal(Menu.Steadied + "/" + Menu.Walked + "/" + Menu.Strolled + "/" + Menu.Waited, "7/3/1/10", "also those whose helpers call themselves, call each other or are async");
         Equal(shown.Enabled + "/" + closed.Enabled, "enabled1/enabled1", "a local attribute on a lifecycle entry runs the helper that holds its body, on every live object");
         Equal(shown.Refreshed + "/" + closed.Refreshed, "1/1", "the instance callback ran on both objects");
 
-        // The first object's callback destroys the second one while the pass still lists it.
+        // The same generation again, as a comment in the source makes it: nothing the Player runs
+        // changed, so no callback of the game runs, neither a local one nor one for every patch.
+        ack = Send(++generation, menus(patchMenu1, "Patch.M1"));
+        Applied(ack, generation, 9, 0, "a generation with the bodies of the one before");
+        Equal(Json.Integer(ack, "callbacksInvoked") + "/" + (Reloads.Simple - simple) + "/" + shown.Refreshed + "/" + Menu.Kept, "0/1/1/1", "a generation that changes no body runs no callback");
+
+        // The first object's callback destroys the second one at once while the pass still lists it,
+        // and the third one for the end of the frame, until which it exists.
         shown.Closes = closed;
+        shown.Fades = fading;
         shown.Enabled = string.Empty;
         ack = Send(++generation, menus(patchMenu2, "Patch.M2"));
-        Applied(ack, generation, 5, 0, "the second generation retargets the five methods");
+        Applied(ack, generation, 9, 0, "the next generation retargets the nine methods");
         Equal(shown.Shown + "/" + Menu.Rebuilt + "/" + Menu.Counted, "click2/110/6", "a changed lambda, a changed helper and a changed iterator are changes of the method that names them");
-        Equal(Menu.Kept + "/" + shown.Enabled, "1/", "a body whose lambda and helper are the same code did not change");
+        Equal(Menu.Walked + "/" + Menu.Strolled + "/" + Menu.Waited, "33/11/110", "so are a changed method that calls itself, for each of the two that name it, and a changed async method");
+        Equal(Menu.Kept + "/" + Menu.Steadied + "/" + shown.Enabled, "1/7/", "a body whose lambda and helpers are the same code did not change, also when they call themselves and each other");
         var listed = new List<string>();
         foreach (MethodPatch patch in Reloads.Last) listed.Add(patch.originalMethod.Name);
         listed.Sort(StringComparer.Ordinal);
-        Equal(string.Join(",", listed), "Build,Count,Rebuild", "the patch list names exactly the three changed methods");
-        Equal(shown.Refreshed + "/" + closed.Refreshed + "/" + Json.Integer(ack, "callbackErrors"), "2/1/3", "an object that a callback of the pass destroyed is not called by the rest of it");
+        Equal(string.Join(",", listed), "Build,Count,Rebuild,Stroll,Wait,Walk", "the patch list names exactly the six changed methods");
+        Equal(shown.Refreshed + "/" + closed.Refreshed + "/" + fading.Refreshed, "2/1/2", "an object that a callback of the pass destroyed at once is not called by the rest of it; one that lives to the end of the frame is");
+        UnityEngine.Object.EndOfFrame();
+        shown.Closes = shown.Fades = null;
 
         ack = Send(++generation, new List<object>());
-        Applied(ack, generation, 0, 5, "an empty descriptor restores the five methods");
+        Applied(ack, generation, 0, 9, "an empty descriptor restores the nine methods");
         Equal(shown.Shown + "/" + Menu.Rebuilt + "/" + Menu.Kept + "/" + Menu.Counted + "/" + shown.Enabled, "click0/111/2/7/enabled0", "the local callbacks of a restore ran the original bodies");
-        UnityEngine.Object.Destroy(shown);
+        Equal(Menu.Steadied + "/" + Menu.Walked + "/" + Menu.Strolled + "/" + Menu.Waited, "8/34/12/111", "all of them");
+        UnityEngine.Object.DestroyImmediate(shown);
+
+        Console.WriteLine("which method is the helper of a lifecycle callback");
+        var crowd = new Crowded();
+        Panel panel = new Panel(), quiet = new QuietPanel();
+        MethodBase helper = Method(typeof(Crowded), "__UnityPlay_OnEnable_"), own = Method(typeof(Crowded), "__UnityPlay_OnEnable"),
+            later = Method(typeof(Crowded), "__UnityPlay_OnEnableLater"), fooHelper = Method(typeof(Crowded), "__UnityPlay_Foo"),
+            panelHelper = Method(typeof(Panel), "__UnityPlay_OnEnable");
+        ack = Send(++generation, new List<object> { Target("Game", patchHelpers,
+            Detour(helper, patchHelpers, "Patch.Helpers.Crowds::Helper"), Detour(panelHelper, patchHelpers, "Patch.Helpers.Crowds::PanelEnable")) });
+        Applied(ack, generation, 2, 0, "the helpers of two lifecycle callbacks");
+        Equal(crowd.Enabled + "/" + crowd.Own + "/" + crowd.Later, "crowded1/0/0", "the helper is the name the rewrite made free with underscores, not a shorter or a longer one the game declares");
+        Equal(panel.Seen + "/" + quiet.Seen, "panel1;/quiet;", "a virtual callback runs as the engine calls it: an object whose class overrides it runs its own body");
+
+        crowd.Enabled = string.Empty;
+        ack = Send(++generation, new List<object> { Target("Game", patchHelpers,
+            Detour(helper, patchHelpers, "Patch.Helpers.Crowds::Helper"), Detour(panelHelper, patchHelpers, "Patch.Helpers.Crowds::PanelEnable"),
+            Detour(own, patchHelpers, "Patch.Helpers.Crowds::Own"), Detour(later, patchHelpers, "Patch.Helpers.Crowds::Later"),
+            Detour(fooHelper, patchHelpers, "Patch.Helpers.Crowds::FooHelper")) });
+        Applied(ack, generation, 5, 0, "three methods that only look like helpers");
+        Equal(crowd.Enabled + "/" + crowd.Own + "/" + crowd.Later + "/" + crowd.Fooed, "/0/0/0", "a method named like a helper is no callback, and a method that is no lifecycle callback has no helper");
+        Applied(Send(++generation, new List<object>()), generation, 0, 5, "restored");
+        Equal(crowd.Enabled + "/" + crowd.Fooed, "crowded0/0", "the restore of a helper runs its callback with the original body");
+        UnityEngine.Object.DestroyImmediate(crowd);
+        UnityEngine.Object.DestroyImmediate(panel);
+        UnityEngine.Object.DestroyImmediate(quiet);
     }
 
     // ------------------------------------------------------------------ first redirects

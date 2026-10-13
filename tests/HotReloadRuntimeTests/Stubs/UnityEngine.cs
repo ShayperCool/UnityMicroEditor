@@ -15,10 +15,24 @@ namespace UnityEngine
 
         public Object() { lock (live) live.Add(this); }
 
-        public static void Destroy(Object value)
+        private static readonly List<Object> doomed = new List<Object>();
+
+        // As in the engine: the object exists until the end of the frame, and compares
+        // equal to null only then. DestroyImmediate removes it at once.
+        public static void Destroy(Object value) { lock (live) doomed.Add(value); }
+
+        public static void DestroyImmediate(Object value)
         {
             value.destroyed = true;
             lock (live) live.Remove(value);
+        }
+
+        /// What the engine does between two frames with the objects passed to Destroy.
+        public static void EndOfFrame()
+        {
+            Object[] due;
+            lock (live) { due = doomed.ToArray(); doomed.Clear(); }
+            foreach (Object value in due) DestroyImmediate(value);
         }
 
         public static Object[] FindObjectsByType(Type type, FindObjectsInactive findObjectsInactive)

@@ -478,7 +478,11 @@ namespace UnityMicroEditor.HotReload
             try
             {
                 // A method that an earlier generation already replaced with this very body did not change now.
-                changes.RemoveAll(change => change.Previous != change.Original && change.Current != change.Original && Bodies.Same(change.Previous, change.Current));
+                var pass = new Bodies.Pass();
+                changes.RemoveAll(change => change.Previous != change.Original && change.Current != change.Original && Bodies.Same(change.Previous, change.Current, pass));
+                // A generation that changes nothing the Player runs (a comment, a blank line) is
+                // no event for the game: its callbacks are for code that changed.
+                if (changes.Count == 0) { result.Invoked = 0; result.CallbackErrors = 0; return; }
                 var game = new List<Assembly>();
                 foreach (object name in Json.Array(descriptor, "gameAssemblies"))
                 {

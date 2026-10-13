@@ -15,7 +15,7 @@ namespace UnityMicroEditor.HotReload
     // whatever cannot be decided counts as changed.
     internal static class Bodies
     {
-        /// <summary>The two patch assemblies of one comparison.</summary>
+        /// <summary>The two patch assemblies of the comparisons of one applied generation.</summary>
         private sealed class Pair
         {
             internal Assembly Left, Right;
@@ -26,15 +26,40 @@ namespace UnityMicroEditor.HotReload
             // A second visit adds nothing, and it ends the recursion of code that names itself.
             internal readonly HashSet<MethodBase> Methods = new HashSet<MethodBase>();
             internal readonly HashSet<Type> Machines = new HashSet<Type>();
+            // Those of earlier comparisons that came out the same. Many redirected methods can
+            // name one method of the patch, and it is compared once for all of them.
+            internal readonly HashSet<MethodBase> SameMethods = new HashSet<MethodBase>();
+            internal readonly HashSet<Type> SameMachines = new HashSet<Type>();
+        }
+
+        /// <summary>What the comparisons of one applied generation have established so far.</summary>
+        internal sealed class Pass
+        {
+            internal readonly List<object> Pairs = new List<object>();
         }
 
         private const BindingFlags Declared = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance | BindingFlags.DeclaredOnly;
 
         private static Dictionary<short, OperandType> operands;
 
-        internal static bool Same(MethodBase left, MethodBase right)
+        internal static bool Same(MethodBase left, MethodBase right, Pass pass)
         {
-            try { return Compare(left, right, new Pair { Left = left.Module.Assembly, Right = right.Module.Assembly }); }
+            try
+            {
+                Assembly one = left.Module.Assembly, other = right.Module.Assembly;
+                Pair pair = null;
+                foreach (object known in pass.Pairs)
+                    if (((Pair)known).Left == one && ((Pair)known).Right == other) pair = (Pair)known;
+                if (pair == null) pass.Pairs.Add(pair = new Pair { Left = one, Right = other });
+                pair.Methods.Clear();
+                pair.Machines.Clear();
+                if (!Compare(left, right, pair)) return false;
+                // Whatever this comparison visited is the same in both patches: one difference
+                // anywhere would have ended it.
+                pair.SameMethods.UnionWith(pair.Methods);
+                pair.SameMachines.UnionWith(pair.Machines);
+                return true;
+            }
             catch (Exception) { return false; }
         }
 
@@ -110,7 +135,8 @@ namespace UnityMicroEditor.HotReload
             if (method is MethodInfo info && !SameType(info.ReturnType, ((MethodInfo)match).ReturnType, pair)) return false;
             // A method of the game is redirected on its own and listed on its own. One that only
             // the patches define runs as part of the bodies that name it.
-            if (method.Module.Assembly != pair.Left || match.Module.Assembly != pair.Right || !pair.Methods.Add(method)) return true;
+            if (method.Module.Assembly != pair.Left || match.Module.Assembly != pair.Right) return true;
+            if (pair.SameMethods.Contains(method) || !pair.Methods.Add(method)) return true;
             return Compare(method, match, pair);
         }
 
@@ -119,7 +145,7 @@ namespace UnityMicroEditor.HotReload
         private static bool SameMachine(Type left, Type right, Pair pair)
         {
             if (!typeof(System.Collections.IEnumerator).IsAssignableFrom(left) && !typeof(System.Runtime.CompilerServices.IAsyncStateMachine).IsAssignableFrom(left)) return true;
-            if (!pair.Machines.Add(left)) return true;
+            if (pair.SameMachines.Contains(left) || !pair.Machines.Add(left)) return true;
             MethodInfo[] methods = left.GetMethods(Declared), others = right.GetMethods(Declared);
             if (methods.Length != others.Length) return false;
             for (int index = 0; index < methods.Length; index++)
