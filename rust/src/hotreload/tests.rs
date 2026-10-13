@@ -411,6 +411,8 @@ enum Reply {
     },
     /// Success with one redirect less than the descriptor lists.
     ApplyShort,
+    /// Success with one redirect more than the descriptor lists.
+    ApplyLong,
     /// `success: false`, nothing written.
     Refuse(Vec<(&'static str, &'static str, &'static str, &'static str)>),
     /// The bridge's own answer: no list of failures.
@@ -509,6 +511,11 @@ impl FakePlayer {
                             ack["success"] = true.into();
                             ack["appliedGeneration"] = generation.into();
                             ack["detoursApplied"] = (redirects - 1).into();
+                        }
+                        Reply::ApplyLong => {
+                            ack["success"] = true.into();
+                            ack["appliedGeneration"] = generation.into();
+                            ack["detoursApplied"] = (redirects + 1).into();
                         }
                         Reply::Refuse(failures) => {
                             ack["error"] = failures[0].3.into();
@@ -1217,6 +1224,11 @@ fn an_uncertain_player_needs_a_restart() {
             Reply::ApplyShort,
             "the Player acknowledged 1 of the 2 redirects of code generation 1",
         ),
+        // Or more than it was sent: neither number is the patch.
+        (
+            Reply::ApplyLong,
+            "the Player acknowledged 3 of the 2 redirects of code generation 1",
+        ),
     ] {
         let mut rig = Rig::new();
         let player = FakePlayer::start(&rig.run, vec![reply]);
@@ -1474,7 +1486,7 @@ fn a_builder_that_does_not_end_is_stopped() {
     let (_guard, root) = temp();
     let stuck = write(
         &sysutil::join(&[&root, "dotnet"]),
-        b"#!/bin/sh\necho started\nexec sleep 600\n",
+        b"#!/bin/sh\necho started\nexec sleep 30\n",
     );
     fs::set_permissions(&stuck, fs::Permissions::from_mode(0o700)).unwrap();
     let tools = Tools {
@@ -1499,6 +1511,21 @@ fn a_builder_that_does_not_end_is_stopped() {
         (Duration::from_secs(1)..Duration::from_secs(20)).contains(&waited),
         "{waited:?}"
     );
+    // The call the runner makes applies the limit of the session's tools:
+    // without one this builder would be waited for until it ends by itself.
+    let limited = Tools {
+        limit: Some(Duration::from_secs(1)),
+        sdk: tools.sdk.clone(),
+        patcher: tools.patcher.clone(),
+        ..Tools::default()
+    };
+    let started = Instant::now();
+    let error = limited.build(&Context::background(), &request).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "the patch builder did not finish within 1s and was stopped"
+    );
+    assert!(started.elapsed() < Duration::from_secs(20));
     // The end of the session is not a deadline of the builder.
     let ctx = Context::background().with_cancel();
     ctx.cancel();
@@ -1523,7 +1550,9 @@ fn a_builder_that_does_not_end_is_stopped() {
         tools.build(&Context::background(), &request).unwrap(),
         b"{\"verdict\":\"unchanged\"}"
     );
-    assert!(BUILD_TIMEOUT >= Duration::from_secs(30));
+    // The documented limit of a session.
+    assert_eq!(BUILD_TIMEOUT, Duration::from_secs(60));
+    assert!(tools.limit.is_none());
 }
 
 // SDK tests
@@ -1633,6 +1662,7 @@ fn hot_reload_patch_builder_sdk() {
         managed: String::new(),
         output: root.clone(),
         patcher,
+        limit: None,
     };
     // The command line of the contract, on a request written by hand.
     let output = sysutil::join(&[&root, "direct"]);
@@ -1769,6 +1799,28 @@ fn hot_reload_patch_builder_sdk() {
     assert_eq!(player.seen().len(), 2);
 }
 
+/// The newest file named `name` below `root`: the lifecycle helper's copy of
+/// a source for the last compile.
+fn newest_copy(root: &str, name: &str) -> String {
+    let mut found: Option<(SystemTime, String)> = None;
+    let mut pending = vec![root.to_string()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).unwrap().flatten() {
+            let path = entry.path().to_string_lossy().into_owned();
+            let info = entry.metadata().unwrap();
+            if info.is_dir() {
+                pending.push(path);
+            } else if sysutil::base(&path) == name && path.contains("/Lifecycle/") {
+                let modified = info.modified().unwrap();
+                if found.as_ref().is_none_or(|(newest, _)| modified > *newest) {
+                    found = Some((modified, path));
+                }
+            }
+        }
+    }
+    found.expect("a rewritten copy of the source").1
+}
+
 /// The whole way of an edit without a Player: the real compiler pipeline
 /// (lifecycle helper, Roslyn, a Player directory per revision) on a
 /// synthetic project, the assemblies as the runner reads them from it, the
@@ -1808,6 +1860,7 @@ fn hot_reload_compiled_revisions_sdk() {
             "-target:library",
             "-nostdlib+",
             "-debug:portable",
+            "-unsafe+",
         ]
         .map(String::from)
         .to_vec();
@@ -1850,10 +1903,13 @@ public static class RawLifecycle {
     );
     // `Awake` has no access modifier and follows a directive, as scripts
     // with regions have it: the helper made of it must not take the
-    // directive along.
+    // directive along. The classes below it have no `Awake`, so the rewrite
+    // appends one, in front of a closing brace that follows a directive;
+    // one of their callbacks needs `unsafe` for its body.
+    const TAILS: &str = "public class ProbeRegions : MonoBehaviour\n{\n    #region Fields\n    public int level;\n    #endregion\n    #region Methods\n    unsafe void OnEnable() { int value = 2; int* pointer = &value; level = *pointer; }\n    void Update() { level++; }\n    #endregion\n}\npublic class ProbeEditor : MonoBehaviour\n{\n    public int checks;\n#if UNITY_EDITOR\n    void OnValidate() { checks++; }\n#endif\n}\npublic class ProbeEmpty : MonoBehaviour\n{\n    #region Nothing yet\n    #endregion\n}\n";
     let probe = |awake: u32, update: u32, tail: &str| {
         format!(
-            "using UnityEngine;\npublic class Probe : MonoBehaviour\n{{\n    public int seed = 3;\n    private int frames;\n    #region Unity messages\n    void Awake() {{ seed += {awake}; }}\n    #endregion\n    private void Update() {{ frames += {update}; }}\n    public int Frames() {{ return frames; }}\n}}\n{tail}"
+            "using UnityEngine;\npublic class Probe : MonoBehaviour\n{{\n    public int seed = 3;\n    private int frames;\n    #region Unity messages\n    void Awake() {{ seed += {awake}; }}\n    #endregion\n    private void Update() {{ frames += {update}; }}\n    public int Frames() {{ return frames; }}\n}}\n{TAILS}{tail}"
         )
     };
     let source = file("Assets/Probe.cs", &probe(1, 1, ""));
@@ -1872,6 +1928,10 @@ public static class RawLifecycle {
                 name: "Assembly-CSharp".into(),
                 sources: NilVec::from([source.clone()]),
                 defines: NilVec::from(["UNITY_6000_6".to_string()]),
+                config: crate::compiler::AssemblyOptions {
+                    allow_unsafe: true,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             path: exported.clone(),
@@ -1923,6 +1983,7 @@ public static class RawLifecycle {
         editor: editor.clone(),
         managed: managed.clone(),
         output: output.clone(),
+        limit: None,
     };
     let run = sysutil::join(&[&output, "runs/r1"]);
     fs::create_dir_all(&run).unwrap();
@@ -2017,6 +2078,18 @@ public static class RawLifecycle {
         patch.members,
         ["Probe::Update()", "Probe::__UnityPlay_Awake()"]
     );
+    // The compiler read a copy of the source in which the lifecycle helper
+    // names the lines of the source: the copy starts with the file, and the
+    // body of the callback, which moved behind a wrapper, is on its line 7.
+    let copy = newest_copy(&sysutil::join(&[&output, "compiler"]), "Probe.cs");
+    let rewritten = fs::read_to_string(&copy).unwrap();
+    assert!(
+        rewritten.starts_with(&format!("#line 1 \"{source}\"\n")),
+        "{copy}: {}",
+        &rewritten[..rewritten.len().min(200)]
+    );
+    let resumed = format!("\n#line 7 \"{source}\"\n{{ seed += 2; }}");
+    assert!(rewritten.contains(&resumed), "{copy}:\n{rewritten}");
     let (request, descriptor) = player.seen()[0].clone();
     assert_eq!(request["generation"], 1);
     assert_eq!(descriptor["gameAssemblies"], json!(["Assembly-CSharp"]));
@@ -2090,18 +2163,18 @@ public static class RawLifecycle {
     assert_eq!(player.seen().len(), 3);
     assert_eq!(code.applied_generation(), 4);
 
-    // A field made public, as one does to have Unity serialize it. No body
-    // differs and nothing is sent, but the Player keeps the old
-    // accessibility: the builder's note must come back with the outcome.
-    let public = probe(1, 1, "").replace("private int frames;", "public int frames;");
-    assert!(public.contains("public int frames;"));
+    // A method made public. No body differs and nothing is sent, but the
+    // Player keeps the old accessibility for reflection: the builder's note
+    // must come back with the outcome.
+    let public = probe(1, 1, "").replace("private void Update()", "public void Update()");
+    assert!(public.contains("public void Update()"));
     match edit(&mut compiler, &mut code, public) {
         Outcome::Unchanged(unchanged) => {
             assert_eq!(unchanged.notes.len(), 1, "{unchanged:?}");
             let note = &unchanged.notes[0];
             assert_eq!(
                 (note.code.as_str(), note.member.as_str()),
-                ("accessibility_changed", "Probe::frames")
+                ("accessibility_changed", "Probe::Update()")
             );
             assert!(note.message.contains("until a full recompile"), "{note:?}");
             let report = read_json(&unchanged.report);
@@ -2112,6 +2185,28 @@ public static class RawLifecycle {
     }
     assert_eq!(player.seen().len(), 3);
     assert!(!code.refused() && !code.redirected());
+
+    // A field made public, as one does to have Unity serialize it. No body
+    // differs, and nothing of the edit is in the Player before it restarts:
+    // a scene value for the field is not read. That is a refusal, as
+    // `[SerializeField]` on the field is one.
+    let exposed = probe(1, 1, "").replace("private int frames;", "public int frames;");
+    assert!(exposed.contains("public int frames;"));
+    match edit(&mut compiler, &mut code, exposed) {
+        Outcome::Unsupported(refusal) => {
+            assert_eq!(refusal.reasons.len(), 1, "{refusal:?}");
+            assert_eq!(
+                (
+                    refusal.reasons[0].code.as_str(),
+                    refusal.reasons[0].member.as_str()
+                ),
+                ("serialization_changed", "Probe::frames")
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(player.seen().len(), 3);
+    assert!(code.refused() && !code.redirected());
 }
 
 /// A `Managed` directory as a staged host has it, as far as the applier

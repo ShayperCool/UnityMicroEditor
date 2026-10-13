@@ -9,7 +9,10 @@ use crate::{
     hotreload::{Failure, Fallback, Outcome, Patched, Reason, Refusal, Unchanged, bounded},
 };
 use anyhow::Result;
-use std::time::{Instant, SystemTime};
+use std::{
+    collections::BTreeSet,
+    time::{Instant, SystemTime},
+};
 
 /// Lists of an event hold this many entries; the report file has all.
 pub(crate) const LIST_MAXIMUM: usize = 16;
@@ -33,7 +36,7 @@ pub(crate) enum Compiled {
     /// The sources were checked and nothing had to be rebuilt.
     Unchanged,
     /// A new compile, which no Player process has loaded yet.
-    Updated { seconds: f64 },
+    Updated,
 }
 
 /// A new Player process that became ready.
@@ -90,9 +93,6 @@ pub(crate) trait Steps {
     fn merged_recompile(&mut self) -> Option<String>;
     /// Brings the running Player to the revision `prepare` published.
     fn scene(&mut self, ctx: &Context, window: &Window, started: Instant) -> Result<Scene>;
-    /// Whether source changes arrived that this window did not take: the
-    /// next window handles them.
-    fn changes_pending(&self) -> bool;
 }
 
 /// Why the next decision restarts the Player on the newest compile.
@@ -124,6 +124,11 @@ pub(crate) struct Loop {
     /// not take over all of it: the builder's notes, until the next compile
     /// or restart.
     noted: Option<Unchanged>,
+    /// The notes of the code this Player process runs, as code, member and
+    /// revision: those of its last patch, or of the last compile that
+    /// needed none. A note of a later outcome that is not among them is
+    /// about what that outcome changed.
+    told: BTreeSet<(String, String, String)>,
 }
 
 /// What a window says when its work is done.
@@ -135,6 +140,9 @@ struct Tail {
     patched: bool,
     /// The refusal that stands is the last of them.
     refusal: bool,
+    /// The notes that the compile of this window brought and the outcome
+    /// before did not have, when it needed no patch.
+    fresh: Vec<Reason>,
 }
 
 fn capped<T: Clone>(list: &[T]) -> Vec<T> {
@@ -146,10 +154,12 @@ fn listed(reasons: &[Reason]) -> Vec<Reason> {
     reasons
         .iter()
         .take(LIST_MAXIMUM)
-        .map(|reason| Reason {
-            code: cut(&reason.code),
-            member: cut(&reason.member),
-            message: cut(&reason.message),
+        .map(|reason| {
+            Reason::new(
+                &cut(&reason.code),
+                &cut(&reason.member),
+                &cut(&reason.message),
+            )
         })
         .collect()
 }
@@ -186,14 +196,25 @@ pub(crate) fn refusal_event(refusal: &Refusal, paths: &[String]) -> Event {
         .with("report", &refusal.report)
 }
 
+/// `fresh`: the notes of the patch that the code before it did not have.
+/// They lead `notes`, so that the limit of a list cuts what stood before.
 pub(crate) fn patched_event(
     patch: &Patched,
+    fresh: &[Reason],
     window: &Window,
     pid: i32,
     revision: &str,
     compile_seconds: f64,
     patch_seconds: f64,
 ) -> Event {
+    let mut notes = fresh.to_vec();
+    notes.extend(
+        patch
+            .notes
+            .iter()
+            .filter(|note| !fresh.contains(note))
+            .cloned(),
+    );
     Event::new("code-patched")
         .with("paths", &window.paths)
         .with("pid", &pid)
@@ -205,8 +226,10 @@ pub(crate) fn patched_event(
         .with("addedFields", &patch.added_fields)
         .with("restoredMethods", &patch.restored_methods)
         .with("members", &capped(&patch.members))
-        .with("notes", &listed(&patch.notes))
+        .with("notes", &listed(&notes))
         .with("notesCount", &patch.notes.len())
+        .with("newNotes", &listed(fresh))
+        .with("newNotesCount", &fresh.len())
         .seconds("compileSeconds", compile_seconds)
         .seconds("patchSeconds", patch_seconds)
         .seconds(
@@ -214,6 +237,71 @@ pub(crate) fn patched_event(
             window.changed_at.elapsed().as_secs_f64(),
         )
         .with("report", &patch.report)
+}
+
+/// `unchanged`: nothing the runtime reads changed with this window. It names
+/// the Player and the scene revision that stand.
+pub(crate) fn unchanged_event(
+    window: &Window,
+    prepare_seconds: f64,
+    pid: i32,
+    revision: &str,
+) -> Event {
+    Event::new("unchanged")
+        .with("paths", &window.paths)
+        .seconds("prepareSeconds", prepare_seconds)
+        .with("pid", &pid)
+        .with("revision", revision)
+}
+
+/// `updated`: the Player acknowledged the scene revision of this window.
+/// `ack` is its acknowledgement, as JSON.
+pub(crate) fn updated_event<C: serde::Serialize>(
+    window: &Window,
+    prepare_seconds: f64,
+    started: Instant,
+    ack: String,
+    cache: &C,
+) -> Event {
+    Event::new("updated")
+        .with("paths", &window.paths)
+        .seconds("prepareSeconds", prepare_seconds)
+        .seconds("elapsedSeconds", started.elapsed().as_secs_f64())
+        .seconds(
+            "sourceToAckSeconds",
+            window.changed_at.elapsed().as_secs_f64(),
+        )
+        .raw("ack", ack)
+        .with("cache", cache)
+}
+
+/// `update-rejected` of a scene revision the Player refused or did not
+/// acknowledge; `ack` is what it wrote, or `null`.
+pub(crate) fn scene_rejected_event(error: &str, ack: String) -> Event {
+    Event::new("update-rejected")
+        .with("error", error)
+        .raw("ack", ack)
+}
+
+/// `content-updated`: a new Player process became ready. `restart_event`
+/// makes the event of the window of it.
+pub(crate) fn ready_event(
+    window: &Window,
+    manifest: &str,
+    routes: &str,
+    pid: i32,
+    report: &str,
+) -> Event {
+    Event::new("content-updated")
+        .with("paths", &window.paths)
+        .with("manifest", manifest)
+        .with("contentRoutes", routes)
+        .seconds(
+            "sourceToReadySeconds",
+            window.changed_at.elapsed().as_secs_f64(),
+        )
+        .with("pid", &pid)
+        .with("report", report)
 }
 
 /// `content-updated`, or `code-updated` when the new process loaded a newer
@@ -261,7 +349,27 @@ impl Loop {
             restart: None,
             refused: None,
             noted: None,
+            told: BTreeSet::new(),
         }
+    }
+
+    /// Takes the notes of an outcome that is in the Player now and returns
+    /// those the outcome before it did not have.
+    fn fresh(&mut self, notes: &[Reason]) -> Vec<Reason> {
+        let key = |note: &Reason| {
+            (
+                note.code.clone(),
+                note.member.clone(),
+                note.revision.clone(),
+            )
+        };
+        let fresh = notes
+            .iter()
+            .filter(|note| !self.told.contains(&key(note)))
+            .cloned()
+            .collect();
+        self.told = notes.iter().map(key).collect();
+        fresh
     }
 
     /// Why the newest compiled code waits for a full recompile, when it does.
@@ -279,17 +387,24 @@ impl Loop {
     /// proves nothing about it, and a reader must not take one for the
     /// arrival of a refused edit. The notes of a compile that needed no
     /// patch are repeated for as long as they stand.
-    fn stated(&self, event: Event) -> Event {
+    /// `fresh`: those of the notes that the compile of this window brought.
+    fn stated(&self, event: Event, fresh: &[Reason]) -> Event {
         if !self.hot_reload {
             return event;
         }
         let event = event.with("fullRecompileRequired", &self.refused.is_some());
-        match &self.noted {
-            Some(noted) => event
-                .with("notes", &listed(&noted.notes))
-                .with("notesCount", &noted.notes.len())
-                .with("hotReloadReport", &noted.report),
-            None => event,
+        let Some(noted) = &self.noted else {
+            return event;
+        };
+        let event = event
+            .with("notes", &listed(&noted.notes))
+            .with("notesCount", &noted.notes.len())
+            .with("hotReloadReport", &noted.report);
+        match fresh.is_empty() {
+            true => event,
+            false => event
+                .with("newNotes", &listed(fresh))
+                .with("newNotesCount", &fresh.len()),
         }
     }
 
@@ -298,14 +413,17 @@ impl Loop {
     /// fails for that reason alone, and a reader that stops at this event
     /// must be led to the recompile, with the reasons that stand. Without a
     /// refusal it says so too: a window that took one back may end here.
-    fn blocked(&self, event: Event) -> Event {
+    /// `part` tells this rejection from the refusal itself: its `error` is
+    /// the scene's own.
+    fn blocked(&self, event: Event, fresh: &[Reason]) -> Event {
+        let event = event.with("part", "scene");
         match &self.refused {
             Some(refusal) if self.hot_reload => event
                 .with("fullRecompileRequired", &true)
                 .with("unsupported", &listed(&refusal.reasons))
                 .with("unsupportedCount", &refusal.reasons.len())
                 .with("report", &refusal.report),
-            _ => self.stated(event),
+            _ => self.stated(event, fresh),
         }
     }
 
@@ -315,11 +433,13 @@ impl Loop {
     /// the same save is still on its way into the Player. `pending` marks an
     /// event that is not the last word: another one of this window follows
     /// it, or source changes arrived meanwhile and the next window answers.
+    /// `queued` says whether such changes wait when the events are printed.
     pub fn window<S: Steps>(
         &mut self,
         ctx: &Context,
         steps: &mut S,
         window: &Window,
+        queued: &dyn Fn() -> bool,
     ) -> Result<()> {
         let mut tail = Tail::default();
         let outcome = self.apply(ctx, steps, window, &mut tail);
@@ -331,7 +451,7 @@ impl Loop {
         {
             tail.events.push(refusal_event(refusal, &window.paths));
         }
-        let queued = steps.changes_pending();
+        let queued = queued();
         let last = tail.events.len().saturating_sub(1);
         for (index, event) in tail.events.into_iter().enumerate() {
             steps.emit(match index < last || queued {
@@ -369,12 +489,13 @@ impl Loop {
                 return Ok(());
             }
         };
+        // The whole step as the window waited for it: the compiler's own
+        // time leaves out the source and revision hashes around it.
+        let seconds = started.elapsed().as_secs_f64();
         self.managed_rejected = false;
         match compiled {
             // A window that restarts anyway needs no patch.
-            Compiled::Updated { seconds }
-                if self.hot_reload && request.is_none() && self.restart.is_none() =>
-            {
+            Compiled::Updated if self.hot_reload && request.is_none() && self.restart.is_none() => {
                 let patch_started = Instant::now();
                 let outcome = match steps.patch_code(ctx, window) {
                     Ok(outcome) => outcome,
@@ -386,9 +507,11 @@ impl Loop {
                     Outcome::Patched(patch) => {
                         (self.refused, self.noted) = (None, None);
                         tail.patched = true;
+                        let fresh = self.fresh(&patch.notes);
                         let (pid, revision) = (steps.pid(), steps.revision());
                         tail.events.push(patched_event(
                             &patch,
+                            &fresh,
                             window,
                             pid,
                             &revision,
@@ -398,6 +521,7 @@ impl Loop {
                     }
                     Outcome::Unchanged(unchanged) => {
                         self.refused = None;
+                        tail.fresh = self.fresh(&unchanged.notes);
                         self.noted = (!unchanged.notes.is_empty()).then_some(unchanged);
                     }
                     Outcome::Unsupported(refusal) | Outcome::ApplyFailed(refusal) => {
@@ -417,7 +541,7 @@ impl Loop {
                 }
             }
             // Without hot reload only a new process runs new code.
-            Compiled::Updated { .. } if !self.hot_reload => {
+            Compiled::Updated if !self.hot_reload => {
                 self.restart.get_or_insert(Cause::Plain);
             }
             // The sources were compiled again and still are what was refused.
@@ -446,7 +570,7 @@ impl Loop {
                 // A command prepares for a new process, so its answer stays
                 // plain: an event that states a refusal answers none.
                 Err(error) if !newest => {
-                    let event = self.blocked(rejected_event(&error, paths, request));
+                    let event = self.blocked(rejected_event(&error, paths, request), &tail.fresh);
                     tail.events.push(event);
                     return Ok(());
                 }
@@ -468,6 +592,7 @@ impl Loop {
             let restarted = steps.restart(ctx, window)?;
             let cause = self.restart.take();
             (self.refused, self.noted) = (None, None);
+            self.told.clear();
             tail.refusal = false;
             let merged = match request {
                 Some(_) => None,
@@ -484,10 +609,10 @@ impl Loop {
             // The code event of this window already is its confirmation.
             Scene::Unchanged(_) if tail.patched || tail.refusal => {}
             Scene::Unchanged(event) | Scene::Updated(event) => {
-                tail.events.push(self.stated(event));
+                tail.events.push(self.stated(event, &tail.fresh));
             }
             Scene::Rejected { event, fatal } => {
-                tail.events.push(self.blocked(event));
+                tail.events.push(self.blocked(event, &tail.fresh));
                 if let Some(error) = fatal {
                     return Err(error);
                 }

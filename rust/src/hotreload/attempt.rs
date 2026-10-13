@@ -622,14 +622,18 @@ impl PlayerCode {
         };
         let mut notes = result.notes();
         if ack.callback_errors > 0 {
-            notes.push(Reason::new(
-                CODE_CALLBACK_FAILED,
-                "",
-                &format!(
-                    "{} hot reload callback(s) of the game threw or could not be called; see the Player log.",
-                    ack.callback_errors
-                ),
-            ));
+            notes.push(Reason {
+                // A fact of this generation, not one that stands from the one before.
+                revision: format!("g{generation}"),
+                ..Reason::new(
+                    CODE_CALLBACK_FAILED,
+                    "",
+                    &format!(
+                        "{} hot reload callback(s) of the game threw or could not be called; see the Player log.",
+                        ack.callback_errors
+                    ),
+                )
+            });
         }
         Ok(Outcome::Patched(Patched {
             generation,

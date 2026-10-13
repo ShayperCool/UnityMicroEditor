@@ -147,7 +147,7 @@ Verified with Unity `6000.6.3f1`, one machine, one project:
   used from the other in the same change was refused. A session with
   `--no-hot-reload` showed the scene patch, the scene reload, the restart on a
   C# edit and the compile error and its repair as before the watch loop was
-  rearranged. After the review of that stage, on the same day: a field made
+  rearranged. After the review of that stage, on the same day: a method made
   `public` gave `unchanged` with the builder's note, in the runner and in the
   state `wait_update` returns; a `[InvokeOnHotReloadLocal]` method ran again
   for the first, second and third edit of its lambda, and one on `OnEnable`
@@ -155,7 +155,19 @@ Verified with Unity `6000.6.3f1`, one machine, one project:
   method without access modifier compiled and ran; two files saved 0.4 s
   apart ended with one answer that was not marked `pending`, and one
   `wait_update` after two `script_edit` calls returned with both in the
-  Player.
+  Player. After the second review, on the same day: one `wait_update` after
+  two saves eight seconds apart returned after the second of them, as an
+  error when that one was refused; an edit that lay only in a lambda of a
+  generic method was refused (`generic_method`) and the Player kept the old
+  lambda, where the builder had answered `unchanged`; a field whose accessibility
+  decides what Unity serializes was refused (`serialization_changed`) in both
+  directions; the reply to an edit of a running coroutine began with
+  `attention` and listed the note under `newNotes`; a stack trace of a patched
+  method named the file under `Assets`; a second `.asmdef` added to a ready
+  session was prepared without a further call and the session continued on
+  it; with the same sources saved again in a later server process, which the
+  project was prepared for already, the session continued on that preparation
+  after 7 s, and the removal of the `.asmdef` was prepared anew in 18 s.
 
 Not verified: a project with native models, audio, UI or Netcode through the
 whole cycle; `build-project` against a real Editor; `project_tools`; attaching
