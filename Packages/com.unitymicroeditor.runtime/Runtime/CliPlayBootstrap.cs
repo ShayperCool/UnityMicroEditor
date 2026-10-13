@@ -70,6 +70,7 @@ namespace UnityMicroEditor
             private bool rawLoaded;
             private UnityMicroEditor.Raw.RawSceneLoader.LiveSession rawSession;
             private AgentControl agentControl;
+            private CodeReload codeReload;
             private DateTime reloadFileWriteTime;
             private long reloadFileLength = -1;
             private double nextReloadPoll;
@@ -105,6 +106,7 @@ namespace UnityMicroEditor
                 {
                     if (!string.IsNullOrEmpty(options.ControlDirectory))
                         agentControl = new AgentControl(options.ControlDirectory, () => rawSession);
+                    if (!string.IsNullOrEmpty(options.CodeReloadRequestPath)) codeReload = new CodeReload(options.CodeReloadRequestPath);
                     if (options.TargetFrameRate.HasValue) Application.targetFrameRate = options.TargetFrameRate.Value;
                     if (options.NoVsync) QualitySettings.vSyncCount = 0;
                     if (string.IsNullOrEmpty(options.RawManifestPath) && !string.IsNullOrEmpty(options.ContentManifestPath))
@@ -133,7 +135,19 @@ namespace UnityMicroEditor
                 if (finished) return;
                 try
                 {
-                    if (rawLoaded) { PollRawReload(); return; }
+                    if (rawLoaded)
+                    {
+                        // One clock for both request files, and code first: a scene
+                        // request of the same edit is then taken in the same frame and
+                        // meets the new code. A pending scene reload counts every error
+                        // logged until its ack, so callbacks of a code patch wait for it.
+                        double now = Time.realtimeSinceStartupAsDouble;
+                        if (now < nextReloadPoll) return;
+                        nextReloadPoll = now + .025;
+                        if (codeReload != null && pendingReload == null) codeReload.Poll();
+                        PollRawReload();
+                        return;
+                    }
                     // Bootstrap scene is loaded, but the first render has not
                     // constructed and cached the host's URP global settings.
                     rawLoaded = true;
@@ -150,8 +164,6 @@ namespace UnityMicroEditor
             {
                 if (pendingReload != null || rawSession == null || string.IsNullOrEmpty(options.RawReloadRequestPath)) return;
                 double now = Time.realtimeSinceStartupAsDouble;
-                if (now < nextReloadPoll) return;
-                nextReloadPoll = now + .025;
                 CliPlayRawReloadRequest request = null;
                 try
                 {
