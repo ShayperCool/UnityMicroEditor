@@ -307,7 +307,9 @@ internal static class Program
         ["LAMBDA_IN_ITERATOR"] = Patch().Redirects("changed Edits.Wiring::Makers()", "lambda Edits.Wiring::Makers() [lambda 0]")
             .Noted("running_coroutines_keep_old_code Edits.Wiring::Makers()"),
         ["RECORD_WITH"] = Patch().Redirects("changed Edits.Figures::Grow(Edits.Figure)"),
-        ["LIFECYCLE_BODY"] = Patch().Redirects("changed Edits.Behaviour1::__UnityPlay_Awake()"),
+        ["LIFECYCLE_BODY"] = Patch().Redirects("changed Edits.Behaviour1::__UnityPlay_Awake()").Noted("started_objects_keep_state Edits.Behaviour1::__UnityPlay_Awake()"),
+        // Start of an engine object ran for the objects that exist; a plain class has no such method.
+        ["START_BODY"] = Patch().Redirects("changed Edits.Starting::Start()", "changed Edits.PlainStarting::Start()").Noted("started_objects_keep_state Edits.Starting::Start()"),
         ["CHANGE_CONST"] = Patch().Redirects("changed Edits.Consts::Use()"),
         ["ANONYMOUS_TYPE_EXISTING"] = Patch().Redirects("changed Edits.Anonymous::Reuse()"),
         // The parameter of the edited lambda is an anonymous type: the loaded one, on both sides of the redirect.
@@ -332,6 +334,8 @@ internal static class Program
         ["REMOVE_UNITY_MESSAGE"] = Patch().Redirects("removed Edits.Behaviour1::Update()"),
         ["PARAMETER_RENAME"] = Unchanged(),
         ["ACCESSIBILITY"] = Unchanged().Noted("accessibility_changed Edits.Access::field", "accessibility_changed Edits.Access::Method()"),
+        // Unity serializes these as before: static, read-only, marked already.
+        ["ACCESSIBILITY_NOT_SERIALIZED"] = Unchanged().Noted("accessibility_changed Edits.Exposure::shared", "accessibility_changed Edits.Exposure::frozen", "accessibility_changed Edits.Exposure::marked"),
         ["RUNTIME_INITIALIZER_ADD"] = Patch().Methods("Edits.BootA::Extra()").Noted("runtime_initializer_added Edits.BootA"),
         ["RUNTIME_INITIALIZER_REMOVE"] = Unchanged().Noted("runtime_initializer_removed Edits.BootB"),
 
@@ -359,6 +363,14 @@ internal static class Program
         ["GENERIC_METHOD_BODY"] = Refused("generic_method Edits.Generics::Echo`1(!!0)"),
         ["GENERIC_METHOD_ADD"] = Refused("generic_method Edits.Generics::Make`1()"),
         ["GENERIC_LOCAL_FUNCTION"] = Refused("generic_generated_member Edits.LocalGeneric::Run(System.Int32)"),
+        // An edit that lies only in a lambda or local function of generic code is an edit of the
+        // method that owns it.
+        ["GENERIC_LOCAL_LAMBDA"] = Refused("generic_generated_member Edits.LocalGeneric::Deep(System.Int32)"),
+        ["GENERIC_TYPE_LAMBDA"] = Refused("generic_type Edits.GenericLambdas`1::Pooled()"),
+        ["GENERIC_TYPE_THIS_LAMBDA"] = Refused("generic_type Edits.GenericLambdas`1::Bound()"),
+        ["GENERIC_TYPE_LOCAL_FUNCTION"] = Refused("generic_type Edits.GenericLambdas`1::Local()"),
+        ["GENERIC_NESTED_LAMBDA"] = Refused("generic_type Edits.GenericLambdas`1+Inner::Pooled()"),
+        ["GENERIC_METHOD_LAMBDA"] = Refused("generic_method Edits.GenericMethodLambdas::Pool`1(!!0)", "generic_method Edits.GenericMethodLambdas::Query`1(!!0)"),
         ["NEW_ANONYMOUS_TYPE"] = Refused("generated_type_not_loaded Edits.Anonymous::Fresh()"),
         ["ADD_TYPES"] = Refused("type_added Edits.AddedClass", "type_added Edits.AddedStruct", "type_added Edits.AddedEnum", "type_added Edits.IAdded", "type_added Edits.AddedDelegate"),
         ["REMOVE_TYPE"] = Refused("type_removed Edits.Doomed"),
@@ -391,6 +403,8 @@ internal static class Program
             "extern_method_changed Edits.NativeCallback::Invoke(System.String)", "extern_method_changed Edits.NativeCallback::BeginInvoke(System.String,System.AsyncCallback,System.Object)"),
         ["ADD_SPECIAL_FIELD"] = Refused("special_field_added Edits.Special::perThread", "special_field_added Edits.Special::flag", "special_field_added Edits.Special::Use()"),
         ["FIELD_NONSERIALIZED"] = Refused("field_flags_changed Edits.Data::cache"),
+        // A field that Unity starts or stops serializing: nothing of the edit is in the Player.
+        ["ACCESSIBILITY_SERIALIZED"] = Refused("serialization_changed Edits.Exposure::tuned", "serialization_changed Edits.Exposure::shown", "serialization_changed Edits.ExposureData::value"),
         ["STATIC_READONLY_REMOVED"] = Refused("static_readonly_removed Edits.Frozen::limit"),
         ["ATTRIBUTE_TYPE"] = Refused("custom_attributes_changed Edits.AttributedType"),
         ["ATTRIBUTE_METHOD"] = Refused("custom_attributes_changed Edits.Attributed::M()"),
@@ -441,6 +455,18 @@ internal static class Program
         string body = Path.Combine(root, "BODY", "Edits.dll");
         Expect("generation 7", Patcher("generation 7", Path.Combine(root, "generation7"), 7, new[] { new AssemblyPair("Edits", loaded, body) }), "Edits",
             Refused("emit_verification_failed Edits"));
+
+        // Generated code that no method owns is compared with nothing: a difference in it is
+        // refused. The diagnostic `owner` hides the owner of a lambda of generic code.
+        foreach (string name in new[] { "GENERIC_METHOD_LAMBDA", "GENERIC_TYPE_LAMBDA", "GENERIC_TYPE_THIS_LAMBDA", "GENERIC_TYPE_LOCAL_FUNCTION", "GENERIC_NESTED_LAMBDA" })
+        {
+            string label = "unowned " + name, type = name == "GENERIC_METHOD_LAMBDA" ? "Edits.GenericMethodLambdas" : name == "GENERIC_NESTED_LAMBDA" ? "Edits.GenericLambdas`1+Inner" : "Edits.GenericLambdas`1";
+            Expect(label, Patcher(label, Path.Combine(root, "unowned-" + name), 1, new[] { new AssemblyPair("Edits", loaded, Path.Combine(root, name, "Edits.dll")) }, fault: "owner"), "Edits",
+                Refused("unowned_generated_code " + type));
+        }
+        // The same diagnostic on an edit that it does not hide, and on no edit at all, changes nothing.
+        Expect("unowned, plain edit", Patcher("unowned, plain edit", Path.Combine(root, "unowned-body"), 1, new[] { new AssemblyPair("Edits", loaded, body) }, fault: "owner"), "Edits",
+            Patch().Redirects("changed Edits.Bodies::Instance()"));
 
         // Netcode: named by the request, or recognised by the reference to the Netcode runtime.
         Expect("netcode flag", Patcher("netcode flag", Path.Combine(root, "netcode-flag"), 1, new[] { new AssemblyPair("Edits", loaded, body, Netcode: true) }), "Edits",
@@ -766,6 +792,26 @@ internal static class Program
         Expect("generation 2, previous of another assembly", Patcher("generation 2, previous of another assembly", Path.Combine(root, "g2-foreign"), 2, To(second), previous: foreign), "Gens",
             Patch().Redirects(common).Methods("Gens.Thing::Handler()", "Gens.Thing::Steady(System.Int32)").Fields("Gens.Thing::count")
                 .Noted("existing_instances_keep_default Gens.Thing::count", "running_coroutines_keep_old_code Gens.Thing::Steps()"));
+        // The revision of a note tells a note that only still stands from one about code that
+        // changed again: the iterator differs in the second patch and is the same in a repetition
+        // of the first. A note about a field has none, one about the step between two patches
+        // names the generation.
+        static string Revision(JsonElement? result, string code, string member)
+        {
+            if (result is not { } root) return "?";
+            foreach (var note in root.GetProperty("assemblies")[0].GetProperty("notes").EnumerateArray())
+                if (note.GetProperty("code").GetString() == code && note.GetProperty("member").GetString() == member)
+                    return note.TryGetProperty("revision", out var revision) ? revision.GetString()! : "";
+            return "?";
+        }
+        var same = Patcher("generation 2, same code again", Path.Combine(root, "g2-same-again"), 2, To(first), previous: previous);
+        string stepsOne = Revision(one, "running_coroutines_keep_old_code", "Gens.Thing::Steps()"), stepsTwo = Revision(two, "running_coroutines_keep_old_code", "Gens.Thing::Steps()");
+        Check(stepsOne.Length == 16 && stepsOne.All(Uri.IsHexDigit), $"generation 1: the note of Steps() has the revision '{stepsOne}', expected 16 hex digits.");
+        Check(stepsTwo.Length == 16 && stepsTwo != stepsOne, $"generation 2: the iterator changed, but its note has the revision '{stepsTwo}' after '{stepsOne}'.");
+        Check(Revision(same, "running_coroutines_keep_old_code", "Gens.Thing::Steps()") == stepsOne, "generation 2, same code: the note of the unchanged iterator has another revision.");
+        Check(Revision(two, "existing_instances_keep_default", "Gens.Thing::count") == "", "generation 2: the note of an added field has a revision.");
+        Check(Revision(two, "earlier_patch_delegates_keep_old_code", "Gens.Thing::Handler()") == "g2", "generation 2: a note about the earlier patch does not name its generation as the revision.");
+
         // Everything reverted: nothing to patch, and all the first patch brought stays behind,
         // except the lambda of Kept, which is the loaded one again.
         Expect("generation 2, reverted", Patcher("generation 2, reverted", Path.Combine(root, "g2-reverted"), 2, To(loaded), previous: previous), "Gens",

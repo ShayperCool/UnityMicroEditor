@@ -15,6 +15,10 @@ internal sealed class Change
 {
     public string Kind = "", Member = "", Action = Actions.None, Code = "", Message = "";
     public readonly List<(string Code, string Message)> Notes = new();
+    /// What the member runs, as a short hash, for a method that is patched or added. A note
+    /// carries it, so that a reader of two results in a row can tell a note about code that
+    /// changed again from one that only still stands.
+    public string Revision = "";
 
     // Not serialized: what the emitter needs.
     public MethodDefinitionHandle OldMethod, NewMethod;
@@ -36,15 +40,19 @@ internal sealed class Differ
     /// Diagnostic: report every comparable body as changed, so the emitter must carry all of them.
     public bool ForceAll;
 
-    public Differ(Workspace workspace, Entry entry) : this(workspace, entry.Loaded, entry.Current, null) { }
+    public Differ(Workspace workspace, Entry entry, bool blind = false) : this(workspace, entry.Loaded, entry.Current, null, blind) { }
 
-    Differ(Workspace workspace, Asm loaded, Asm current, Lazy<HashSet<string>>? strings)
+    /// `blind`: diagnostic, see `Canon.Blind`.
+    Differ(Workspace workspace, Asm loaded, Asm current, Lazy<HashSet<string>>? strings, bool blind)
     {
         this.workspace = workspace;
+        this.blind = blind;
         o = loaded; n = current;
-        co = new Canon(o); cn = new Canon(n);
+        co = new Canon(o) { Blind = blind }; cn = new Canon(n) { Blind = blind };
         userStrings = strings ?? new Lazy<HashSet<string>>(() => UserStrings(n));
     }
+
+    readonly bool blind;
 
     static bool IsUser(Asm a, TypeDefinitionHandle h) => a.Kind(h) == GenKind.User && a.SimpleName(h) != "<Module>";
 
@@ -69,12 +77,13 @@ internal sealed class Differ
         if (threads <= 1 || names.Length < 64)
         {
             foreach (var name in names) DiffName(name);
+            DiffUnowned();
             return;
         }
         var perName = new List<Change>?[names.Length];
         Parallel.For(0, threads, new ParallelOptions { MaxDegreeOfParallelism = threads }, worker =>
         {
-            var d = new Differ(workspace, o, n, userStrings) { ForceAll = ForceAll };
+            var d = new Differ(workspace, o, n, userStrings, blind) { ForceAll = ForceAll };
             for (int i = worker; i < names.Length; i += threads)
             {
                 int before = d.Changes.Count;
@@ -83,6 +92,73 @@ internal sealed class Differ
             }
         });
         foreach (var list in perName) if (list != null) Changes.AddRange(list);
+        DiffUnowned();
+    }
+
+    // ---- generated code without an owner ---------------------------------------------------
+
+    /// The compiler-generated methods that no user method reaches, each as the user type it lies
+    /// in and the hash of what it runs.
+    static List<(string Type, string Hash)> Unowned(Asm a, Canon canon)
+    {
+        var methods = new HashSet<MethodDefinitionHandle>();
+        var types = new HashSet<TypeDefinitionHandle>();
+        foreach (var t in a.MD.TypeDefinitions)
+        {
+            if (a.Kind(t) != GenKind.User) continue;
+            foreach (var m in a.MD.GetTypeDefinition(t).GetMethods())
+            {
+                var d = a.MD.GetMethodDefinition(m);
+                if (Canon.Owned(a.MD.GetString(d.Name), d.Attributes) || d.RelativeVirtualAddress == 0) continue;
+                var closure = canon.Compute(m);
+                methods.UnionWith(closure.Methods);
+                methods.UnionWith(closure.Locals);
+                types.UnionWith(closure.Types);
+            }
+        }
+        var rest = new List<(string, string)>();
+        foreach (var m in a.MD.MethodDefinitions)
+        {
+            var d = a.MD.GetMethodDefinition(m);
+            if (d.RelativeVirtualAddress == 0 || methods.Contains(m)) continue;
+            var t = d.GetDeclaringType();
+            string name = a.MD.GetString(d.Name);
+            switch (a.Kind(t))
+            {
+                case GenKind.User:
+                    if (!Canon.Owned(name, d.Attributes)) continue;
+                    break;
+                // A state machine, a closure class or an anonymous type is compared whole with
+                // the method that names it.
+                case GenKind.Exclusive:
+                    if (types.Contains(t)) continue;
+                    break;
+                // The constructors of the class that pools the lambdas of a type only make its instance.
+                case GenKind.Shared:
+                    if (name is ".ctor" or ".cctor") continue;
+                    break;
+            }
+            var user = t;
+            while (a.Kind(user) != GenKind.User && !a.MD.GetTypeDefinition(user).GetDeclaringType().IsNil) user = a.MD.GetTypeDefinition(user).GetDeclaringType();
+            rest.Add((a.TypeName(user), Convert.ToHexString(canon.Compute(m).Hash)));
+        }
+        return rest;
+    }
+
+    /// A body is compared through the user method that owns it. Generated code that no user
+    /// method reaches is compared with nothing, so both compilations must hold the same of it:
+    /// otherwise an edit lies where the comparison did not look, and it is refused.
+    void DiffUnowned()
+    {
+        var olds = Unowned(o, co);
+        var news = Unowned(n, cn);
+        if (olds.Count == 0 && news.Count == 0) return;
+        var before = olds.Select(x => x.Type + " " + x.Hash).ToList();
+        var after = news.Select(x => x.Type + " " + x.Hash).ToList();
+        var types = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (string text in Without(before, after).Concat(Without(after, before))) types.Add(text[..text.LastIndexOf(' ')]);
+        foreach (string type in types)
+            Refuse("generated_code", type, Codes.UnownedGeneratedCode, $"Compiler-generated code of {type} (a lambda, a local function or a state machine) changed, and no method is known to own it; it cannot be compared, so nothing about it can be patched.");
     }
 
     void DiffName(string name)
@@ -394,8 +470,20 @@ internal sealed class Differ
             else if ((od.Attributes & foldable) == foldable && (nd.Attributes & FieldAttributes.InitOnly) == 0)
                 Refuse("field", id, Codes.StaticReadonlyRemoved, $"`readonly` was removed from the static field {id}; the runtime may have compiled its value into existing code as a constant, so an assignment would not be seen.");
             else if ((od.Attributes & FieldAttributes.FieldAccessMask) != (nd.Attributes & FieldAttributes.FieldAccessMask))
-                Add("field", id, Actions.Note).Notes.Add((Codes.AccessibilityChanged,
-                    $"Field {id} changed accessibility; Unity serialization and reflection keep the loaded accessibility until a full recompile."));
+            {
+                // A field that Unity starts or stops serializing is the same edit as [SerializeField]
+                // on it: nothing of it is in the Player before a restart, and a scene value for the
+                // field is not read. The bodies are as they were, so a note would be all of the answer.
+                bool before = Serialized(od.Attributes, nt, AuthoredAttributes(o, od.GetCustomAttributes()));
+                bool after = Serialized(nd.Attributes, nt, AuthoredAttributes(n, nd.GetCustomAttributes()));
+                if (before != after)
+                    Refuse("field", id, Codes.SerializationChanged, after
+                        ? $"Field {id} changed accessibility and Unity now serializes it; the Player reads scenes, prefabs and assets with the loaded fields until a restart, so its saved value is not applied."
+                        : $"Field {id} changed accessibility and Unity no longer serializes it; the Player keeps reading it from scenes, prefabs and assets until a restart.");
+                else
+                    Add("field", id, Actions.Note).Notes.Add((Codes.AccessibilityChanged,
+                        $"Field {id} changed accessibility; reflection keeps the loaded accessibility until a full recompile."));
+            }
             if (ConstantText(o, od.GetDefaultValue()) != ConstantText(n, nd.GetDefaultValue()))
                 Add("const", id, Actions.None, message: "A constant has no storage; the methods that use it were recompiled and are compared on their own.");
             if (od.GetOffset() != nd.GetOffset())
@@ -449,7 +537,7 @@ internal sealed class Differ
         else if (!isStatic)
             change.Notes.Add((Codes.ExistingInstancesKeepDefault, $"Objects that already exist read the default value of the added field {id}; its initializer runs only in objects constructed after the patch."));
         var attributes = AuthoredAttributes(n, d.GetCustomAttributes());
-        if (!isStatic && Serialized(d, type, attributes))
+        if (Serialized(d.Attributes, type, attributes))
             change.Notes.Add((Codes.SerializedFieldNotRestored, $"The added field {id} is not restored from scenes, prefabs or assets until a restart."));
         if (attributes.Count > 0)
             change.Notes.Add((Codes.AddedMemberAttributesIgnored, $"[{string.Join("], [", attributes)}] on the added field {id} is invisible to reflection until a full recompile."));
@@ -460,11 +548,14 @@ internal sealed class Differ
     const FieldAttributes NotSerialized = (FieldAttributes)0x0080;
     const TypeAttributes SerializableType = (TypeAttributes)0x2000;
 
-    bool Serialized(FieldDefinition d, TypeDefinitionHandle type, List<string> attributes)
+    /// Whether Unity serializes an instance field with these flags and attributes in `type` of
+    /// the new compilation: public or marked, not read-only, in an engine object or a
+    /// [Serializable] type.
+    bool Serialized(FieldAttributes flags, TypeDefinitionHandle type, List<string> attributes)
     {
-        if ((d.Attributes & (FieldAttributes.InitOnly | NotSerialized)) != 0) return false;
+        if ((flags & (FieldAttributes.Static | FieldAttributes.Literal | FieldAttributes.InitOnly | NotSerialized)) != 0) return false;
         bool marked = attributes.Contains("SerializeField") || attributes.Contains("SerializeReference");
-        if (!marked && (d.Attributes & FieldAttributes.FieldAccessMask) != FieldAttributes.Public) return false;
+        if (!marked && (flags & FieldAttributes.FieldAccessMask) != FieldAttributes.Public) return false;
         return Unity(type).Kind != UnityKind.No || (n.MD.GetTypeDefinition(type).Attributes & SerializableType) != 0;
     }
 
@@ -576,6 +667,7 @@ internal sealed class Differ
         }
         var change = Add("method_added", id, Actions.Patch);
         change.NewMethod = method;
+        change.Revision = Short(cn.Compute(method).Hash);
         var attributes = AuthoredAttributes(n, d.GetCustomAttributes());
         if (attributes.Count > 0)
             change.Notes.Add((Codes.AddedMemberAttributesIgnored, $"[{string.Join("], [", attributes)}] on the added method {id} is invisible to reflection until a full recompile."));
@@ -736,13 +828,20 @@ internal sealed class Differ
             var change = Add("method_body", id, Actions.Patch);
             change.OldMethod = oh;
             change.NewMethod = nh;
+            change.Revision = Short(nc.Hash);
             if (name == ".ctor")
                 change.Notes.Add((Codes.ConstructorAppliesToNewObjects, $"{id} and the instance field initializers apply to objects constructed after the patch; existing objects keep their values."));
+            // The engine calls these once per object. `Awake` of an engine object is the helper
+            // of the lifecycle rewrite, which may carry trailing underscores.
+            if ((nd.Attributes & MethodAttributes.Static) == 0 && Unity(nt).Kind != UnityKind.No && (name is "Start" or "Awake" || name.TrimEnd('_') == "__UnityPlay_Awake"))
+                change.Notes.Add((Codes.StartedObjectsKeepState, $"{id} already ran for the objects that exist and is not run again; its new body runs for objects created after the patch."));
             if (StaleStateMachines(oc, nc))
                 change.Notes.Add((Codes.RunningCoroutinesKeepOldCode, $"Calls of {id} made after the patch run the new code; a coroutine, iterator or async call that is already running finishes on the old code."));
             MapLambdas(change, id, oh, nh, oc, nc);
         }
     }
+
+    static string Short(byte[] hash) => Convert.ToHexString(hash, 0, 8).ToLowerInvariant();
 
     // ---- lambdas and state machines --------------------------------------------------------
 
