@@ -1687,8 +1687,12 @@ internal static class Program
                 var phase = method.Identifier.ValueText;
                 var helperName = HelperName(type, phase);
                 var visitedMethod = (MethodDeclarationSyntax)base.VisitMethodDeclaration(method)!;
+                // What stands in front of the method stays with the entry. Without a modifier it
+                // hangs on the return type, and a directive there (#region, #if, #endif) would
+                // end up behind the helper's `private`, in the middle of a line.
                 var helper = visitedMethod.WithIdentifier(SyntaxFactory.Identifier(helperName))
                     .WithAttributeLists(default)
+                    .WithReturnType(visitedMethod.ReturnType.WithLeadingTrivia(default(SyntaxTriviaList)))
                     .WithModifiers(SyntaxFactory.TokenList(SyntaxFactory.Token(SyntaxKind.PrivateKeyword)
                         .WithTrailingTrivia(SyntaxFactory.Space)))
                     .WithLeadingTrivia(default(SyntaxTriviaList));
