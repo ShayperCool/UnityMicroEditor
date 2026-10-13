@@ -40,6 +40,16 @@ pub struct HotReload {
     pub report: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_patch: Option<LastPatch>,
+    /// What the Player does not take over of the newest compiled code although
+    /// nothing had to be patched, for example a changed accessibility; at most
+    /// 16, `notes_count` counts all and `notes_report` names the file with
+    /// them. Only a recompile applies these too.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<Reason>,
+    #[serde(skip_serializing_if = "no_count")]
+    pub notes_count: u64,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub notes_report: String,
     /// Why this Player process was started, when hot reload caused it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_restart: Option<LastRestart>,
@@ -65,6 +75,9 @@ impl Default for HotReload {
             unsupported_count: 0,
             report: String::new(),
             last_patch: None,
+            notes: Vec::new(),
+            notes_count: 0,
+            notes_report: String::new(),
             last_restart: None,
             pending_recompile: String::new(),
             refused_sequence: 0,
@@ -130,6 +143,9 @@ pub(super) enum Refused<'a> {
     Recompiled(&'a str),
 }
 
+fn no_count(count: &u64) -> bool {
+    *count == 0
+}
 fn bounded(text: &str) -> String {
     let mut end = text.len().min(TEXT_MAXIMUM);
     while !text.is_char_boundary(end) {
@@ -215,6 +231,7 @@ impl HotReload {
     pub(super) fn patched(&mut self, sequence: u64, generation: u64, event: &Map<String, Value>) {
         self.code_generation = generation;
         self.clear_refusal();
+        self.clear_notes();
         let number = |key: &str| count(event.get(key)).unwrap_or(0);
         let notes = reasons(event.get("notes"));
         self.last_patch = Some(LastPatch {
@@ -234,24 +251,43 @@ impl HotReload {
     /// `update-rejected` with `fullRecompileRequired`; `summary` is its text.
     pub(super) fn refused(&mut self, sequence: u64, event: &Map<String, Value>, summary: &str) {
         self.full_recompile_required = true;
+        self.clear_notes();
         self.refused_sequence = sequence;
         self.refused_summary = bounded(summary);
         self.unsupported = reasons(event.get("unsupported"));
         self.unsupported_count = total(event, "unsupportedCount", self.unsupported.len());
         self.report = text(event, "report");
     }
-    /// `updated` or `unchanged`. A scene update proves nothing about the code,
-    /// so the runner states it: `false` when the Player runs the newest
-    /// compiled code, `true` when that code cannot be patched into it. An
-    /// event without the statement leaves the state as it is.
+    /// `updated` or `unchanged`, or the rejection of a scene part. A scene
+    /// update proves nothing about the code, so the runner states it: `false`
+    /// when the Player runs the newest compiled code, `true` when that code
+    /// cannot be patched into it. With `false` come the notes of a compile
+    /// that needed no patch, for as long as they stand. An event without the
+    /// statement leaves the state as it is.
     pub(super) fn confirmed(&mut self, event: &Map<String, Value>) {
         match event.get("fullRecompileRequired") {
-            Some(Value::Bool(false)) => self.clear_refusal(),
+            Some(Value::Bool(false)) => {
+                self.clear_refusal();
+                self.notes = reasons(event.get("notes"));
+                self.notes_count = total(event, "notesCount", self.notes.len());
+                self.notes_report = match self.notes_count {
+                    0 => String::new(),
+                    _ => text(event, "hotReloadReport"),
+                };
+            }
             // The reasons come with the rejection of the same change, which
             // the runner may print after this event.
-            Some(Value::Bool(true)) => self.full_recompile_required = true,
+            Some(Value::Bool(true)) => {
+                self.full_recompile_required = true;
+                self.clear_notes();
+            }
             _ => {}
         }
+    }
+    fn clear_notes(&mut self) {
+        self.notes.clear();
+        self.notes_count = 0;
+        self.notes_report.clear();
     }
     fn clear_refusal(&mut self) {
         self.full_recompile_required = false;
@@ -381,6 +417,7 @@ impl Inner {
     pub(super) fn forget_code(&mut self) {
         self.commands = None;
         self.recompiles.clear();
+        self.state.update_pending = false;
         self.state.hot_reload = HotReload::launched(self.state.hot_reload.enabled);
     }
 }

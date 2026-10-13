@@ -1504,6 +1504,13 @@ fn outcome(c: &Controller, name: &str) -> Value {
     let mut event = match name {
         "refusal" => refusal("/owned/report.json"),
         "compile-error" => json!({"event": "update-rejected", "error": "CS1002: ; expected"}),
+        // The scene part of a change, rejected while a refused edit waits: its
+        // own error with the runner's statement and the reasons that stand.
+        "scene-rejected" => {
+            let mut event = refusal("/owned/report.json");
+            event["error"] = json!(SCENE_REJECTED);
+            event
+        }
         "updated" => updated(state.pid),
         "unchanged" => json!({"event": name, "pid": state.pid, "revision": state.revision}),
         // A generation is never used twice by one Player process.
@@ -1517,6 +1524,7 @@ fn outcome(c: &Controller, name: &str) -> Value {
     }
     event
 }
+const SCENE_REJECTED: &str = "unresolved managed component type 0123 in Assets/Scenes/A.unity";
 fn orderings<'a>(items: &[&'a str]) -> Vec<Vec<&'a str>> {
     if items.len() < 2 {
         return vec![items.to_vec()];
@@ -2030,7 +2038,7 @@ fn waits_report_the_code_the_player_runs_after_every_outcome() {
     use Expect::{Applied, Refused, Rejected};
     const BOSS: &str = "Game.Boss: a type was added [type_added] (and 2 more)";
     const UNLISTED: &str = "the reasons are not reported yet";
-    let cases: [(&[&str], Expect, Expect); 18] = [
+    let cases: [(&[&str], Expect, Expect); 21] = [
         (&["unchanged"], Applied, Applied),
         (&["compile-error"], Rejected, Rejected),
         // The runner states that the Player runs the newest code again: the
@@ -2066,6 +2074,13 @@ fn waits_report_the_code_the_player_runs_after_every_outcome() {
         // wait also when a rejection follows.
         (&["updated", "compile-error"], Rejected, Applied),
         (&["updated", "refusal"], Refused(BOSS), Refused(BOSS)),
+        // A scene that needs the refused code is rejected with the runner's
+        // statement and the reasons. It is no compile error: the recompile
+        // is what applies it, also for a caller that wakes on this event
+        // before the refusal of the same change is printed.
+        (&["refusal", "scene-rejected"], Refused(BOSS), Refused(BOSS)),
+        (&["scene-rejected"], Refused(BOSS), Refused(BOSS)),
+        (&["scene-rejected", "refusal"], Refused(BOSS), Refused(BOSS)),
     ];
     for (events, update, readiness) in cases {
         let c = controller_fixture("");
@@ -2118,6 +2133,17 @@ fn waits_report_the_code_the_player_runs_after_every_outcome() {
             }
         }
     }
+
+    // The rejected scene part keeps its own error in the session state,
+    // beside the reasons of the refusal.
+    let c = controller_fixture("");
+    start_ready(&c);
+    accept(&c, outcome(&c, "refusal"));
+    let state = accept(&c, outcome(&c, "scene-rejected"));
+    assert_eq!(state.update_error, SCENE_REJECTED);
+    assert_eq!(state.hot_reload.unsupported[0].code, "type_added");
+    assert_eq!(state.hot_reload.unsupported_count, 3);
+    assert!(state.code_refused() && !state.preparation_required);
 
     // A refusal that lists no reason is reported with the runner's own
     // sentence, also after later events replaced the session's update error.
@@ -2785,4 +2811,483 @@ fn refusal_ends_when_the_player_runs_the_current_code_again() {
         scene.state,
         scene.error
     );
+}
+
+// The runner's watch loop with scripted steps: what it prints is what the
+// controller reads, so neither side is tested against lines written by hand.
+mod loop_lines {
+    use super::*;
+    pub(crate) use crate::runner::testing::Compiled;
+    use crate::{
+        hotreload::{Failure, Fallback, Outcome, Patched, Reason as Why, Refusal, Unchanged},
+        runner::testing::{Event as Line, Loop, Restarted, Scene, Steps, Window},
+    };
+    use std::{collections::VecDeque, time::SystemTime};
+
+    /// What the scripted scene step does.
+    pub enum Reload {
+        Unchanged,
+        Updated,
+        Rejected,
+    }
+
+    pub struct Script {
+        pub lines: Vec<Value>,
+        pub compiles: VecDeque<Compiled>,
+        pub patches: VecDeque<Outcome>,
+        pub reloads: VecDeque<Reload>,
+        pub prepare_error: Option<&'static str>,
+        pub queued: bool,
+        compiled: bool,
+        pid: i64,
+        revision: String,
+        manifest: String,
+        report: String,
+    }
+    impl Script {
+        pub fn new(c: &Controller, ready: &State) -> Self {
+            let options = &c.0.options;
+            Self {
+                lines: Vec::new(),
+                compiles: VecDeque::new(),
+                patches: VecDeque::new(),
+                reloads: VecDeque::new(),
+                prepare_error: None,
+                queued: false,
+                compiled: false,
+                pid: ready.pid,
+                revision: ready.revision.clone(),
+                manifest: sysutil::join(&[&options.project, "Temp/manifests/rev-1/scene.json"]),
+                report: sysutil::join(&[&options.output, "runs/first/report.json"]),
+            }
+        }
+        pub fn edit(&mut self, outcome: Outcome) {
+            self.compiles.push_back(Compiled::Updated { seconds: 0.5 });
+            self.patches.push_back(outcome);
+        }
+    }
+    impl Steps for Script {
+        fn emit(&mut self, event: Line) {
+            self.lines
+                .push(serde_json::from_str(&event.line()).unwrap());
+        }
+        fn invalidate(&mut self, _: &[String]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn compile(&mut self, _: &Context, _: Option<&[String]>) -> anyhow::Result<Compiled> {
+            let compiled = self.compiles.pop_front().unwrap_or(Compiled::Unaffected);
+            self.compiled |= matches!(compiled, Compiled::Updated { .. });
+            Ok(compiled)
+        }
+        fn compile_pending(&self) -> bool {
+            self.compiled
+        }
+        fn patch_code(&mut self, _: &Context, _: &Window) -> anyhow::Result<Outcome> {
+            Ok(self.patches.pop_front().expect("an unexpected code patch"))
+        }
+        fn pid(&self) -> i32 {
+            self.pid as i32
+        }
+        fn revision(&self) -> String {
+            self.revision.clone()
+        }
+        fn bind_newest(&mut self, _: &Context) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn prepare(&mut self, _: &Context, _: &Window, _: bool, _: bool) -> anyhow::Result<bool> {
+            match self.prepare_error.take() {
+                Some(error) => Err(anyhow::anyhow!(error)),
+                None => Ok(true),
+            }
+        }
+        // The fixture has one Player process, so a restart names it again.
+        fn restart(&mut self, _: &Context, window: &Window) -> anyhow::Result<Restarted> {
+            self.revision = "rev-1".into();
+            Ok(Restarted {
+                event: Line::new("content-updated")
+                    .with("paths", &window.paths)
+                    .with("manifest", &self.manifest)
+                    .with("contentRoutes", "")
+                    .seconds("sourceToReadySeconds", 1.5)
+                    .with("pid", &(self.pid as i32))
+                    .with("report", &self.report),
+                compile: std::mem::take(&mut self.compiled)
+                    .then(crate::compiler::CompileUpdate::default),
+            })
+        }
+        fn merged_recompile(&mut self) -> Option<String> {
+            None
+        }
+        fn scene(&mut self, _: &Context, window: &Window, _: Instant) -> anyhow::Result<Scene> {
+            let pid = self.pid as i32;
+            Ok(
+                match self.reloads.pop_front().unwrap_or(Reload::Unchanged) {
+                    Reload::Unchanged => Scene::Unchanged(
+                        Line::new("unchanged")
+                            .with("paths", &window.paths)
+                            .seconds("prepareSeconds", 0.25)
+                            .with("pid", &pid)
+                            .with("revision", &self.revision),
+                    ),
+                    Reload::Updated => {
+                        self.revision = "rev-2".into();
+                        Scene::Updated(
+                        Line::new("updated")
+                            .with("paths", &window.paths)
+                            .seconds("prepareSeconds", 0.25)
+                            .raw(
+                                "ack",
+                                format!(
+                                    r#"{{"success":true,"restartRequired":false,"loadedRevision":"rev-2","pid":{pid}}}"#
+                                ),
+                            ),
+                    )
+                    }
+                    Reload::Rejected => Scene::Rejected {
+                        event: Line::new("update-rejected")
+                            .with("error", SCENE_REJECTED)
+                            .raw("ack", "null".into()),
+                        fatal: None,
+                    },
+                },
+            )
+        }
+        fn changes_pending(&self) -> bool {
+            self.queued
+        }
+    }
+
+    pub fn window(paths: &[&str], recompile: Option<&str>) -> Window {
+        Window {
+            paths: paths.iter().map(|path| path.to_string()).collect(),
+            changed_at: Instant::now(),
+            changed_wall: SystemTime::now(),
+            recompile: recompile.map(str::to_string),
+        }
+    }
+    /// Runs one window and lets the controller read every line of it.
+    pub fn run(c: &Controller, state: &mut Loop, script: &mut Script, window: &Window) -> State {
+        state
+            .window(&Context::background(), script, window)
+            .unwrap();
+        let mut last = c.status();
+        for line in std::mem::take(&mut script.lines) {
+            last = accept(c, line);
+            assert_ne!(last.phase, "failed", "{}", last.last_error);
+        }
+        last
+    }
+    pub fn note(code: &str, member: &str) -> Why {
+        Why::new(code, member, "A note of the patch builder.")
+    }
+    pub fn patch(generation: u64, notes: Vec<Why>) -> Outcome {
+        Outcome::Patched(Patched {
+            generation,
+            assemblies: vec!["Assembly-CSharp".into()],
+            patched_methods: 1,
+            members: vec!["Game.A::M()".into()],
+            notes,
+            report: format!("/out/{generation}/report.json"),
+            ..Patched::default()
+        })
+    }
+    pub fn refused() -> Outcome {
+        Outcome::Unsupported(Refusal {
+            reasons: vec![Why::new("type_added", "Game.Boss", "A type was added.")],
+            report: "/out/refused/report.json".into(),
+        })
+    }
+    pub fn noted() -> Outcome {
+        Outcome::Unchanged(Unchanged {
+            notes: vec![note("accessibility_changed", "Game.A::speed")],
+            report: "/out/noted/report.json".into(),
+        })
+    }
+    pub fn unchanged() -> Outcome {
+        Outcome::Unchanged(Unchanged::default())
+    }
+    pub fn timed_out() -> Outcome {
+        Outcome::TimedOut(Failure {
+            error: "the Player did not acknowledge the code patch within 20s".into(),
+            report: "/out/failed/report.json".into(),
+        })
+    }
+    pub fn report_loop() -> Loop {
+        Loop::new(true, Fallback::Report)
+    }
+}
+
+#[test]
+fn the_lines_of_the_watch_loop_are_what_the_controller_reads() {
+    use loop_lines::*;
+    let c = controller_fixture("");
+    let ready = start_ready(&c);
+    let (mut state, mut script) = (report_loop(), Script::new(&c, &ready));
+
+    // A patched edit with a note.
+    script.edit(patch(
+        1,
+        vec![note("existing_instances_keep_default", "Game.A::f")],
+    ));
+    let patched = run(
+        &c,
+        &mut state,
+        &mut script,
+        &window(&["/p/Assets/A.cs"], None),
+    );
+    assert_eq!(patched.hot_reload.code_generation, 1);
+    let last = patched.hot_reload.last_patch.as_ref().unwrap();
+    assert_eq!(
+        (last.notes_count, last.report.as_str()),
+        (1, "/out/1/report.json")
+    );
+    assert!(!patched.update_pending);
+    assert!(c.wait(&seconds(1), ready.last_sequence, false).is_ok());
+
+    // A save with a C# part that is refused and a scene part that is applied:
+    // the scene line is not the answer, the refusal after it is.
+    let mark = c.status().last_sequence;
+    script.edit(refused());
+    script.reloads.push_back(Reload::Updated);
+    let refusal = run(
+        &c,
+        &mut state,
+        &mut script,
+        &window(&["/p/Assets/A.cs", "/p/Assets/S.unity"], None),
+    );
+    assert!(refusal.hot_reload.full_recompile_required && !refusal.update_pending);
+    assert_eq!(refusal.hot_reload.unsupported[0].code, "type_added");
+    assert_eq!(refusal.revision, "rev-2");
+    assert_eq!(refusal.last_sequence, mark + 2);
+    expect_refused(c.wait(&seconds(1), mark, false), "mixed window");
+
+    // The recompile the controller sends is answered by the loop's restart.
+    let worker = recompile_in_background(&c, "rc-1");
+    script.compiles.push_back(Compiled::Unchanged);
+    let restarted = run(&c, &mut state, &mut script, &window(&[], Some("rc-1")));
+    let answer = worker.join().unwrap();
+    assert!(
+        answer.is_ok(),
+        "{:?}",
+        answer.err().map(|failure| failure.error.to_string())
+    );
+    assert!(!restarted.hot_reload.full_recompile_required);
+    let restart = restarted.hot_reload.last_restart.as_ref().unwrap();
+    assert_eq!(
+        (restart.reason.as_str(), restart.request_id.as_str()),
+        ("requested", "rc-1")
+    );
+
+    // A patch the Player did not acknowledge restarts with its error.
+    script.edit(timed_out());
+    let failed = run(
+        &c,
+        &mut state,
+        &mut script,
+        &window(&["/p/Assets/A.cs"], None),
+    );
+    let restart = failed.hot_reload.last_restart.clone().unwrap();
+    assert_eq!(
+        (restart.reason.as_str(), restart.report.as_str()),
+        ("hot_reload_failed", "/out/failed/report.json")
+    );
+    assert!(restart.error.contains("within 20s"), "{restart:?}");
+
+    // A compile that needs no patch and still is not all in the Player: the
+    // builder's notes are in the state a successful wait returns, for as
+    // long as they stand.
+    let mark = c.status().last_sequence;
+    script.edit(noted());
+    run(
+        &c,
+        &mut state,
+        &mut script,
+        &window(&["/p/Assets/A.cs"], None),
+    );
+    let noted_state = c.wait(&seconds(1), mark, false).unwrap();
+    let hot = &noted_state.hot_reload;
+    assert!(!hot.full_recompile_required && hot.code_generation == 0);
+    assert_eq!(
+        (hot.notes.len(), hot.notes_count, hot.notes_report.as_str()),
+        (1, 1, "/out/noted/report.json")
+    );
+    assert_eq!(hot.notes[0].code, "accessibility_changed");
+    let encoded = serde_json::to_value(&noted_state).unwrap();
+    assert_eq!(encoded["hotReload"]["notes"][0]["member"], "Game.A::speed");
+    assert_eq!(
+        encoded["hotReload"]["notesReport"],
+        "/out/noted/report.json"
+    );
+    // A scene edit keeps them; the next patch replaces them with its own.
+    script.reloads.push_back(Reload::Updated);
+    let scene = run(
+        &c,
+        &mut state,
+        &mut script,
+        &window(&["/p/Assets/S.unity"], None),
+    );
+    assert_eq!(scene.hot_reload.notes_count, 1);
+    script.edit(patch(1, Vec::new()));
+    let patched = run(
+        &c,
+        &mut state,
+        &mut script,
+        &window(&["/p/Assets/A.cs"], None),
+    );
+    assert!(patched.hot_reload.notes.is_empty() && patched.hot_reload.notes_report.is_empty());
+    assert_eq!(patched.hot_reload.notes_count, 0);
+}
+
+#[test]
+fn a_refusal_taken_back_in_a_window_whose_scene_part_fails_is_cleared() {
+    use loop_lines::*;
+    for (reload, prepare_error) in [
+        (Reload::Rejected, None),
+        (
+            Reload::Unchanged,
+            Some("prepare prefab: unsupported component"),
+        ),
+    ] {
+        let c = controller_fixture("");
+        let ready = start_ready(&c);
+        let (mut state, mut script) = (report_loop(), Script::new(&c, &ready));
+        script.edit(refused());
+        let refusal = run(
+            &c,
+            &mut state,
+            &mut script,
+            &window(&["/p/Assets/A.cs"], None),
+        );
+        assert!(refusal.hot_reload.full_recompile_required);
+        // The edit is reverted, and a scene part of the same save fails.
+        script.edit(unchanged());
+        script.reloads.push_back(reload);
+        script.prepare_error = prepare_error;
+        let rejected = run(
+            &c,
+            &mut state,
+            &mut script,
+            &window(&["/p/Assets/A.cs", "/p/Assets/P.prefab"], None),
+        );
+        // The Player runs the newest code: nothing asks for a recompile, and
+        // the wait gives the scene's own error.
+        assert!(
+            rejected.hot_reload.is_default() && !rejected.code_refused(),
+            "{rejected:?}"
+        );
+        let failure = c
+            .wait(&seconds(1), refusal.last_sequence, false)
+            .expect_err("the scene part was rejected");
+        assert!(failure.typed.is_none(), "{}", failure.error);
+        let expected = prepare_error.unwrap_or(SCENE_REJECTED);
+        assert_eq!(failure.error.message(), expected);
+    }
+}
+
+#[test]
+fn an_answer_marked_pending_answers_no_wait() {
+    use loop_lines::*;
+    let c = controller_fixture("");
+    let ready = start_ready(&c);
+    let (mut state, mut script) = (report_loop(), Script::new(&c, &ready));
+    // Two files saved one after the other: the first one is patched while
+    // the second is already queued. A wait from before both must not take
+    // the first patch for the answer.
+    script.queued = true;
+    script.edit(patch(1, Vec::new()));
+    let first = run(
+        &c,
+        &mut state,
+        &mut script,
+        &window(&["/p/Assets/A.cs"], None),
+    );
+    assert!(first.update_pending && first.hot_reload.code_generation == 1);
+    assert_eq!(serde_json::to_value(&first).unwrap()["updatePending"], true);
+    for readiness in [false, true] {
+        let early = c
+            .wait(&millis(150), ready.last_sequence, readiness)
+            .expect_err("a pending answer answered a wait");
+        assert!(early.error.is_deadline_exceeded(), "{}", early.error);
+    }
+    // The second window is the last word, and the wait returns its state.
+    script.queued = false;
+    script.edit(patch(2, Vec::new()));
+    let waiter = {
+        let (controller, after) = (c.clone(), ready.last_sequence);
+        thread::spawn(move || controller.wait(&seconds(3), after, false))
+    };
+    let second = run(
+        &c,
+        &mut state,
+        &mut script,
+        &window(&["/p/Assets/B.cs"], None),
+    );
+    let answered = waiter.join().unwrap().unwrap();
+    assert_eq!(answered.hot_reload.code_generation, 2);
+    assert!(!second.update_pending);
+    assert!(
+        serde_json::to_value(&second)
+            .unwrap()
+            .get("updatePending")
+            .is_none()
+    );
+
+    // A compile that raced a save is rejected, and the save's own window
+    // compiles both: the rejection reaches nobody who waits.
+    let mark = c.status().last_sequence;
+    script.queued = true;
+    script.prepare_error = Some("runtime source changed while snapshotting: /p/Assets/B.cs");
+    let raced = run(
+        &c,
+        &mut state,
+        &mut script,
+        &window(&["/p/Assets/A.cs"], None),
+    );
+    assert!(raced.update_pending && raced.last_update_rejected_sequence > mark);
+    script.queued = false;
+    script.edit(patch(3, Vec::new()));
+    run(
+        &c,
+        &mut state,
+        &mut script,
+        &window(&["/p/Assets/B.cs"], None),
+    );
+    let healed = c.wait(&seconds(1), mark, false).unwrap();
+    assert_eq!(healed.hot_reload.code_generation, 3);
+    assert!(healed.update_error.is_empty());
+
+    // A window with two answers: the code part is applied, the scene part
+    // rejected. The rejection is the outcome, whenever the waiter wakes.
+    let mark = healed.last_sequence;
+    script.edit(patch(4, Vec::new()));
+    script.reloads.push_back(Reload::Rejected);
+    let mixed = run(
+        &c,
+        &mut state,
+        &mut script,
+        &window(&["/p/Assets/A.cs", "/p/Assets/S.unity"], None),
+    );
+    assert_eq!(mixed.last_sequence, mark + 2);
+    let failure = c
+        .wait(&seconds(1), mark, false)
+        .expect_err("the scene part was rejected");
+    assert_eq!(failure.error.message(), SCENE_REJECTED);
+    assert_eq!(failure.state.hot_reload.code_generation, 4);
+
+    // A session that ends while an answer is pending ends the wait.
+    script.queued = true;
+    script.reloads.push_back(Reload::Updated);
+    run(
+        &c,
+        &mut state,
+        &mut script,
+        &window(&["/p/Assets/S.unity"], None),
+    );
+    let mark = c.status().last_sequence - 1;
+    c.stop(&seconds(3)).unwrap();
+    let stopped = c
+        .wait(&seconds(1), mark, false)
+        .expect_err("the session stopped");
+    assert_eq!(stopped.state.phase, "stopped");
+    assert!(!stopped.state.update_pending);
 }
