@@ -42,6 +42,8 @@ internal sealed class Canon
     readonly Dictionary<int, string> tokCache = new();
     readonly Dictionary<int, string> alias = new();
     readonly Dictionary<int, string> layouts = new();
+    /// The definitions that member references of this module name; nil for a foreign member.
+    readonly Dictionary<int, EntityHandle> definitions = new();
     readonly string cycle = "$cycle" + Interlocked.Increment(ref instances);
     static int instances;
     readonly Queue<EntityHandle> queue = new();
@@ -54,6 +56,9 @@ internal sealed class Canon
     int localAliases;
     /// A closure class is reduced to its layout and the lambdas the code names: see MemberHash.
     bool codeOnly;
+    /// Diagnostic: a reference through a type of this module is read as its text alone, so that
+    /// what it leads to has no owner. The tests use it to reach the check for such code.
+    public bool Blind;
 
     public Canon(Asm a)
     {
@@ -250,9 +255,17 @@ internal sealed class Canon
             {
                 var mr = md.GetMemberReference((MemberReferenceHandle)h);
                 string parent = Tok(mr.Parent), name = md.GetString(mr.Name);
-                return mr.GetKind() == MemberReferenceKind.Method
+                bool method = mr.GetKind() == MemberReferenceKind.Method;
+                string reference = method
                     ? parent + "::" + name + Asm.SigText(mr.DecodeMethodSignature(prov, null))
                     : parent + "::" + name + ":" + mr.DecodeFieldSignature(prov, null);
+                // Generic code names the members of its own type, and its lambdas, through an
+                // instantiation: `Box<!0>::<Get>b__1_0`, `<>c__2<!!0>::<>9__2_0`. Such a reference
+                // means its definition, and a generated member it leads to belongs to the method
+                // like one that is named directly.
+                var definition = Definition((MemberReferenceHandle)h, mr, method);
+                if (definition.IsNil) return reference;
+                return reference + " = " + (method ? MethodDefText((MethodDefinitionHandle)definition) : FieldDefText((FieldDefinitionHandle)definition));
             }
             case HandleKind.MethodSpecification:
             {
@@ -271,6 +284,60 @@ internal sealed class Canon
             default:
                 throw new InvalidDataException($"Unexpected token kind {h.Kind} in a method body of {a.Name}.");
         }
+    }
+
+    /// The method or field of this module that a reference through a type of this module names;
+    /// nil for a member of another assembly, of an array type, or a call site with its own
+    /// signature. A reference that names no member is not understood, and nothing that holds it
+    /// may count as unchanged.
+    EntityHandle Definition(MemberReferenceHandle handle, MemberReference mr, bool method)
+    {
+        if (Blind) return default;
+        int token = MetadataTokens.GetToken(handle);
+        if (definitions.TryGetValue(token, out var known)) return known;
+        TypeDefinitionHandle type;
+        switch (mr.Parent.Kind)
+        {
+            case HandleKind.TypeDefinition:
+                type = (TypeDefinitionHandle)mr.Parent;
+                break;
+            case HandleKind.TypeSpecification:
+            {
+                var blob = md.GetBlobReader(md.GetTypeSpecification((TypeSpecificationHandle)mr.Parent).Signature);
+                if (blob.ReadSignatureTypeCode() != SignatureTypeCode.GenericTypeInstance || blob.ReadSignatureTypeCode() != SignatureTypeCode.TypeHandle) return definitions[token] = default;
+                var generic = blob.ReadTypeHandle();
+                if (generic.Kind != HandleKind.TypeDefinition) return definitions[token] = default;
+                type = (TypeDefinitionHandle)generic;
+                break;
+            }
+            default:
+                return definitions[token] = default;
+        }
+        string name = md.GetString(mr.Name);
+        var td = md.GetTypeDefinition(type);
+        EntityHandle found = default;
+        if (method)
+        {
+            // A call with a variable argument list has the signature of its call site.
+            if (md.GetBlobReader(mr.Signature).ReadSignatureHeader().CallingConvention == SignatureCallingConvention.VarArgs) return definitions[token] = default;
+            string signature = Asm.SigText(mr.DecodeMethodSignature(a.Plain, null));
+            foreach (var m in td.GetMethods())
+            {
+                var d = md.GetMethodDefinition(m);
+                if (md.StringComparer.Equals(d.Name, name) && Asm.SigText(d.DecodeSignature(a.Plain, null)) == signature) { found = m; break; }
+            }
+        }
+        else
+        {
+            string fieldType = mr.DecodeFieldSignature(a.Plain, null);
+            foreach (var f in td.GetFields())
+            {
+                var d = md.GetFieldDefinition(f);
+                if (md.StringComparer.Equals(d.Name, name) && d.DecodeSignature(a.Plain, null) == fieldType) { found = f; break; }
+            }
+        }
+        if (found.IsNil) throw new InvalidDataException($"{a.TypeName(type)} of {a.Name} declares no member {name} that a method body names through it.");
+        return definitions[token] = found;
     }
 
     string Alias(TypeDefinitionHandle h)

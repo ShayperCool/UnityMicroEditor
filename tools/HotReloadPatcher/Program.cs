@@ -13,7 +13,9 @@
 // `previousResult` is the result document of the patch the Player runs now, when it runs one: what
 // that patch defined and this one changes or drops is reported, because nothing redirects it.
 // Diagnostic members: `threads`, `forceAll` (every comparable body becomes a change), `fault`
-// ("diff" or "emit": fail there, to exercise the handling of a defect).
+// ("diff" or "emit": fail there, to exercise the handling of a defect; "owner": do not follow a
+// reference into generic code to its definition, to exercise the check for generated code that no
+// method owns).
 //
 // Result:
 //   {"schemaVersion":1,"generation":3,"verdict":"patch|unchanged|unsupported",
@@ -25,11 +27,14 @@
 //      "patchMembers":[{"member":"Game.Player::Wire() [lambda 0]","kind":"added|lambda|local|closure|state_machine","bodyHash":"<hex>"}],
 //      "changes":[{"kind":"method_body","member":"Game.Player::Update()","action":"patch|none|note|unsupported","code":"","message":""}],
 //      "unsupported":[{"code":"generic_method","member":"...","message":"..."}],
-//      "notes":[{"code":"existing_instances_keep_default","member":"...","message":"..."}]}],
+//      "notes":[{"code":"existing_instances_keep_default","member":"...","message":"...","revision":"<hex>"}]}],
 //    "summary":{"patchedMethods":2,"addedMethods":1,"addedFields":1,"unsupported":0,"notes":1},
 //    "timingsMs":{"read":1,"diff":2,"emit":3}}
 // The lists of a patch are empty unless its file was written; `patchMembers` are the methods that
-// only the patch defines.
+// only the patch defines. `revision` of a note is present when the note is about a method the
+// patch carries: a short hash of what that method runs now, or `g<generation>` for a note about
+// the step from the previous patch. The same code, member and revision in the result before
+// means that the note only still stands; anything else is about code that changed since.
 //
 // A request that cannot be read is a message on stderr and exit code 1; an edit that cannot be
 // patched, and a failure of the tool on one assembly, is a normal result with the verdict "unsupported".
@@ -130,7 +135,8 @@ internal static class Program
         public string Verdict = Unchanged;
         public Patch? Patch;
         public string Path = "", Sha256 = "", Pdb = "";
-        public readonly List<(string Code, string Member, string Message)> Unsupported = new(), Notes = new();
+        public readonly List<(string Code, string Member, string Message)> Unsupported = new();
+        public readonly List<(string Code, string Member, string Message, string Revision)> Notes = new();
     }
 
     public static int Main(string[] args)
@@ -235,7 +241,7 @@ internal static class Program
             Guard(outcome, "comparing", () =>
             {
                 if (request.Fault == "diff") throw new InvalidOperationException("The request asked for a fault.");
-                var differ = new Differ(workspace, entry) { ForceAll = request.ForceAll };
+                var differ = new Differ(workspace, entry, blind: request.Fault == "owner") { ForceAll = request.ForceAll };
                 differ.Run(request.Threads);
                 outcome.Changes = differ.Changes;
             });
@@ -299,7 +305,8 @@ internal static class Program
                 {
                     foreach (var (code, member, message) in outcome.Emitter.EarlierPatch(members, previous.Generation, outcome.Patch))
                     {
-                        var change = new Change { Kind = "earlier_patch", Member = member, Action = Actions.Note };
+                        // Each of these notes is about the step from one patch to the next.
+                        var change = new Change { Kind = "earlier_patch", Member = member, Action = Actions.Note, Revision = "g" + request.Generation };
                         change.Notes.Add((code, message));
                         outcome.Changes.Add(change);
                     }
@@ -312,7 +319,7 @@ internal static class Program
         if (verdict != Unsupported)
             foreach (var outcome in outcomes)
                 foreach (var c in outcome.Changes)
-                    foreach (var (code, message) in c.Notes) outcome.Notes.Add((code, c.Member, message));
+                    foreach (var (code, message) in c.Notes) outcome.Notes.Add((code, c.Member, message, c.Revision));
         long emitMs = watch.ElapsedMilliseconds;
         return Result(request, outcomes, verdict, readMs, diffMs, emitMs);
     }
@@ -346,15 +353,16 @@ internal static class Program
         var buffer = new MemoryStream();
         using (var w = new Utf8JsonWriter(buffer, new JsonWriterOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }))
         {
-            void Reasons(string name, List<(string Code, string Member, string Message)> list)
+            void Reasons(string name, IEnumerable<(string Code, string Member, string Message, string Revision)> list)
             {
                 w.WriteStartArray(name);
-                foreach (var (code, member, message) in list)
+                foreach (var (code, member, message, revision) in list)
                 {
                     w.WriteStartObject();
                     w.WriteString("code", code);
                     w.WriteString("member", member);
                     w.WriteString("message", message);
+                    if (revision.Length > 0) w.WriteString("revision", revision);
                     w.WriteEndObject();
                 }
                 w.WriteEndArray();
@@ -432,7 +440,7 @@ internal static class Program
                     w.WriteEndObject();
                 }
                 w.WriteEndArray();
-                Reasons("unsupported", outcome.Unsupported);
+                Reasons("unsupported", outcome.Unsupported.Select(x => (x.Code, x.Member, x.Message, "")));
                 Reasons("notes", outcome.Notes);
                 w.WriteEndObject();
             }

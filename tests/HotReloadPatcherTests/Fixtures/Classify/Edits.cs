@@ -492,6 +492,58 @@ namespace Edits
         public int Use() => Method();
     }
 
+    public class Exposure : MonoBehaviour
+    {
+#if CASE_ACCESSIBILITY_SERIALIZED
+        public int tuned;
+        private int shown;
+#else
+        private int tuned;
+        public int shown;
+#endif
+#if CASE_ACCESSIBILITY_NOT_SERIALIZED
+        public static int shared;
+        public readonly int frozen = 1;
+        [SerializeField] public int marked;
+#else
+        private static int shared;
+        private readonly int frozen = 1;
+        [SerializeField] private int marked;
+#endif
+        public int Sum() => tuned + shown + shared + frozen + marked;
+    }
+
+    [Serializable]
+    public class ExposureData
+    {
+#if CASE_ACCESSIBILITY_SERIALIZED
+        public int value;
+#else
+        private int value;
+#endif
+        public int Get() => value;
+    }
+
+    public class Starting : MonoBehaviour
+    {
+        private int n;
+#if CASE_START_BODY
+        private void Start() { n = 2; }
+#else
+        private void Start() { n = 1; }
+#endif
+    }
+
+    public class PlainStarting
+    {
+        private int n;
+#if CASE_START_BODY
+        public void Start() { n = 2; }
+#else
+        public void Start() { n = 1; }
+#endif
+    }
+
     public class Reordered
     {
 #if CASE_REORDER
@@ -660,6 +712,62 @@ namespace Edits
             return v;
 #endif
         }
+
+        // The lambda becomes a generic method beside the local function.
+        public int Deep(int v)
+        {
+            int Twice<T>(T x)
+            {
+#if CASE_GENERIC_LOCAL_LAMBDA
+                Func<int> f = () => 2;
+#else
+                Func<int> f = () => 1;
+#endif
+                return f() + f();
+            }
+            return Twice(v);
+        }
+    }
+
+    // Generic code names its own lambdas and local functions through an instantiation of the
+    // type that holds them. Only the generated member differs in each of these edits.
+    public class GenericLambdas<T>
+    {
+        private int seed;
+#if CASE_GENERIC_TYPE_LAMBDA
+        public int Pooled() { Func<int> f = () => 2; return f(); }
+#else
+        public int Pooled() { Func<int> f = () => 1; return f(); }
+#endif
+#if CASE_GENERIC_TYPE_THIS_LAMBDA
+        public int Bound() { Func<int> f = () => seed + 2; return f(); }
+#else
+        public int Bound() { Func<int> f = () => seed + 1; return f(); }
+#endif
+#if CASE_GENERIC_TYPE_LOCAL_FUNCTION
+        public int Local() { int L() => 2; return L(); }
+#else
+        public int Local() { int L() => 1; return L(); }
+#endif
+        public class Inner
+        {
+#if CASE_GENERIC_NESTED_LAMBDA
+            public int Pooled() { Func<int> f = () => 2; return f(); }
+#else
+            public int Pooled() { Func<int> f = () => 1; return f(); }
+#endif
+        }
+    }
+
+    public class GenericMethodLambdas
+    {
+#if CASE_GENERIC_METHOD_LAMBDA
+        public int Pool<T>(T v) { Func<int> f = () => 2; return f(); }
+        public int Query<T>(T v) => new[] { 1, 2, 3 }.Count(x => x > 2);
+#else
+        public int Pool<T>(T v) { Func<int> f = () => 1; return f(); }
+        public int Query<T>(T v) => new[] { 1, 2, 3 }.Count(x => x > 1);
+#endif
     }
 
     public class Anonymous

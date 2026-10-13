@@ -32,9 +32,11 @@ internal static class Codes
     public const string FieldFlagsChanged = "field_flags_changed";
     public const string StaticReadonlyRemoved = "static_readonly_removed";
     public const string SpecialFieldAdded = "special_field_added";
+    public const string SerializationChanged = "serialization_changed";
     public const string CrossAssemblyAddition = "cross_assembly_addition";
     public const string GeneratedTypeNotLoaded = "generated_type_not_loaded";
     public const string GenericGeneratedMember = "generic_generated_member";
+    public const string UnownedGeneratedCode = "unowned_generated_code";
     public const string UnsupportedInstruction = "unsupported_instruction";
     public const string EmitNotSupported = "emit_not_supported";
     public const string EmitVerificationFailed = "emit_verification_failed";
@@ -45,6 +47,7 @@ internal static class Codes
     public const string SerializedFieldNotRestored = "serialized_field_not_restored";
     public const string FieldValueReset = "field_value_reset";
     public const string ConstructorAppliesToNewObjects = "constructor_applies_to_new_objects";
+    public const string StartedObjectsKeepState = "started_objects_keep_state";
     public const string RunningCoroutinesKeepOldCode = "running_coroutines_keep_old_code";
     public const string LambdaNotRemapped = "lambda_not_remapped";
     public const string EarlierPatchDelegatesKeepOldCode = "earlier_patch_delegates_keep_old_code";
@@ -84,9 +87,11 @@ internal static class Codes
         (FieldFlagsChanged, "Flags of an existing field changed (not-serialized, marshalling, special name, ...)."),
         (StaticReadonlyRemoved, "`readonly` was removed from a static field; the runtime may have compiled its value into loaded and patched code as a constant, so an assignment would not be seen."),
         (SpecialFieldAdded, "The added field cannot live in the side table (thread-static, volatile, pointer or by-ref type, marshalled, mapped data)."),
+        (SerializationChanged, "The accessibility of an existing field changed so that Unity starts or stops serializing it; the Player reads scenes, prefabs and assets with the loaded fields until a restart."),
         (CrossAssemblyAddition, "Patched code uses a type or member that this same change added to another game assembly."),
         (GeneratedTypeNotLoaded, "Patched code needs an anonymous type or a generic compiler-generated type that the loaded assembly does not contain."),
         (GenericGeneratedMember, "Patched code contains a generic lambda or local function."),
+        (UnownedGeneratedCode, "Compiler-generated code (a lambda, a local function or a state machine) differs between the two compilations and no method is known to own it, so the edit cannot be compared."),
         (UnsupportedInstruction, "Patched code uses an added member in a way the patch cannot express (reflection handle, delegate over an added struct method, volatile access, ...)."),
         (EmitNotSupported, "The patch builder cannot prove a correct patch for this member (a synchronized added method, a variable argument list or a call of one, ...)."),
         (EmitVerificationFailed, "The emitted patch assembly did not pass its verification; nothing was published."),
@@ -99,13 +104,14 @@ internal static class Codes
         (SerializedFieldNotRestored, "An added field that Unity would serialize is not restored from scenes, prefabs or assets until a restart."),
         (FieldValueReset, "A field whose type or static modifier changed is stored anew; its previous value is lost."),
         (ConstructorAppliesToNewObjects, "A changed constructor or instance field initializer affects only objects constructed after the patch."),
+        (StartedObjectsKeepState, "A changed Awake or Start of an engine object is not run again for the objects that exist; it runs for objects created after the patch."),
         (RunningCoroutinesKeepOldCode, "Coroutines, iterators and async methods that are already running finish on the old code; new calls run the new code."),
         (LambdaNotRemapped, "A lambda or local function was edited, moved or removed and its old version is not redirected: which lambda it became is only known while the code that creates it is unchanged, and a redirect needs the same captures, none of them taken by reference. Delegates and calls made by code from before the patch keep the old body."),
         (EarlierPatchDelegatesKeepOldCode, "An added method, lambda, local function or state machine that an earlier patch brought was changed or dropped; delegates, coroutines and async calls created while that patch was applied keep running its code."),
         (AddedMethodDelegateIdentity, "Patched code makes a delegate of an added method that the earlier patch also had; each patch has its own copy, so `-=` does not remove a handler subscribed while the earlier patch was applied, until a full recompile."),
         (AddedMemberAttributesIgnored, "Attributes on an added member are invisible to reflection until a full recompile."),
         (AddedMethodInvisibleByName, "An added method that a string literal names, or an added instance method of an engine object, cannot be found by name until a full recompile: SendMessage, Invoke, StartCoroutine(string), UnityEvent, animation events, input messages and reflection look in the loaded class."),
-        (AccessibilityChanged, "The accessibility of an existing member changed; reflection and Unity serialization keep the loaded accessibility until a full recompile."),
+        (AccessibilityChanged, "The accessibility of an existing member changed; reflection keeps the loaded accessibility until a full recompile. A field that Unity would serialize differently is refused instead (serialization_changed)."),
         (RuntimeInitializerAdded, "A [RuntimeInitializeOnLoadMethod] method was added; it runs at the next start."),
         (RuntimeInitializerRemoved, "A [RuntimeInitializeOnLoadMethod] method was removed or renamed; the change is effective at the next start."),
     };
