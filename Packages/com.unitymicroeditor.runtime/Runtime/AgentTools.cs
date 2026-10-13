@@ -180,7 +180,10 @@ namespace UnityMicroEditor
             var selected = new List<Assembly>(); var identities = new List<string>(); string runtimeName = typeof(AgentToolAttribute).Assembly.GetName().Name;
             foreach (Assembly assembly in assemblies)
             {
-                if (assembly.IsDynamic || assembly == typeof(AgentToolAttribute).Assembly) continue;
+                // An assembly loaded from memory is the code reload applier or one of
+                // its patches. A patch repeats types of the game; it adds no tool and
+                // must not make the catalog look like another set of assemblies.
+                if (assembly.IsDynamic || assembly == typeof(AgentToolAttribute).Assembly || string.IsNullOrEmpty(assembly.Location)) continue;
                 bool references = false;
                 foreach (AssemblyName reference in assembly.GetReferencedAssemblies()) if (reference.Name == runtimeName) { references = true; break; }
                 if (!references) continue;

@@ -1,0 +1,205 @@
+# The Player side of hot reload
+
+These sources are the applier: the code that redirects methods inside a running Player. The runner compiles the directory into `UnityMicroEditor.HotReload.dll` for a session, with the bridge's session flags and against the staged Player's `Managed` directory. The Player bridge (`Runtime/CodeReload.cs`) loads the assembly from bytes on the first code reload request and calls `UnityMicroEditor.HotReload.Entry.Handle(string requestPath)` on the main thread, at the end of `EarlyUpdate`. The applier is not part of the bridge and is not pinned to a host build.
+
+Verified for Unity `6000.6.3f1`, Mono `6.13.0`, Linux x86-64. Other platforms, architectures and backends are refused with a message.
+
+| File | Responsibility |
+| --- | --- |
+| `Entry.cs` | The entry point; one request from the descriptor to the ack |
+| `Detour.cs` | Entries of compiled methods and every store into them: the first byte, the second instruction, the gated jump |
+| `Island.cs` | The code such a store leads to, islands and relays, and the pages it is mapped in |
+| `Canary.cs` | Whether the JIT of this process inlines |
+| `FieldStore.cs` | Storage of fields a patch added to loaded types; the only public API besides `Entry` |
+| `Callbacks.cs`, `Bodies.cs` | `[InvokeOnHotReload]` and `[InvokeOnHotReloadLocal]`; whether a body changed with a generation |
+| `Engine.cs` | Everything that needs the engine or the bridge assembly |
+| `Json.cs` | Reader and writer of the three documents |
+
+Every `.cs` file of the directory belongs to the assembly; nothing else does.
+
+## What one request does
+
+The request names a descriptor. The descriptor is cumulative: it lists every method that differs from the assemblies the Player loaded at its start and replaces the generation before it entirely.
+
+1. Read the request (at most 64 KiB) and the descriptor (at most 16 MiB, SHA-256 checked). The generation must be newer than the applied one.
+2. Read every patch assembly (at most 64 MiB, SHA-256 checked) and its symbol file.
+3. Check the JIT (see "Inlining"). Only when the descriptor lists a detour.
+4. Find each game assembly among the loaded ones by simple name and MVID. Resolve every original by its metadata token and check that it is a closed method with an IL body.
+5. Load the patch assemblies with `Assembly.Load(raw[, pdb])`. An assembly that was loaded before, by SHA-256, is used again. Resolve every replacement by token and compare the native signatures.
+6. Compile every replacement and every original.
+7. Decide how each method is written (see "The redirect") and map the islands and relays that are needed. This is where the process map is read, after everything listed is compiled.
+8. Compile every other method of the patch assemblies.
+9. Write. For every method that is redirected for the first time: its first byte, or its second instruction, or a whole jump behind the gate with one drain of 1 ms for the batch. For the methods that are already redirected: their pointer slot or their jump. For the methods the descriptor no longer lists: their saved bytes.
+10. Run the callbacks.
+
+Steps 1 to 8 write nothing into the game's code. If any of them reports a failure, the request ends there and the Player keeps running the generation it had. The ack then has `success: false`, the unchanged `appliedGeneration` and one entry per failure:
+
+| `stage` | Reported for |
+| --- | --- |
+| `resolve` | request, descriptor, hashes, generation order, assembly not loaded or of another MVID, tokens, methods that are generic or have no body, signatures that do not match, a patch assembly that does not load |
+| `inlining` | a JIT that inlines |
+| `compile` | a method the JIT refuses, a type of the patch that does not load, a static initializer that fails |
+| `write` | a method for which there is no way to redirect it (see "When there is no way"); an entry that is not 8-byte aligned or not in a writable and executable mapping; one method listed twice; a body whose first bytes something else changed; a check of the JIT that could not run; an exception during step 9 |
+
+`error` holds the first message, with the count when there are more; at most 32 failures are listed. A request id that was answered before returns the same ack again and runs nothing.
+
+`restartRequired` is true in two cases. An exception interrupted step 9: some methods may be redirected and others not, or a method may be left closed by its gate. Or a static initializer of the game failed while the request compiled (see "Static initializers"): nothing was written, but the game has lost a type.
+
+### The ack
+
+```json
+{"schemaVersion":1,"requestId":"request-41","pid":4084366,"success":true,"generation":7,"appliedGeneration":7,
+ "restartRequired":false,"error":"","failures":[],
+ "detoursApplied":2,"detoursRestored":0,"islandWrites":2,"gatedWrites":0,
+ "callbacksInvoked":8,"callbackErrors":3,
+ "inliningDisabled":true,"inliningChecked":true,"initializersRun":true,
+ "elapsedSeconds":0.0021,"completedUtcUnixMilliseconds":1791879000000}
+```
+
+A failure is `{"assembly":"Game","member":"Game.Player::Health","stage":"write","message":"..."}`. Beyond the members of the design contract:
+
+| Member | Meaning |
+| --- | --- |
+| `islandWrites` | first redirects of this request that go through an island or a relay: the first byte or the second instruction of the body was replaced |
+| `gatedWrites` | first redirects of this request that wrote a whole jump behind the gate, over a first instruction of seven bytes |
+| `inliningChecked` | false while the check of the JIT has not given an answer: no request with a detour came yet, or the check could not run. `inliningDisabled` is false then too, and says nothing |
+| `initializersRun` | the request made the runtime compile methods the applier had not asked for before. Static initializers that were pending for their types have run, also when `success` is false |
+
+A retarget and a restore count in `detoursApplied` and `detoursRestored` only.
+
+## What a patch assembly must be
+
+- A simple name no loaded assembly has. A reference by name binds to the first assembly loaded under that name, so a second assembly of a used name is refused: `An assembly named X is already loaded`.
+- The declaration `SecurityPermission(SecurityAction.RequestMinimum, SkipVerification = true)`. Without it this Mono refuses access to non-public fields when it compiles, but it compiles a call of a non-public method and throws `MethodAccessException` only when the call runs. The applier therefore looks for the declaration in the file and refuses an assembly without it before loading it.
+- Replacements of these forms, which keep the native signature of the original:
+
+| Original | Replacement |
+| --- | --- |
+| static method | static method, same parameters and return type |
+| instance method or constructor of a class | static method whose first parameter is the instance (the class or a base of it), then the same parameters; or an instance method of any class |
+| instance method or constructor of a struct | instance method of a struct in the patch (a stand-in; `this` is the game's struct), same parameters |
+
+A struct method replaced by a static method that takes the struct by reference is refused: with a result returned through a hidden buffer the two forms pass `this` and the buffer in swapped registers. Generic methods, methods of generic types, static constructors, abstract and extern methods are refused on either side. The applier never asks the runtime for the entry of a generic definition; that aborts the process.
+
+Every method of a patch assembly is compiled before anything is written, not only the replacements.
+
+## Static initializers
+
+This Mono runs the static initializers that are still pending for the types a method involves when it compiles the method: the method's own type, and types whose static fields it reads. A request compiles the replacements, the originals and the rest of each patch assembly, so it runs initializers of the game at patch time, earlier than the game would have, and it has run them when it is refused afterwards. No public API tells whether an initializer is pending, so this cannot be avoided; the ack reports it:
+
+- `initializersRun` is true for every request that compiled a method the applier had not compiled before. A request that is refused before step 6 has it false.
+- A request that is refused in step 6 or 7 does not go on to step 8, so it runs no more initializers than its listed methods need.
+- A static initializer of the game that throws is final: the runtime fails every later use of the type, in a process that might have initialized it without error later. The failure has stage `compile`, names the type, and the ack has `restartRequired: true`. A failing initializer of a type of the patch itself only refuses the patch.
+
+## The redirect
+
+Both addresses of a redirect come from `RuntimeMethodHandle.GetFunctionPointer()`. The Player thread that applies a patch has no game method on its stack; other threads are not stopped, and one of them may be about to execute any instruction of a body, for as long as the scheduler keeps it waiting. So a first redirect replaces bytes of **one** instruction and never the first byte of the next one. This JIT starts a body in three ways, and each has its own:
+
+| Body starts with | Share | First redirect |
+| --- | --- | --- |
+| `55 48 8B EC 48` (`push rbp`: a `try` block, `stackalloc`, an argument passed or received on the stack) | 9.1 % | the first byte, to an island |
+| `48 83 EC ib` (`sub rsp`, 8-bit) | 89.4 % | the first byte, to an island. Where that island would lie below address zero, which is the case when the second instruction is `mov r32, imm32` (`B8` to `BF`: the method first loads a constant; 1.1 to 3.3 % of all methods, depending on where the JIT's code lies), that second instruction, to a relay |
+| `48 81 EC id` (`sub rsp`, 32-bit: more than 127 bytes of locals) | 1.5 % | the first byte, to an island. Where the island address is taken (104 of the 864), a whole jump behind the gate |
+
+Shares are of 57,213 methods of `mscorlib`, `System`, `System.Core` and `System.Xml`, compiled by the Player runtime with `-O=-float32,-inline` (2026-10-13). No other first instruction occurred.
+
+### The first byte and an island
+
+Only byte 0 of the body changes, to `E9`. Bytes 1 to 4 are not written: they stay the rest of the old prologue, and after byte 0 they are read as the distance of the jump, which therefore lands at `entry + 5 + int32(bytes 1..4)`. The applier maps an island at exactly that address before it writes the byte:
+
+- `mmap` of the page (two, when the island crosses a page end) with `MAP_FIXED_NOREPLACE | MAP_ANONYMOUS | MAP_PRIVATE`, readable, writable and executable. A returned address other than the requested one is unmapped again and counts as a failure.
+- At the address: `FF 25 disp32`, a jump through a pointer slot. The slot is the 8-byte aligned word after those six bytes, or the one before them when the island of a body 16 bytes further on is in the way. The rest of a new page is `int3`.
+- The slot holds the entry of the replacement.
+
+One byte is stored atomically and no thread can be inside it. A thread that has not reached the body takes the jump; a thread that is past byte 0 runs the old body, of which no other byte changed. A **retarget** is one aligned 8-byte store into the slot. A **restore** stores the saved byte 0.
+
+The island of a `push rbp` body lies 1.22 GiB above it, that of a `sub rsp, imm8` body between 1.1 GiB below and 1.6 GiB above, that of a `sub rsp, imm32` body 9 to 16 MiB above, inside the JIT's own area. None of the 5,199 `push rbp` islands of the sample and none of the 50,514 mappable `sub rsp, imm8` islands lay in mapped memory. Two islands coincide when two bodies with different prologues lie at the matching distance: 482 of the 56,473 islands of the sample, had all of them been mapped at once.
+
+### The second instruction and a relay
+
+`sub rsp, imm8; mov r32, imm32` puts the island of the first byte 1.0 to 1.15 GiB below the body, and the JIT's code starts at 1 GiB. The `mov` is five bytes, as long as a jump, and a thread is before it or after it. It is replaced whole: `EB FE` on its first two bytes, so that a thread arriving there spins; its last three bytes; then `E9` and the first displacement byte. Both ends are single aligned 2-byte stores and nothing has to be waited for, because no thread can be inside the instruction. The jump leads to a relay, an island at an address of the applier's choice (a page 1.75 GiB above the body, shared by relays while it has room): `add rsp, imm8`, which gives back what the first instruction took, then the jump through a pointer slot. Retarget stores the slot; restore puts the five bytes back the same way.
+
+### A whole jump behind the gate
+
+Only a first instruction of at least five bytes contains a whole `E9 rel32`, and of the three only `sub rsp, imm32` is one. For such a body without an island the jump is written as the design contract describes, each step one aligned 8-byte store that keeps bytes 5 to 7: `EB FE` on bytes 0 and 1; one sleep of 1 ms for the whole batch; bytes 2 to 4; then `E9` and the first displacement byte. Retarget and restore are one store each. The next first redirect of the method tries the island again.
+
+A whole jump over a shorter first instruction ends in the second one. A thread that is about to execute that instruction then continues in the middle of the jump, whenever it is scheduled again: the 1 ms only make that unlikely. This is why stage 1's gated write is no longer used for `sub rsp, imm8` bodies. Measured with it on `Hot.Work` (`48 83 EC 08 48 89 3C 24`), three threads calling nothing else, Player runtime: one SIGSEGV in about 11,000 first redirects while other builds ran on the machine, and one in the first run of 500 with 16 busy loops beside it, `at Game.Hot:Work <0x00004>`, the second instruction.
+
+### When there is no way
+
+A method fails with stage `write`, before anything is written, when none of the three applies: the island address of its first byte is taken, lies outside the address space or overlaps the island of another method, and the body is neither of the other two forms; or no relay page can be mapped; or the replacement is out of reach of the 32-bit jump of the gated write. The request is refused as a whole and the runner takes its fallback. In the sample this is the 482 coinciding islands, and only when both methods of a pair are patched in one Player.
+
+### What is left for other threads
+
+Nothing known for the three stores themselves. Measured on 2026-10-13 (AMD Ryzen 7 5700X3D, 16 hardware threads) with three threads that do nothing but call the method while the main thread redirects it for the first time, retargets and restores it, without a fault and without a result other than those of the three bodies:
+
+| Where | Method and way | Runs × first redirects | Calls of the three threads |
+| --- | --- | --- | --- |
+| Player runtime (`libmonobdwgc-2.0.so` in the embedding host) | `Hot.Guarded`, `push rbp`: first byte and island | 10 × 200 | 0.87 billion |
+| | `Hot.Flat`, loads a constant: second instruction and relay | 10 × 200 | 1.31 billion |
+| | `Hot.Large`, `sub rsp, imm32`, island address taken: whole jump behind the gate | 10 × 200 | 0.87 billion |
+| the same, with 16 busy loops on the 16 hardware threads | the three above | 5 × 500 each | 1.70, 2.00 and 1.39 billion |
+| the same, the reviewer's reproduction of the stage 1 crash (cycles of first redirect and restore) | `Shapes.CallsSeven`, `push rbp`: first byte and island | 10 × 3000 | 131 billion |
+| standalone Mono | the three above | 10 × 200 each | 1.22, 1.38 and 1.57 billion |
+| the stock `LinuxPlayer` process, without game data | the three above | 1 × 500 each | 0.19, 0.23 and 0.18 billion |
+
+Every run of the first four rows also retargets and restores the method once per first redirect. The stage 1 write crashed in each of three runs of the reviewer's reproduction, before 250 first redirects.
+
+What a redirect does not do:
+
+- A frame that is on a stack while its method is redirected finishes the old body. A running coroutine or `async` method keeps the body it started with.
+- A thread inside an island or a relay is at an address the runtime has no method for. A stack walk of that thread from outside (a sampling profiler) loses frames for those one or two instructions.
+- An island is never unmapped, because a thread may be inside it at any time; a later first redirect of the same method uses it again. Pages are unmapped in one case only: an attempt that failed returns the pages it mapped itself, to which no jump was ever written.
+
+Mean time inside the applier for a request with one detour, under the three calling threads on the Player runtime: 0.76 ms for a first redirect through an island or a relay, 1.84 ms behind the gate (1 ms of it the drain), 0.57 ms for a retarget, 0.23 ms for a restore. Nearly all of it is the request itself: reading and hashing the descriptor and the patch assembly, the callbacks. A request with 590 first redirects of methods that were never compiled took 26 ms in the stock Player process, compiling included.
+
+## Inlining
+
+A JIT that inlines copies small methods (IL under 20 bytes) and `AggressiveInlining` methods into their callers, also into callers it compiles later. A redirect does not reach those copies. With the first request that lists a detour the applier redirects three probe methods of its own and lets the JIT compile their callers: when any of them still runs its original body, every descriptor with a detour is refused with stage `inlining`. The runner starts the Player with `MONO_ARGUMENTS=-O=-float32,-inline`; `MONO_INLINELIMIT=0` is not enough, forced inlining remains.
+
+The ack reports the answer as `inliningDisabled`, and with `inliningChecked` whether there is one. When the probes cannot be redirected (their code is not in a writable and executable mapping, the process map cannot be read, the platform is not supported), nothing is known about the JIT: the request is refused with stage `write` and the message `The inlining check could not run`, `inliningChecked` stays false, and the next request with a detour checks again. Only an answer is kept for the life of the process.
+
+## Added fields
+
+```csharp
+namespace UnityMicroEditor.HotReload
+{
+    public static class FieldStore
+    {
+        public static ref T Instance<T>(object owner, string id);
+        public static ref T Static<T>(string id);
+    }
+}
+```
+
+`id` is `<assembly>|<type id>|<field>`, a string literal of the patch: literals are interned, and the lookup compares references. An id built at run time names the same slot through a slower path. A new owner, and a static field, start with `default(T)`. Owners are weak keys: an object and the values of its added fields are collected together, also when a value refers back to the object. The same id used with another `T` is another slot, so a field that changed its type starts from the default and code of an older patch keeps its own value. Values outlive generations; a field that is removed and added again has its old value.
+
+Reads take no lock. Measured on 2026-10-12 (AMD Ryzen 7 5700X3D, this Mono): 60 to 78 ns per access of an instance field, almost all of it the weak table.
+
+## Callbacks
+
+The loaded game assemblies named by `gameAssemblies` (and the patched ones) are scanned once each for methods with an attribute whose simple name is `InvokeOnHotReload`, `OnHotReload` or `InvokeOnHotReloadLocal`, with or without `Attribute`, from any namespace. Measured on the class library: about 3.6 µs per method, 87 ms for 23,896 methods, once per assembly at the first applied patch.
+
+- `InvokeOnHotReload` and `OnHotReload`: after every applied request that redirected or restored at least one method. A static method runs once; an instance method runs on every object `Object.FindObjectsByType(type, FindObjectsInactive.Include)` returns. The method takes no parameter or one `List<UnityMicroEditor.MethodPatch>`.
+- `InvokeOnHotReloadLocal`: the parameterless method itself is invoked, through the original and therefore with its new body, when its body changed with this generation or was restored.
+- The list holds one entry per method whose body changed with this generation: first redirects (`previousMethod` is the original), methods whose replacement differs from the one of the generation before, and restored methods (`newMethod` is the original again). A method that an earlier generation replaced with the same body is not listed, and a removed message redirected to an empty method never is. "The same body" is decided on the IL: the same instructions naming the same members. Members of the two patch assemblies match by name; their types may differ in one segment of the full name, the same one throughout, because the builder names the types of a patch after its generation. Anything undecidable counts as changed.
+- An exception is passed to `Debug.LogException` and counted in `callbackErrors`. So is a method that cannot be called (another parameter, a generic method, an instance method of a type that is not a `UnityEngine.Object`), with one warning `callback-skipped` per method and Player. Neither fails the patch.
+
+## Limits
+
+- An attribute on a method that a patch added is not seen: only the loaded assemblies are scanned. Methods a patch added are not in the list of patches.
+- Callbacks that take the `MethodPatch` type of another tool are skipped.
+- One applier per Player process. The bridge answers a request that names another applier hash with `restartRequired: true` and one failure of stage `applier`; only a new Player takes another applier.
+- The check for the `SkipVerification` declaration finds its encoded named argument in the file; it does not read the declarative security table.
+- Not exercised in a game. This directory was tested on the standalone Mono of the Unity installation, on the Player's `libmonobdwgc-2.0.so` through an embedding host, and inside the stock `LinuxPlayer` process without game data (a preloaded shim runs the test harness there once the Player has started Mono), always with stand-ins for the engine.
+
+## Checks
+
+```bash
+# the bridge both ways and this directory, against a prepared host
+tests/HotReloadRuntimeTests/check-compile.sh <host>/<Name>_Data/Managed
+
+# the applier and the bridge's CodeReload.cs on Unity's Mono, and on the Player's runtime
+tests/HotReloadRuntimeTests/run.sh
+tests/HotReloadRuntimeTests/run.sh --host Temp/hotreload/mono-probe/out/host --stress 10
+```
