@@ -12,7 +12,7 @@
 //! 90 s, header size 16 KiB). `axum::serve` keeps hyper's defaults.
 use super::{
     CallError, HandlerError, Options, RuntimeHandler, Server, ToolDefinition, ToolResult,
-    server::{INSTRUCTIONS, SERVER_NAME, SERVER_VERSION, encode_tree},
+    server::{SERVER_NAME, SERVER_VERSION, encode_tree},
 };
 use crate::{
     cancel::{self, Context, Flag},
@@ -404,7 +404,7 @@ impl ServerHandler for Handler {
                     .expect("server info"),
             )
             .with_protocol_version(ProtocolVersion::V_2025_11_25)
-            .with_instructions(INSTRUCTIONS)
+            .with_instructions(self.server.instructions())
     }
     async fn initialize(
         &self,

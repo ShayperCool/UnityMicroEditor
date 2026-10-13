@@ -32,6 +32,12 @@ use std::{
 pub const SERVER_NAME: &str = "unity-micro-editor";
 pub const SERVER_VERSION: &str = "0.2.0";
 pub const INSTRUCTIONS: &str = "This service edits authored Unity project files. Read sourceRevision or asset_read revision before each write and send a unique operationId. Resolved hierarchy revision binds the entire prefab dependency graph; composite IDs are read-only and provenance identifies editable local/source IDs. Repeating identical arguments with the same operationId safely replays the original result. Source writes preserve .meta GUIDs. Source write success does not imply compilation, import or Player success. Use explicit source prefab override operations or prefab_edit for source prefab authoring. Read project_capabilities to inspect supported behavior.";
+/// Added to [`INSTRUCTIONS`] by a server that controls a Player session.
+const SESSION_INSTRUCTIONS: &str = " With a running Player session a saved C# edit is compiled and applied to the running Player when possible; the Player keeps its process and its game state, and session_control(wait_update) reports the outcome. When a reply has the error code full_recompile_required, or the session state has hotReload.fullRecompileRequired true, the edit cannot be applied live and the Player still runs the previous code: call hot_reload with action recompile. A recompile restarts the Player and resets game state.";
+// What the same server adds to the two tools that write C# source. A server
+// without a session has neither tool these sentences name.
+const SCRIPT_CREATE_SESSION: &str = " A running Player session compiles the file. A type it adds cannot be applied live: unless the session restarts by itself (onUnsupportedEdit restart or hotReload false), session_control(wait_update) fails with full_recompile_required and hot_reload(recompile) restarts the Player on the new code.";
+const SCRIPT_EDIT_SESSION: &str = " A running Player session compiles the saved change and applies it to the running Player when possible, keeping game state; session_control(wait_update) reports the outcome, and its error code full_recompile_required means hot_reload(recompile).";
 pub const PROJECT_URI: &str = "unitymicroeditor://project";
 pub const CAPABILITIES_URI: &str = "unitymicroeditor://capabilities";
 
@@ -99,6 +105,7 @@ enum Kind {
     RuntimeQuery,
     RuntimeCommand,
     RemoteSession,
+    HotReload,
     ProjectPrepare,
     ProjectBuild,
     PrefabEdit,
@@ -188,6 +195,12 @@ struct RemoteInput {
     bitrate_kbps: i64,
     publish: String,
     publish_pattern: String,
+}
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
+struct HotReloadInput {
+    action: String,
+    request_id: String,
 }
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -373,6 +386,14 @@ impl RemoteInput {
         out.int_omitempty("bitrateKbps", self.bitrate_kbps);
         out.text_omitempty("publish", &self.publish);
         out.text_omitempty("publishPattern", &self.publish_pattern);
+        out.finish()
+    }
+}
+impl HotReloadInput {
+    fn marshal(&self) -> Vec<u8> {
+        let mut out = Encoder::new();
+        out.text("action", &self.action);
+        out.text_omitempty("requestId", &self.request_id);
         out.finish()
     }
 }
@@ -755,8 +776,12 @@ fn static_tool(
     }
 }
 
-fn source_tools() -> Vec<StaticTool> {
+fn source_tools(session: bool) -> Vec<StaticTool> {
     use schema::{ANY, array, boolean, integer, map, object, optional_boolean, string};
+    let with_session = |description: &str, addition: &str| match session {
+        true => format!("{description}{addition}"),
+        false => description.to_string(),
+    };
     let read_input = || {
         object(&[
             (
@@ -967,7 +992,10 @@ fn source_tools() -> Vec<StaticTool> {
         static_tool(
             write_tool(
                 "script_create",
-                "Create a new C# file and MonoImporter .meta transactionally. expectedRevision must be absent; parent directory must exist. Does not run the compiler.",
+                &with_session(
+                    "Create a new C# file and MonoImporter .meta transactionally. expectedRevision must be absent; parent directory must exist. Does not run the compiler.",
+                    SCRIPT_CREATE_SESSION,
+                ),
                 true,
                 script_request(),
             ),
@@ -978,7 +1006,10 @@ fn source_tools() -> Vec<StaticTool> {
         static_tool(
             write_tool(
                 "script_edit",
-                "Replace C# source using expectedRevision and operationId; preserve existing .meta byte-for-byte. Does not run the compiler.",
+                &with_session(
+                    "Replace C# source using expectedRevision and operationId; preserve existing .meta byte-for-byte. Does not run the compiler.",
+                    SCRIPT_EDIT_SESSION,
+                ),
                 true,
                 script_request(),
             ),
@@ -1041,7 +1072,7 @@ fn runtime_tools() -> Vec<StaticTool> {
         static_tool(
             write_tool(
                 "session_control",
-                "Control the configured Player session: start, stop, status, reset, wait, wait_update. Start can be asynchronous: while it prepares, start, status and wait report the preparation stage and log path. Wait for confirmed readiness. start/reset arguments: scene, gameArguments (the game's own command line, like the CLI's -- args), contentScenes (GUID=Assets/...unity), contentPrefabs (Assets/...prefab), rebuildHost. expectedPid/revision guard stale runtime sessions.",
+                "Control the configured Player session: start, stop, status, reset, wait, wait_update. Start can be asynchronous: while it prepares, start, status and wait report the preparation stage and log path. Wait for confirmed readiness. wait_update returns when the session applied or rejected a source change after afterSequence; read status.lastSequence before the edit and pass it. wait returns when a Player is ready after afterSequence: after a start or a restart, and with the same outcome of an edit as wait_update, so it does not outlast one. A C# edit is applied to the running Player when possible: same pid, game state kept, hotReload.codeGeneration advanced. An edit that cannot be applied live fails with the error code full_recompile_required, whose details list the members and reasons, and the Player keeps the previous code. While hotReload.fullRecompileRequired is true neither wait nor wait_update succeeds, whatever afterSequence is and also for a scene edit that was applied since; call hot_reload with action recompile, which restarts the Player and resets game state. start/reset arguments: scene, gameArguments (the game's own command line, like the CLI's -- args), contentScenes (GUID=Assets/...unity), contentPrefabs (Assets/...prefab), rebuildHost, hotReload (default true; false restarts the Player on every C# edit), onUnsupportedEdit (report, the default, or restart: the Player restarts by itself instead of failing with full_recompile_required). expectedPid/revision guard stale runtime sessions.",
                 false,
                 object(&[
                     (
@@ -1057,7 +1088,7 @@ fn runtime_tools() -> Vec<StaticTool> {
                         "arguments",
                         map(
                             ANY,
-                            "start/reset: scene, gameArguments[], contentScenes[], contentPrefabs[], addressables, rebuildHost",
+                            "start/reset: scene, gameArguments[], contentScenes[], contentPrefabs[], addressables, rebuildHost, hotReload, onUnsupportedEdit",
                         ),
                         false,
                     ),
@@ -1155,6 +1186,26 @@ fn runtime_tools() -> Vec<StaticTool> {
             "RemoteInput",
             &[],
             Kind::RemoteSession,
+        ),
+        static_tool(
+            write_tool(
+                "hot_reload",
+                "C# hot reload of the Player session: status, recompile. A saved C# edit is compiled and applied to the running Player when possible; the Player keeps its process and game state, and session_control(wait_update) reports it. An edit that cannot be applied live is never approximated: the Player keeps the previous code, wait_update fails with full_recompile_required and the session state has hotReload.fullRecompileRequired true with the unsupported members and reasons, until a recompile. recompile restarts the Player on the newest compiled code and resets game state; it returns the new session state like wait_update, or the compile error when the sources do not compile, which keeps the Player. It also works for a session started with hotReload false. One recompile runs at a time. requestId names one command: repeating it waits for that command while it is pending and returns its outcome afterwards, without a second restart, so omit it for a new recompile. status returns enabled, codeGeneration, fullRecompileRequired, unsupported, lastPatch and onUnsupportedEdit, also while no session runs.",
+                false,
+                object(&[
+                    ("action", string("status,recompile"), true),
+                    (
+                        "requestId",
+                        string(
+                            "recompile: identity of the command, default a new one; a repeated id returns the outcome of its command; ASCII letters, digits or hyphens, at most 64",
+                        ),
+                        false,
+                    ),
+                ]),
+            ),
+            "HotReloadInput",
+            &[],
+            Kind::HotReload,
         ),
     ]
 }
@@ -1312,7 +1363,7 @@ fn project_action_tools() -> Vec<StaticTool> {
 impl Server {
     pub fn new(options: &Options) -> Result<Server, AuthoringError> {
         let store = Store::new(Path::new(&options.project))?;
-        let mut tools = source_tools();
+        let mut tools = source_tools(options.runtime.is_some());
         if options.runtime.is_some() {
             tools.extend(runtime_tools());
         }
@@ -1404,6 +1455,13 @@ impl Server {
         let _ = watcher.join();
         result
     }
+    /// The `instructions` of `initialize`.
+    pub fn instructions(&self) -> String {
+        match self.0.runtime {
+            Some(_) => format!("{INSTRUCTIONS}{SESSION_INSTRUCTIONS}"),
+            None => INSTRUCTIONS.to_string(),
+        }
+    }
     fn capabilities(&self) -> Result<Vec<u8>, HandlerError> {
         // Numeric keys are ordered as strings.
         let types: BTreeMap<String, &str> = native_component_types()
@@ -1415,8 +1473,25 @@ impl Server {
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
                 .map_err(HandlerError::Failed)
         };
+        // Only a server that controls a Player session has the `hot_reload` tool.
+        let hot_reload = match self.0.runtime {
+            Some(_) => format!(
+                "\"hotReload\":{},",
+                part(jsondoc::marshal(&json!({
+                    "appliedLive": "A saved C# edit is compiled and applied to the running Player when possible; the Player keeps its process and its game state. session_control(wait_update) reports the outcome and the session state counts hotReload.codeGeneration.",
+                    "fullRecompile": "An edit that cannot be applied live is refused, never approximated: the Player keeps the previous code, session_control(wait_update) and session_control(wait) fail with the error code full_recompile_required, and the session state has hotReload.fullRecompileRequired true with the members and reasons. Call hot_reload with action recompile; it restarts the Player on the new code and resets game state.",
+                    "errorCode": "full_recompile_required",
+                    "recompile": {"tool": "hot_reload", "arguments": {"action": "recompile"}},
+                    "launchArguments": {
+                        "hotReload": "boolean, default true; false restarts the Player on every C# edit",
+                        "onUnsupportedEdit": "report (default) or restart: the Player restarts by itself for an edit that cannot be applied live",
+                    },
+                })))?
+            ),
+            None => String::new(),
+        };
         Ok(format!(
-            "{{\"authoring\":{},\"backends\":{},\"nativeComponentTypes\":{},\"projectActionsConfigured\":{},\"runtimeConfigured\":{}}}",
+            "{{\"authoring\":{},\"backends\":{},{hot_reload}\"nativeComponentTypes\":{},\"projectActionsConfigured\":{},\"runtimeConfigured\":{}}}",
             part(jsondoc::marshal(&self.0.store.capabilities()))?,
             part(jsondoc::marshal(&self.0.backends))?,
             part(jsondoc::marshal(&types))?,
@@ -1609,6 +1684,13 @@ impl Server {
                     )),
                 }
             }
+            Kind::HotReload => {
+                let input: HotReloadInput = Self::decode(tool, raw)?;
+                match input.action.as_str() {
+                    "status" | "recompile" => Ok(self.forward_hot_reload(ctx, &input)),
+                    _ => Err(typed("unsupported_operation", "unknown hot reload action")),
+                }
+            }
             Kind::ProjectPrepare => {
                 let input: ProjectPrepareInput = Self::decode(tool, raw)?;
                 Ok(self.forward_action(ctx, "project_prepare", &input.marshal()))
@@ -1660,6 +1742,25 @@ impl Server {
             self.clear();
         }
         if error.is_none() && matches!(input.action.as_str(), "wait" | "wait_update") {
+            return (self.refresh_ready(ctx, result), None);
+        }
+        (result.into(), error)
+    }
+    fn forward_hot_reload(
+        &self,
+        ctx: &Context,
+        input: &HotReloadInput,
+    ) -> (Data, Option<HandlerError>) {
+        let (result, error) = call_backend(
+            ctx,
+            "hot_reload",
+            &input.marshal(),
+            self.runtime(),
+            "runtime_rejected",
+        );
+        // A recompile replaces the Player process, so its project tools are
+        // read again as after a confirmed update.
+        if error.is_none() && input.action == "recompile" {
             return (self.refresh_ready(ctx, result), None);
         }
         (result.into(), error)

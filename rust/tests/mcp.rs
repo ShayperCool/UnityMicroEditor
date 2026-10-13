@@ -65,6 +65,25 @@ fn stdio_transport_starts_and_serves_tools() {
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
     );
     assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 11);
+    // Hot reload belongs to a Player session, which this server does not
+    // control: neither its instructions nor its tools name the session calls.
+    let mut texts = vec![
+        initialized["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+    ];
+    for tool in tools["result"]["tools"].as_array().unwrap() {
+        texts.push(tool["description"].as_str().unwrap().to_string());
+    }
+    for text in texts {
+        for name in ["hot_reload", "session_control", "full_recompile_required"] {
+            assert!(
+                !text.contains(name),
+                "{name} is named without a session: {text}"
+            );
+        }
+    }
     let called = request(
         &mut stdin,
         r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"project_capabilities","arguments":{}}}"#,
@@ -76,6 +95,72 @@ fn stdio_transport_starts_and_serves_tools() {
     assert!(reply["success"] == true, "{reply}");
     assert_eq!(result["structuredContent"], reply);
     // Closing stdin ends the server cleanly.
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+}
+
+// The full server without a session: the tool is listed, reports what the
+// next launch uses and refuses a recompile with a typed error. `--editor` only
+// has to exist here; no Unity installation is used.
+#[test]
+fn full_server_offers_hot_reload_before_a_session_runs() {
+    let project = project_fixture();
+    let mut child = Command::new(BINARY)
+        .args(["mcp", "--editor", BINARY, "--project"])
+        .arg(project.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut request = |stdin: &mut std::process::ChildStdin, line: &str| -> Value {
+        writeln!(stdin, "{line}").unwrap();
+        serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap()
+    };
+    let initialized = request(&mut stdin, INITIALIZE);
+    let instructions = initialized["result"]["instructions"].as_str().unwrap();
+    assert!(
+        instructions.contains("full_recompile_required")
+            && instructions.contains("hot_reload with action recompile"),
+        "{instructions}"
+    );
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#
+    )
+    .unwrap();
+    let tools = request(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+    );
+    let tool = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "hot_reload")
+        .expect("hot_reload is not listed");
+    assert_eq!(tool["inputSchema"]["required"], json!(["action"]));
+    assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+    assert_eq!(tool["annotations"]["readOnlyHint"], false);
+    let mut call = |id: u32, arguments: Value| -> Value {
+        let call = json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": "hot_reload", "arguments": arguments}});
+        request(&mut stdin, &call.to_string())["result"].clone()
+    };
+    let status = call(3, json!({"action": "status"}));
+    assert!(status.get("isError").is_none(), "{status}");
+    assert_eq!(
+        status["structuredContent"],
+        json!({"success": true, "data": {"enabled": true, "onUnsupportedEdit": "report", "codeGeneration": 0,
+            "fullRecompileRequired": false, "unsupported": [], "unsupportedCount": 0, "phase": "stopped"}})
+    );
+    let refused = call(4, json!({"action": "recompile"}));
+    assert_eq!(refused["isError"], true, "{refused}");
+    assert_eq!(
+        refused["structuredContent"]["error"]["code"],
+        "session_not_ready"
+    );
     drop(stdin);
     assert!(child.wait().unwrap().success());
 }

@@ -2,8 +2,9 @@
 
 Unity Micro Editor exposes authored project files and a reusable Mono Player over
 MCP. Agents can prepare a project, inspect and edit supported assets, compile C#,
-control the simulation, send supported input, and call project tools declared with
-C# attributes. Read `project_capabilities` before selecting an operation.
+apply supported C# edits to the running Player, control the simulation, send
+supported input, and call project tools declared with C# attributes. Read
+`project_capabilities` before selecting an operation.
 
 The implementation uses several explicit backends. Source transactions, prefab
 operations, package resolution, Player assembly graphs and scene loading are ours;
@@ -176,7 +177,8 @@ An attached interactive Editor is not owned or terminated by the tool.
 | `project_build` | **Real Editor build proxy**, with explicit scenes and a fresh owned Linux Mono output. |
 | `prefab_edit` | Source instantiate/create/variant/override/apply/revert/unpack, with revision-checked multi-file publication. |
 | `component_schema`, `component_add` | Cached native defaults and required companions; attachment uses our source writer and starts no Editor. |
-| `session_control` | Start/stop/status/reset/wait/wait_update. `start`/`reset` accept `arguments`: `scene`, `gameArguments`, `contentScenes`, `contentPrefabs`, `rebuildHost`. |
+| `session_control` | Start/stop/status/reset/wait/wait_update. `start`/`reset` accept `arguments`: `scene`, `gameArguments`, `contentScenes`, `contentPrefabs`, `rebuildHost`, `hotReload`, `onUnsupportedEdit`. `wait` and `wait_update` fail with `full_recompile_required` while a C# edit that cannot be applied to the running Player is not in it. |
+| `hot_reload` | `status` of C# hot reload, and `recompile`: restart the Player on the newest compiled code. See [Hot reload](#hot-reload). |
 | `runtime_query` | Public status, hierarchy, inspection, logs, raycast and tool catalog. |
 | `runtime_command` | Simulation, input, screenshots and public project tool calls. |
 | `project_tools` | Refresh the live catalog and register `project.<name>` MCP tools. |
@@ -283,10 +285,17 @@ publication. Keep external source writers
 out of the target during transactions; they do not join our lock.
 
 Before an edit, retain `session_control(status).lastSequence`. After a changed
-commit, call `wait_update` with `afterSequence`. A scene `updated` ACK, or confirmed
-`code-updated`/`content-updated` readiness, proves application rather than behavior.
+commit, call `wait_update` with `afterSequence`. A scene `updated` ACK, a
+`code-patched` confirmation, or confirmed `code-updated`/`content-updated`
+readiness, proves application rather than behavior.
 Read the current PID/revision, inspect values, check logs, and run an assertion.
-C# updates restart the Player and reset game state. Ordinary compile failures
+`wait` with the same `afterSequence` ends with the same outcome of an edit once
+a Player is ready, although a C# edit that is applied live starts no Player. It
+also returns when a Player becomes ready: after a start or a restart.
+A C# edit is applied to the running Player when possible and keeps game state.
+An edit that cannot be applied live fails `wait_update` and `wait` with
+`full_recompile_required`; `hot_reload(recompile)` then restarts the Player and
+resets game state (see [Hot reload](#hot-reload)). Ordinary compile failures
 retain the last confirmed Player. A graph/configuration rejection, for example a
 new `.cs` in an assembly the prepared graph does not hold, cannot be applied to
 the running Player at all. The session state then has `preparationRequired:
@@ -337,6 +346,186 @@ ID authorizes a new execution. This is not a claim of transactional exactly-once
 execution across arbitrary crashes. Long project jobs use their own durable IDs;
 `result_pending` is not a completed or failed operation.
 
+## Hot reload
+
+A running session applies a saved C# edit to the running Player when it can.
+The runner compiles the changed assemblies as before, compares each with the
+assembly the Player loaded, and loads a patch with the new method bodies into
+the same process. The Player keeps its PID, scene revision, control directory,
+loaded scenes, objects, static fields and the `project.<name>` tools. No call is
+needed: the watcher does it for every saved `.cs` file, whoever wrote it.
+
+An edit outside the supported set is never approximated. The Player keeps
+running the previous code and the caller is told, so that it decides when the
+game loses its state.
+
+| The C# edit | `session_control(wait_update)` | Session state |
+| --- | --- | --- |
+| Applied live | Success; same `pid` and `revision`; the last event is `code-patched` | `hotReload.codeGeneration` is the patch generation, `hotReload.lastPatch` summarizes it |
+| No difference in the compiled code | Success | Unchanged |
+| Cannot be applied live | Error `full_recompile_required` | `hotReload.fullRecompileRequired: true` with `unsupported`, `unsupportedCount` and `report`; `updateError` |
+| Does not compile | Error `operation_failed` with the compiler's text, as before | `updateError` |
+| Needs a new source graph | Pending preparation, as before | `preparationRequired: true` |
+
+`wait_update` and `wait` report success only for a Player that runs the newest
+compiled code. While `hotReload.fullRecompileRequired` is true both fail with
+`full_recompile_required`, whatever `afterSequence` is: also for a caller that
+has read the refusal, and also when a scene edit was applied since. The message
+then adds that the other source changes confirmed after `afterSequence` are
+applied, and `status` shows them as `lastUpdateSequence` and `revision`. Only a
+compile error that nothing followed is reported first: no recompile can
+succeed until the sources compile.
+
+The `full_recompile_required` reply names the first reason and the call to
+make:
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "full_recompile_required",
+    "message": "The C# edit compiled but cannot be applied to the running Player: Game.Boss: a type was added [type_added] (and 2 more). The Player still runs the previous code. Call hot_reload with action \"recompile\" to restart the Player on the new code; game state is reset.",
+    "details": {
+      "unsupported": [
+        {"code": "type_added", "member": "Game.Boss", "message": "a type was added"},
+        {"code": "generic_method", "member": "Game.Pool::Take()", "message": "a generic method is not patched"}
+      ],
+      "unsupportedCount": 3,
+      "report": "ABSOLUTE_PATH_OF_THE_COMPLETE_RESULT",
+      "next": {"tool": "hot_reload", "arguments": {"action": "recompile"}}
+    }
+  }
+}
+```
+
+`unsupported` holds at most 16 entries; `unsupportedCount` counts all of them
+and `report` names the file with the complete result. Each entry has a
+lower_snake_case reason `code`, the `member` and a `message`. The patch builder
+in `tools/HotReloadPatcher` defines the codes. The same list stays in
+`session_control(status)` and `hot_reload(status)` as
+`hotReload.unsupported` until the code is applied.
+
+Then call the tool the reply names:
+
+```json
+{"name": "hot_reload", "arguments": {"action": "recompile"}}
+```
+
+`recompile` checks that the whole source graph compiles, restarts the Player on
+the newest compiled code inside the running session, and returns the session
+state as `wait_update` does, with a new `pid`. `hotReload.lastRestart` then has
+`reason: "requested"`. The call waits for the restart. Game state is reset:
+the scene is loaded again, static fields start over, and runtime requests bound
+to the old PID report an unknown outcome. The `project.<name>` tools are read
+again from the new Player. When the sources do not compile, `recompile` fails
+with the compiler's text and the Player keeps running.
+
+The runner names the command in its answer, and only that event ends the call.
+A compile error, a failed scene reload or a restart that belongs to a source
+edit the runner was still handling is reported to `wait_update` as usual and
+leaves the recompile pending.
+
+| `hot_reload` action | Result |
+| --- | --- |
+| `status` | `enabled`, `onUnsupportedEdit`, `codeGeneration`, `fullRecompileRequired`, `unsupported`, `unsupportedCount`, `report`, `lastPatch`, `lastRestart`, `pendingRecompile` and the session `phase`. Without a session it reports what the next launch uses, with `codeGeneration: 0`. |
+| `recompile` | The session state after the restart. Optional `requestId` identifies the command. |
+
+`lastRestart` is present when hot reload caused the start of this Player
+process: `sequence`, `reason` (`requested`, `hot_reload_unsupported` or
+`hot_reload_failed`) and, where they apply, `requestId`, `error`, `unsupported`,
+`unsupportedCount` and `report`.
+
+`recompile` fails with `session_not_ready` when no Player is ready, and with
+`recompile_pending` when another recompile has not been answered; that reply's
+`details.requestId` is the pending one. A request the client gave up on keeps
+running: `hotReload.pendingRecompile` shows it, and
+`session_control(wait_update)` returns when the restart is confirmed.
+
+A `requestId` names one command, so repeating it never restarts the Player a
+second time. While the command is pending the call waits for it. After the
+answer it returns the recorded outcome: the current session state for a
+restart, or the compiler's text, marked as already rejected, for a compile
+error. Omit `requestId`, or send a new one, to recompile again; this also
+applies after the compile error was fixed. The session keeps the outcome of
+its last 16 commands, and a new session starts without any.
+
+`recompile` also fails with `full_recompile_required` when it restarted the
+Player and an edit that compiled after that restart was refused: the message
+says so, and the next `recompile` needs a new `requestId`.
+
+What a patch does not change is reported in `hotReload.lastPatch.notes`, with
+the same `code`, `member` and `message` members:
+
+- An added field has its default value in objects that existed before the
+  patch; an added serialized field is not filled from the scene until a restart.
+- A changed field initializer or constructor affects objects created later.
+- A coroutine or `async` method that is already running finishes on the old
+  code; new calls run the new code.
+- A delegate created before the patch can keep the old body of an edited
+  lambda.
+- An attribute on an added member is not visible until a recompile. An added
+  `[AgentTool]` method is therefore not in the tool catalog, and an added
+  `[RuntimeInitializeOnLoadMethod]` does not run.
+
+Edits that are applied live, as the patch builder classifies them: bodies of
+non-generic methods in non-generic types, including property accessors,
+constructors, lambdas, iterators and `async` methods; added non-virtual
+methods; added instance fields of classes and added static fields without an
+initializer; added or changed constants. Edits that need a recompile: anything
+in a generic type or generic method; added, removed or renamed types; enum,
+base type and interface changes; added or removed virtual, abstract, override
+or interface methods; a changed static constructor or static field
+initializer; attribute changes on existing members; a Unity message such as
+`Update` added to an existing class; a field added to a struct. The builder
+treats an edit as patchable only when it can prove it, so the reply, not this
+list, decides.
+
+Launch options, in `arguments` of `session_control(start)` or `reset`:
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `hotReload` | `true` | `false` turns hot reload off for the session: every C# edit restarts the Player and reports `code-updated`, as before hot reload existed. `hot_reload(recompile)` still works. |
+| `onUnsupportedEdit` | `report` | `report` keeps the Player and fails `wait_update` with `full_recompile_required`. `restart` lets the runner restart the Player by itself for such an edit: `wait_update` succeeds with a new `pid`, and `hotReload.lastRestart` has `reason: "hot_reload_unsupported"` and the reasons. |
+
+The runtime package declares `[InvokeOnHotReload]` and
+`[InvokeOnHotReloadLocal]` for game code that has to react to a patch.
+
+Limits:
+
+- Hot reload needs a session started by this server; `mcp-standalone` has no
+  Player and no `hot_reload` tool.
+- A patch changes neither `pid` nor `revision`. Compare `hotReload.codeGeneration`
+  to know which code an observation ran on.
+- `hotReload.fullRecompileRequired` is cleared by an applied patch
+  (`code-patched`), by a restart of the Player, or by an `updated` or
+  `unchanged` event in which the runner states `fullRecompileRequired: false`,
+  for example after the refused edit was reverted. A scene update without that
+  statement does not clear it, and neither wait succeeds until it is cleared.
+  To keep the Player and its game state for a while, confirm a scene edit with
+  `status`: `lastUpdateSequence` and `revision` advance.
+- A compile error after a refused edit leaves `fullRecompileRequired` set:
+  the newest code that compiled is still not in the Player. `wait_update`
+  reports the compile error while it is the newest outcome.
+- A change with a scene part and a refused C# part can show
+  `fullRecompileRequired: true` with an empty `unsupported` list for a moment:
+  the runner stated it on the scene update and lists the reasons right after.
+  The error message says so, and `hot_reload(status)` has them then.
+- `wait` and `wait_update` differ in one case: a Player that became ready after
+  `afterSequence` answers `wait` also when a compile error followed, which
+  `wait_update` reports. Neither has a time limit of its own.
+- When a patch leaves the Player unusable, the runner restarts it by itself on
+  the newest code. `hotReload.lastRestart` then has `reason:
+  "hot_reload_failed"` and the `error`, and game state is lost.
+- `recompile` has no time limit of its own; the call ends when the client
+  cancels it, and the command stays pending in the runner. A pending command
+  ends with the runner's answer or with the session: `session_control(reset)`
+  replaces a session whose runner does not answer.
+- When the runner no longer reads its commands, `recompile` fails with
+  `operation_failed` and a message that names `session_control(reset)`. The
+  session stays `ready` on its old code until then.
+- Changes of packages, assembly definitions or other compiler configuration
+  are not hot reload: they queue a new preparation, as described above.
+
 ## Game arguments and runtime content
 
 `session_control(start)` and `reset` pass launch options in `arguments`:
@@ -348,7 +537,9 @@ execution across arbitrary crashes. Long project jobs use their own durable IDs;
     "gameArguments": ["-content-url", "http://127.0.0.1:8080/StandaloneLinux64"],
     "contentScenes": ["0123456789abcdef0123456789abcdef=Assets/Scenes/Level.unity"],
     "contentPrefabs": ["Assets/Prefabs/Enemy.prefab"],
-    "addressables": true
+    "addressables": true,
+    "hotReload": true,
+    "onUnsupportedEdit": "report"
   }
 }
 ```
@@ -360,7 +551,8 @@ list that is given replaces the previous one and stays for later launches; the
 session state shows the current values as `launch`. A running Player keeps its
 command line: `start` with other values is refused, `reset` relaunches with them.
 `addressables: false` turns off the source Addressables described below; it is
-on by default.
+on by default. `hotReload` and `onUnsupportedEdit` are described under
+[Hot reload](#hot-reload).
 
 ### Addressables from sources
 
@@ -547,7 +739,7 @@ Limits:
 - Rendering is close but not pixel-identical. Geometry and background match in the reference scene; shading and antialiasing differ slightly.
 - In the standalone Player, `Transform.GetSiblingIndex()` returns `0` for root objects. MCP hierarchy reports root order from authored order and `Scene.GetRootGameObjects()`. Game code that depends on the native root index can behave differently. Child sibling order uses the native API.
 - Legacy `pause` sets scaled time to zero. It does not suspend the whole PlayerLoop the way Editor Pause does; use `simulation_pause` and `simulation_step` for that.
-- A C# change restarts the Player and resets game state. There is no domain reload equivalent.
+- A C# change is patched into the running Player when the edit is supported; the Player then keeps its state. Other C# changes need `hot_reload(recompile)`, which restarts the Player and resets game state. There is no domain reload equivalent: static state is either kept by a patch or lost by a restart.
 - Fresh native import is bound to verified profiles. Baked lighting and navigation, arbitrary shader and importer settings, complete animation behavior and multiplayer state are not implied by a successful preparation.
 - General `CustomEditor`/`EditorWindow` execution and an EditMode test runner are out of scope.
 

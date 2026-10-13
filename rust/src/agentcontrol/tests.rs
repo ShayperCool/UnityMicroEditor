@@ -8,6 +8,7 @@ use std::{
     os::fd::FromRawFd,
     path::Path,
     process,
+    sync::atomic::AtomicU64,
     time::Instant,
 };
 use tempfile::TempDir;
@@ -60,6 +61,26 @@ fn controller_helper_process() {
     };
     if mode == "child" {
         idle(true);
+    }
+    // The controller's commands arrive on the inherited standard input. Each
+    // complete line is recorded as it was written. Two modes are a runner whose
+    // command reader is gone: it closed the input, or it leaves it unread.
+    let commands = sysutil::join(&[&output, "helper-commands.jsonl"]);
+    match mode.as_str() {
+        // SAFETY: descriptor 0 belongs to this process and nothing reads it.
+        "commands-closed" => drop(unsafe { File::from_raw_fd(0) }),
+        "commands-unread" => {}
+        _ => {
+            thread::spawn(move || {
+                for line in io::stdin().lines().map_while(|line| line.ok()) {
+                    let log = fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&commands);
+                    let _ = log.and_then(|mut log| writeln!(log, "{line}"));
+                }
+            });
+        }
     }
     // SAFETY: descriptor 3 is the inherited event pipe and is used only here.
     let mut events = unsafe {
@@ -144,7 +165,12 @@ fn controller_helper_process() {
         line.push(b'\n');
         let _ = events.write_all(&line);
     };
-    emit(&json!({"event": "ready", "pid": pid, "manifest": manifest, "report": report}));
+    let mut readiness =
+        json!({"event": "ready", "pid": pid, "manifest": manifest, "report": report});
+    if mode == "hot-reload-off" {
+        readiness["hotReload"] = json!(false);
+    }
+    emit(&readiness);
     let mut seen: HashSet<String> = HashSet::new();
     let mut pending: HashMap<String, Instant> = HashMap::new();
     let mut executions = 0;
@@ -1406,4 +1432,1357 @@ fn rejection_that_needs_preparation_is_reported_until_an_update_applies() {
     emit_fixture_event(&c, updated(ready.pid));
     let state = c.wait(&seconds(1), state.last_sequence, false).unwrap();
     assert!(!state.preparation_required);
+}
+
+fn runner_arguments(c: &Controller) -> Vec<String> {
+    let path = sysutil::join(&[&c.0.options.output, "helper-arguments.json"]);
+    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+// The command lines the fixture runner has read from its standard input.
+fn commands(c: &Controller) -> Vec<String> {
+    fs::read_to_string(sysutil::join(&[
+        &c.0.options.output,
+        "helper-commands.jsonl",
+    ]))
+    .unwrap_or_default()
+    .lines()
+    .map(str::to_string)
+    .collect()
+}
+fn wait_for(what: &str, reached: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(PATIENCE);
+    while !reached() {
+        assert!(Instant::now() < deadline, "{what} did not happen");
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+// The `code-updated` of a restart, naming the fixture's own readiness report.
+fn restarted(c: &Controller, pid: i64, mut event: Value) -> Value {
+    let options = &c.0.options;
+    event["event"] = json!("code-updated");
+    event["pid"] = json!(pid);
+    event["manifest"] = json!(sysutil::join(&[
+        &options.project,
+        "Temp/manifests/rev-1/scene.json"
+    ]));
+    event["report"] = json!(sysutil::join(&[&options.output, "runs/first/report.json"]));
+    event
+}
+fn refusal(report: &str) -> Value {
+    json!({
+        "event": "update-rejected",
+        "error": "the C# edit cannot be applied to the running Player: Game.Boss was added (3 reasons)",
+        "paths": ["Assets/Scripts/Enemy.cs"],
+        "fullRecompileRequired": true,
+        "unsupported": [
+            {"code": "type_added", "member": "Game.Boss", "message": "a type was added."},
+            {"code": "generic_type", "member": "Game.Pool`1::Take()", "message": "a method of a generic type is not patched"},
+        ],
+        "unsupportedCount": 3,
+        "report": report,
+    })
+}
+// Prints one event and returns the state once the controller has taken it.
+// The fixture runner prints an event file only when it changed, so a serial
+// number keeps two equal events apart.
+fn accept(c: &Controller, mut event: Value) -> State {
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
+    event["serial"] = json!(SERIAL.fetch_add(1, Ordering::SeqCst));
+    let before = c.status().last_sequence;
+    emit_fixture_event(c, event);
+    wait_for("the event", || c.status().last_sequence > before);
+    c.status()
+}
+// What the runner prints for the outcome of an edit, by a short name. A
+// `:true` or `:false` suffix is its statement about the code on a scene update.
+fn outcome(c: &Controller, name: &str) -> Value {
+    let state = c.status();
+    let (name, statement) = match name.split_once(':') {
+        Some((name, statement)) => (name, Some(statement == "true")),
+        None => (name, None),
+    };
+    let mut event = match name {
+        "refusal" => refusal("/owned/report.json"),
+        "compile-error" => json!({"event": "update-rejected", "error": "CS1002: ; expected"}),
+        "updated" => updated(state.pid),
+        "unchanged" => json!({"event": name, "pid": state.pid, "revision": state.revision}),
+        // A generation is never used twice by one Player process.
+        "code-patched" => json!({"event": name, "pid": state.pid, "revision": state.revision,
+            "codeGeneration": state.last_sequence + 1}),
+        "restart" => restarted(c, state.pid, json!({"reason": "hot_reload_unsupported"})),
+        _ => panic!("unknown outcome {name}"),
+    };
+    if let Some(statement) = statement {
+        event["fullRecompileRequired"] = json!(statement);
+    }
+    event
+}
+fn orderings<'a>(items: &[&'a str]) -> Vec<Vec<&'a str>> {
+    if items.len() < 2 {
+        return vec![items.to_vec()];
+    }
+    let mut all = Vec::new();
+    for index in 0..items.len() {
+        let mut rest = items.to_vec();
+        let first = rest.remove(index);
+        for mut ordering in orderings(&rest) {
+            ordering.insert(0, first);
+            all.push(ordering);
+        }
+    }
+    all
+}
+// The typed failure of a wait that found a refused edit standing.
+fn expect_refused(outcome: std::result::Result<State, StateError>, context: &str) -> StateError {
+    let failure = match outcome {
+        Ok(state) => {
+            panic!("{context}: an edit that is not in the Player was confirmed: {state:?}")
+        }
+        Err(failure) => failure,
+    };
+    let typed = failure.typed.clone();
+    assert_eq!(
+        typed.as_ref().map(|typed| typed.code),
+        Some("full_recompile_required"),
+        "{context}: {:?} {}",
+        failure.state,
+        failure.error
+    );
+    assert_eq!(
+        typed.unwrap().details["next"],
+        json!({"tool": "hot_reload", "arguments": {"action": "recompile"}}),
+        "{context}"
+    );
+    assert!(
+        failure.state.hot_reload.full_recompile_required,
+        "{context}: {:?}",
+        failure.state
+    );
+    failure
+}
+fn recompile_in_background(
+    c: &Controller,
+    id: &str,
+) -> thread::JoinHandle<std::result::Result<State, StateError>> {
+    let (controller, id, sent) = (c.clone(), id.to_string(), commands(c).len());
+    let worker = thread::spawn(move || controller.recompile(&seconds(3), &id));
+    wait_for("the recompile command", || commands(c).len() > sent);
+    worker
+}
+// A stop that stays under way: the `ignore-signals` runner outlives the
+// signals of a stop, so the session is `stopping` until `end_runner`.
+fn stop_slowly(c: &Controller) -> thread::JoinHandle<std::result::Result<State, StateError>> {
+    {
+        let mut inner = c.lock();
+        inner.stop_grace = Duration::from_secs(60 * PATIENCE);
+        inner.terminate_grace = Duration::from_secs(60 * PATIENCE);
+    }
+    let stopping = c.clone();
+    let stopper = thread::spawn(move || stopping.stop(&seconds(3)));
+    wait_for("the stop", || c.status().phase == "stopping");
+    stopper
+}
+fn end_runner(c: &Controller) {
+    let runner = c.lock().command.expect("the runner is already reaped");
+    sysutil::kill(-runner.pid, libc::SIGKILL).unwrap();
+}
+
+#[test]
+fn launch_selects_hot_reload_flags_and_keeps_the_command_channel() {
+    let c = controller_fixture("");
+    let ctx = seconds(3);
+    let status = |c: &Controller| match c.handle(&ctx, "hot_reload", br#"{"action":"status"}"#) {
+        Ok(Reply::Value(status)) => status,
+        other => panic!("hot reload status: {other:?}"),
+    };
+    assert_eq!(
+        status(&c),
+        json!({"enabled": true, "onUnsupportedEdit": "report", "codeGeneration": 0,
+            "fullRecompileRequired": false, "unsupported": [], "unsupportedCount": 0, "phase": "stopped"}),
+        "a stopped controller did not report what its next launch uses"
+    );
+    let flags = |c: &Controller| -> Vec<String> {
+        runner_arguments(c)
+            .into_iter()
+            .skip_while(|argument| argument != "run")
+            .filter(|argument| {
+                argument.contains("hot-reload")
+                    || argument == "--commands-stdin"
+                    || argument == "report"
+                    || argument == "restart"
+            })
+            .collect()
+    };
+    let ready = start_ready(&c);
+    assert_eq!(
+        flags(&c),
+        ["--hot-reload-fallback", "report", "--commands-stdin"]
+    );
+    let encoded = String::from_utf8(jsondoc::marshal(&ready).unwrap()).unwrap();
+    assert!(
+        !encoded.contains("hotReload") && !encoded.contains("launch"),
+        "defaults changed the session state: {encoded}"
+    );
+
+    let reset = |arguments: Value| -> State {
+        let before = c.status().last_sequence;
+        let raw = jsondoc::encode(&json!({"action": "reset", "arguments": arguments}));
+        c.handle(&ctx, "session_control", &raw).unwrap();
+        c.wait(&ctx, before, true).unwrap()
+    };
+    let restart = reset(json!({"onUnsupportedEdit": "restart"}));
+    assert_eq!(
+        flags(&c),
+        ["--hot-reload-fallback", "restart", "--commands-stdin"]
+    );
+    assert_eq!(restart.launch.on_unsupported_edit, "restart");
+    assert_eq!(status(&c)["onUnsupportedEdit"], "restart");
+
+    let disabled = reset(json!({"hotReload": false}));
+    assert_eq!(flags(&c), ["--no-hot-reload", "--commands-stdin"]);
+    assert_eq!(disabled.launch.hot_reload, Some(false));
+    let encoded = String::from_utf8(jsondoc::marshal(&disabled).unwrap()).unwrap();
+    assert!(
+        encoded.contains(r#""hotReload":{"enabled":false,"codeGeneration":0,"fullRecompileRequired":false,"unsupported":[],"unsupportedCount":0}"#)
+            && encoded.contains(r#""launch":{"hotReload":false,"onUnsupportedEdit":"restart"}"#),
+        "{encoded}"
+    );
+    assert_eq!(
+        status(&c),
+        json!({"enabled": false, "codeGeneration": 0, "fullRecompileRequired": false,
+            "unsupported": [], "unsupportedCount": 0, "phase": "ready"})
+    );
+    // The command channel does not depend on hot reload: a recompile is the
+    // way to restart this Player on the newest code.
+    let worker = recompile_in_background(&c, "without-hot-reload");
+    emit_fixture_event(
+        &c,
+        restarted(
+            &c,
+            disabled.pid,
+            json!({"reason": "requested", "requestId": "without-hot-reload"}),
+        ),
+    );
+    let state = worker.join().unwrap().unwrap();
+    assert!(state.phase == "ready" && !state.hot_reload.enabled);
+
+    // The next fixture runner must not replay the event of this one.
+    fs::remove_file(sysutil::join(&[&c.0.options.output, "helper-event.json"])).unwrap();
+    let enabled = reset(json!({"hotReload": null, "onUnsupportedEdit": null}));
+    assert_eq!(
+        flags(&c),
+        ["--hot-reload-fallback", "report", "--commands-stdin"]
+    );
+    assert!(enabled.launch.is_empty() && enabled.hot_reload.is_default());
+    c.stop(&ctx).unwrap();
+    for invalid in [
+        json!({"hotReload": "yes"}),
+        json!({"onUnsupportedEdit": "ignore"}),
+        json!({"onUnsupportedEdit": true}),
+    ] {
+        let start = json!({"action": "start", "arguments": invalid});
+        assert!(
+            c.handle(&ctx, "session_control", &jsondoc::encode(&start))
+                .is_err(),
+            "invalid hot reload launch arguments accepted: {start}"
+        );
+    }
+}
+
+#[test]
+fn readiness_reports_whether_the_runner_patches_code() {
+    let c = controller_fixture("hot-reload-off");
+    let ready = start_ready(&c);
+    assert!(
+        !ready.hot_reload.enabled && ready.launch.is_empty(),
+        "the runner's own statement was ignored: {ready:?}"
+    );
+}
+
+#[test]
+fn code_patch_confirms_the_same_player_and_its_generation() {
+    let c = controller_fixture("");
+    let ready = start_ready(&c);
+    let report = sysutil::join(&[&c.0.options.output, "runs/first/hot-reload/1/report.json"]);
+    let members: Vec<String> = (0..20)
+        .map(|index| format!("Game.Enemy::M{index}()"))
+        .collect();
+    emit_fixture_event(
+        &c,
+        json!({
+            "event": "code-patched", "paths": ["Assets/Scripts/Enemy.cs"], "pid": ready.pid,
+            "revision": ready.revision, "codeGeneration": 1, "assemblies": ["Assembly-CSharp"],
+            "patchedMethods": 20, "addedMethods": 1, "addedFields": 1, "restoredMethods": 0,
+            "members": members,
+            "notes": [{"code": "existing_instances_keep_default", "member": "Game.Enemy::armor", "message": "existing objects see the default value"}],
+            "notesCount": 1, "compileSeconds": 0.7, "patchSeconds": 0.02, "sourceToAckSeconds": 0.9,
+            "report": report,
+        }),
+    );
+    let patched = c.wait(&seconds(1), ready.last_sequence, false).unwrap();
+    assert!(
+        patched.phase == "ready"
+            && patched.pid == ready.pid
+            && patched.revision == ready.revision
+            && patched.control_directory == ready.control_directory
+            && patched.last_update_sequence == patched.last_sequence
+            && patched.last_ready_sequence == ready.last_ready_sequence,
+        "a code patch changed the Player identity: {patched:?}"
+    );
+    // No Player becomes ready for a patch, and a readiness wait of before the
+    // edit still ends with it.
+    assert_eq!(
+        c.wait(&seconds(1), ready.last_sequence, true).unwrap(),
+        patched
+    );
+    let patch = patched.hot_reload.last_patch.clone().unwrap();
+    assert_eq!(
+        (patched.hot_reload.code_generation, patch.code_generation),
+        (1, 1)
+    );
+    assert_eq!(
+        (
+            patch.sequence,
+            patch.patched_methods,
+            patch.added_methods,
+            patch.added_fields
+        ),
+        (patched.last_sequence, 20, 1, 1)
+    );
+    assert_eq!(patch.members.len(), 16, "the member list was not bounded");
+    assert_eq!(patch.notes[0].code, "existing_instances_keep_default");
+    let encoded = String::from_utf8(jsondoc::marshal(&patched).unwrap()).unwrap();
+    assert!(
+        encoded.contains(&format!(
+            r#""hotReload":{{"enabled":true,"codeGeneration":1,"fullRecompileRequired":false,"unsupported":[],"unsupportedCount":0,"lastPatch":{{"sequence":{},"codeGeneration":1,"patchedMethods":20,"addedMethods":1,"addedFields":1,"restoredMethods":0,"assemblies":["Assembly-CSharp"],"members":["#,
+            patched.last_sequence
+        )),
+        "{encoded}"
+    );
+    // Runtime commands stay bound to the same Player and scene revision.
+    let response = c
+        .request(
+            &seconds(1),
+            "status",
+            &request_args(json!({"requestId": "after-code-patch"})),
+        )
+        .unwrap();
+    assert_eq!(response["success"], true, "{response}");
+
+    emit_fixture_event(
+        &c,
+        json!({"event": "code-patched", "pid": ready.pid, "revision": ready.revision, "codeGeneration": 2, "restoredMethods": 20}),
+    );
+    let reverted = c.wait(&seconds(1), patched.last_sequence, false).unwrap();
+    let patch = reverted.hot_reload.last_patch.unwrap();
+    assert_eq!(
+        (
+            reverted.hot_reload.code_generation,
+            patch.restored_methods,
+            patch.members.len()
+        ),
+        (2, 20, 0)
+    );
+    // The code state belongs to the Player process and ends with it.
+    let stopped = c.stop(&seconds(3)).unwrap();
+    assert!(stopped.hot_reload.is_default(), "{stopped:?}");
+}
+
+#[test]
+fn malformed_code_patch_fails_the_session() {
+    for field in ["pid", "revision", "codeGeneration", "no-generation"] {
+        let c = controller_fixture("");
+        let ready = start_ready(&c);
+        let mut event = json!({"event": "code-patched", "pid": ready.pid, "revision": ready.revision, "codeGeneration": 1});
+        match field {
+            "pid" => event["pid"] = json!(ready.pid + 1),
+            "revision" => event["revision"] = json!("rev-unaccepted"),
+            "codeGeneration" => event["codeGeneration"] = json!("1"),
+            _ => drop(event.as_object_mut().unwrap().remove("codeGeneration")),
+        }
+        emit_fixture_event(&c, event);
+        let failure = c
+            .wait(&seconds(1), ready.last_sequence, false)
+            .expect_err("a code patch without the accepted identity was acknowledged");
+        assert!(
+            failure.state.phase == "failed"
+                && failure.state.last_update_sequence <= ready.last_sequence
+                && failure.error.message().starts_with("runner code patch"),
+            "{field}: {:?} {}",
+            failure.state,
+            failure.error
+        );
+    }
+}
+
+#[test]
+fn refused_code_edit_asks_for_the_recompile_that_restarts_the_player() {
+    let c = controller_fixture("");
+    let ready = start_ready(&c);
+    let report = sysutil::join(&[&c.0.options.output, "runs/first/hot-reload/1/report.json"]);
+    emit_fixture_event(&c, refusal(&report));
+    let refused = c
+        .wait(&seconds(1), ready.last_sequence, false)
+        .expect_err("an edit that is not in the Player was acknowledged");
+    let typed = refused.typed.clone().expect("the refusal has no code");
+    assert_eq!(typed.code, "full_recompile_required");
+    assert_eq!(
+        typed.details,
+        json!({
+            "unsupported": [
+                {"code": "type_added", "member": "Game.Boss", "message": "a type was added."},
+                {"code": "generic_type", "member": "Game.Pool`1::Take()", "message": "a method of a generic type is not patched"},
+            ],
+            "unsupportedCount": 3,
+            "report": report,
+            "next": {"tool": "hot_reload", "arguments": {"action": "recompile"}},
+        })
+    );
+    assert_eq!(
+        refused.error.message(),
+        "The C# edit compiled but cannot be applied to the running Player: Game.Boss: a type was added [type_added] (and 2 more). The Player still runs the previous code. Call hot_reload with action \"recompile\" to restart the Player on the new code; game state is reset."
+    );
+    let state = refused.state;
+    assert!(
+        state.phase == "ready"
+            && state.pid == ready.pid
+            && state.code_refused()
+            && state.hot_reload.full_recompile_required
+            && state.hot_reload.unsupported_count == 3
+            && state.hot_reload.report == report
+            && state
+                .update_error
+                .starts_with("the C# edit cannot be applied"),
+        "{state:?}"
+    );
+    let encoded = String::from_utf8(jsondoc::marshal(&c.status()).unwrap()).unwrap();
+    assert!(
+        encoded.contains(r#""hotReload":{"enabled":true,"codeGeneration":0,"fullRecompileRequired":true,"unsupported":[{"code":"type_added","member":"Game.Boss","message":"a type was added."},"#),
+        "{encoded}"
+    );
+
+    // A compile error after the refusal keeps today's untyped reply, and the
+    // newest compiled code still waits for the recompile.
+    emit_fixture_event(
+        &c,
+        json!({"event": "update-rejected", "error": "CS1002: ; expected"}),
+    );
+    let compile = c
+        .wait(&seconds(1), state.last_sequence, false)
+        .expect_err("compile error was not reported");
+    assert!(
+        compile.typed.is_none()
+            && compile.error.message() == "CS1002: ; expected"
+            && !compile.state.code_refused()
+            && compile.state.hot_reload.full_recompile_required,
+        "{:?} {}",
+        compile.state,
+        compile.error
+    );
+    // Neither does a scene update say anything about the code: the caller
+    // that has read the refusal is still not told that its edit is applied.
+    emit_fixture_event(
+        &c,
+        json!({"event": "unchanged", "pid": ready.pid, "revision": ready.revision}),
+    );
+    let scene = expect_refused(
+        c.wait(&seconds(1), compile.state.last_sequence, false),
+        "scene update",
+    );
+    assert_eq!(
+        scene.error.message(),
+        format!(
+            "The C# edit compiled but cannot be applied to the running Player: Game.Boss: a type was added [type_added] (and 2 more). The Player still runs the previous code; the other source changes confirmed after sequence {} are applied. Call hot_reload with action \"recompile\" to restart the Player on the new code; game state is reset.",
+            compile.state.last_sequence
+        )
+    );
+    let scene = *scene.state;
+    assert!(scene.update_error.is_empty() && scene.last_update_sequence == scene.last_sequence);
+
+    let worker = recompile_in_background(&c, "rc-1");
+    assert_eq!(
+        commands(&c),
+        [r#"{"command":"recompile","requestId":"rc-1"}"#],
+        "the runner did not read exactly one command line"
+    );
+    assert_eq!(c.status().hot_reload.pending_recompile, "rc-1");
+    let second = c
+        .recompile(&seconds(1), "rc-2")
+        .expect_err("a second recompile was sent while one is pending");
+    assert_eq!(
+        second.typed,
+        Some(Typed {
+            code: "recompile_pending",
+            details: json!({"requestId": "rc-1"}),
+        })
+    );
+    // The reply names the ways on: wait, repeat the id, or replace a runner
+    // that does not answer.
+    for way in [
+        "session_control(wait_update)",
+        "with that requestId",
+        "session_control(reset)",
+    ] {
+        assert!(second.error.message().contains(way), "{}", second.error);
+    }
+    // An update of a source edit that the runner handles first is not the answer.
+    emit_fixture_event(
+        &c,
+        json!({"event": "unchanged", "pid": ready.pid, "revision": ready.revision, "paths": ["Assets/Main.unity"]}),
+    );
+    wait_for("the scene update", || {
+        c.status().last_update_sequence > scene.last_sequence
+    });
+    assert!(
+        !worker.is_finished(),
+        "an unrelated update ended the recompile"
+    );
+    emit_fixture_event(
+        &c,
+        restarted(
+            &c,
+            ready.pid,
+            json!({"reason": "requested", "requestId": "rc-1"}),
+        ),
+    );
+    let state = worker.join().unwrap().unwrap();
+    let restart = state.hot_reload.last_restart.clone().unwrap();
+    assert!(
+        state.phase == "ready"
+            && state.last_update_sequence == state.last_sequence
+            && state.last_ready_sequence == state.last_sequence
+            && state.update_error.is_empty()
+            && !state.hot_reload.full_recompile_required
+            && state.hot_reload.unsupported.is_empty()
+            && state.hot_reload.report.is_empty()
+            && state.hot_reload.pending_recompile.is_empty()
+            && restart.reason == "requested"
+            && restart.request_id == "rc-1",
+        "{state:?}"
+    );
+    assert_eq!(commands(&c).len(), 1, "the command was written twice");
+}
+
+// A wait succeeds only when the Player runs the newest compiled code,
+// whatever the runner reported in between and whatever the caller has read:
+// every order of the four outcomes, after each event, for every mark a caller
+// can hold. The state and `hot_reload(status)` say the same.
+#[test]
+fn no_wait_succeeds_while_a_refused_edit_is_not_in_the_player() {
+    let c = controller_fixture("");
+    start_ready(&c);
+    // The model: whether a refusal stands, and the last confirmed update.
+    let (mut stale, mut confirmed) = (false, 0);
+    for ordering in orderings(&["refusal", "updated", "unchanged", "code-patched"]) {
+        let began = c.status().last_sequence;
+        for (index, name) in ordering.iter().enumerate() {
+            let state = accept(&c, outcome(&c, name));
+            match *name {
+                "refusal" => stale = true,
+                "code-patched" => (stale, confirmed) = (false, state.last_sequence),
+                _ => confirmed = state.last_sequence,
+            }
+            let context = format!("{ordering:?}, event {index}");
+            assert_eq!(
+                state.hot_reload.full_recompile_required, stale,
+                "{context}: {state:?}"
+            );
+            assert_eq!(c.hot_reload()["fullRecompileRequired"], stale, "{context}");
+            // No mark, the mark of before these edits, and one after each
+            // event before the newest.
+            for after in std::iter::once(0).chain(began..state.last_sequence) {
+                for readiness in [false, true] {
+                    let context = format!("{context}, after {after}, readiness {readiness}");
+                    let waited = c.wait(&seconds(1), after, readiness);
+                    if !stale {
+                        match waited {
+                            Ok(applied) => assert_eq!(applied, state, "{context}"),
+                            Err(failure) => panic!("{context}: {}", failure.error),
+                        }
+                        continue;
+                    }
+                    let failure = expect_refused(waited, &context);
+                    let message = failure.error.message();
+                    let since = format!(
+                        "the other source changes confirmed after sequence {after} are applied"
+                    );
+                    assert!(
+                        message.contains("Game.Boss: a type was added [type_added] (and 2 more)")
+                            && message.contains("The Player still runs the previous code")
+                            && message.contains(&since) == (confirmed > after),
+                        "{context}: {message}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+// What a wait for an update and a wait for readiness return, both with the
+// mark of before the listed events.
+#[test]
+fn waits_report_the_code_the_player_runs_after_every_outcome() {
+    enum Expect {
+        Applied,
+        Refused(&'static str),
+        Rejected,
+    }
+    use Expect::{Applied, Refused, Rejected};
+    const BOSS: &str = "Game.Boss: a type was added [type_added] (and 2 more)";
+    const UNLISTED: &str = "the reasons are not reported yet";
+    let cases: [(&[&str], Expect, Expect); 18] = [
+        (&["unchanged"], Applied, Applied),
+        (&["compile-error"], Rejected, Rejected),
+        // The runner states that the Player runs the newest code again: the
+        // refused edit was reverted.
+        (&["refusal", "unchanged:false"], Applied, Applied),
+        (&["refusal", "updated:false"], Applied, Applied),
+        // It states the opposite on the scene part of a change whose refusal
+        // it prints afterwards, and on every scene update while one stands.
+        (&["updated:true"], Refused(UNLISTED), Refused(UNLISTED)),
+        (&["unchanged:true"], Refused(UNLISTED), Refused(UNLISTED)),
+        (&["updated:true", "refusal"], Refused(BOSS), Refused(BOSS)),
+        (&["refusal", "unchanged:true"], Refused(BOSS), Refused(BOSS)),
+        // A new Player process loads the newest code.
+        (&["refusal", "restart"], Applied, Applied),
+        (&["refusal", "updated", "restart"], Applied, Applied),
+        (&["updated:true", "restart"], Applied, Applied),
+        // A compile error is the outcome while nothing follows it. The
+        // refusal is back with the next update that does not lift it.
+        (&["refusal", "compile-error"], Rejected, Rejected),
+        (&["compile-error", "refusal"], Refused(BOSS), Refused(BOSS)),
+        (
+            &["refusal", "compile-error", "updated"],
+            Refused(BOSS),
+            Refused(BOSS),
+        ),
+        (
+            &["refusal", "compile-error", "unchanged:false"],
+            Applied,
+            Applied,
+        ),
+        (&["code-patched", "compile-error"], Rejected, Rejected),
+        // A scene reload leaves a ready Player, which answers a readiness
+        // wait also when a rejection follows.
+        (&["updated", "compile-error"], Rejected, Applied),
+        (&["updated", "refusal"], Refused(BOSS), Refused(BOSS)),
+    ];
+    for (events, update, readiness) in cases {
+        let c = controller_fixture("");
+        let ready = start_ready(&c);
+        // Progress is no outcome.
+        accept(&c, json!({"event": "compiling", "stage": "Roslyn"}));
+        for is_ready in [false, true] {
+            let waiting = c.wait(&millis(40), ready.last_sequence, is_ready);
+            assert!(
+                waiting
+                    .as_ref()
+                    .is_err_and(|failure| failure.error.is_deadline_exceeded()),
+                "{events:?}: progress answered a wait: {waiting:?}"
+            );
+        }
+        for name in events {
+            accept(&c, outcome(&c, name));
+        }
+        let state = c.status();
+        for (is_ready, expected) in [(false, &update), (true, &readiness)] {
+            let context = format!("{events:?}, readiness {is_ready}");
+            let waited = c.wait(&seconds(1), ready.last_sequence, is_ready);
+            match expected {
+                Applied => match waited {
+                    Ok(applied) => assert!(
+                        applied == state && !state.hot_reload.full_recompile_required,
+                        "{context}: {applied:?}"
+                    ),
+                    Err(failure) => panic!("{context}: {}", failure.error),
+                },
+                Refused(reason) => {
+                    let failure = expect_refused(waited, &context);
+                    assert!(
+                        failure.error.message().contains(reason),
+                        "{context}: {}",
+                        failure.error
+                    );
+                }
+                Rejected => {
+                    let failure = waited.expect_err(&context);
+                    assert!(
+                        failure.typed.is_none()
+                            && failure.error.message() == "CS1002: ; expected"
+                            && failure.state.phase == "ready",
+                        "{context}: {:?} {}",
+                        failure.state,
+                        failure.error
+                    );
+                }
+            }
+        }
+    }
+
+    // A refusal that lists no reason is reported with the runner's own
+    // sentence, also after later events replaced the session's update error.
+    let c = controller_fixture("");
+    let ready = start_ready(&c);
+    accept(
+        &c,
+        json!({"event": "update-rejected", "error": "the C# edit needs a restart; see the report.", "fullRecompileRequired": true}),
+    );
+    accept(&c, outcome(&c, "compile-error"));
+    accept(&c, outcome(&c, "updated"));
+    let failure = expect_refused(
+        c.wait(&seconds(1), ready.last_sequence, false),
+        "no listed reason",
+    );
+    assert_eq!(
+        failure.error.message(),
+        format!(
+            "The C# edit compiled but cannot be applied to the running Player: the C# edit needs a restart; see the report. The Player still runs the previous code; the other source changes confirmed after sequence {} are applied. Call hot_reload with action \"recompile\" to restart the Player on the new code; game state is reset.",
+            ready.last_sequence
+        )
+    );
+}
+
+#[test]
+fn restart_records_why_hot_reload_caused_it() {
+    let c = controller_fixture("");
+    let ready = start_ready(&c);
+    accept(&c, refusal("/owned/hot-reload/1/report.json"));
+    // The runner restarted by itself. `report` of a readiness event is the
+    // Player's report, so the result of the patch builder has its own name.
+    let fallback = accept(
+        &c,
+        restarted(
+            &c,
+            ready.pid,
+            json!({"reason": "hot_reload_unsupported", "unsupportedCount": 4,
+                "unsupported": [{"code": "type_added", "member": "Game.Boss", "message": "a type was added"}],
+                "hotReloadReport": "/owned/hot-reload/2/report.json"}),
+        ),
+    );
+    let restart = fallback.hot_reload.last_restart.clone().unwrap();
+    assert!(
+        !fallback.hot_reload.full_recompile_required
+            && fallback.hot_reload.unsupported.is_empty()
+            && fallback.hot_reload.code_generation == 0
+            && restart.sequence == fallback.last_sequence
+            && restart.reason == "hot_reload_unsupported"
+            && restart.unsupported_count == 4
+            && restart.unsupported[0].member == "Game.Boss"
+            && restart.report == "/owned/hot-reload/2/report.json",
+        "{fallback:?}"
+    );
+    // A patch that left the Player unusable.
+    let failed = accept(
+        &c,
+        restarted(
+            &c,
+            ready.pid,
+            json!({"reason": "hot_reload_failed", "error": "the Player exited during a code patch"}),
+        ),
+    );
+    let encoded = String::from_utf8(jsondoc::marshal(&failed).unwrap()).unwrap();
+    assert!(
+        encoded.contains(&format!(
+            r#""lastRestart":{{"sequence":{},"reason":"hot_reload_failed","error":"the Player exited during a code patch","unsupportedCount":0}}"#,
+            failed.last_sequence
+        )),
+        "{encoded}"
+    );
+    // A restart that names no reason is not one of hot reload.
+    let plain = accept(&c, restarted(&c, ready.pid, json!({})));
+    assert!(plain.hot_reload.is_default(), "{plain:?}");
+}
+
+#[test]
+fn recompile_needs_a_ready_session() {
+    let not_ready = |c: &Controller, phase: &str| {
+        for raw in [
+            &br#"{"action":"recompile"}"#[..],
+            br#"{"action":"recompile","requestId":"rc-early"}"#,
+        ] {
+            let failure = c
+                .handle(&seconds(3), "hot_reload", raw)
+                .expect_err("recompile without a ready Player");
+            assert_eq!(
+                failure.typed,
+                Some(Typed {
+                    code: "session_not_ready",
+                    details: json!({"phase": phase}),
+                }),
+                "{}",
+                failure.error
+            );
+            assert!(matches!(failure.reply, Some(Reply::State(state)) if state.phase == phase));
+        }
+        assert!(
+            c.status().hot_reload.pending_recompile.is_empty(),
+            "a command was sent to a {phase} session"
+        );
+    };
+    let c = controller_fixture("");
+    not_ready(&c, "stopped");
+    let message = |raw: &[u8]| {
+        c.handle(&seconds(3), "hot_reload", raw)
+            .expect_err("invalid hot reload call accepted")
+            .error
+            .to_string()
+    };
+    assert_eq!(
+        message(br#"{"action":"apply"}"#),
+        "unsupported runtime operation \"hot_reload_apply\""
+    );
+    assert_eq!(
+        message(br#"{"action":"recompile","requestId":"bad id"}"#),
+        "requestId must be ASCII letters, digits or hyphens, at most 64 characters"
+    );
+    // The command pipe exists from the launch to the end of the runner, but
+    // only a ready Player can be restarted on new code. The `child` runner
+    // never reports readiness.
+    let starting = controller_fixture("child");
+    starting.start().unwrap();
+    not_ready(&starting, "starting");
+    let stopping = controller_fixture("ignore-signals");
+    start_ready(&stopping);
+    let stopper = stop_slowly(&stopping);
+    not_ready(&stopping, "stopping");
+    end_runner(&stopping);
+    assert_eq!(stopper.join().unwrap().unwrap().phase, "stopped");
+}
+
+#[test]
+fn recompile_is_answered_only_by_the_event_that_names_it() {
+    let c = controller_fixture("");
+    let ready = start_ready(&c);
+    let worker = recompile_in_background(&c, "rc-1");
+    // The runner first finishes what it was doing. The compile error of a
+    // source edit, a failed scene reload and the answer to another command
+    // are rejections too, and none of them is the answer to this command.
+    for (error, id) in [
+        ("CS1002: ; expected", None),
+        ("scene reload failed", Some("rc-other")),
+    ] {
+        let before = c.status().last_update_rejected_sequence;
+        let mut event =
+            json!({"event": "update-rejected", "error": error, "paths": ["Assets/A.cs"]});
+        if let Some(id) = id {
+            event["requestId"] = json!(id);
+        }
+        emit_fixture_event(&c, event);
+        wait_for("the rejection", || {
+            c.status().last_update_rejected_sequence > before
+        });
+    }
+    // Neither is a refusal, whatever it names: a restart needs no patch, so
+    // a refusal is about a source edit.
+    let mut refused = refusal("/owned/report.json");
+    refused["requestId"] = json!("rc-1");
+    emit_fixture_event(&c, refused);
+    wait_for("the refusal", || {
+        c.status().hot_reload.full_recompile_required
+    });
+    // A restart that names another cause belongs to an edit handled first.
+    emit_fixture_event(
+        &c,
+        restarted(
+            &c,
+            ready.pid,
+            json!({"reason": "hot_reload_unsupported", "unsupportedCount": 1,
+                "unsupported": [{"code": "type_added", "member": "Game.Boss", "message": "a type was added"}]}),
+        ),
+    );
+    wait_for("the fallback restart", || {
+        c.status().hot_reload.last_restart.is_some()
+    });
+    let fallback = c.status();
+    let restart = fallback.hot_reload.last_restart.clone().unwrap();
+    assert!(
+        !worker.is_finished()
+            && fallback.last_update_sequence == fallback.last_sequence
+            && restart.reason == "hot_reload_unsupported"
+            && restart.unsupported_count == 1
+            && restart.unsupported[0].member == "Game.Boss"
+            && fallback.hot_reload.pending_recompile == "rc-1",
+        "{fallback:?}"
+    );
+    // The compile check of the command itself failed: the Player is kept.
+    emit_fixture_event(
+        &c,
+        json!({"event": "update-rejected", "error": "CS0103: The name 'boss' does not exist", "requestId": "rc-1"}),
+    );
+    let rejected = worker
+        .join()
+        .unwrap()
+        .expect_err("a compile error restarted the Player");
+    assert!(
+        rejected.typed.is_none()
+            && rejected.error.message() == "CS0103: The name 'boss' does not exist"
+            && rejected.state.phase == "ready"
+            && rejected.state.pid == ready.pid
+            && rejected.state.hot_reload.pending_recompile.is_empty(),
+        "{:?} {}",
+        rejected.state,
+        rejected.error
+    );
+
+    // A restart answers under either readiness name: the runner reports one
+    // without a new compilation as `content-updated`. It answers by its
+    // reason when the id is missing, and by its id when it was merged with a
+    // restart that has another cause.
+    for (name, id, answer) in [
+        (
+            "content-updated",
+            "rc-2",
+            json!({"reason": "requested", "requestId": "rc-2"}),
+        ),
+        ("code-updated", "rc-3", json!({"reason": "requested"})),
+        (
+            "code-updated",
+            "rc-4",
+            json!({"reason": "hot_reload_unsupported", "requestId": "rc-4"}),
+        ),
+    ] {
+        let worker = recompile_in_background(&c, id);
+        let mut event = restarted(&c, ready.pid, answer);
+        event["event"] = json!(name);
+        emit_fixture_event(&c, event);
+        let state = match worker.join().unwrap() {
+            Ok(state) => state,
+            Err(failure) => panic!("{name} {id}: {:?} {}", failure.state, failure.error),
+        };
+        assert!(
+            state.phase == "ready"
+                && state.last_update_sequence == state.last_sequence
+                && state.hot_reload.pending_recompile.is_empty(),
+            "{name} {id}: {state:?}"
+        );
+    }
+    assert_eq!(commands(&c).len(), 4, "a command was written twice");
+
+    // The runner is stopped while a command is pending.
+    let worker = recompile_in_background(&c, "rc-5");
+    let stopping = c.clone();
+    let stopper = thread::spawn(move || stopping.stop(&seconds(3)).map(drop));
+    let stopped = worker
+        .join()
+        .unwrap()
+        .expect_err("a stopped session confirmed a recompile");
+    assert!(
+        stopped
+            .error
+            .message()
+            .contains("before the requested recompile"),
+        "{}",
+        stopped.error
+    );
+    stopper.join().unwrap().unwrap();
+    assert!(c.status().hot_reload.is_default());
+}
+
+// A request id names one command. Asking again returns what the runner
+// answered instead of restarting the Player once more.
+#[test]
+fn answered_recompile_is_replayed_for_its_request_id() {
+    let c = controller_fixture("");
+    let ready = start_ready(&c);
+    // The client gives up on the call; the command stays with the runner.
+    let gave_up = c
+        .recompile(&millis(50), "rc-1")
+        .expect_err("a recompile ended without an answer");
+    assert!(gave_up.error.is_deadline_exceeded(), "{}", gave_up.error);
+    assert_eq!(c.status().hot_reload.pending_recompile, "rc-1");
+    emit_fixture_event(
+        &c,
+        restarted(
+            &c,
+            ready.pid,
+            json!({"reason": "requested", "requestId": "rc-1"}),
+        ),
+    );
+    wait_for("the restart", || {
+        let state = c.status();
+        state.hot_reload.pending_recompile.is_empty() && state.hot_reload.last_restart.is_some()
+    });
+    let replayed = c.recompile(&seconds(1), "rc-1").unwrap();
+    assert!(
+        replayed.phase == "ready"
+            && replayed.hot_reload.pending_recompile.is_empty()
+            && replayed
+                .hot_reload
+                .last_restart
+                .as_ref()
+                .unwrap()
+                .request_id
+                == "rc-1",
+        "{replayed:?}"
+    );
+    // The outcome belongs to its id, also while the next command is pending.
+    let next = recompile_in_background(&c, "rc-2");
+    let replayed = c.recompile(&seconds(1), "rc-1").unwrap();
+    assert_eq!(replayed.hot_reload.pending_recompile, "rc-2");
+    emit_fixture_event(
+        &c,
+        json!({"event": "update-rejected", "error": "CS1002: ; expected", "requestId": "rc-2"}),
+    );
+    let rejected = next.join().unwrap().expect_err("compile error");
+    assert_eq!(rejected.error.message(), "CS1002: ; expected");
+    // A repeated id says that it repeats, so that a fixed source is not
+    // mistaken for one that still fails.
+    let again = c
+        .recompile(&seconds(1), "rc-2")
+        .expect_err("a rejected recompile was replayed as a success");
+    assert!(again.typed.is_none() && again.state.pid == ready.pid);
+    assert_eq!(
+        again.error.message(),
+        format!(
+            "recompile rc-2 was already rejected at sequence {} (send a new requestId to recompile again): CS1002: ; expected",
+            rejected.state.last_sequence
+        )
+    );
+
+    // An edit refused after the restart is not hidden behind its success.
+    emit_fixture_event(&c, refusal("/owned/report.json"));
+    wait_for("the refusal", || {
+        c.status().hot_reload.full_recompile_required
+    });
+    let stale = c
+        .recompile(&seconds(1), "rc-1")
+        .expect_err("a recorded restart hid a refused edit");
+    assert_eq!(
+        stale.typed.as_ref().map(|typed| typed.code),
+        Some("full_recompile_required")
+    );
+    assert_eq!(
+        stale.error.message(),
+        "Recompile rc-1 restarted the Player, and a C# edit compiled after it cannot be applied to the running Player: Game.Boss: a type was added [type_added] (and 2 more). Call hot_reload with action \"recompile\" and a new requestId to restart the Player on the new code; game state is reset."
+    );
+
+    // Only the newest outcomes are kept; a forgotten id is a new command.
+    let mut expected = vec!["rc-1".to_string(), "rc-2".to_string()];
+    for index in 0..hotreload::RECOMPILE_HISTORY {
+        let id = format!("fill-{index}");
+        let worker = recompile_in_background(&c, &id);
+        emit_fixture_event(
+            &c,
+            json!({"event": "update-rejected", "error": format!("answer {index}"), "requestId": id}),
+        );
+        worker.join().unwrap().expect_err("compile error");
+        expected.push(id);
+    }
+    let worker = recompile_in_background(&c, "rc-1");
+    expected.push("rc-1".into());
+    assert_eq!(c.status().hot_reload.pending_recompile, "rc-1");
+    let sent: Vec<String> = commands(&c)
+        .iter()
+        .map(|line| {
+            serde_json::from_str::<Value>(line).unwrap()["requestId"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(sent, expected, "a replayed id reached the runner again");
+    c.stop(&seconds(3)).unwrap();
+    worker.join().unwrap().expect_err("stopped");
+}
+
+// The session stays ready when the command channel is gone, so the error has
+// to name the call that replaces the runner.
+#[test]
+fn recompile_names_the_reset_when_the_runner_takes_no_commands() {
+    let reported = |c: &Controller, ready: &State, cause: &str| {
+        // Repeating the call fails the same way and sends nothing.
+        for id in ["rc-1", "rc-2"] {
+            let failure = c
+                .recompile(&seconds(1), id)
+                .expect_err("a command was written to a runner that reads none");
+            let message = failure.error.message();
+            assert!(
+                failure.typed.is_none()
+                    && message.contains(cause)
+                    && message.contains("session_control(reset)")
+                    && failure.state.phase == "ready"
+                    && failure.state.pid == ready.pid
+                    && failure.state.hot_reload.pending_recompile.is_empty(),
+                "{cause}: {:?} {message}",
+                failure.state
+            );
+        }
+    };
+    let c = controller_fixture("commands-closed");
+    let ready = start_ready(&c);
+    reported(&c, &ready, "broken pipe");
+
+    // A runner that stopped reading leaves a full pipe. The write must fail
+    // there: the controller holds the session lock while it writes.
+    let c = controller_fixture("commands-unread");
+    let ready = start_ready(&c);
+    let flags = {
+        let mut inner = c.lock();
+        let commands = inner.commands.as_mut().unwrap();
+        // SAFETY: both calls only read or set properties of an open pipe.
+        let flags = unsafe {
+            libc::fcntl(commands.as_raw_fd(), libc::F_SETPIPE_SZ, 4096);
+            libc::fcntl(commands.as_raw_fd(), libc::F_GETFL)
+        };
+        // Blank lines fill the pipe; a blocking one would hang right here.
+        while flags & libc::O_NONBLOCK != 0 && commands.write(b"\n").is_ok() {}
+        flags
+    };
+    assert!(
+        flags >= 0 && flags & libc::O_NONBLOCK != 0,
+        "the command pipe would block the controller: flags {flags:#o}"
+    );
+    reported(&c, &ready, "resource temporarily unavailable");
+}
+
+// A stop does not turn a confirmation of the Player it is stopping into a
+// protocol error of the session.
+#[test]
+fn update_confirmed_while_stopping_leaves_a_stopped_session() {
+    for name in ["code-patched", "unchanged", "updated"] {
+        let c = controller_fixture("ignore-signals");
+        let ready = start_ready(&c);
+        let stopper = stop_slowly(&c);
+        emit_fixture_event(
+            &c,
+            match name {
+                "updated" => updated(ready.pid),
+                _ => {
+                    json!({"event": name, "pid": ready.pid, "revision": ready.revision, "codeGeneration": 1})
+                }
+            },
+        );
+        wait_for("the confirmation", || {
+            c.status().last_sequence > ready.last_sequence
+        });
+        // The confirmation is not the readiness of a Player that is going away.
+        let waiting = c.wait(&millis(40), ready.last_sequence, true);
+        assert!(
+            waiting
+                .as_ref()
+                .is_err_and(|failure| failure.error.is_deadline_exceeded()),
+            "{name}: a stopping Player answered a readiness wait: {waiting:?}"
+        );
+        end_runner(&c);
+        let stopped = stopper.join().unwrap().unwrap();
+        assert!(
+            stopped.phase == "stopped" && stopped.last_error.is_empty(),
+            "{name}: {stopped:?}"
+        );
+    }
+}
+
+// The reply an agent gets through the server the `mcp` command builds: the
+// service in front of the controller, and the MCP tools in front of the service.
+#[test]
+fn mcp_reply_names_the_full_recompile_and_the_call_that_applies_it() {
+    use crate::{agent, mcp};
+    let c = controller_fixture("");
+    let project = c.0.options.project.clone();
+    for directory in ["Assets", "ProjectSettings"] {
+        fs::create_dir_all(sysutil::join(&[&project, directory])).unwrap();
+    }
+    for (path, content) in [
+        (
+            "ProjectSettings/ProjectVersion.txt",
+            "m_EditorVersion: 6000.6.3f1\n",
+        ),
+        ("Assets/Main.unity", "selected scene"),
+    ] {
+        fs::write(sysutil::join(&[&project, path]), content).unwrap();
+    }
+    let service = agent::Service::new(agent::Options {
+        project: project.clone(),
+        scene: "Assets/Main.unity".into(),
+        asynchronous: true,
+        controller: Some(c.controller.clone()),
+        lifetime: Some(Context::background()),
+        ..Default::default()
+    });
+    let runtime: Arc<dyn mcp::RuntimeHandler> = {
+        let service = service.clone();
+        Arc::new(move |ctx: &Context, name: &str, raw: &[u8]| {
+            service
+                .runtime(ctx, name, raw)
+                .map_err(agent::handler_error)
+        })
+    };
+    let server = mcp::Server::new(&mcp::Options {
+        project,
+        runtime: Some(runtime),
+        ..Default::default()
+    })
+    .unwrap();
+    let call = |name: &str, arguments: Value| -> (bool, Value) {
+        let result = server
+            .call_tool(&seconds(3), name, Some(&jsondoc::encode(&arguments)))
+            .unwrap();
+        (result.is_error, serde_json::from_str(&result.text).unwrap())
+    };
+    let ready = start_ready(&c);
+    // A refusal is answered by a recompile even when its text reads like a
+    // graph rejection, which would queue a preparation and replace the Player.
+    let mut event = refusal("/owned/report.json");
+    event["error"] = json!("Game.Boss is outside the prepared managed graph of the running Player");
+    emit_fixture_event(&c, event);
+    let (is_error, reply) = call(
+        "session_control",
+        json!({"action": "wait_update", "afterSequence": ready.last_sequence}),
+    );
+    let error = &reply["error"];
+    assert!(is_error && reply["success"] == false, "{reply}");
+    assert_eq!(error["code"], "full_recompile_required", "{reply}");
+    assert_eq!(
+        error["details"]["next"],
+        json!({"tool": "hot_reload", "arguments": {"action": "recompile"}})
+    );
+    assert_eq!(error["details"]["unsupported"][0]["code"], "type_added");
+    assert_eq!(error["details"]["unsupportedCount"], 3);
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("Game.Boss: a type was added [type_added] (and 2 more)"),
+        "{reply}"
+    );
+    // A status poll shows the same state and starts no preparation for it.
+    let (is_error, status) = call("session_control", json!({"action": "status"}));
+    assert!(
+        !is_error
+            && status["data"]["hotReload"]["fullRecompileRequired"] == true
+            && status["data"].get("preparation").is_none()
+            && status["data"].get("preparationRequired").is_none(),
+        "{status}"
+    );
+    let refused = status["data"]["lastSequence"].as_u64().unwrap();
+    let (_, status) = call("hot_reload", json!({"action": "status"}));
+    assert!(
+        status["success"] == true
+            && status["data"]["fullRecompileRequired"] == true
+            && status["data"]["onUnsupportedEdit"] == "report"
+            && status["data"]["phase"] == "ready",
+        "{status}"
+    );
+    // A scene edit confirmed after the refusal does not make the answer a
+    // success: not with the mark of before the C# edit, not without a mark,
+    // not with the mark of the status that showed the refusal, and not for
+    // an agent that waits for readiness.
+    accept(
+        &c,
+        json!({"event": "unchanged", "pid": ready.pid, "revision": ready.revision, "paths": ["Assets/Main.unity"]}),
+    );
+    for arguments in [
+        json!({"action": "wait_update", "afterSequence": ready.last_sequence}),
+        json!({"action": "wait_update"}),
+        json!({"action": "wait_update", "afterSequence": refused}),
+        json!({"action": "wait", "afterSequence": refused}),
+        json!({"action": "wait"}),
+    ] {
+        let (is_error, reply) = call("session_control", arguments.clone());
+        assert!(
+            is_error
+                && reply["success"] == false
+                && reply["error"]["code"] == "full_recompile_required"
+                && reply["error"]["details"]["unsupportedCount"] == 3
+                && reply["error"]["details"]["next"]["tool"] == "hot_reload",
+            "{arguments}: {reply}"
+        );
+    }
+    let worker = {
+        let server = server.clone();
+        thread::spawn(move || {
+            server.call_tool(
+                &seconds(3),
+                "hot_reload",
+                Some(br#"{"action":"recompile","requestId":"rc-mcp"}"#),
+            )
+        })
+    };
+    wait_for("the recompile command", || !commands(&c).is_empty());
+    assert_eq!(
+        commands(&c),
+        [r#"{"command":"recompile","requestId":"rc-mcp"}"#]
+    );
+    emit_fixture_event(
+        &c,
+        restarted(
+            &c,
+            ready.pid,
+            json!({"reason": "requested", "requestId": "rc-mcp"}),
+        ),
+    );
+    let result = worker.join().unwrap().unwrap();
+    let reply: Value = serde_json::from_str(&result.text).unwrap();
+    let data = &reply["data"];
+    assert!(
+        !result.is_error
+            && reply["success"] == true
+            && data["phase"] == "ready"
+            && data["hotReload"]["fullRecompileRequired"] == false
+            && data["hotReload"]["lastRestart"]["requestId"] == "rc-mcp"
+            // The fixture Player publishes no tool catalog; the refresh was attempted.
+            && data["projectToolsRefreshError"].is_string(),
+        "{reply}"
+    );
+    service.close();
+}
+
+#[test]
+fn refusal_ends_when_the_player_runs_the_current_code_again() {
+    let c = controller_fixture("");
+    let ready = start_ready(&c);
+    let refuse = |after: u64| -> State {
+        // A different report path makes each refusal a new fixture event.
+        emit_fixture_event(&c, refusal(&format!("/owned/report-{after}.json")));
+        let refused = c
+            .wait(&seconds(1), after, false)
+            .expect_err("refusal was not reported");
+        assert!(refused.state.hot_reload.full_recompile_required);
+        *refused.state
+    };
+    // The edit was reverted: the compiled code equals the loaded code again.
+    let refused = refuse(ready.last_sequence);
+    emit_fixture_event(
+        &c,
+        json!({"event": "unchanged", "pid": ready.pid, "revision": ready.revision, "fullRecompileRequired": false}),
+    );
+    let healed = c.wait(&seconds(1), refused.last_sequence, false).unwrap();
+    assert!(
+        healed.hot_reload.is_default() && !healed.code_refused(),
+        "{healed:?}"
+    );
+    // A later edit made the whole difference patchable.
+    let refused = refuse(healed.last_sequence);
+    emit_fixture_event(
+        &c,
+        json!({"event": "code-patched", "pid": ready.pid, "revision": ready.revision, "codeGeneration": 1, "patchedMethods": 1}),
+    );
+    let patched = c.wait(&seconds(1), refused.last_sequence, false).unwrap();
+    assert!(
+        !patched.hot_reload.full_recompile_required
+            && patched.hot_reload.unsupported.is_empty()
+            && patched.hot_reload.unsupported_count == 0
+            && patched.hot_reload.report.is_empty()
+            && patched.hot_reload.code_generation == 1,
+        "{patched:?}"
+    );
+    // A scene reload without that statement leaves the refusal in place. The
+    // reload is applied, and the reply says both.
+    let stale = refuse(patched.last_sequence);
+    accept(&c, updated(ready.pid));
+    let scene = expect_refused(
+        c.wait(&seconds(1), stale.last_sequence, false),
+        "scene reload",
+    );
+    assert!(
+        scene.state.revision == "rev-2"
+            && scene.state.hot_reload.code_generation == 1
+            && scene.error.message().contains(&format!(
+                "the other source changes confirmed after sequence {} are applied",
+                stale.last_sequence
+            )),
+        "{:?} {}",
+        scene.state,
+        scene.error
+    );
 }
