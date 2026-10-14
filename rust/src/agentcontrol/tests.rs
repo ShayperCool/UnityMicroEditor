@@ -71,30 +71,24 @@ fn controller_helper_process() {
         libc::fcntl(3, libc::F_SETFD, libc::FD_CLOEXEC);
         File::from_raw_fd(3)
     }));
+    // The `sync` commands that wait for their answer, by request id.
+    let syncs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
     match mode.as_str() {
         // SAFETY: descriptor 0 belongs to this process and nothing reads it.
         "commands-closed" => drop(unsafe { File::from_raw_fd(0) }),
         // The real loop reads its commands itself.
         "commands-unread" | "watch-loop" => {}
         _ => {
-            // A `sync` command is answered as the runner answers it when no
-            // source change waits; the other commands are recorded. The mode
-            // `sync-held` answers only once the file `helper-sync-release`
-            // exists, like a runner that is still compiling a save.
-            let (events, held) = (events.clone(), mode == "sync-held");
-            let release = sysutil::join(&[&output, "helper-sync-release"]);
+            // A `sync` command is handed to the loop below, which answers it
+            // as the runner does: after the event of everything that was
+            // "saved" (written as `helper-event.json`) before the command.
+            // The other commands are recorded.
+            let syncs = syncs.clone();
             thread::spawn(move || {
                 for line in io::stdin().lines().map_while(|line| line.ok()) {
                     let command = serde_json::from_str::<Value>(&line).unwrap_or_default();
                     if command["command"] == json!("sync") {
-                        while held && fs::metadata(&release).is_err() {
-                            thread::sleep(Duration::from_millis(2));
-                        }
-                        let mut answer = jsondoc::encode(
-                            &json!({"event": "synced", "requestId": command["requestId"]}),
-                        );
-                        answer.push(b'\n');
-                        let _ = events.lock().unwrap().write_all(&answer);
+                        syncs.lock().unwrap().push(command["requestId"].clone());
                         continue;
                     }
                     let log = fs::OpenOptions::new()
@@ -203,10 +197,20 @@ fn controller_helper_process() {
     let mut pending: HashMap<String, Instant> = HashMap::new();
     let mut executions = 0;
     let mut last_event = Vec::new();
+    // The mode `sync-held` answers a sync only once the file
+    // `helper-sync-release` exists, like a runner that is still compiling
+    // a save.
+    let release = sysutil::join(&[&output, "helper-sync-release"]);
     loop {
         if signalled() && mode != "ignore-signals" {
             process::exit(0);
         }
+        // Taken before the event file is read: an event that was written
+        // before one of these commands is printed before its answer.
+        let answered = match mode == "sync-held" && fs::metadata(&release).is_err() {
+            true => Vec::new(),
+            false => std::mem::take(&mut *syncs.lock().unwrap()),
+        };
         if let Ok(data) = fs::read(sysutil::join(&[&output, "helper-event.json"]))
             && data != last_event
         {
@@ -217,6 +221,9 @@ fn controller_helper_process() {
                 }
                 emit(&event);
             }
+        }
+        for id in answered {
+            emit(&json!({"event": "synced", "requestId": id}));
         }
         let mut requests: Vec<String> = fs::read_dir(&control)
             .into_iter()
@@ -539,6 +546,12 @@ fn executions(c: &Controller) -> String {
 fn alive(pid: i64) -> bool {
     sysutil::kill(pid, 0).is_ok()
 }
+/// The words of a wait that has nothing to report after its mark.
+const NOTHING_FOLLOWED: &str = "Nothing was applied or rejected after ";
+/// How a scene or asset rejection reads in the session state.
+fn scene_part(error: &str) -> String {
+    format!("The scene or asset part of the save was rejected: {error}.")
+}
 fn updated(pid: i64) -> Value {
     json!({"event": "updated", "ack": {"success": true, "restartRequired": false, "loadedRevision": "rev-2", "pid": pid}})
 }
@@ -654,12 +667,16 @@ fn stop_continues_cleanup_after_caller_timeout() {
 fn wait_distinguishes_progress_completion_and_rejection() {
     let c = controller_fixture("");
     let ready = start_ready(&c);
-    emit_fixture_event(&c, json!({"event": "compiling", "stage": "Roslyn"}));
-    let progress = c.wait(&millis(80), ready.last_sequence, false);
+    // Progress is no outcome: the runner has answered, nothing follows the
+    // mark, and the wait says so instead of waiting for a save nobody made.
+    accept(&c, json!({"event": "compiling", "stage": "Roslyn"}));
+    let progress = c.wait(&seconds(1), ready.last_sequence, false).unwrap();
     assert!(
-        progress
-            .as_ref()
-            .is_err_and(|failure| failure.error.is_deadline_exceeded()),
+        progress.attention.starts_with(NOTHING_FOLLOWED)
+            && progress
+                .attention
+                .contains(&format!("afterSequence {}", ready.last_sequence))
+            && progress.last_update_sequence == 0,
         "progress falsely acknowledged update: {progress:?}"
     );
     emit_fixture_event(
@@ -1325,14 +1342,46 @@ fn handle_routes_session_and_runtime_operations() {
             && encoded.contains("\"ready\":{\"controlDirectory\":"),
         "{encoded}"
     );
-    let pending = c.handle(
-        &millis(60),
+    // Nothing was saved: the runner answers, and the wait says that nothing
+    // followed its mark instead of waiting for a save nobody made.
+    let idle = c.handle(
+        &seconds(1),
         "session_control",
         br#"{"action":"wait_update","afterSequence":1}"#,
     );
-    let failure = pending.expect_err("update wait ended without an update");
-    assert!(failure.error.is_deadline_exceeded());
-    assert!(matches!(failure.reply, Some(Reply::State(state)) if state.phase == "ready"));
+    assert!(
+        matches!(&idle, Ok(Reply::State(state)) if state.phase == "ready"
+            && state.attention.starts_with(NOTHING_FOLLOWED) && state.events.is_empty()),
+        "{idle:?}"
+    );
+    // A mark that no event of this session has reached is answered the
+    // same way, with the session's own numbers; a wait of no time is no wait.
+    let ahead = c.handle(
+        &seconds(1),
+        "session_control",
+        br#"{"action":"wait_update","afterSequence":7}"#,
+    );
+    assert!(
+        matches!(&ahead, Ok(Reply::State(state)) if state.attention.starts_with(
+            "Nothing was applied or rejected after afterSequence 7: that mark is above lastSequence 1 of this session, so it was read from another one"
+        )),
+        "{ahead:?}"
+    );
+    let refused = c
+        .handle(
+            &seconds(1),
+            "session_control",
+            br#"{"action":"wait","timeoutSeconds":0}"#,
+        )
+        .expect_err("a wait of no time was taken");
+    assert!(
+        refused
+            .error
+            .message()
+            .contains("timeoutSeconds must be at least 1"),
+        "{}",
+        refused.error
+    );
     let query = format!(
         r#"{{"operation":"status","requestId":"routed","expectedPid":{}}}"#,
         ready.pid
@@ -2033,11 +2082,13 @@ fn refused_code_edit_asks_for_the_recompile_that_restarts_the_player() {
             "unsupportedCount": 3,
             "report": report,
             "next": {"tool": "hot_reload", "arguments": {"action": "recompile"}},
+            // The mark of the caller's next wait: a failed call has no state.
+            "lastSequence": refused.state.last_sequence,
         })
     );
     assert_eq!(
         refused.error.message(),
-        "The C# edit compiled but cannot be applied to the running Player: Game.Boss: a type was added [type_added] (and 2 more). The Player still runs the previous code. Call hot_reload with action \"recompile\" to restart the Player on the new code; game state is reset."
+        "The C# edit compiled but cannot be applied to the running Player: Game.Boss: a type was added [type_added] (and 2 more). The Player keeps the code it ran before this edit. Call hot_reload with action \"recompile\" to restart the Player on the new code; game state is reset."
     );
     let state = refused.state.clone();
     assert!(
@@ -2098,10 +2149,9 @@ fn refused_code_edit_asks_for_the_recompile_that_restarts_the_player() {
     );
     assert_eq!(
         scene.error.message(),
-        format!(
-            "The C# edit compiled but cannot be applied to the running Player: Game.Boss: a type was added [type_added] (and 2 more). The Player still runs the previous code; a scene or asset change confirmed after sequence {} is applied. Call hot_reload with action \"recompile\" to restart the Player on the new code; game state is reset.",
-            compile.state.last_sequence
-        )
+        // The confirmation was an `unchanged`: nothing was applied, and the
+        // reply does not say that something was.
+        "The C# edit compiled but cannot be applied to the running Player: Game.Boss: a type was added [type_added] (and 2 more). The Player keeps the code it ran before this edit. Call hot_reload with action \"recompile\" to restart the Player on the new code; game state is reset."
     );
     let scene = *scene.state;
     assert!(scene.update_error.is_empty() && scene.last_update_sequence == scene.last_sequence);
@@ -2178,16 +2228,17 @@ fn refused_code_edit_asks_for_the_recompile_that_restarts_the_player() {
 fn no_wait_succeeds_while_a_refused_edit_is_not_in_the_player() {
     let c = controller_fixture("");
     start_ready(&c);
-    // The model: whether a refusal stands, and the last confirmed update.
-    let (mut stale, mut confirmed) = (false, 0);
+    // The model: whether a refusal stands, and the last confirmed update
+    // with the event that confirmed it.
+    let (mut stale, mut confirmed, mut by) = (false, 0, "");
     for ordering in orderings(&["refusal", "updated", "unchanged", "code-patched"]) {
         let began = c.status().last_sequence;
         for (index, name) in ordering.iter().enumerate() {
             let state = accept(&c, outcome(&c, name));
             match *name {
                 "refusal" => stale = true,
-                "code-patched" => (stale, confirmed) = (false, state.last_sequence),
-                _ => confirmed = state.last_sequence,
+                "code-patched" => (stale, confirmed, by) = (false, state.last_sequence, *name),
+                _ => (confirmed, by) = (state.last_sequence, *name),
             }
             let context = format!("{ordering:?}, event {index}");
             assert_eq!(
@@ -2210,14 +2261,28 @@ fn no_wait_succeeds_while_a_refused_edit_is_not_in_the_player() {
                     }
                     let failure = expect_refused(waited, &context);
                     let message = failure.error.message();
-                    let since = format!(
-                        "a scene or asset change confirmed after sequence {after} is applied"
-                    );
+                    // What the wait did bring is named by what it was: a
+                    // scene update, or an earlier edit that was patched in.
+                    // An `unchanged` applied nothing.
+                    let brought = match (confirmed > after, by) {
+                        (true, "updated") => format!(
+                            "; a scene or asset change confirmed at sequence {confirmed} is applied"
+                        ),
+                        (true, "code-patched") => format!(
+                            "; an earlier C# edit was applied at sequence {confirmed} and is in the Player (hotReload.lastPatch)"
+                        ),
+                        _ => String::new(),
+                    };
                     assert!(
                         message.contains("Game.Boss: a type was added [type_added] (and 2 more)")
-                            && message.contains("The Player still runs the previous code")
-                            && message.contains(&since) == (confirmed > after),
+                            && message.contains(&format!(
+                                "The Player keeps the code it ran before this edit{brought}. Call hot_reload"
+                            )),
                         "{context}: {message}"
+                    );
+                    assert_eq!(
+                        failure.typed.unwrap().details["lastSequence"],
+                        state.last_sequence
                     );
                 }
             }
@@ -2285,14 +2350,13 @@ fn waits_report_the_code_the_player_runs_after_every_outcome() {
     for (events, update, readiness) in cases {
         let c = controller_fixture("");
         let ready = start_ready(&c);
-        // Progress is no outcome.
+        // Progress is no outcome: both waits say that nothing followed.
         accept(&c, json!({"event": "compiling", "stage": "Roslyn"}));
         for is_ready in [false, true] {
-            let waiting = c.wait(&millis(40), ready.last_sequence, is_ready);
+            let waiting = c.wait(&seconds(1), ready.last_sequence, is_ready).unwrap();
             assert!(
-                waiting
-                    .as_ref()
-                    .is_err_and(|failure| failure.error.is_deadline_exceeded()),
+                waiting.attention.starts_with(NOTHING_FOLLOWED)
+                    && waiting.last_update_sequence == 0,
                 "{events:?}: progress answered a wait: {waiting:?}"
             );
         }
@@ -2305,10 +2369,20 @@ fn waits_report_the_code_the_player_runs_after_every_outcome() {
             let waited = c.wait(&seconds(1), ready.last_sequence, is_ready);
             match expected {
                 Applied => match waited {
-                    Ok(applied) => assert!(
-                        applied == state && !state.hot_reload.full_recompile_required,
-                        "{context}: {applied:?}"
-                    ),
+                    Ok(mut applied) => {
+                        // A restart the runner made by itself is said first.
+                        let attention = std::mem::take(&mut applied.attention);
+                        assert_eq!(
+                            attention
+                                .starts_with("The edit could not be applied to the running Player"),
+                            events.contains(&"restart"),
+                            "{context}: {attention}"
+                        );
+                        assert!(
+                            applied == state && !state.hot_reload.full_recompile_required,
+                            "{context}: {applied:?}"
+                        )
+                    }
                     Err(failure) => panic!("{context}: {}", failure.error),
                 },
                 Refused(reason) => {
@@ -2362,8 +2436,8 @@ fn waits_report_the_code_the_player_runs_after_every_outcome() {
     assert_eq!(
         failure.error.message(),
         format!(
-            "The C# edit compiled but cannot be applied to the running Player: the C# edit needs a restart; see the report. The Player still runs the previous code; a scene or asset change confirmed after sequence {} is applied. Call hot_reload with action \"recompile\" to restart the Player on the new code; game state is reset.",
-            ready.last_sequence
+            "The C# edit compiled but cannot be applied to the running Player: the C# edit needs a restart; see the report. The Player keeps the code it ran before this edit; a scene or asset change confirmed at sequence {} is applied. Call hot_reload with action \"recompile\" to restart the Player on the new code; game state is reset.",
+            failure.state.last_update_sequence
         )
     );
 }
@@ -3038,8 +3112,8 @@ fn refusal_ends_when_the_player_runs_the_current_code_again() {
         scene.state.revision == "rev-2"
             && scene.state.hot_reload.code_generation == 1
             && scene.error.message().contains(&format!(
-                "a scene or asset change confirmed after sequence {} is applied",
-                stale.last_sequence
+                "a scene or asset change confirmed at sequence {} is applied",
+                scene.state.last_update_sequence
             )),
         "{:?} {}",
         scene.state,
@@ -3412,7 +3486,7 @@ fn a_refusal_taken_back_in_a_window_whose_scene_part_fails_is_cleared() {
             .wait(&seconds(1), refusal.last_sequence, false)
             .expect_err("the scene part was rejected");
         assert!(failure.typed.is_none(), "{}", failure.error);
-        let expected = prepare_error.unwrap_or(SCENE_REJECTED);
+        let expected = scene_part(prepare_error.unwrap_or(SCENE_REJECTED));
         assert_eq!(failure.error.message(), expected);
     }
 }
@@ -3504,7 +3578,14 @@ fn an_answer_marked_pending_answers_no_wait() {
     let failure = c
         .wait(&seconds(1), mark, false)
         .expect_err("the scene part was rejected");
-    assert_eq!(failure.error.message(), SCENE_REJECTED);
+    // The error is the scene's, and the C# part of the same save is live.
+    assert_eq!(
+        failure.error.message(),
+        format!(
+            "{} The C# edit of the same save is applied (code generation 4).",
+            scene_part(SCENE_REJECTED)
+        )
+    );
     assert_eq!(failure.state.hot_reload.code_generation, 4);
 
     // A session that ends while an answer is pending ends the wait.
@@ -3802,9 +3883,9 @@ fn notes_in_the_state_end_with_a_plain_confirmation_and_with_a_refusal() {
     );
 }
 
-/// A wait that succeeds while a part of the saved code is not in effect
-/// says so before anything else, for the notes the answer brought and for
-/// no others.
+/// A wait that succeeds while the patch has a limit says so before anything
+/// else, for the notes the answers after its mark brought and for no
+/// others, in words that claim no more than is known.
 #[test]
 fn a_wait_whose_answer_brought_notes_says_so_first() {
     use loop_lines::*;
@@ -3820,13 +3901,17 @@ fn a_wait_whose_answer_brought_notes_says_so_first() {
             "A coroutine that is already running finishes on the old code.",
         )
     };
+    const HELD: &str = "The edit is applied, with a limit that lasts until the Player restarts: ";
+    const ADVICE: &str = "If what you are checking depends on it, hot_reload with action \"recompile\" restarts the Player on the saved code and resets game state; otherwise go on.";
 
     script.edit(patch(1, vec![keeps.clone()]));
     run(&c, &mut state, &mut script, &source);
     let waited = c.wait(&seconds(1), ready.last_sequence, false).unwrap();
     assert_eq!(
         waited.attention,
-        "Not all of the saved code is in effect in the running Player: A coroutine that is already running finishes on the old code [running_coroutines_keep_old_code]. The rest of the edit is applied. hot_reload with action \"recompile\" restarts the Player on the saved code; game state is reset."
+        format!(
+            "{HELD}A coroutine that is already running finishes on the old code [running_coroutines_keep_old_code]. {ADVICE}"
+        )
     );
     assert_eq!(
         (
@@ -3839,14 +3924,24 @@ fn a_wait_whose_answer_brought_notes_says_so_first() {
     // It is the first member of the reply, and no part of the state a
     // status call reads.
     let encoded = String::from_utf8(jsondoc::marshal(&waited).unwrap()).unwrap();
-    assert!(encoded.starts_with(r#"{"attention":"Not all"#), "{encoded}");
+    assert!(
+        encoded.starts_with(r#"{"attention":"The edit is applied"#),
+        "{encoded}"
+    );
     assert!(c.status().attention.is_empty());
-    // A caller whose mark is this answer is told nothing new by it.
+    // A caller whose mark is before this answer is told again; one that
+    // gives no mark has read it with the wait above and is told that
+    // nothing followed.
     assert!(
         c.wait(&seconds(1), waited.last_sequence - 1, false)
             .unwrap()
             .attention
-            .starts_with("Not all")
+            .starts_with(HELD)
+    );
+    let again = c.wait_within(&seconds(1), None, false, None).unwrap();
+    assert!(
+        again.attention.starts_with(NOTHING_FOLLOWED) && again.hot_reload.new_notes.is_empty(),
+        "{again:?}"
     );
 
     // An edit elsewhere: the note stands in the patch and is no news.
@@ -3867,35 +3962,170 @@ fn a_wait_whose_answer_brought_notes_says_so_first() {
         ),
         (0, 1)
     );
-    // Two new notes: the first is named, the other counted.
+    // Two saves in two windows and ONE wait with the mark from before the
+    // first: what the first window brought is told, although the answer of
+    // the second, an edit elsewhere, brought nothing. This is the group of
+    // edits a caller is told to make before one wait.
     let mark = elsewhere.last_sequence;
-    let mut notes = vec![
-        Why {
-            revision: "bb".into(),
-            ..keeps.clone()
-        },
-        note("existing_instances_keep_default", "Game.A::f"),
-    ];
-    notes.sort_by(|a, b| a.member.cmp(&b.member));
-    script.edit(patch(3, notes));
+    let changed = Why {
+        revision: "bb".into(),
+        ..keeps.clone()
+    };
+    script.edit(patch(3, vec![changed.clone()]));
     run(&c, &mut state, &mut script, &source);
-    let both = c.wait(&seconds(1), mark, true).unwrap();
+    script.edit(patch(4, vec![changed.clone()]));
+    let second = run(&c, &mut state, &mut script, &source);
+    assert_eq!(second.hot_reload.new_notes_count, 0, "{second:?}");
+    let grouped = c.wait(&seconds(1), mark, false).unwrap();
+    assert!(grouped.attention.starts_with(HELD), "{}", grouped.attention);
+    assert_eq!(
+        (
+            grouped.hot_reload.new_notes_count,
+            grouped.hot_reload.new_notes_sequence,
+            grouped.hot_reload.new_notes[0].code.as_str()
+        ),
+        (
+            1,
+            grouped.last_sequence - 1,
+            "running_coroutines_keep_old_code"
+        )
+    );
+    // A status reads the state as it is: the last answer brought nothing.
+    assert_eq!(c.status().hot_reload.new_notes_count, 0);
+    // A caller that has read the first of the two answers is told nothing.
+    let later = c
+        .wait(&seconds(1), grouped.last_sequence - 1, false)
+        .unwrap();
+    assert!(later.attention.is_empty(), "{}", later.attention);
+
+    // The same over three windows, and the edit of the first one is taken
+    // back in the third: the patch has the note no more, and nothing is
+    // said about a limit that has ended.
+    let mark = later.last_sequence;
+    let field = note("existing_instances_keep_default", "Game.A::f");
+    script.edit(patch(5, vec![changed.clone(), field.clone()]));
+    run(&c, &mut state, &mut script, &source);
+    script.edit(patch(6, vec![changed.clone(), field.clone()]));
+    run(&c, &mut state, &mut script, &source);
+    let both = c.wait(&seconds(1), mark, false).unwrap();
     assert!(
-        both.attention
-            .contains("(and 1 more in hotReload.newNotes)"),
+        both.attention.contains("[existing_instances_keep_default]"),
         "{}",
         both.attention
     );
+    script.edit(patch(7, vec![changed.clone()]));
+    run(&c, &mut state, &mut script, &source);
+    let taken_back = c.wait(&seconds(1), mark, false).unwrap();
+    assert!(
+        taken_back.attention.is_empty() && taken_back.hot_reload.new_notes.is_empty(),
+        "{taken_back:?}"
+    );
+
+    // Several new notes: the sentence names the one that matters most, not
+    // the first of the builder's order, and counts the others. A note about
+    // lookups by name alone is listed and not worth the sentence.
+    let mark = taken_back.last_sequence;
+    let mut notes = vec![
+        changed.clone(),
+        note("added_method_invisible_by_name", "Game.A::Helper()"),
+        note("existing_instances_keep_default", "Game.A::f"),
+        Why {
+            revision: "cc".into(),
+            ..Why::new(
+                "added_method_named_by_string",
+                "Game.A::Blast()",
+                "The string \"Blast\" in code of Game.A names the added method Game.A::Blast().",
+            )
+        },
+    ];
+    notes.sort_by(|a, b| a.member.cmp(&b.member));
+    script.edit(patch(8, notes.clone()));
+    run(&c, &mut state, &mut script, &source);
+    let several = c.wait(&seconds(1), mark, true).unwrap();
+    assert!(
+        several.attention.starts_with(&format!(
+            "{HELD}The string \"Blast\" in code of Game.A names the added method Game.A::Blast() [added_method_named_by_string] (and 2 more in hotReload.newNotes). "
+        )),
+        "{}",
+        several.attention
+    );
+    assert_eq!(
+        several
+            .hot_reload
+            .new_notes
+            .iter()
+            .map(|note| note.code.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "added_method_named_by_string",
+            "existing_instances_keep_default",
+            "added_method_invisible_by_name"
+        ]
+    );
+    // Alone, the note about lookups by name is in the list and no reason to
+    // read anything first.
+    let mark = several.last_sequence;
+    notes.push(note("added_method_invisible_by_name", "Game.A::Other()"));
+    script.edit(patch(9, notes.clone()));
+    run(&c, &mut state, &mut script, &source);
+    let minor = c.wait(&seconds(1), mark, false).unwrap();
+    assert!(
+        minor.attention.is_empty() && minor.hot_reload.new_notes_count == 1,
+        "{minor:?}"
+    );
+    // A value that was lost is told without the offer of a restart, which
+    // would not bring it back.
+    let mark = minor.last_sequence;
+    notes.push(Why::new(
+        "field_value_reset",
+        "Game.A::speed",
+        "Field Game.A::speed changed its type; its previous value is lost.",
+    ));
+    script.edit(patch(10, notes.clone()));
+    run(&c, &mut state, &mut script, &source);
+    let reset = c.wait(&seconds(1), mark, false).unwrap();
+    assert_eq!(
+        reset.attention,
+        "The edit is applied and its code runs. Note: Field Game.A::speed changed its type; its previous value is lost [field_value_reset]."
+    );
+
+    // More new notes than a list holds: the sentence says where all are.
+    let mark = reset.last_sequence;
+    for index in 0..20 {
+        notes.push(note(
+            "existing_instances_keep_default",
+            &format!("Game.B::f{index:02}"),
+        ));
+    }
+    script.edit(patch(11, notes.clone()));
+    let many = run(&c, &mut state, &mut script, &source);
+    let report = many.hot_reload.last_patch.as_ref().unwrap().report.clone();
+    let many = c.wait(&seconds(1), mark, false).unwrap();
+    assert!(
+        many.attention.contains(&format!(
+            "(and 19 more notes: hotReload.newNotes lists 16 of them, {report} all)"
+        )),
+        "{}",
+        many.attention
+    );
+    assert_eq!(
+        (
+            many.hot_reload.new_notes.len(),
+            many.hot_reload.new_notes_count
+        ),
+        (16, 20)
+    );
 
     // A change that needs no patch and is not all in the Player.
-    let mark = both.last_sequence;
+    let mark = many.last_sequence;
     script.edit(unchanged());
     run(&c, &mut state, &mut script, &source);
     script.edit(noted());
     run(&c, &mut state, &mut script, &source);
     let noted = c.wait(&seconds(1), mark, false).unwrap();
     assert!(
-        noted.attention.contains("[accessibility_changed]") && noted.hot_reload.notes_count == 1,
+        noted.hot_reload.new_notes[0].code == "accessibility_changed"
+            && noted.hot_reload.notes_count == 1,
         "{noted:?}"
     );
     // A scene update while the notes stand repeats them, and brings none.
@@ -3909,7 +4139,9 @@ fn a_wait_whose_answer_brought_notes_says_so_first() {
     );
     let scene = c.wait(&seconds(1), mark, false).unwrap();
     assert!(
-        scene.attention.is_empty() && scene.hot_reload.notes_count == 1,
+        scene.attention.is_empty()
+            && scene.hot_reload.new_notes.is_empty()
+            && scene.hot_reload.notes_count == 1,
         "{scene:?}"
     );
 }
@@ -3961,7 +4193,7 @@ fn the_refusal_names_the_scene_change_the_player_rejected() {
         );
         assert!(
             failure.error.message().contains(&format!(
-                "The Player still runs the previous code. A scene or asset change saved since was rejected by the running Player: {SCENE_REJECTED}. If it only needs the new code, the recompile applies it. Call hot_reload"
+                "The Player keeps the code it ran before this edit. A scene or asset change saved since was rejected by the running Player: {SCENE_REJECTED}. If it only needs the new code, the recompile applies it. Call hot_reload"
             )),
             "{}",
             failure.error
@@ -3981,9 +4213,16 @@ fn the_refusal_names_the_scene_change_the_player_rejected() {
     );
     let applied = expect_refused(c.wait(&seconds(1), mark, false), "the repaired scene");
     assert!(
-        applied.typed.as_ref().unwrap().details.get("rejected").is_none()
+        applied
+            .typed
+            .as_ref()
+            .unwrap()
+            .details
+            .get("rejected")
+            .is_none()
             && applied.error.message().contains(&format!(
-                "a scene or asset change confirmed after sequence {mark} is applied. Call hot_reload"
+                "a scene or asset change confirmed at sequence {} is applied. Call hot_reload",
+                applied.state.last_update_sequence
             )),
         "{}",
         applied.error
@@ -4037,14 +4276,15 @@ fn replies_list_the_newest_events_and_a_wait_those_after_its_mark() {
         (sequences(&status), 14)
     );
     // The hashes of every source are the runner's own record, and the notes
-    // that stand are in the state: an event keeps their count and what it
-    // brought itself.
+    // that stand and those that are new are in the state: an event keeps
+    // their counts.
     let last = &status.events.last().unwrap().data;
     assert!(last.get("sourceHashes").is_none() && last["compiledAssemblies"].is_array());
     assert!(
         last.get("notes").is_none()
             && last["notesCount"] == 1
-            && last["newNotes"][0]["member"] == "A::B()",
+            && last.get("newNotes").is_none()
+            && last["newNotesCount"] == 1,
         "{last:?}"
     );
     // The session keeps the event as the runner printed it.
@@ -4073,10 +4313,25 @@ fn replies_list_the_newest_events_and_a_wait_those_after_its_mark() {
         (sequences(&waited), waited.events_omitted),
         (vec![mark + 1], 21)
     );
+    // A wait without a mark: what came after the last wait that answered,
+    // which is nothing here, and the whole session for the mark 0.
     let unmarked = call("session_control", json!({"action": "wait"}));
-    assert_eq!(unmarked.events.len(), 16);
+    assert!(
+        unmarked.events.is_empty() && unmarked.attention.starts_with(NOTHING_FOLLOWED),
+        "{unmarked:?}"
+    );
+    let whole = call(
+        "session_control",
+        json!({"action": "wait", "afterSequence": 0}),
+    );
+    assert_eq!(whole.events.len(), 16);
     // A wait that is given a time says what it waited for when it is over,
-    // long before the caller's own patience ends.
+    // long before the caller's own patience ends. The runner marks its
+    // answer as not its last: it is still working on what was saved.
+    accept(
+        &c,
+        json!({"event": "unchanged", "pid": ready.pid, "revision": c.status().revision, "pending": true}),
+    );
     let asked = Instant::now();
     let failure = c
         .handle(
@@ -4086,7 +4341,7 @@ fn replies_list_the_newest_events_and_a_wait_those_after_its_mark() {
                 &json!({"action": "wait_update", "afterSequence": mark + 1, "timeoutSeconds": 1}),
             ),
         )
-        .expect_err("a wait without an update answered");
+        .expect_err("a wait answered on an answer the runner marked as pending");
     assert!(
         asked.elapsed() < Duration::from_secs(15),
         "timeoutSeconds did not end the wait: {:?}",
@@ -4096,15 +4351,15 @@ fn replies_list_the_newest_events_and_a_wait_those_after_its_mark() {
     assert_eq!(typed.code, "wait_timeout");
     assert_eq!(
         typed.details,
-        json!({"afterSequence": mark + 1, "phase": "ready", "lastSequence": mark + 1,
-            "lastUpdateSequence": mark + 1, "lastUpdateRejectedSequence": 0,
-            "updatePending": false, "runnerAnswered": true})
+        json!({"afterSequence": mark + 1, "phase": "ready", "lastSequence": mark + 2,
+            "lastUpdateSequence": mark + 2, "lastUpdateRejectedSequence": 0,
+            "updatePending": true, "runnerAnswered": true})
     );
     assert!(
         failure
             .error
             .message()
-            .contains("no source change was applied or rejected after afterSequence"),
+            .contains("the session is still working on saved source changes. Nothing was decided. Repeat the call"),
         "{}",
         failure.error
     );
@@ -4148,4 +4403,288 @@ fn a_recompile_that_needs_a_new_graph_names_what_applies_the_change() {
         .unwrap()
         .expect_err("a compile error restarted");
     assert_eq!(failure.error.message(), "CS1002: ; expected");
+}
+
+/// A rejection that no update followed is the outcome for every mark: the
+/// caller that has read it and passes its sequence is not held, and is not
+/// sent to a recompile that cannot succeed. A compile error on top of a
+/// refused edit is reported as the compile error it is.
+#[test]
+fn a_rejection_that_stands_answers_every_mark() {
+    let c = controller_fixture("");
+    let ready = start_ready(&c);
+    accept(&c, outcome(&c, "refusal"));
+    let error = accept(&c, outcome(&c, "compile-error"));
+    for after in [ready.last_sequence, error.last_sequence, 0] {
+        for readiness in [false, true] {
+            let failure = c
+                .wait(&seconds(1), after, readiness)
+                .expect_err("a compile error that stands was passed over");
+            assert!(
+                failure.typed.is_none() && failure.error.message() == "CS1002: ; expected",
+                "after {after}: {:?} {}",
+                failure.typed,
+                failure.error
+            );
+        }
+    }
+    // The sources compile again and are still what was refused: the refusal
+    // is the outcome, for a mark at the newest event too.
+    let stated = accept(
+        &c,
+        json!({"event": "unchanged", "pid": ready.pid, "revision": ready.revision, "fullRecompileRequired": true}),
+    );
+    let refused = expect_refused(
+        c.wait(&seconds(1), stated.last_sequence, false),
+        "the refusal that stands",
+    );
+    assert!(
+        refused.error.message().contains("Call hot_reload"),
+        "{}",
+        refused.error
+    );
+    // A mark ahead of the session (a client that counted its own edit in)
+    // is given the refusal too, by both waits, through the tool call.
+    for action in ["wait_update", "wait"] {
+        let ahead = c
+            .handle(
+                &seconds(1),
+                "session_control",
+                format!(
+                    r#"{{"action":"{action}","afterSequence":{}}}"#,
+                    stated.last_sequence + 1
+                )
+                .as_bytes(),
+            )
+            .expect_err("a mark ahead of the session passed over the refusal that stands");
+        assert!(
+            ahead.typed.as_ref().map(|typed| typed.code) == Some("full_recompile_required")
+                && ahead.error.message().contains("Call hot_reload"),
+            "{action}: {:?} {}",
+            ahead.typed,
+            ahead.error
+        );
+    }
+    // A scene the Player would not load, with nothing refused: its error for
+    // every mark, and it says whose error it is.
+    let c = controller_fixture("");
+    let ready = start_ready(&c);
+    let rejected = accept(
+        &c,
+        json!({"event": "update-rejected", "error": SCENE_REJECTED, "part": "scene", "fullRecompileRequired": false}),
+    );
+    for after in [ready.last_sequence, rejected.last_sequence] {
+        let failure = c
+            .wait(&seconds(1), after, false)
+            .expect_err("a rejected scene was passed over");
+        assert_eq!(failure.error.message(), scene_part(SCENE_REJECTED));
+    }
+}
+
+/// The compiler prints every error of the sources. The state keeps the
+/// beginning of a rejection and a file all of it, and an event in a reply
+/// keeps less: a status after several failed compiles stays small.
+#[test]
+fn a_long_compile_error_is_bounded_in_every_reply() {
+    let c = controller_fixture("");
+    let ready = start_ready(&c);
+    let lines: Vec<String> = (0..600)
+        .map(|index| {
+            format!(
+                "/p/Assets/Scripts/Enemy.cs({index},13): error CS0103: The name 'missing{index}' does not exist in the current context"
+            )
+        })
+        .collect();
+    let output = format!(
+        "verify lifecycle Assembly-CSharp: dotnet: exit status 1\n{}",
+        lines.join("\n")
+    );
+    assert!(output.len() > 60_000);
+    let mut last = ready.clone();
+    for attempt in 0..8 {
+        last = accept(
+            &c,
+            json!({"event": "update-rejected", "error": output, "paths": [format!("Assets/Scripts/E{attempt}.cs")]}),
+        );
+    }
+    let failure = c
+        .wait(&seconds(1), ready.last_sequence, false)
+        .expect_err("a compile error was passed over");
+    let message = failure.error.message();
+    // The first errors, whole lines, and where the rest is.
+    let file = sysutil::join(&[
+        &c.0.options.output,
+        "rejections",
+        &format!("{}.txt", last.last_sequence),
+    ]);
+    assert!(message.len() < 4400, "{}", message.len());
+    assert!(
+        message.starts_with("verify lifecycle Assembly-CSharp: dotnet: exit status 1\n/p/Assets/Scripts/Enemy.cs(0,13)")
+            && message.ends_with(&format!(" more bytes: the whole text is in {file}]")),
+        "{message}"
+    );
+    let kept = message.rsplit_once("\n[").unwrap().0;
+    assert!(output.starts_with(kept) && kept.ends_with("in the current context"));
+    assert_eq!(fs::read_to_string(&file).unwrap(), output);
+    // A status: eight events of the error, the state twice.
+    let status = match c.handle(&seconds(1), "session_control", br#"{"action":"status"}"#) {
+        Ok(Reply::State(state)) => *state,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(status.events.len(), 8);
+    let encoded = jsondoc::marshal(&status).unwrap();
+    assert!(encoded.len() < 20_000, "{}", encoded.len());
+    let listed = status.events.last().unwrap().data["error"]
+        .as_str()
+        .unwrap();
+    assert!(
+        listed.len() < 560
+            && listed.ends_with(" more bytes]")
+            && output.starts_with(&listed[..500]),
+        "{listed}"
+    );
+    // The session keeps the event as the runner printed it.
+    assert_eq!(c.status().events.last().unwrap().data["error"], output);
+    // A refusal lists its reasons in the state, not in each event again.
+    let refused = accept(&c, outcome(&c, "refusal"));
+    let status = match c.handle(&seconds(1), "session_control", br#"{"action":"status"}"#) {
+        Ok(Reply::State(state)) => *state,
+        other => panic!("{other:?}"),
+    };
+    let event = &status.events.last().unwrap().data;
+    assert!(
+        event.get("unsupported").is_none()
+            && event["unsupportedCount"] == 3
+            && status.hot_reload.unsupported.len() == 2,
+        "{event:?}"
+    );
+    assert_eq!(refused.hot_reload.unsupported_count, 3);
+}
+
+/// A patch that leaves the Player unusable makes the runner restart it. The
+/// caller's wait succeeds, on the saved code, and the game state it was
+/// promised to keep is gone: the reply says so first.
+#[test]
+fn a_restart_the_runner_made_by_itself_is_said_first() {
+    let c = controller_fixture("");
+    let ready = start_ready(&c);
+    accept(
+        &c,
+        restarted(
+            &c,
+            ready.pid,
+            json!({"reason": "hot_reload_failed", "error": "the Player did not acknowledge the code patch within 20s."}),
+        ),
+    );
+    let waited = c.wait(&seconds(1), ready.last_sequence, false).unwrap();
+    assert_eq!(
+        waited.attention,
+        "The runner restarted the Player by itself and game state is reset: a code patch left the Player unusable (the Player did not acknowledge the code patch within 20s). The Player runs the saved code."
+    );
+    // A caller that has read the restart is told nothing by it, and a
+    // restart it asked for is no news either.
+    assert!(
+        c.wait(&seconds(1), waited.last_sequence - 1, true)
+            .unwrap()
+            .attention
+            .starts_with("The runner restarted")
+    );
+    let read = c.wait_within(&seconds(1), None, true, None).unwrap();
+    assert!(
+        read.attention.starts_with(NOTHING_FOLLOWED),
+        "{}",
+        read.attention
+    );
+    let worker = recompile_in_background(&c, "rc-own");
+    emit_fixture_event(
+        &c,
+        restarted(
+            &c,
+            ready.pid,
+            json!({"reason": "requested", "requestId": "rc-own"}),
+        ),
+    );
+    assert!(worker.join().unwrap().unwrap().attention.is_empty());
+}
+
+/// A scene update that brings a value for a field the applied patch added
+/// is confirmed by the Player and is not all in it. The runner says so on
+/// the event, and the wait puts it first.
+#[test]
+fn a_scene_value_for_an_added_field_is_said_first() {
+    let c = controller_fixture("");
+    let ready = start_ready(&c);
+    // The edit that adds the field: the builder's note, new with its patch.
+    let added = json!([{"code": "serialized_field_not_restored", "member": "Game.Lamp::glowCut",
+        "message": "The added field Game.Lamp::glowCut is not restored from scenes, prefabs or assets until a restart."}]);
+    let patched = accept(
+        &c,
+        json!({"event": "code-patched", "pid": ready.pid, "revision": ready.revision, "codeGeneration": 1,
+            "patchedMethods": 1, "addedFields": 1, "notes": added, "notesCount": 1, "newNotes": added, "newNotesCount": 1}),
+    );
+    assert!(
+        c.wait(&seconds(1), ready.last_sequence, false)
+            .unwrap()
+            .attention
+            .contains("The added field Game.Lamp::glowCut is not restored")
+    );
+    // The scene edit that sets it, waited for on its own.
+    let mut event = updated(ready.pid);
+    event["fullRecompileRequired"] = json!(false);
+    event["newNotes"] = json!([{"code": "serialized_field_not_restored", "member": "Game.Lamp::glowCut",
+        "message": "/p/Assets/Lamp.unity holds a value for the added field Game.Lamp::glowCut, which the Player does not read from scenes, prefabs or assets until a restart; its objects keep what the field's initializer gave them."}]);
+    event["newNotesCount"] = json!(1);
+    accept(&c, event);
+    let waited = c.wait(&seconds(1), patched.last_sequence, false).unwrap();
+    assert!(
+        waited.attention.starts_with("The edit is applied, with a limit that lasts until the Player restarts: /p/Assets/Lamp.unity holds a value for the added field Game.Lamp::glowCut")
+            && waited.attention.contains("[serialized_field_not_restored]")
+            && waited.revision == "rev-2",
+        "{}",
+        waited.attention
+    );
+}
+
+/// A start that spells out the values the Player already runs with is no
+/// other launch: it returns the running session like a start without
+/// arguments. Another value is refused, with the call that applies it.
+#[test]
+fn a_start_with_the_values_in_use_returns_the_running_session() {
+    let c = controller_fixture("");
+    let ready = start_ready(&c);
+    let ctx = seconds(1);
+    for arguments in [
+        json!({"hotReload": true}),
+        json!({"onUnsupportedEdit": "report"}),
+        json!({"hotReload": true, "onUnsupportedEdit": "report", "addressables": true}),
+        json!({"hotReload": null}),
+        json!({}),
+    ] {
+        let start = json!({"action": "start", "arguments": arguments});
+        match c.handle(&ctx, "session_control", &jsondoc::encode(&start)) {
+            Ok(Reply::State(state)) => assert_eq!(
+                (state.pid, state.session_id.as_str()),
+                (ready.pid, ready.session_id.as_str()),
+                "{start}"
+            ),
+            other => panic!("{start}: {other:?}"),
+        }
+    }
+    for arguments in [
+        json!({"hotReload": false}),
+        json!({"onUnsupportedEdit": "restart"}),
+        json!({"addressables": false}),
+        json!({"gameArguments": ["--level", "2"]}),
+    ] {
+        let start = json!({"action": "start", "arguments": arguments});
+        let refused = c
+            .handle(&ctx, "session_control", &jsondoc::encode(&start))
+            .expect_err("another launch was taken for the running one");
+        assert!(
+            refused.error.message().contains("other launch arguments"),
+            "{start}: {}",
+            refused.error
+        );
+    }
+    assert_eq!(c.status().pid, ready.pid);
 }
