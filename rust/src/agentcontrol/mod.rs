@@ -1299,6 +1299,12 @@ impl Controller {
         let Some(runner) = inner.command else {
             return Ok(None);
         };
+        // A session that failed answers with its failure. Its runner is
+        // being stopped and may be gone already: a command to it would
+        // fail, and that failure would stand in for the session's own.
+        if inner.state.phase == "failed" {
+            return Ok(None);
+        }
         let number = inner.syncs_sent + 1;
         let line = format!("{{\"command\":\"sync\",\"requestId\":\"{SYNC_PREFIX}{number}\"}}\n");
         let written = match inner.commands.as_mut() {

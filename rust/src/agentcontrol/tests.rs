@@ -63,8 +63,9 @@ fn controller_helper_process() {
         idle(true);
     }
     // The controller's commands arrive on the inherited standard input. Each
-    // complete line is recorded as it was written. Two modes are a runner whose
-    // command reader is gone: it closed the input, or it leaves it unread.
+    // complete line is recorded as it was written. Three modes are a runner
+    // whose command reader is gone: it closed the input (and, in one of them,
+    // outlives the signals of a stop as well), or it leaves it unread.
     let commands = sysutil::join(&[&output, "helper-commands.jsonl"]);
     // SAFETY: descriptor 3 is the inherited event pipe and is used only here.
     let events = std::sync::Arc::new(std::sync::Mutex::new(unsafe {
@@ -75,7 +76,9 @@ fn controller_helper_process() {
     let syncs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
     match mode.as_str() {
         // SAFETY: descriptor 0 belongs to this process and nothing reads it.
-        "commands-closed" => drop(unsafe { File::from_raw_fd(0) }),
+        "commands-closed" | "commands-closed-ignore-signals" => {
+            drop(unsafe { File::from_raw_fd(0) })
+        }
         // The real loop reads its commands itself.
         "commands-unread" | "watch-loop" => {}
         _ => {
@@ -202,7 +205,7 @@ fn controller_helper_process() {
     // a save.
     let release = sysutil::join(&[&output, "helper-sync-release"]);
     loop {
-        if signalled() && mode != "ignore-signals" {
+        if signalled() && !mode.ends_with("ignore-signals") {
             process::exit(0);
         }
         // Taken before the event file is read: an event that was written
@@ -2060,6 +2063,38 @@ fn malformed_code_patch_fails_the_session() {
             failure.error
         );
     }
+}
+
+// A failure stops the runner, and a wait can come when the runner no longer
+// reads commands but is not reaped yet. That wait answers with the failure
+// of the session, not with the `sync` command it could not write.
+#[test]
+fn a_wait_names_the_failure_while_the_runner_of_a_failed_session_ends() {
+    let c = controller_fixture("commands-closed-ignore-signals");
+    c.start().unwrap();
+    wait_for("a ready Player", || c.status().phase == "ready");
+    let ready = c.status();
+    // The runner outlives the SIGTERM of the failure until `end_runner`.
+    c.lock().terminate_grace = Duration::from_secs(60 * PATIENCE);
+    emit_fixture_event(
+        &c,
+        json!({"event": "code-patched", "pid": ready.pid + 1, "revision": ready.revision, "codeGeneration": 1}),
+    );
+    wait_for("the failure", || c.status().phase == "failed");
+    for readiness in [false, true] {
+        let failure = c
+            .wait(&seconds(1), ready.last_sequence, readiness)
+            .expect_err("a failed session was answered");
+        assert!(
+            failure.state.phase == "failed"
+                && failure.state.pid == ready.pid
+                && failure.error.message().starts_with("runner code patch"),
+            "{:?} {}",
+            failure.state,
+            failure.error
+        );
+    }
+    end_runner(&c);
 }
 
 #[test]
