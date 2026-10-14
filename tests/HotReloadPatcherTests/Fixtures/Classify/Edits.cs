@@ -1148,4 +1148,260 @@ namespace Edits
         public static void __UnityPlay_RuntimeInitialize_0() { Boot(); }
 #endif
     }
+
+    // ---- generated code that nothing names -------------------------------------------------
+
+    // The compiler emits the method of a lambda or a local function also when no code leads to
+    // it. These are the edits of work in progress: a method switched off for a moment, a debug
+    // flag, a helper saved before its first call.
+    public class Dead : MonoBehaviour
+    {
+        private const bool Verbose =
+#if CASE_DEAD_FLAG_ON
+            true;
+#else
+            false;
+#endif
+        private const bool Loud =
+#if CASE_DEAD_FLAG_OFF
+            false;
+#else
+            true;
+#endif
+        private int speed;
+        private readonly List<int> seen = new List<int>();
+
+        // A `return` in front of code with lambdas.
+        public int Early()
+        {
+#if CASE_DEAD_EARLY_RETURN
+            return 0;
+#endif
+            Func<int, int> twice = x => x * 2;
+            return twice(speed) + seen.Count(x => x > speed);
+        }
+
+        // The same edit taken back: the loaded code has the lambda behind the `return`.
+        public int Late()
+        {
+#if !CASE_DEAD_RETURN_REMOVED
+            return 1;
+#endif
+            Func<int, int> thrice = x => x * 3;
+            return thrice(speed);
+        }
+
+        // `throw` in front of a block with a lambda that captures a variable of the block. No
+        // code makes an object of its closure class any more, but the class stays the type of a
+        // local of the method, so it is compared with the method as before.
+        public int Thrown(int from)
+        {
+#if CASE_DEAD_THROW
+            throw new NotImplementedException();
+#endif
+            {
+                int local = from + speed;
+                Func<int, int> add = x => x + local;
+                return add(1);
+            }
+        }
+
+        // A debug flag: the lambda behind it is emitted whether the flag is on or off.
+        public int Flagged()
+        {
+            if (Verbose) seen.ForEach(x => Console.WriteLine(x));
+            if (Loud) seen.ForEach(x => Console.WriteLine(x + 1));
+            return speed;
+        }
+
+        // An edit inside code that no flag switches on.
+        public int Silenced()
+        {
+            const bool never = false;
+#if CASE_DEAD_LAMBDA_EDITED
+            if (never) seen.ForEach(x => Console.WriteLine(x + 2));
+#else
+            if (never) seen.ForEach(x => Console.WriteLine(x + 1));
+#endif
+            return speed;
+        }
+
+        // A local function written before anything calls it, and one edited while nothing does.
+        public int Helper()
+        {
+#if CASE_DEAD_LOCAL_ADDED
+            int Clamp(int v) { return v > 10 ? 10 : v; }
+#endif
+#if CASE_DEAD_LOCAL_EDITED
+            int Unused(int v) { return v + 2; }
+#else
+            int Unused(int v) { return v + 1; }
+#endif
+            return speed + 1;
+        }
+
+        // The only call of a local iterator with a lambda inside is commented out.
+        public int Called()
+        {
+            IEnumerable<int> Numbers() { yield return speed; yield return seen.Count(x => x > 0); }
+#if CASE_DEAD_CALL_REMOVED
+            return 0;
+#else
+            return Numbers().Sum();
+#endif
+        }
+    }
+
+    // ---- what Unity serializes ---------------------------------------------------------------
+
+    public enum Pace { Idle, Busy }
+    public struct Unlisted { public int x; }
+    public delegate void Tick();
+    public class Loose { public int x; }
+
+    // The accessibility of a field decides what Unity serializes only for a type it can serialize.
+    public class ExposureTypes : MonoBehaviour
+    {
+#if CASE_ACCESSIBILITY_TYPES_SERIALIZED
+        public string title;
+        public Pace mode;
+        public int[] numbers;
+        public List<float> weights;
+        public ExposureData data;
+        public Starting other;
+        public List<ExposureData> all;
+#else
+        private string title;
+        private Pace mode;
+        private int[] numbers;
+        private List<float> weights;
+        private ExposureData data;
+        private Starting other;
+        private List<ExposureData> all;
+#endif
+#if CASE_ACCESSIBILITY_TYPES_NOT_SERIALIZED
+        public Dictionary<string, int> table;
+        public Action onChanged;
+        public Tick onTick;
+        public object tag;
+        public IMarker marker;
+        public int[,] grid;
+        public int[][] rows;
+        public List<List<int>> nested;
+        public int? maybe;
+        public (int, int) pair;
+        public Loose loose;
+        public Unlisted unlisted;
+        public DateTime when;
+        public HashSet<int> set;
+        public Task task;
+        public IEnumerator routine;
+#else
+        private Dictionary<string, int> table;
+        private Action onChanged;
+        private Tick onTick;
+        private object tag;
+        private IMarker marker;
+        private int[,] grid;
+        private int[][] rows;
+        private List<List<int>> nested;
+        private int? maybe;
+        private (int, int) pair;
+        private Loose loose;
+        private Unlisted unlisted;
+        private DateTime when;
+        private HashSet<int> set;
+        private Task task;
+        private IEnumerator routine;
+#endif
+    }
+
+    // Unity serializes no read-only field, so `readonly` decides it like the accessibility does.
+    public class Frozen2 : MonoBehaviour
+    {
+#if CASE_READONLY_SERIALIZED
+        public int max = 5;
+        public readonly int min = 1;
+        [SerializeField] private int marked = 2;
+        private int hidden = 3;
+        public Action handler;
+#else
+        public readonly int max = 5;
+        public int min = 1;
+        [SerializeField] private readonly int marked = 2;
+        private readonly int hidden = 3;
+        public readonly Action handler;
+#endif
+        public int Sum() => max + min + marked + hidden;
+    }
+
+    // ---- Start and Awake that the engine does not call ---------------------------------------
+
+    public class StartOverload : MonoBehaviour
+    {
+        private int n;
+#if CASE_START_NOT_A_MESSAGE
+        public void Start(int from) { n = from + 1; }
+        public void Awake(int from) { n = from + 2; }
+#else
+        public void Start(int from) { n = from; }
+        public void Awake(int from) { n = from; }
+#endif
+    }
+
+    public class Quest : ScriptableObject
+    {
+        private int n;
+#if CASE_START_NOT_A_MESSAGE
+        public void Start() { n = 2; }
+        private void Awake() { n = 2; }
+#else
+        public void Start() { n = 1; }
+        private void Awake() { n = 1; }
+#endif
+    }
+
+    // ---- attributes only a compiler reads -----------------------------------------------------
+
+    public struct Meter
+    {
+        public int value;
+#if CASE_COMPILER_ATTRIBUTES
+        public readonly int Read() => value;
+        public (int low, int high) Range() => (value, value);
+        public static int Sum(params int[] values) => values.Length;
+        public (int first, int second) held;
+#else
+        public int Read() => value;
+        public (int min, int max) Range() => (value, value);
+        public static int Sum(int[] values) => values.Length;
+        public (int a, int b) held;
+#endif
+    }
+
+    // ---- an added method that a string names ---------------------------------------------------
+
+    public class Caller : MonoBehaviour
+    {
+        private int n;
+#if CASE_ADD_METHOD_UNNAMED || CASE_ADD_METHOD_NAMED || CASE_ADD_METHOD_NAMED_TWICE
+        private void Blast() { n++; }
+#endif
+        public void Tick()
+        {
+#if CASE_ADD_METHOD_NAMED || CASE_ADD_METHOD_NAMED_TWICE
+            Invoke("Blast", 0.1f);
+#else
+            n += 2;
+#endif
+        }
+        public void Tock()
+        {
+#if CASE_ADD_METHOD_NAMED_TWICE
+            Invoke("Blast", 0.2f);
+#else
+            n += 3;
+#endif
+        }
+    }
 }

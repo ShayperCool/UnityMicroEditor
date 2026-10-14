@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     cancel::{Context, Source, select},
-    compiler::{Compiler, needs_netcode},
+    compiler::Compiler,
     sha256, sysutil,
     util::{atomic_json, file_hash, marshal, random_id},
 };
@@ -42,8 +42,6 @@ pub struct Assembly {
     pub name: String,
     pub path: String,
     pub sha256: String,
-    /// Rewritten by the Netcode post-processor.
-    pub netcode: bool,
 }
 
 /// The game assemblies of the compiler graph as a Player started from
@@ -57,7 +55,6 @@ pub fn loaded_assemblies(compiler: &Compiler, player: &str) -> Result<Vec<Assemb
             name: assembly.name.clone(),
             sha256: file_hash(&path)?,
             path,
-            netcode: needs_netcode(assembly),
         });
     }
     Ok(loaded)
@@ -76,7 +73,6 @@ pub fn newest_assemblies(compiler: &Compiler) -> Result<Vec<Assembly>> {
             name: assembly.name.clone(),
             path,
             sha256,
-            netcode: needs_netcode(assembly),
         });
     }
     Ok(newest)
@@ -368,7 +364,6 @@ impl PlayerCode {
                         true => assembly.path.clone(),
                         false => loaded.path.clone(),
                     },
-                    netcode: assembly.netcode || loaded.netcode,
                 });
             }
         }

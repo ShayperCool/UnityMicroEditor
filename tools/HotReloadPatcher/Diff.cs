@@ -34,23 +34,32 @@ internal sealed class Differ
     readonly Asm o, n;
     readonly Canon co, cn;
     readonly Lazy<HashSet<string>> userStrings;
+    readonly Lazy<Dictionary<string, SortedDictionary<string, int>>> namedByString;
     readonly Dictionary<int, UnityType> unity = new();
+    /// What the comparison walked of each assembly; see `Walk`.
+    readonly Walk walkedOld = new(), walkedNew = new();
     public readonly List<Change> Changes = new();
 
     /// Diagnostic: report every comparable body as changed, so the emitter must carry all of them.
     public bool ForceAll;
 
-    public Differ(Workspace workspace, Entry entry, bool blind = false) : this(workspace, entry.Loaded, entry.Current, null, blind) { }
+    public Differ(Workspace workspace, Entry entry, bool blind = false) : this(workspace, entry.Loaded, entry.Current, null, null, blind) { }
 
     /// `blind`: diagnostic, see `Canon.Blind`.
-    Differ(Workspace workspace, Asm loaded, Asm current, Lazy<HashSet<string>>? strings, bool blind)
+    Differ(Workspace workspace, Asm loaded, Asm current, Lazy<HashSet<string>>? strings, Lazy<Dictionary<string, SortedDictionary<string, int>>>? named, bool blind)
     {
         this.workspace = workspace;
         this.blind = blind;
         o = loaded; n = current;
         co = new Canon(o) { Blind = blind }; cn = new Canon(n) { Blind = blind };
         userStrings = strings ?? new Lazy<HashSet<string>>(() => UserStrings(n));
+        namedByString = named ?? new Lazy<Dictionary<string, SortedDictionary<string, int>>>(() => NamedByString(n));
     }
+
+    /// The closure of a user method of the loaded assembly, remembered as walked.
+    Closure Old(MethodDefinitionHandle method) { var closure = co.Compute(method); walkedOld.Add(method, closure); return closure; }
+    /// The same for the new compilation.
+    Closure New(MethodDefinitionHandle method) { var closure = cn.Compute(method); walkedNew.Add(method, closure); return closure; }
 
     readonly bool blind;
 
@@ -81,9 +90,10 @@ internal sealed class Differ
             return;
         }
         var perName = new List<Change>?[names.Length];
+        var workers = new Differ[threads];
         Parallel.For(0, threads, new ParallelOptions { MaxDegreeOfParallelism = threads }, worker =>
         {
-            var d = new Differ(workspace, o, n, userStrings, blind) { ForceAll = ForceAll };
+            var d = workers[worker] = new Differ(workspace, o, n, userStrings, namedByString, blind) { ForceAll = ForceAll };
             for (int i = worker; i < names.Length; i += threads)
             {
                 int before = d.Changes.Count;
@@ -92,35 +102,38 @@ internal sealed class Differ
             }
         });
         foreach (var list in perName) if (list != null) Changes.AddRange(list);
+        foreach (var d in workers) { walkedOld.Add(d.walkedOld); walkedNew.Add(d.walkedNew); }
         DiffUnowned();
     }
 
     // ---- generated code without an owner ---------------------------------------------------
 
-    /// The compiler-generated methods that no user method reaches, each as the user type it lies
-    /// in and the hash of what it runs.
-    static List<(string Type, string Hash)> Unowned(Asm a, Canon canon)
+    /// What the comparison walked of one assembly: the user methods whose closure it computed, and
+    /// the generated methods and types those closures hold.
+    sealed class Walk
     {
-        var methods = new HashSet<MethodDefinitionHandle>();
-        var types = new HashSet<TypeDefinitionHandle>();
-        foreach (var t in a.MD.TypeDefinitions)
+        public readonly HashSet<MethodDefinitionHandle> Roots = new(), Methods = new();
+        public readonly HashSet<TypeDefinitionHandle> Types = new();
+
+        public void Add(MethodDefinitionHandle root, Closure closure)
         {
-            if (a.Kind(t) != GenKind.User) continue;
-            foreach (var m in a.MD.GetTypeDefinition(t).GetMethods())
-            {
-                var d = a.MD.GetMethodDefinition(m);
-                if (Canon.Owned(a.MD.GetString(d.Name), d.Attributes) || d.RelativeVirtualAddress == 0) continue;
-                var closure = canon.Compute(m);
-                methods.UnionWith(closure.Methods);
-                methods.UnionWith(closure.Locals);
-                types.UnionWith(closure.Types);
-            }
+            Roots.Add(root);
+            Methods.UnionWith(closure.Methods);
+            Methods.UnionWith(closure.Locals);
+            Types.UnionWith(closure.Types);
         }
-        var rest = new List<(string, string)>();
+
+        public void Add(Walk other) { Roots.UnionWith(other.Roots); Methods.UnionWith(other.Methods); Types.UnionWith(other.Types); }
+    }
+
+    /// The generated methods with a body that the walk did not reach.
+    static List<MethodDefinitionHandle> Unreached(Asm a, Walk walk)
+    {
+        var rest = new List<MethodDefinitionHandle>();
         foreach (var m in a.MD.MethodDefinitions)
         {
             var d = a.MD.GetMethodDefinition(m);
-            if (d.RelativeVirtualAddress == 0 || methods.Contains(m)) continue;
+            if (d.RelativeVirtualAddress == 0 || walk.Methods.Contains(m)) continue;
             var t = d.GetDeclaringType();
             string name = a.MD.GetString(d.Name);
             switch (a.Kind(t))
@@ -131,14 +144,52 @@ internal sealed class Differ
                 // A state machine, a closure class or an anonymous type is compared whole with
                 // the method that names it.
                 case GenKind.Exclusive:
-                    if (types.Contains(t)) continue;
+                    if (walk.Types.Contains(t)) continue;
                     break;
                 // The constructors of the class that pools the lambdas of a type only make its instance.
                 case GenKind.Shared:
                     if (name is ".ctor" or ".cctor") continue;
                     break;
             }
-            var user = t;
+            rest.Add(m);
+        }
+        return rest;
+    }
+
+    /// The compiler-generated methods that code of the assembly can run and that no user method
+    /// reaches, each as the user type it lies in and the hash of what it runs.
+    ///
+    /// The compiler also emits the method of a lambda or local function that nothing names: code
+    /// behind a `return` or a `throw`, a branch behind a constant that is false, a local function
+    /// that is not called yet. Such a method cannot run, in either compilation, so it is no part
+    /// of any edit that could be missed. `Reach` finds what can run by following every token,
+    /// and it takes a reference it cannot place for a use of everything of that name: what is
+    /// left out here is only what no body of the assembly names at all.
+    static List<(string Type, string Hash)> Unowned(Asm a, Canon canon, Walk walk)
+    {
+        var rest = new List<(string, string)>();
+        // The workers walked every method they compared. Nothing is left in the usual case, and
+        // then nothing below costs anything.
+        if (Unreached(a, walk).Count == 0) return rest;
+        // The methods the comparison had no reason to hash: a removed or refused one, a start-up
+        // bridge, a method of a type that only one compilation has.
+        foreach (var t in a.MD.TypeDefinitions)
+        {
+            if (a.Kind(t) != GenKind.User) continue;
+            foreach (var m in a.MD.GetTypeDefinition(t).GetMethods())
+            {
+                var d = a.MD.GetMethodDefinition(m);
+                if (walk.Roots.Contains(m) || Canon.Owned(a.MD.GetString(d.Name), d.Attributes) || d.RelativeVirtualAddress == 0) continue;
+                walk.Add(m, canon.Compute(m));
+            }
+        }
+        var unreached = Unreached(a, walk);
+        if (unreached.Count == 0) return rest;
+        var reach = new Reach(a);
+        foreach (var m in unreached)
+        {
+            if (!reach.Methods.Contains(m)) continue;
+            var user = a.MD.GetMethodDefinition(m).GetDeclaringType();
             while (a.Kind(user) != GenKind.User && !a.MD.GetTypeDefinition(user).GetDeclaringType().IsNil) user = a.MD.GetTypeDefinition(user).GetDeclaringType();
             rest.Add((a.TypeName(user), Convert.ToHexString(canon.Compute(m).Hash)));
         }
@@ -150,8 +201,8 @@ internal sealed class Differ
     /// otherwise an edit lies where the comparison did not look, and it is refused.
     void DiffUnowned()
     {
-        var olds = Unowned(o, co);
-        var news = Unowned(n, cn);
+        var olds = Unowned(o, co, walkedOld);
+        var news = Unowned(n, cn, walkedNew);
         if (olds.Count == 0 && news.Count == 0) return;
         var before = olds.Select(x => x.Type + " " + x.Hash).ToList();
         var after = news.Select(x => x.Type + " " + x.Hash).ToList();
@@ -166,19 +217,22 @@ internal sealed class Differ
         bool inOld = o.Types.TryGetValue(name, out var ot) && IsUser(o, ot);
         bool inNew = n.Types.TryGetValue(name, out var nt) && IsUser(n, nt);
         if (inOld && inNew) DiffType(ot, nt, name);
+        else if (inOld && IsEmbeddedAttribute(o, ot))
+            Add("type_removed", name, Actions.None, message: "The compiler no longer embeds an attribute type; the loaded one stays and nothing reads it.");
         else if (inOld) Refuse("type_removed", name, Codes.TypeRemoved, $"Type {name} was removed or renamed.");
-        else if (IsEmbeddedAttribute(nt))
+        else if (IsEmbeddedAttribute(n, nt))
             Add("type_added", name, Actions.None, message: "The compiler embedded an attribute type; nothing reads it at run time.");
         else Refuse("type_added", name, Codes.TypeAdded, $"Type {name} was added or renamed.");
     }
 
     // The compiler embeds attribute types the class library lacks (the first `#nullable enable`
-    // of an assembly brings three). Patches carry no custom attributes, so nothing needs them.
-    bool IsEmbeddedAttribute(TypeDefinitionHandle type)
+    // of an assembly brings three, the first `nint` another) and drops them with their last use.
+    // Patches carry no custom attributes, so nothing needs them.
+    static bool IsEmbeddedAttribute(Asm a, TypeDefinitionHandle type)
     {
-        if (n.TypeName(type) == "Microsoft.CodeAnalysis.EmbeddedAttribute") return true;
-        foreach (var h in n.MD.GetTypeDefinition(type).GetCustomAttributes())
-            if (n.AttributeTypeName(n.MD.GetCustomAttribute(h)) == "Microsoft.CodeAnalysis.EmbeddedAttribute") return true;
+        if (a.TypeName(type) == "Microsoft.CodeAnalysis.EmbeddedAttribute") return true;
+        foreach (var h in a.MD.GetTypeDefinition(type).GetCustomAttributes())
+            if (a.AttributeTypeName(a.MD.GetCustomAttribute(h)) == "Microsoft.CodeAnalysis.EmbeddedAttribute") return true;
         return false;
     }
 
@@ -220,8 +274,13 @@ internal sealed class Differ
     // The same holds for what the compiler writes on an iterator or async method: the attribute that
     // names its state machine, and [DebuggerStepThrough] on every async method, which only a
     // debugger reads. Without them, making a method an iterator or async is a body edit.
+    // What only a compiler reads of a signature is of the same kind: the names of tuple elements,
+    // `nint` against IntPtr, `dynamic` against object, `readonly` on a struct or its members and
+    // `params`. Every caller in the assembly was compiled again and is compared on its own.
     static bool Ignored(string name) => name is "System.Runtime.CompilerServices.NullableAttribute"
         or "System.Runtime.CompilerServices.NullableContextAttribute" or "System.Runtime.CompilerServices.NullablePublicOnlyAttribute"
+        or "System.Runtime.CompilerServices.TupleElementNamesAttribute" or "System.Runtime.CompilerServices.NativeIntegerAttribute"
+        or "System.Runtime.CompilerServices.DynamicAttribute" or "System.Runtime.CompilerServices.IsReadOnlyAttribute" or "System.ParamArrayAttribute"
         or "System.Runtime.CompilerServices.ExtensionAttribute" or "System.Reflection.DefaultMemberAttribute"
         or "System.Runtime.CompilerServices.CompilerGeneratedAttribute"
         or "System.Runtime.CompilerServices.IteratorStateMachineAttribute" or "System.Runtime.CompilerServices.AsyncStateMachineAttribute"
@@ -440,7 +499,19 @@ internal sealed class Differ
             var nh = nf[name];
             var nd = n.MD.GetFieldDefinition(nh);
             string id = type + "::" + name;
-            if (!of.TryGetValue(name, out var oh)) { enumChanged |= isEnum; if (!isEnum) FieldAdded(nh, nt, id, fixedLayout, retyped: false); continue; }
+            if (!of.TryGetValue(name, out var oh))
+            {
+                enumChanged |= isEnum;
+                if (isEnum) continue;
+                // A field of the same type and kind went with this edit: as far as anyone can
+                // tell, a rename. The value the old field has in the objects that exist is not
+                // the new field's.
+                string added = nd.DecodeSignature(n.Plain, null);
+                bool replaces = oldOrder.Any(x => !nf.ContainsKey(x) && o.MD.GetFieldDefinition(of[x]) is var gone
+                    && (gone.Attributes & Identity) == (nd.Attributes & Identity) && gone.DecodeSignature(o.Plain, null) == added);
+                FieldAdded(nh, nt, id, fixedLayout, retyped: false, replaces);
+                continue;
+            }
             var od = o.MD.GetFieldDefinition(oh);
             string oldType = od.DecodeSignature(o.Plain, null), newType = nd.DecodeSignature(n.Plain, null);
             if (isEnum)
@@ -469,18 +540,24 @@ internal sealed class Differ
                 Refuse("field", id, Codes.FieldFlagsChanged, $"Flags of field {id} changed from [{od.Attributes}] to [{nd.Attributes}].");
             else if ((od.Attributes & foldable) == foldable && (nd.Attributes & FieldAttributes.InitOnly) == 0)
                 Refuse("field", id, Codes.StaticReadonlyRemoved, $"`readonly` was removed from the static field {id}; the runtime may have compiled its value into existing code as a constant, so an assignment would not be seen.");
-            else if ((od.Attributes & FieldAttributes.FieldAccessMask) != (nd.Attributes & FieldAttributes.FieldAccessMask))
+            else if ((od.Attributes & benign) != (nd.Attributes & benign))
             {
                 // A field that Unity starts or stops serializing is the same edit as [SerializeField]
                 // on it: nothing of it is in the Player before a restart, and a scene value for the
                 // field is not read. The bodies are as they were, so a note would be all of the answer.
-                bool before = Serialized(od.Attributes, nt, AuthoredAttributes(o, od.GetCustomAttributes()));
-                bool after = Serialized(nd.Attributes, nt, AuthoredAttributes(n, nd.GetCustomAttributes()));
+                // Unity serializes neither a read-only field nor one that is not public or marked,
+                // so `readonly` decides it like the accessibility does.
+                bool access = (od.Attributes & FieldAttributes.FieldAccessMask) != (nd.Attributes & FieldAttributes.FieldAccessMask);
+                bool before = Serialized(nd, od.Attributes, nt, AuthoredAttributes(o, od.GetCustomAttributes()));
+                bool after = Serialized(nd, nd.Attributes, nt, AuthoredAttributes(n, nd.GetCustomAttributes()));
                 if (before != after)
+                {
+                    string what = !access ? "`readonly`" : (od.Attributes & FieldAttributes.InitOnly) != (nd.Attributes & FieldAttributes.InitOnly) ? "accessibility and `readonly`" : "accessibility";
                     Refuse("field", id, Codes.SerializationChanged, after
-                        ? $"Field {id} changed accessibility and Unity now serializes it; the Player reads scenes, prefabs and assets with the loaded fields until a restart, so its saved value is not applied."
-                        : $"Field {id} changed accessibility and Unity no longer serializes it; the Player keeps reading it from scenes, prefabs and assets until a restart.");
-                else
+                        ? $"Field {id} changed {what} and Unity now serializes it; the Player reads scenes, prefabs and assets with the loaded fields until a restart, so its saved value is not applied."
+                        : $"Field {id} changed {what} and Unity no longer serializes it; the Player keeps reading it from scenes, prefabs and assets until a restart.");
+                }
+                else if (access)
                     Add("field", id, Actions.Note).Notes.Add((Codes.AccessibilityChanged,
                         $"Field {id} changed accessibility; reflection keeps the loaded accessibility until a full recompile."));
             }
@@ -510,7 +587,8 @@ internal sealed class Differ
             Refuse("type", type, Codes.StructLayoutChanged, $"The order of the fields of {type} changed; it is the layout of the type.");
     }
 
-    void FieldAdded(FieldDefinitionHandle field, TypeDefinitionHandle type, string id, bool fixedLayout, bool retyped)
+    /// `replaces`: a field of the same type was removed by the same edit.
+    void FieldAdded(FieldDefinitionHandle field, TypeDefinitionHandle type, string id, bool fixedLayout, bool retyped, bool replaces = false)
     {
         var d = n.MD.GetFieldDefinition(field);
         bool isStatic = (d.Attributes & FieldAttributes.Static) != 0;
@@ -534,13 +612,35 @@ internal sealed class Differ
         change.NewField = field;
         if (retyped)
             change.Notes.Add((Codes.FieldValueReset, $"Field {id} changed its type or static modifier; it is stored anew and its previous value is lost."));
-        else if (!isStatic)
+        // Without an initializer the default is what a new compilation gives every object too:
+        // there is nothing an existing object lacks, and nothing to tell. A field that takes
+        // the place of another one is told: the objects that exist had a value there.
+        else if (!isStatic && StoredByConstructor(field, type))
             change.Notes.Add((Codes.ExistingInstancesKeepDefault, $"Objects that already exist read the default value of the added field {id}; its initializer runs only in objects constructed after the patch."));
+        else if (!isStatic && replaces)
+            change.Notes.Add((Codes.ExistingInstancesKeepDefault, $"Objects that already exist read the default value of the added field {id}; if it is a renamed field, the value they had under the old name is not taken over."));
         var attributes = AuthoredAttributes(n, d.GetCustomAttributes());
-        if (Serialized(d.Attributes, type, attributes))
+        if (Serialized(d, d.Attributes, type, attributes))
             change.Notes.Add((Codes.SerializedFieldNotRestored, $"The added field {id} is not restored from scenes, prefabs or assets until a restart."));
         if (attributes.Count > 0)
             change.Notes.Add((Codes.AddedMemberAttributesIgnored, $"[{string.Join("], [", attributes)}] on the added field {id} is invisible to reflection until a full recompile."));
+    }
+
+    /// Whether a constructor of the type gives the field a value or hands out its address: an
+    /// initializer of the field, or an assignment in a constructor body.
+    bool StoredByConstructor(FieldDefinitionHandle field, TypeDefinitionHandle type)
+    {
+        int token = MetadataTokens.GetToken(field);
+        foreach (var m in n.MD.GetTypeDefinition(type).GetMethods())
+        {
+            var d = n.MD.GetMethodDefinition(m);
+            if (d.RelativeVirtualAddress == 0 || n.MD.GetString(d.Name) != ".ctor") continue;
+            byte[] il = n.PE.GetMethodBody(d.RelativeVirtualAddress).GetILBytes() ?? Array.Empty<byte>();
+            var r = new IL.Reader(il);
+            while (r.Read())
+                if (r.OpCode is IL.Stfld or IL.Ldflda && System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(r.OperandOffset)) == token) return true;
+        }
+        return false;
     }
 
     // [NonSerialized] and [Serializable] are metadata flags. The framework marks its own names for
@@ -548,15 +648,91 @@ internal sealed class Differ
     const FieldAttributes NotSerialized = (FieldAttributes)0x0080;
     const TypeAttributes SerializableType = (TypeAttributes)0x2000;
 
-    /// Whether Unity serializes an instance field with these flags and attributes in `type` of
-    /// the new compilation: public or marked, not read-only, in an engine object or a
-    /// [Serializable] type.
-    bool Serialized(FieldAttributes flags, TypeDefinitionHandle type, List<string> attributes)
+    /// Whether Unity serializes the instance field `field` of the new compilation when it has
+    /// these flags and attributes in `type`: public or marked, not read-only, in an engine object
+    /// or a [Serializable] type, and of a type Unity can serialize. A field type that cannot be
+    /// decided counts as serialized: the answer is then a refusal or a note that errs toward what
+    /// the Player lacks.
+    bool Serialized(FieldDefinition field, FieldAttributes flags, TypeDefinitionHandle type, List<string> attributes)
     {
         if ((flags & (FieldAttributes.Static | FieldAttributes.Literal | FieldAttributes.InitOnly | NotSerialized)) != 0) return false;
-        bool marked = attributes.Contains("SerializeField") || attributes.Contains("SerializeReference");
+        bool reference = attributes.Contains("SerializeReference");
+        bool marked = reference || attributes.Contains("SerializeField");
         if (!marked && (flags & FieldAttributes.FieldAccessMask) != FieldAttributes.Public) return false;
-        return Unity(type).Kind != UnityKind.No || (n.MD.GetTypeDefinition(type).Attributes & SerializableType) != 0;
+        if (Unity(type).Kind == UnityKind.No && (n.MD.GetTypeDefinition(type).Attributes & SerializableType) == 0) return false;
+        return CanSerialize(field.DecodeSignature(Shapes.Instance, null), reference, element: false);
+    }
+
+    /// Unity's rules for the type of a serialized field: a primitive, a string, an enum, a
+    /// reference to an engine object, a [Serializable] class or struct, a type of the engine,
+    /// and an array or a List<T> of one of these. Not serialized: a delegate; an interface,
+    /// `object` or a class without [Serializable], unless the field is a [SerializeReference];
+    /// an array or list of arrays or lists; a multi-dimensional array; Nullable<T>, tuples,
+    /// dictionaries and the other types of the class library.
+    bool CanSerialize(Shape shape, bool reference, bool element)
+    {
+        switch (shape.Kind)
+        {
+            case ShapeKind.Primitive:
+                return shape.Code switch
+                {
+                    PrimitiveTypeCode.Boolean or PrimitiveTypeCode.Char or PrimitiveTypeCode.SByte or PrimitiveTypeCode.Byte or PrimitiveTypeCode.Int16
+                        or PrimitiveTypeCode.UInt16 or PrimitiveTypeCode.Int32 or PrimitiveTypeCode.UInt32 or PrimitiveTypeCode.Int64 or PrimitiveTypeCode.UInt64
+                        or PrimitiveTypeCode.Single or PrimitiveTypeCode.Double or PrimitiveTypeCode.String => true,
+                    PrimitiveTypeCode.Object => reference,
+                    _ => false,
+                };
+            case ShapeKind.Vector:
+                return !element && CanSerialize(shape.Element!, reference, element: true);
+            case ShapeKind.Generic:
+            {
+                var generic = shape.Element!;
+                if (generic.Kind == ShapeKind.Reference && UnityTypes.IsClassLibrary(n.TypeRefAssembly(generic.Reference)))
+                {
+                    if (n.TypeRefName(generic.Reference, bare: true) == "System.Collections.Generic.List`1")
+                        return !element && shape.Arguments.Length == 1 && CanSerialize(shape.Arguments[0], reference, element: true);
+                    // Dictionary, HashSet, Nullable, a tuple, Action<T>: no enum is among them.
+                    return reference && !generic.ValueType;
+                }
+                return CanSerialize(generic, reference, element);
+            }
+            case ShapeKind.Definition:
+                return SerializableNamed(n, shape.Definition, reference);
+            case ShapeKind.Reference:
+            {
+                string home = n.TypeRefAssembly(shape.Reference), name = n.TypeRefName(shape.Reference, bare: true);
+                bool library = UnityTypes.IsClassLibrary(home);
+                // A type that cannot be read: a class of the class library is plain data to
+                // nobody, a value type of it may be an enum, and anything else may be the engine's.
+                if (home.Length == 0 || workspace.Resolve(home) is not { } assembly || !assembly.Types.TryGetValue(name, out var found))
+                    return library ? (shape.ValueType ? !UnityTypes.LibraryStructs.Contains(name) : reference) : true;
+                if (library) return assembly.IsEnum(found) || (reference && !assembly.IsValueType(found));
+                // The engine serializes its own types by rules of its own (Vector3 has no flag).
+                if (UnityTypes.IsEngine(home)) return !IsDelegate(assembly, found) && (reference || !assembly.IsInterface(found));
+                return SerializableNamed(assembly, found, reference);
+            }
+            // A type parameter is whatever the instantiation makes of it.
+            case ShapeKind.Parameter:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    static bool IsDelegate(Asm a, TypeDefinitionHandle type)
+    {
+        var parent = a.MD.GetTypeDefinition(type).BaseType;
+        return parent.Kind == HandleKind.TypeReference && a.TypeRefName((TypeReferenceHandle)parent, bare: true) is "System.MulticastDelegate" or "System.Delegate";
+    }
+
+    /// A type of a game assembly as the type of a serialized field.
+    bool SerializableNamed(Asm a, TypeDefinitionHandle type, bool reference)
+    {
+        if (a.IsEnum(type)) return true;
+        if (IsDelegate(a, type)) return false;
+        if (a.IsInterface(type)) return reference;
+        if (!a.IsValueType(type) && UnityTypes.Classify(workspace, a, type).Kind != UnityKind.No) return true;
+        return reference || (a.MD.GetTypeDefinition(type).Attributes & SerializableType) != 0;
     }
 
     /// Why a field cannot be a `FieldStore` slot of its type. Null when it can.
@@ -667,7 +843,8 @@ internal sealed class Differ
         }
         var change = Add("method_added", id, Actions.Patch);
         change.NewMethod = method;
-        change.Revision = Short(cn.Compute(method).Hash);
+        byte[] hash = New(method).Hash;
+        change.Revision = Short(hash);
         var attributes = AuthoredAttributes(n, d.GetCustomAttributes());
         if (attributes.Count > 0)
             change.Notes.Add((Codes.AddedMemberAttributesIgnored, $"[{string.Join("], [", attributes)}] on the added method {id} is invisible to reflection until a full recompile."));
@@ -676,10 +853,57 @@ internal sealed class Differ
         // in a scene (which may also set a property). No string of this assembly needs to name it.
         bool special = d.Attributes.HasFlag(MethodAttributes.SpecialName);
         bool instance = (d.Attributes & MethodAttributes.Static) == 0;
-        if (instance && (!special || name.StartsWith("set_", StringComparison.Ordinal)) && Unity(type).Kind != UnityKind.No)
+        // A string of the game that equals the name is, as far as anyone can tell, a call by
+        // name: Invoke("Blast", 1f) finds nothing and does nothing. That is code of the edit that
+        // has no effect, which the note for every added method of an engine object does not say.
+        // The note is a change of its own: it is about the code that holds the string, and its
+        // revision moves when another place starts or stops naming the method.
+        if (!special && userStrings.Value.Contains(name) && namedByString.Value.TryGetValue(name, out var holders))
+        {
+            var named = Add("method_named", id, Actions.Note);
+            using (var sha = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256))
+            {
+                sha.AppendData(hash);
+                foreach (var (holder, count) in holders) sha.AppendData(Encoding.UTF8.GetBytes(holder + "=" + count.ToString(CultureInfo.InvariantCulture) + ";"));
+                named.Revision = Short(sha.GetHashAndReset());
+            }
+            named.Notes.Add((Codes.AddedMethodNamedByString, $"The string \"{name}\" in code of {string.Join(", ", holders.Keys)} names the added method {id}; Invoke, SendMessage, StartCoroutine(string) and reflection look in the loaded class and do not find it until a full recompile, so a call by that name does nothing."));
+        }
+        else if (instance && (!special || name.StartsWith("set_", StringComparison.Ordinal)) && Unity(type).Kind != UnityKind.No)
             change.Notes.Add((Codes.AddedMethodInvisibleByName, $"The added method {id} belongs to an engine object; SendMessage, Invoke, StartCoroutine(string), a UnityEvent, an animation event or an input message cannot find it by name until a full recompile."));
-        else if (!special && userStrings.Value.Contains(name))
-            change.Notes.Add((Codes.AddedMethodInvisibleByName, $"The string \"{name}\" names the added method {id}; SendMessage, Invoke, StartCoroutine(string) and reflection cannot find it until a full recompile."));
+    }
+
+    /// The strings that method bodies of the assembly load and that equal the name of one of its
+    /// methods, each with the user types whose code loads it and how often.
+    static Dictionary<string, SortedDictionary<string, int>> NamedByString(Asm a)
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var m in a.MD.MethodDefinitions) names.Add(a.MD.GetString(a.MD.GetMethodDefinition(m).Name));
+        var found = new Dictionary<string, SortedDictionary<string, int>>(StringComparer.Ordinal);
+        foreach (var m in a.MD.MethodDefinitions)
+        {
+            var d = a.MD.GetMethodDefinition(m);
+            if (d.RelativeVirtualAddress == 0) continue;
+            byte[] il = a.PE.GetMethodBody(d.RelativeVirtualAddress).GetILBytes() ?? Array.Empty<byte>();
+            var r = new IL.Reader(il);
+            string? holder = null;
+            while (r.Read())
+            {
+                if (r.Operand != System.Reflection.Emit.OperandType.InlineString) continue;
+                int token = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(r.OperandOffset));
+                string text = a.MD.GetUserString(MetadataTokens.UserStringHandle(token & 0xFFFFFF));
+                if (!names.Contains(text)) continue;
+                if (holder == null)
+                {
+                    var user = d.GetDeclaringType();
+                    while (a.Kind(user) != GenKind.User && !a.MD.GetTypeDefinition(user).GetDeclaringType().IsNil) user = a.MD.GetTypeDefinition(user).GetDeclaringType();
+                    holder = a.TypeName(user);
+                }
+                if (!found.TryGetValue(text, out var holders)) found[text] = holders = new SortedDictionary<string, int>(StringComparer.Ordinal);
+                holders[holder] = holders.GetValueOrDefault(holder) + 1;
+            }
+        }
+        return found;
     }
 
     void MethodRemoved(MethodDefinitionHandle method, TypeDefinitionHandle newType)
@@ -808,8 +1032,8 @@ internal sealed class Differ
                 Refuse("method", id, Codes.ExternMethodChanged, $"The direction or marshalling of a parameter or of the return value of {id} changed; the runtime keeps the stub it made for the loaded method.");
             return;
         }
-        var oc = co.Compute(oh);
-        var nc = cn.Compute(nh);
+        var oc = Old(oh);
+        var nc = New(nh);
         bool generic = nd.GetGenericParameters().Count > 0, genericType = n.IsGenericType(nt);
         if (oc.Hash.AsSpan().SequenceEqual(nc.Hash) && !(ForceAll && name != ".cctor" && !generic && !genericType && !n.IsInterface(nt) && !VariableArguments(n, nd))) return;
 
@@ -831,10 +1055,13 @@ internal sealed class Differ
             change.Revision = Short(nc.Hash);
             if (name == ".ctor")
                 change.Notes.Add((Codes.ConstructorAppliesToNewObjects, $"{id} and the instance field initializers apply to objects constructed after the patch; existing objects keep their values."));
-            // The engine calls these once per object. `Awake` of an engine object is the helper
-            // of the lifecycle rewrite, which may carry trailing underscores.
-            if ((nd.Attributes & MethodAttributes.Static) == 0 && Unity(nt).Kind != UnityKind.No && (name is "Start" or "Awake" || name.TrimEnd('_') == "__UnityPlay_Awake"))
-                change.Notes.Add((Codes.StartedObjectsKeepState, $"{id} already ran for the objects that exist and is not run again; its new body runs for objects created after the patch."));
+            // The engine calls these once per object: Start of a MonoBehaviour, Awake of a
+            // MonoBehaviour or a ScriptableObject, both without parameters. `Awake` of an engine
+            // object is the helper of the lifecycle rewrite, which may carry trailing underscores.
+            // An overload with parameters and the Start of another class are methods of the game.
+            if ((nd.Attributes & MethodAttributes.Static) == 0 && nd.DecodeSignature(n.Plain, null).ParameterTypes.Length == 0
+                && (name == "Start" ? Unity(nt).Starts : (name == "Awake" || name.TrimEnd('_') == "__UnityPlay_Awake") && Unity(nt).Awakes))
+                change.Notes.Add((Codes.StartedObjectsKeepState, $"{id} does not run again for the objects that already ran it; its new body runs for objects that start after the patch."));
             if (StaleStateMachines(oc, nc))
                 change.Notes.Add((Codes.RunningCoroutinesKeepOldCode, $"Calls of {id} made after the patch run the new code; a coroutine, iterator or async call that is already running finishes on the old code."));
             MapLambdas(change, id, oh, nh, oc, nc);
@@ -1007,4 +1234,199 @@ internal sealed class Differ
         }
         return (Find(o, co, memberId), Find(n, cn, memberId));
     }
+}
+
+/// What the code of an assembly can run: every method a user wrote, and every compiler-generated
+/// method and type that a body which can run names, followed token by token. A member reference
+/// through a type of the module means the methods of that name in that type; a reference this
+/// class cannot place means every generated method of that name. So a generated method outside
+/// `Methods` is one that no instruction of the assembly leads to.
+internal sealed class Reach
+{
+    readonly Asm a;
+    readonly MetadataReader md;
+    readonly SymbolProvider names;
+    readonly Queue<MethodDefinitionHandle> queue = new();
+    Dictionary<string, List<MethodDefinitionHandle>>? generated;
+    public readonly HashSet<MethodDefinitionHandle> Methods = new();
+    public readonly HashSet<TypeDefinitionHandle> Types = new();
+
+    public Reach(Asm a)
+    {
+        this.a = a;
+        md = a.MD;
+        names = new SymbolProvider(a, bare: true) { DefHook = h => { Type(h); return ""; } };
+        foreach (var t in md.TypeDefinitions)
+        {
+            if (a.Kind(t) != GenKind.User) continue;
+            foreach (var m in md.GetTypeDefinition(t).GetMethods())
+            {
+                var d = md.GetMethodDefinition(m);
+                if (!Canon.Owned(md.GetString(d.Name), d.Attributes)) Method(m);
+            }
+        }
+        while (queue.Count > 0) Scan(queue.Dequeue());
+    }
+
+    void Method(MethodDefinitionHandle m)
+    {
+        if (!Methods.Add(m)) return;
+        queue.Enqueue(m);
+        Type(md.GetMethodDefinition(m).GetDeclaringType());
+    }
+
+    void Type(TypeDefinitionHandle t)
+    {
+        if (!Types.Add(t)) return;
+        var td = md.GetTypeDefinition(t);
+        switch (a.Kind(t))
+        {
+            // An object of a closure class or a state machine runs any of its methods: the
+            // comparison takes such a type whole, too.
+            case GenKind.Exclusive:
+                foreach (var m in td.GetMethods()) Method(m);
+                foreach (var nested in td.GetNestedTypes()) Type(nested);
+                break;
+            // The class that pools the lambdas of a type: only its instance is made here.
+            case GenKind.Shared:
+                foreach (var m in td.GetMethods())
+                    if (md.GetString(md.GetMethodDefinition(m).Name) is ".ctor" or ".cctor") Method(m);
+                break;
+        }
+    }
+
+    void Scan(MethodDefinitionHandle m)
+    {
+        var d = md.GetMethodDefinition(m);
+        d.DecodeSignature(names, null);
+        if (d.RelativeVirtualAddress == 0) return;
+        var body = a.PE.GetMethodBody(d.RelativeVirtualAddress);
+        if (!body.LocalSignature.IsNil) md.GetStandaloneSignature(body.LocalSignature).DecodeLocalSignature(names, null);
+        byte[] il = body.GetILBytes() ?? Array.Empty<byte>();
+        var r = new IL.Reader(il);
+        while (r.Read())
+        {
+            if (!IL.IsToken(r.Operand) || r.Operand == System.Reflection.Emit.OperandType.InlineString) continue;
+            Token(MetadataTokens.EntityHandle(System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(r.OperandOffset))));
+        }
+        foreach (var region in body.ExceptionRegions) if (!region.CatchType.IsNil) Token(region.CatchType);
+    }
+
+    void Token(EntityHandle h)
+    {
+        switch (h.Kind)
+        {
+            case HandleKind.TypeDefinition: Type((TypeDefinitionHandle)h); break;
+            case HandleKind.TypeSpecification: md.GetTypeSpecification((TypeSpecificationHandle)h).DecodeSignature(names, null); break;
+            case HandleKind.MethodDefinition: Method((MethodDefinitionHandle)h); break;
+            case HandleKind.FieldDefinition: Type(md.GetFieldDefinition((FieldDefinitionHandle)h).GetDeclaringType()); break;
+            case HandleKind.MemberReference: Member(md.GetMemberReference((MemberReferenceHandle)h)); break;
+            case HandleKind.MethodSpecification:
+            {
+                var ms = md.GetMethodSpecification((MethodSpecificationHandle)h);
+                ms.DecodeSignature(names, null);
+                Token(ms.Method);
+                break;
+            }
+            case HandleKind.StandaloneSignature:
+            {
+                var ss = md.GetStandaloneSignature((StandaloneSignatureHandle)h);
+                if (ss.GetKind() == StandaloneSignatureKind.Method) ss.DecodeMethodSignature(names, null);
+                break;
+            }
+        }
+    }
+
+    void Member(MemberReference mr)
+    {
+        TypeDefinitionHandle type = default;
+        bool foreign = false;
+        switch (mr.Parent.Kind)
+        {
+            case HandleKind.TypeDefinition:
+                type = (TypeDefinitionHandle)mr.Parent;
+                break;
+            case HandleKind.TypeSpecification:
+            {
+                var specification = md.GetTypeSpecification((TypeSpecificationHandle)mr.Parent);
+                specification.DecodeSignature(names, null);
+                var blob = md.GetBlobReader(specification.Signature);
+                if (blob.ReadSignatureTypeCode() != SignatureTypeCode.GenericTypeInstance || blob.ReadSignatureTypeCode() != SignatureTypeCode.TypeHandle) break;
+                var generic = blob.ReadTypeHandle();
+                if (generic.Kind == HandleKind.TypeDefinition) type = (TypeDefinitionHandle)generic;
+                else if (generic.Kind == HandleKind.TypeReference) foreign = a.TypeRefAssembly((TypeReferenceHandle)generic).Length > 0;
+                break;
+            }
+            case HandleKind.TypeReference:
+                foreign = a.TypeRefAssembly((TypeReferenceHandle)mr.Parent).Length > 0;
+                break;
+            // The call site of a method with a variable argument list.
+            case HandleKind.MethodDefinition:
+                Method((MethodDefinitionHandle)mr.Parent);
+                return;
+            case HandleKind.ModuleReference:
+                foreign = true;
+                break;
+        }
+        if (!type.IsNil) Type(type);
+        if (mr.GetKind() != MemberReferenceKind.Method) return;
+        mr.DecodeMethodSignature(names, null);
+        string name = md.GetString(mr.Name);
+        if (!type.IsNil)
+        {
+            foreach (var m in md.GetTypeDefinition(type).GetMethods())
+                if (md.StringComparer.Equals(md.GetMethodDefinition(m).Name, name)) Method(m);
+            return;
+        }
+        if (foreign || !Canon.Generated(name)) return;
+        if (generated == null)
+        {
+            generated = new Dictionary<string, List<MethodDefinitionHandle>>(StringComparer.Ordinal);
+            foreach (var m in md.MethodDefinitions)
+            {
+                string own = md.GetString(md.GetMethodDefinition(m).Name);
+                if (!Canon.Generated(own)) continue;
+                if (!generated.TryGetValue(own, out var list)) generated[own] = list = new List<MethodDefinitionHandle>();
+                list.Add(m);
+            }
+        }
+        if (generated.TryGetValue(name, out var same)) foreach (var m in same) Method(m);
+    }
+}
+
+internal enum ShapeKind { Other, Primitive, Definition, Reference, Vector, Generic, Parameter }
+
+/// The type of a field as far as Unity's serializer tells types apart.
+internal sealed class Shape
+{
+    public ShapeKind Kind;
+    public PrimitiveTypeCode Code;
+    public TypeDefinitionHandle Definition;
+    public TypeReferenceHandle Reference;
+    /// Written as a value type in the signature.
+    public bool ValueType;
+    /// The element of an array, or the generic type of an instantiation.
+    public Shape? Element;
+    public System.Collections.Immutable.ImmutableArray<Shape> Arguments = System.Collections.Immutable.ImmutableArray<Shape>.Empty;
+}
+
+internal sealed class Shapes : ISignatureTypeProvider<Shape, object?>
+{
+    public static readonly Shapes Instance = new();
+    static readonly Shape other = new();
+
+    public Shape GetPrimitiveType(PrimitiveTypeCode c) => new() { Kind = ShapeKind.Primitive, Code = c };
+    public Shape GetTypeFromDefinition(MetadataReader r, TypeDefinitionHandle h, byte rawTypeKind) => new() { Kind = ShapeKind.Definition, Definition = h, ValueType = rawTypeKind == 0x11 };
+    public Shape GetTypeFromReference(MetadataReader r, TypeReferenceHandle h, byte rawTypeKind) => new() { Kind = ShapeKind.Reference, Reference = h, ValueType = rawTypeKind == 0x11 };
+    public Shape GetTypeFromSpecification(MetadataReader r, object? ctx, TypeSpecificationHandle h, byte rawTypeKind) => r.GetTypeSpecification(h).DecodeSignature(this, ctx);
+    public Shape GetSZArrayType(Shape e) => new() { Kind = ShapeKind.Vector, Element = e };
+    public Shape GetArrayType(Shape e, ArrayShape s) => other;
+    public Shape GetByReferenceType(Shape e) => other;
+    public Shape GetPointerType(Shape e) => other;
+    public Shape GetPinnedType(Shape e) => e;
+    public Shape GetGenericInstantiation(Shape g, System.Collections.Immutable.ImmutableArray<Shape> args) => new() { Kind = ShapeKind.Generic, Element = g, Arguments = args };
+    public Shape GetGenericTypeParameter(object? ctx, int i) => new() { Kind = ShapeKind.Parameter };
+    public Shape GetGenericMethodParameter(object? ctx, int i) => new() { Kind = ShapeKind.Parameter };
+    public Shape GetFunctionPointerType(MethodSignature<Shape> s) => other;
+    public Shape GetModifiedType(Shape modifier, Shape unmodified, bool isRequired) => unmodified;
 }

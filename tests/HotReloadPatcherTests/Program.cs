@@ -30,7 +30,7 @@ internal sealed class Expectation
     public Expectation Noted(params string[] notes) { Notes = notes; return this; }
 }
 
-internal sealed record AssemblyPair(string Name, string Loaded, string Current, bool Netcode = false);
+internal sealed record AssemblyPair(string Name, string Loaded, string Current);
 
 internal static class Program
 {
@@ -106,13 +106,13 @@ internal static class Program
         File.WriteAllText(Path.Combine(staging, "NuGet.Config"), "<configuration><packageSources><clear /></packageSources></configuration>\n");
         string payload = Path.Combine(staging, "payload");
         var (exit, output, error) = Run(dotnet, new[] { "build", Path.Combine(staging, "HotReloadPatcher.csproj"), "--nologo", "-v:q", "-o", payload,
-            "-p:RoslynPath=" + Path.GetDirectoryName(csc), "-p:NuGetAudit=false" }, staging);
+            "-p:RoslynPath=" + Path.GetDirectoryName(csc), "-p:NuGetAudit=false", "--disable-build-servers", "-nodeReuse:false" }, staging);
         patcher = Path.Combine(payload, "HotReloadPatcher.dll");
         if (exit != 0 || !File.Exists(patcher)) throw new InvalidOperationException("The patcher does not build from a clean copy:\n" + output + error);
         Check(!output.Contains("warning", StringComparison.Ordinal), "The patcher builds with warnings:\n" + output);
     }
 
-    static string WriteRequest(string directory, int generation, IEnumerable<AssemblyPair> assemblies, bool forceAll = false, string? previous = null, string? fault = null)
+    static string WriteRequest(string directory, int generation, IEnumerable<AssemblyPair> assemblies, bool forceAll = false, string? previous = null, string? fault = null, bool netcode = false)
     {
         Directory.CreateDirectory(directory);
         string path = Path.Combine(directory, "request.json");
@@ -134,7 +134,7 @@ internal static class Program
                 w.WriteString("name", a.Name);
                 w.WriteString("loaded", a.Loaded);
                 w.WriteString("current", a.Current);
-                w.WriteBoolean("netcode", a.Netcode);
+                if (netcode) w.WriteBoolean("netcode", true);
                 w.WriteEndObject();
             }
             w.WriteEndArray();
@@ -144,10 +144,10 @@ internal static class Program
     }
 
     /// Runs the CLI and checks what interface 5.1 promises for every result.
-    static JsonElement? Patcher(string label, string directory, int generation, IEnumerable<AssemblyPair> assemblies, bool forceAll = false, string? previous = null, string? fault = null)
+    static JsonElement? Patcher(string label, string directory, int generation, IEnumerable<AssemblyPair> assemblies, bool forceAll = false, string? previous = null, string? fault = null, bool netcode = false)
     {
         var list = assemblies.ToList();
-        string request = WriteRequest(directory, generation, list, forceAll, previous, fault);
+        string request = WriteRequest(directory, generation, list, forceAll, previous, fault, netcode);
         var (exit, output, error) = Run(dotnet, new[] { patcher, request });
         Check(exit == 0, $"{label}: exit code {exit}: {error}");
         Check(error.Length == 0, $"{label}: stderr is not empty: {error}");
@@ -320,13 +320,13 @@ internal static class Program
         ["ADD_METHOD"] = Patch().Methods("Edits.AddMethod::Helper(System.Int32)", "Edits.AddMethod::StaticHelper(System.Int32)").Redirects("changed Edits.AddMethod::Use()"),
         ["ADD_MEMBERS"] = Patch().Methods("Edits.Members::get_Prop()", "Edits.Members::set_Prop(System.Int32)", "Edits.Members::add_Evt(System.Action)", "Edits.Members::remove_Evt(System.Action)",
                 "Edits.Members::get_Item(System.Int32)", "Edits.Members::op_UnaryNegation(Edits.Members)")
-            .Fields("Edits.Members::<Prop>k__BackingField", "Edits.Members::Evt").Redirects("changed Edits.Members::Use()")
-            .Noted("existing_instances_keep_default Edits.Members::<Prop>k__BackingField", "existing_instances_keep_default Edits.Members::Evt"),
+            // Neither field has an initializer: its default is what every object has anyway.
+            .Fields("Edits.Members::<Prop>k__BackingField", "Edits.Members::Evt").Redirects("changed Edits.Members::Use()"),
         ["SIGNATURE_CHANGE"] = Patch().Methods("Edits.Signatures::Heal(System.Int32,System.Boolean)").Redirects("changed Edits.Signatures::Turn()"),
         ["RENAME_METHOD"] = Patch().Methods("Edits.Signatures::Mend(System.Int32)").Redirects("changed Edits.Signatures::Turn()"),
         ["STATIC_TOGGLE"] = Patch().Methods("Edits.Signatures::Heal(System.Int32)").Redirects("changed Edits.Signatures::Turn()"),
         ["REMOVE_METHOD"] = Unchanged(),
-        ["ADD_ATTRIBUTED_METHOD"] = Patch().Methods("Edits.Tools::Launch()").Noted("added_member_attributes_ignored Edits.Tools::Launch()", "added_method_invisible_by_name Edits.Tools::Launch()"),
+        ["ADD_ATTRIBUTED_METHOD"] = Patch().Methods("Edits.Tools::Launch()").Noted("added_member_attributes_ignored Edits.Tools::Launch()", "added_method_named_by_string Edits.Tools::Launch()"),
         ["ADD_UPDATE_PLAIN"] = Patch().Methods("Edits.PlainTicker::Update()"),
         // The engine finds a method of its objects by name; a static one it does not look for.
         ["ADD_ENGINE_METHOD"] = Patch().Methods("Edits.Behaviour1::OnJump()", "Edits.Behaviour1::set_Level(System.Int32)", "Edits.Behaviour1::Helper()")
@@ -341,11 +341,11 @@ internal static class Program
 
         // Fields.
         ["ADD_INSTANCE_FIELD"] = Patch().Fields("Edits.AddField::extra", "Edits.AddField::primed").Redirects("changed Edits.AddField::.ctor()", "changed Edits.AddField::Use()")
-            .Noted("existing_instances_keep_default Edits.AddField::extra", "existing_instances_keep_default Edits.AddField::primed", "constructor_applies_to_new_objects Edits.AddField::.ctor()"),
+            // `primed` has an initializer, which existing objects never ran; `extra` has none.
+            .Noted("existing_instances_keep_default Edits.AddField::primed", "constructor_applies_to_new_objects Edits.AddField::.ctor()"),
         ["ADD_STATIC_FIELD"] = Patch().Fields("Edits.AddField::shared").Redirects("changed Edits.AddField::Use()"),
         ["ADD_SERIALIZED_FIELD"] = Patch().Fields("Edits.Serialized::exposed", "Edits.Serialized::hidden", "Edits.Serialized::plain").Redirects("changed Edits.Serialized::Sum()")
-            .Noted("existing_instances_keep_default Edits.Serialized::exposed", "existing_instances_keep_default Edits.Serialized::hidden", "existing_instances_keep_default Edits.Serialized::plain",
-                "serialized_field_not_restored Edits.Serialized::exposed", "serialized_field_not_restored Edits.Serialized::hidden", "added_member_attributes_ignored Edits.Serialized::hidden"),
+            .Noted("serialized_field_not_restored Edits.Serialized::exposed", "serialized_field_not_restored Edits.Serialized::hidden", "added_member_attributes_ignored Edits.Serialized::hidden"),
         ["FIELD_RENAME"] = Patch().Fields("Edits.Fields::renamed").Redirects("changed Edits.Fields::Use()").Noted("existing_instances_keep_default Edits.Fields::renamed"),
         ["FIELD_TYPE_CHANGE"] = Patch().Fields("Edits.Fields::speed").Redirects("changed Edits.Fields::.ctor()", "changed Edits.Fields::Use()")
             .Noted("field_value_reset Edits.Fields::speed", "constructor_applies_to_new_objects Edits.Fields::.ctor()"),
@@ -423,6 +423,36 @@ internal static class Program
         ["REMOVE_UNITY_MESSAGE_NONVOID"] = Refused("unity_message_removed Edits.Starter::Start()"),
         ["REMOVE_UNITY_MESSAGE_BASE"] = Refused("unity_message_removed Edits.DerivedBehaviour::LateUpdate()"),
         ["REMOVE_PRESENCE_MESSAGE"] = Refused("unity_message_removed Edits.Rooted::OnAnimatorMove()", "unity_message_removed Edits.Rooted::OnGUI()"),
+        // Generated code that nothing names cannot run, in either compilation. An edit that
+        // makes it unreachable, reachable again, adds it or changes it is the edit of the method
+        // around it and no more; inside dead code it is no edit at all.
+        ["DEAD_EARLY_RETURN"] = Patch().Redirects("changed Edits.Dead::Early()").Noted("lambda_not_remapped Edits.Dead::Early()"),
+        ["DEAD_RETURN_REMOVED"] = Patch().Redirects("changed Edits.Dead::Late()"),
+        ["DEAD_THROW"] = Patch().Redirects("changed Edits.Dead::Thrown(System.Int32)"),
+        ["DEAD_FLAG_ON"] = Patch().Redirects("changed Edits.Dead::Flagged()"),
+        ["DEAD_FLAG_OFF"] = Patch().Redirects("changed Edits.Dead::Flagged()").Noted("lambda_not_remapped Edits.Dead::Flagged()"),
+        ["DEAD_LAMBDA_EDITED"] = Silent(),
+        // The declaration of a local function is one more `nop` in the method around it.
+        ["DEAD_LOCAL_ADDED"] = Patch().Redirects("changed Edits.Dead::Helper()"),
+        ["DEAD_LOCAL_EDITED"] = Silent(),
+        ["DEAD_CALL_REMOVED"] = Patch().Redirects("changed Edits.Dead::Called()").Noted("running_coroutines_keep_old_code Edits.Dead::Called()", "lambda_not_remapped Edits.Dead::Called()"),
+        // The type of a field decides with its accessibility whether Unity serializes it.
+        ["ACCESSIBILITY_TYPES_SERIALIZED"] = Refused(new[] { "title", "mode", "numbers", "weights", "data", "other", "all" }.Select(field => "serialization_changed Edits.ExposureTypes::" + field).ToArray()),
+        ["ACCESSIBILITY_TYPES_NOT_SERIALIZED"] = Unchanged().Noted(new[] { "table", "onChanged", "onTick", "tag", "marker", "grid", "rows", "nested", "maybe", "pair", "loose", "unlisted", "when", "set", "task", "routine" }
+            .Select(field => "accessibility_changed Edits.ExposureTypes::" + field).ToArray()),
+        // `readonly` on a public or marked field starts or stops its serialization; on a private
+        // field, and on one of a type Unity never serializes, it changes nothing.
+        ["READONLY_SERIALIZED"] = Refused("serialization_changed Edits.Frozen2::max", "serialization_changed Edits.Frozen2::min", "serialization_changed Edits.Frozen2::marked"),
+        // A Start or Awake with parameters and the Start of a ScriptableObject are methods of the
+        // game: the engine calls none of them, and nothing "already ran". Awake of a ScriptableObject is called.
+        ["START_NOT_A_MESSAGE"] = Patch().Redirects("changed Edits.StartOverload::Start(System.Int32)", "changed Edits.StartOverload::Awake(System.Int32)", "changed Edits.Quest::Start()", "changed Edits.Quest::Awake()")
+            .Noted("started_objects_keep_state Edits.Quest::Awake()"),
+        // `readonly` on a struct method, the names of tuple elements and `params` are read by compilers only.
+        ["COMPILER_ATTRIBUTES"] = Unchanged(),
+        // An added method of an engine object, and the same one once a string of the game names it.
+        ["ADD_METHOD_UNNAMED"] = Patch().Methods("Edits.Caller::Blast()").Noted("added_method_invisible_by_name Edits.Caller::Blast()"),
+        ["ADD_METHOD_NAMED"] = Patch().Methods("Edits.Caller::Blast()").Redirects("changed Edits.Caller::Tick()").Noted("added_method_named_by_string Edits.Caller::Blast()"),
+        ["ADD_METHOD_NAMED_TWICE"] = Patch().Methods("Edits.Caller::Blast()").Redirects("changed Edits.Caller::Tick()", "changed Edits.Caller::Tock()").Noted("added_method_named_by_string Edits.Caller::Blast()"),
     };
 
     static void Classification(string unityStub, string netcodeStub)
@@ -468,9 +498,55 @@ internal static class Program
         Expect("unowned, plain edit", Patcher("unowned, plain edit", Path.Combine(root, "unowned-body"), 1, new[] { new AssemblyPair("Edits", loaded, body) }, fault: "owner"), "Edits",
             Patch().Redirects("changed Edits.Bodies::Instance()"));
 
-        // Netcode: named by the request, or recognised by the reference to the Netcode runtime.
-        Expect("netcode flag", Patcher("netcode flag", Path.Combine(root, "netcode-flag"), 1, new[] { new AssemblyPair("Edits", loaded, body, Netcode: true) }), "Edits",
-            Refused("netcode_assembly Edits.Bodies::Instance()"));
+        // A string that names an added method is a call by name that finds nothing. The note says
+        // where the string stands, and it is another note (a new revision) when a second place
+        // starts to name the method: an edit that only adds Invoke("Blast") is then not answered
+        // with a note that merely still stands.
+        static (string Revision, string Message) Note(JsonElement? result, string code, string member)
+        {
+            if (result is { } root)
+                foreach (var note in root.GetProperty("assemblies")[0].GetProperty("notes").EnumerateArray())
+                    if (note.GetProperty("code").GetString() == code && note.GetProperty("member").GetString() == member)
+                        return (note.TryGetProperty("revision", out var revision) ? revision.GetString()! : "", note.GetProperty("message").GetString()!);
+            return ("?", "?");
+        }
+        JsonElement? Named(string name) => Patcher("named " + name, Path.Combine(root, "named-" + name), 1, new[] { new AssemblyPair("Edits", loaded, Path.Combine(root, name, "Edits.dll")) });
+        var unnamed = Note(Named("ADD_METHOD_UNNAMED"), "added_method_invisible_by_name", "Edits.Caller::Blast()");
+        var namedOnce = Note(Named("ADD_METHOD_NAMED"), "added_method_named_by_string", "Edits.Caller::Blast()");
+        var namedTwice = Note(Named("ADD_METHOD_NAMED_TWICE"), "added_method_named_by_string", "Edits.Caller::Blast()");
+        Check(unnamed.Revision.Length == 16, $"added method, unnamed: the note has the revision '{unnamed.Revision}', expected that of the method.");
+        Check(namedOnce.Revision.Length == 16 && namedOnce.Revision != unnamed.Revision, $"added method, named: the revision '{namedOnce.Revision}' must differ from that of the note without a string, '{unnamed.Revision}'.");
+        Check(namedTwice.Revision.Length == 16 && namedTwice.Revision != namedOnce.Revision, $"added method, named twice: the revision '{namedTwice.Revision}' must differ from that of one naming place, '{namedOnce.Revision}'.");
+        Check(namedOnce.Message.Contains("\"Blast\" in code of Edits.Caller names", StringComparison.Ordinal) && namedOnce.Message.Contains("does nothing", StringComparison.Ordinal),
+            $"added method, named: the note does not say where the string stands and what it means: {namedOnce.Message}");
+
+        // The attribute types the compiler embeds come with the first nullable annotation or
+        // `nint` of an assembly and go with the last: neither is an added or removed type.
+        string embedded = Fixture("Classify", "Embedded.cs");
+        string embeddedWithout = Compile(Path.Combine(root, "embedded", "without", "Embedded.dll"), new[] { embedded });
+        string embeddedWith = Compile(Path.Combine(root, "embedded", "with", "Embedded.dll"), new[] { embedded }, define: "CASE_EMBEDDED");
+        Expect("embedded attribute types added", Patcher("embedded attribute types added", Path.Combine(root, "embedded-added"), 1, new[] { new AssemblyPair("Embedded", embeddedWithout, embeddedWith) }), "Embedded", Unchanged());
+        Expect("embedded attribute types removed", Patcher("embedded attribute types removed", Path.Combine(root, "embedded-removed"), 1, new[] { new AssemblyPair("Embedded", embeddedWith, embeddedWithout) }), "Embedded", Unchanged());
+
+        // A type of its own module named through a reference scoped to the module: the form a
+        // post-processor writes when it imports a type of the assembly it rewrites. No compiler
+        // writes it, so the test makes it: the reference to the same name in another assembly is
+        // given the module as its scope. A body that names the type this way is patched.
+        string scopedOther = Compile(Path.Combine(root, "scoped", "ScopedOther.dll"), new[] { Fixture("Classify", "ScopedOther.cs") });
+        string scopedSource = Fixture("Classify", "Scoped.cs");
+        string scopedLoaded = Compile(Path.Combine(root, "scoped", "loaded", "Scoped.dll"), new[] { scopedSource }, new[] { "other=" + scopedOther });
+        string scopedCurrent = Compile(Path.Combine(root, "scoped", "current", "Scoped.dll"), new[] { scopedSource }, new[] { "other=" + scopedOther }, define: "CASE_SCOPED_BODY");
+        foreach (string image in new[] { scopedLoaded, scopedCurrent })
+            Check(ScopeToModule(image, "Scoped", "Ball"), $"module-scoped type reference: {image} has no reference to Scoped.Ball of the other assembly to rewrite.");
+        Expect("module-scoped type reference", Patcher("module-scoped type reference", Path.Combine(root, "scoped-body"), 1, new[] { new AssemblyPair("Scoped", scopedLoaded, scopedCurrent) }), "Scoped",
+            Patch().Redirects("changed Scoped.Thrower::Throw()"));
+
+        // Netcode: recognised by the reference of the image to the Netcode runtime, and by nothing
+        // else. A request that still names an assembly as one (the member `netcode` of earlier
+        // runners, which followed the project's assembly graph) changes nothing: this image
+        // references no Netcode, the post-processor returned it as it was, and it is patched.
+        Expect("netcode named by the request", Patcher("netcode named by the request", Path.Combine(root, "netcode-flag"), 1, new[] { new AssemblyPair("Edits", loaded, body) }, netcode: true), "Edits",
+            Patch().Redirects("changed Edits.Bodies::Instance()"));
         string net = Fixture("Classify", "Net.cs");
         string netLoaded = Compile(Path.Combine(root, "net", "loaded", "Net.dll"), new[] { net }, new[] { unityStub, netcodeStub });
         string netCurrent = Compile(Path.Combine(root, "net", "current", "Net.dll"), new[] { net }, new[] { unityStub, netcodeStub }, define: "CASE_NET_BODY");
@@ -493,6 +569,36 @@ internal static class Program
         else Console.WriteLine("note: " + real + " is not installed; the checks against the real engine module were skipped.");
     }
 
+    /// Gives the reference to the type `ns.name` of another assembly the module itself as its
+    /// scope. The resolution scope is the first column of a TypeRef row, a coded index whose tag
+    /// 0 means the Module table.
+    static bool ScopeToModule(string path, string ns, string name)
+    {
+        byte[] image = File.ReadAllBytes(path);
+        int offset = -1;
+        bool wide = false;
+        using (var pe = new System.Reflection.PortableExecutable.PEReader(new MemoryStream(image)))
+        {
+            var md = System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader(pe);
+            foreach (var table in new[] { System.Reflection.Metadata.Ecma335.TableIndex.Module, System.Reflection.Metadata.Ecma335.TableIndex.ModuleRef,
+                System.Reflection.Metadata.Ecma335.TableIndex.AssemblyRef, System.Reflection.Metadata.Ecma335.TableIndex.TypeRef })
+                wide |= System.Reflection.Metadata.Ecma335.MetadataReaderExtensions.GetTableRowCount(md, table) >= 1 << 14;
+            foreach (var handle in md.TypeReferences)
+            {
+                var reference = md.GetTypeReference(handle);
+                if (md.GetString(reference.Name) != name || md.GetString(reference.Namespace) != ns || reference.ResolutionScope.Kind != System.Reflection.Metadata.HandleKind.AssemblyReference) continue;
+                offset = pe.PEHeaders.MetadataStartOffset + System.Reflection.Metadata.Ecma335.MetadataReaderExtensions.GetTableMetadataOffset(md, System.Reflection.Metadata.Ecma335.TableIndex.TypeRef)
+                    + (System.Reflection.Metadata.Ecma335.MetadataTokens.GetRowNumber(handle) - 1) * System.Reflection.Metadata.Ecma335.MetadataReaderExtensions.GetTableRowSize(md, System.Reflection.Metadata.Ecma335.TableIndex.TypeRef);
+            }
+        }
+        if (offset < 0) return false;
+        image[offset] = 4;
+        image[offset + 1] = 0;
+        if (wide) { image[offset + 2] = 0; image[offset + 3] = 0; }
+        File.WriteAllBytes(path, image);
+        return true;
+    }
+
     static void Quietness()
     {
         string root = Path.Combine(work, "quiet");
@@ -501,8 +607,6 @@ internal static class Program
         string commentCurrent = Compile(Path.Combine(root, "comment", "current", "Quiet.dll"), new[] { Fixture("Quiet", "Comment.v2.cs") });
         Check(!File.ReadAllBytes(commentLoaded).AsSpan().SequenceEqual(File.ReadAllBytes(commentCurrent)), "comment-only: the two compilations must differ in bytes for the test to mean anything.");
         Expect("comment-only", Patcher("comment-only", Path.Combine(root, "comment-only"), 1, new[] { new AssemblyPair("Quiet", commentLoaded, commentCurrent) }), "Quiet", Silent());
-        // The same for an assembly the Netcode post-processor rewrites: no difference, no refusal.
-        Expect("comment-only, netcode", Patcher("comment-only, netcode", Path.Combine(root, "comment-netcode"), 1, new[] { new AssemblyPair("Quiet", commentLoaded, commentCurrent, Netcode: true) }), "Quiet", Silent());
 
         // A new file that sorts first moves every token of the files after it.
         string late = Fixture("Quiet", "Late.cs");
@@ -760,7 +864,7 @@ internal static class Program
             .Redirects("changed Gens.Thing::Edit()", "changed Gens.Thing::Count()", "changed Gens.Thing::Subscribe()", "changed Gens.Thing::Unsubscribe()", "changed Gens.Thing::UseSteady()",
                 "changed Gens.Thing::Scaled(System.Int32)", "lambda Gens.Thing::Scaled(System.Int32) [lambda 0]", "changed Gens.Thing::Kept(System.Int32)", "changed Gens.Thing::Steps()")
             .Methods("Gens.Thing::Handler()", "Gens.Thing::Steady(System.Int32)").Fields("Gens.Thing::count")
-            .Noted("existing_instances_keep_default Gens.Thing::count", "running_coroutines_keep_old_code Gens.Thing::Steps()"));
+            .Noted("running_coroutines_keep_old_code Gens.Thing::Steps()"));
         if (one is not { } result) return;
         var members = Pairs(result.GetProperty("assemblies")[0], "patchMembers", "kind", "member");
         foreach (string expected in new[] { "added Gens.Thing::Handler()", "added Gens.Thing::Steady(System.Int32)", "lambda Gens.Thing::Scaled(System.Int32) [lambda 0]", "lambda Gens.Thing::Kept(System.Int32) [lambda 0]" })
@@ -776,22 +880,22 @@ internal static class Program
             "changed Gens.Thing::Scaled(System.Int32)", "lambda Gens.Thing::Scaled(System.Int32) [lambda 0]", "changed Gens.Thing::Kept(System.Int32)", "changed Gens.Thing::Steps()" };
         var two = Patcher("generation 2", Path.Combine(root, "g2"), 2, To(second), previous: previous);
         Expect("generation 2", two, "Gens", Patch().Redirects(common).Methods("Gens.Thing::Handler()", "Gens.Thing::Steady(System.Int32)").Fields("Gens.Thing::count")
-            .Noted("existing_instances_keep_default Gens.Thing::count", "running_coroutines_keep_old_code Gens.Thing::Steps()",
+            .Noted("running_coroutines_keep_old_code Gens.Thing::Steps()",
                 earlier + "Gens.Thing::Handler()", earlier + "Gens.Thing::Scaled(System.Int32)", earlier + "Gens.Thing::Steps()", identity + "Gens.Thing::Handler()"));
         // Without the previous result nothing is known about an earlier patch.
         Expect("generation 2, previous unknown", Patcher("generation 2, previous unknown", Path.Combine(root, "g2-alone"), 2, To(second)), "Gens",
             Patch().Redirects(common).Methods("Gens.Thing::Handler()", "Gens.Thing::Steady(System.Int32)").Fields("Gens.Thing::count")
-                .Noted("existing_instances_keep_default Gens.Thing::count", "running_coroutines_keep_old_code Gens.Thing::Steps()"));
+                .Noted("running_coroutines_keep_old_code Gens.Thing::Steps()"));
         // The same code as another patch: its copies do the same, but a delegate of an added method is still another one.
         Expect("generation 2, same code", Patcher("generation 2, same code", Path.Combine(root, "g2-same"), 2, To(first), previous: previous), "Gens",
             Patch().Redirects(common.Append("changed Gens.Thing::Edit()").ToArray()).Methods("Gens.Thing::Handler()", "Gens.Thing::Steady(System.Int32)").Fields("Gens.Thing::count")
-                .Noted("existing_instances_keep_default Gens.Thing::count", "running_coroutines_keep_old_code Gens.Thing::Steps()", identity + "Gens.Thing::Handler()"));
+                .Noted("running_coroutines_keep_old_code Gens.Thing::Steps()", identity + "Gens.Thing::Handler()"));
         // A previous result that knows nothing of this assembly has nothing to compare.
         string foreign = Path.Combine(root, "foreign.json");
         File.WriteAllText(foreign, "{\"schemaVersion\":1,\"generation\":1,\"assemblies\":[{\"name\":\"Other\",\"patchMembers\":[{\"member\":\"Other.A::B()\",\"kind\":\"added\",\"bodyHash\":\"00\"}]},{\"name\":\"Gens\"}]}");
         Expect("generation 2, previous of another assembly", Patcher("generation 2, previous of another assembly", Path.Combine(root, "g2-foreign"), 2, To(second), previous: foreign), "Gens",
             Patch().Redirects(common).Methods("Gens.Thing::Handler()", "Gens.Thing::Steady(System.Int32)").Fields("Gens.Thing::count")
-                .Noted("existing_instances_keep_default Gens.Thing::count", "running_coroutines_keep_old_code Gens.Thing::Steps()"));
+                .Noted("running_coroutines_keep_old_code Gens.Thing::Steps()"));
         // The revision of a note tells a note that only still stands from one about code that
         // changed again: the iterator differs in the second patch and is the same in a repetition
         // of the first. A note about a field has none, one about the step between two patches
@@ -809,8 +913,11 @@ internal static class Program
         Check(stepsOne.Length == 16 && stepsOne.All(Uri.IsHexDigit), $"generation 1: the note of Steps() has the revision '{stepsOne}', expected 16 hex digits.");
         Check(stepsTwo.Length == 16 && stepsTwo != stepsOne, $"generation 2: the iterator changed, but its note has the revision '{stepsTwo}' after '{stepsOne}'.");
         Check(Revision(same, "running_coroutines_keep_old_code", "Gens.Thing::Steps()") == stepsOne, "generation 2, same code: the note of the unchanged iterator has another revision.");
-        Check(Revision(two, "existing_instances_keep_default", "Gens.Thing::count") == "", "generation 2: the note of an added field has a revision.");
         Check(Revision(two, "earlier_patch_delegates_keep_old_code", "Gens.Thing::Handler()") == "g2", "generation 2: a note about the earlier patch does not name its generation as the revision.");
+        // Two copies of an added method that code makes a delegate of are a condition that stands
+        // from patch to patch: with a generation as its revision the note would be new in every one.
+        Check(Revision(two, "added_method_delegate_identity", "Gens.Thing::Handler()") == "" && Revision(same, "added_method_delegate_identity", "Gens.Thing::Handler()") == "",
+            $"generation 2: the note about the delegate of an added method has the revisions '{Revision(two, "added_method_delegate_identity", "Gens.Thing::Handler()")}' and '{Revision(same, "added_method_delegate_identity", "Gens.Thing::Handler()")}', expected none.");
 
         // Everything reverted: nothing to patch, and all the first patch brought stays behind,
         // except the lambda of Kept, which is the loaded one again.

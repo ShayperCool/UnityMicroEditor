@@ -400,9 +400,8 @@ internal sealed class Entry
 {
     public readonly string Name;
     public readonly Asm Loaded, Current;
-    public readonly bool Netcode;
 
-    public Entry(string name, Asm loaded, Asm current, bool netcode) { Name = name; Loaded = loaded; Current = current; Netcode = netcode; }
+    public Entry(string name, Asm loaded, Asm current) { Name = name; Loaded = loaded; Current = current; }
 }
 
 /// Every assembly of a request, and the assemblies next to them for walking base chains.

@@ -9,7 +9,7 @@
 // Request (camelCase, absolute paths):
 //   {"schemaVersion":1,"generation":3,"output":"/dir/of/this/generation","runtimeAssembly":"UnityMicroEditor.HotReload",
 //    "previousResult":"/dir/of/generation/2/result.json",
-//    "assemblies":[{"name":"Assembly-CSharp","loaded":"/loaded/Assembly-CSharp.dll","current":"/new/Assembly-CSharp.dll","netcode":false}]}
+//    "assemblies":[{"name":"Assembly-CSharp","loaded":"/loaded/Assembly-CSharp.dll","current":"/new/Assembly-CSharp.dll"}]}
 // `previousResult` is the result document of the patch the Player runs now, when it runs one: what
 // that patch defined and this one changes or drops is reported, because nothing redirects it.
 // Diagnostic members: `threads`, `forceAll` (every comparable body becomes a change), `fault`
@@ -32,9 +32,10 @@
 //    "timingsMs":{"read":1,"diff":2,"emit":3}}
 // The lists of a patch are empty unless its file was written; `patchMembers` are the methods that
 // only the patch defines. `revision` of a note is present when the note is about a method the
-// patch carries: a short hash of what that method runs now, or `g<generation>` for a note about
-// the step from the previous patch. The same code, member and revision in the result before
-// means that the note only still stands; anything else is about code that changed since.
+// patch carries: a short hash of what that method runs now (for `added_method_named_by_string`
+// also of where the string stands), or `g<generation>` for a note about what the step from the
+// previous patch changed. The same code, member and revision in the result before means that
+// the note only still stands; anything else is about code that changed since.
 //
 // A request that cannot be read is a message on stderr and exit code 1; an edit that cannot be
 // patched, and a failure of the tool on one assembly, is a normal result with the verdict "unsupported".
@@ -43,7 +44,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
-internal sealed record AssemblyRequest(string Name, string Loaded, string Current, bool Netcode);
+internal sealed record AssemblyRequest(string Name, string Loaded, string Current);
 
 /// The result document of the patch that is applied now: what that patch alone defines, by assembly.
 internal sealed record Previous(int Generation, Dictionary<string, List<PatchMember>> Members)
@@ -108,8 +109,7 @@ internal sealed record Request(int Generation, string Output, string RuntimeAsse
                 if (!info.Exists) throw new InvalidDataException($"The assembly {file} does not exist.");
                 if (info.Length > MaximumAssemblyBytes) throw new InvalidDataException($"The assembly {file} is larger than 1 GiB.");
             }
-            bool netcode = item.TryGetProperty("netcode", out var flag) && flag.ValueKind == JsonValueKind.True;
-            assemblies.Add(new AssemblyRequest(name, loaded, current, netcode));
+            assemblies.Add(new AssemblyRequest(name, loaded, current));
         }
         int threads = root.TryGetProperty("threads", out var t) && t.ValueKind == JsonValueKind.Number ? Math.Clamp(t.GetInt32(), 1, 64) : Math.Min(Environment.ProcessorCount, 8);
         bool forceAll = root.TryGetProperty("forceAll", out var f) && f.ValueKind == JsonValueKind.True;
@@ -178,7 +178,7 @@ internal static class Program
                 {
                     loaded = new Asm(a.Loaded);
                     var current = new Asm(a.Current);
-                    entries[i] = new Entry(a.Name, loaded, current, a.Netcode);
+                    entries[i] = new Entry(a.Name, loaded, current);
                 }
                 catch { loaded?.Dispose(); throw; }
             });
@@ -198,10 +198,11 @@ internal static class Program
     }
 
     // The post-processor rewrites every assembly whose emitted image references the Netcode runtime
-    // and leaves all others untouched, so the reference tells even when the request does not.
+    // and returns all others as they are, so the reference of the two images is what tells. The
+    // project's assembly graph does not: there Assembly-CSharp references every auto-referenced
+    // assembly, whatever its code uses.
     static bool Netcode(Entry e)
     {
-        if (e.Netcode) return true;
         foreach (var a in new[] { e.Loaded, e.Current })
             foreach (var h in a.MD.AssemblyReferences)
                 if (a.MD.GetString(a.MD.GetAssemblyReference(h).Name) == "Unity.Netcode.Runtime") return true;
@@ -305,8 +306,12 @@ internal static class Program
                 {
                     foreach (var (code, member, message) in outcome.Emitter.EarlierPatch(members, previous.Generation, outcome.Patch))
                     {
-                        // Each of these notes is about the step from one patch to the next.
-                        var change = new Change { Kind = "earlier_patch", Member = member, Action = Actions.Note, Revision = "g" + request.Generation };
+                        // A method the earlier patch added and this one changed or dropped is a
+                        // fact of this step. Two copies of an added method that code makes a
+                        // delegate of are a condition that stands from patch to patch: it is told
+                        // when it begins, not again with every patch of any file.
+                        string revision = code == Codes.AddedMethodDelegateIdentity ? "" : "g" + request.Generation;
+                        var change = new Change { Kind = "earlier_patch", Member = member, Action = Actions.Note, Revision = revision };
                         change.Notes.Add((code, message));
                         outcome.Changes.Add(change);
                     }
