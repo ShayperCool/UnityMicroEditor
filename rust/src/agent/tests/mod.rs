@@ -6,6 +6,7 @@ mod content_tests;
 mod defaults_tests;
 mod host_tests;
 mod jobs_tests;
+mod recovery_tests;
 
 use super::*;
 use crate::{mcp::HandlerValue, sysutil::testing::temp_dir};

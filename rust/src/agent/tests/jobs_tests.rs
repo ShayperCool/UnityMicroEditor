@@ -17,7 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn run(
+pub(super) fn run(
     action: impl Fn(&Context, &str, &[u8]) -> Result<HandlerValue> + Send + Sync + 'static,
 ) -> Run {
     Arc::new(action)
@@ -28,7 +28,12 @@ fn map(value: Value) -> Result<HandlerValue> {
 fn pending(value: &HandlerValue) -> bool {
     is_map(value) && decoded(value)["status"] == "result_pending"
 }
-fn wait_job(service: &Service, action: &str, raw: &[u8], run: &Run) -> Result<HandlerValue> {
+pub(super) fn wait_job(
+    service: &Service,
+    action: &str,
+    raw: &[u8],
+    run: &Run,
+) -> Result<HandlerValue> {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let result = service.enqueue_action(&ctx(), action, raw, run.clone())?;
@@ -266,7 +271,18 @@ fn close_cancels_detached_work_before_taking_service_lock() {
     );
 }
 
-fn preparation_fixture(project: &str, id: &str) -> (Preparation, String, String) {
+pub(super) fn preparation_fixture(project: &str, id: &str) -> (Preparation, String, String) {
+    preparation_of(project, id, &[])
+}
+/// A preparation whose compiler plan was made with the managed inputs
+/// `inputs` as they are on disk now: its graph accepts the sources for as
+/// long as those files stay what they are and `Assets` holds no other
+/// managed configuration.
+pub(super) fn preparation_of(
+    project: &str,
+    id: &str,
+    inputs: &[&str],
+) -> (Preparation, String, String) {
     let directory = join(&[project, "Library/UnityMicroEditor/preparations", id]);
     let preparation = Preparation {
         schema_version: 1,
@@ -283,16 +299,29 @@ fn preparation_fixture(project: &str, id: &str) -> (Preparation, String, String)
         json!({"schemaVersion": 1, "projectRoot": project, "scenePath": preparation.scene, "supported": true, "unityVersion": UNITY_VERSION}),
     );
     write_mode(&player, "native Player", 0o700);
-    let compiler = CompileManifest {
+    let mut compiler = CompileManifest {
         schema: 1,
         project: project.into(),
         compiler_inputs: NilMap::from([("public-input", "verified".to_string())]),
         ..Default::default()
     };
+    // The scripts of `review_project` are sources the plan was made with.
+    let scripts = ["Assets/Sample.cs", "Assets/Other.cs"]
+        .into_iter()
+        .flat_map(|script| [script.to_string(), format!("{script}.meta")]);
+    for input in scripts.chain(inputs.iter().map(|input| input.to_string())) {
+        let path = join(&[project, &input]);
+        if let Ok(hash) = crate::util::file_hash(&path) {
+            compiler.compiler_inputs.insert(&path, hash);
+        }
+    }
     immutable(
         &preparation.baseline,
         json!({"schemaVersion": 1, "project": project, "manifest": manifest, "player": player, "compiler": compiler}),
     );
+    // What a preparation leaves beside its baseline: the result a later
+    // server reads to find it.
+    immutable(&join(&[&directory, "result.json"]), json!(preparation));
     (preparation, manifest, player)
 }
 fn stopped_controller(project: &str, lifetime: &Context) -> Controller {
@@ -466,14 +495,38 @@ fn recovery_continues_on_the_preparation_the_sources_already_have() {
             && status["preparation"]["requestId"] == identity.as_str(),
         "{status}"
     );
-    // A later call finds that preparation selected and starts nothing.
-    let waited = recover("wait_update");
+    // The same rejection on the preparation the recovery chose says that
+    // the choice did not fit after all. Nothing waits on a preparation that
+    // nobody makes: the session goes back to the one it had, which fits as
+    // well, and after that a new preparation is requested under a name of
+    // its own. No preparation is tried twice for the same sources.
+    let back = recover("wait_update");
     assert!(
-        waited["status"] == "result_pending" && waited.get("message").is_none(),
-        "{waited}"
+        back["status"] == "result_pending"
+            && back["message"]
+                .as_str()
+                .is_some_and(|text| text.contains("restarting on it"))
+            && back["preparation"]["requestId"] == "active-test",
+        "{back}"
     );
-    assert_eq!(controller.status().session_id, after.session_id);
-    assert_eq!(started().len(), 2);
+    assert_eq!(service.baseline(), active.baseline);
+    assert_eq!(launches(3).len(), 3);
+    let held = service.0.mu.lock().unwrap();
+    let requested = recover("status");
+    let next = requested["preparation"]["requestId"].as_str().unwrap();
+    assert!(
+        requested["preparationRequired"] == true
+            && requested["preparation"]["status"] == "result_pending"
+            && next.starts_with("config-")
+            && next != identity
+            && service.baseline() == active.baseline,
+        "{requested}"
+    );
+    // A poll names the same request, and none restarts anything.
+    assert_eq!(recover("status")["preparation"]["requestId"], next);
+    assert_eq!(started().len(), 3);
+    service.close_action_jobs();
+    drop(held);
     service.close();
     let _ = controller.close();
     lifetime.cancel();
