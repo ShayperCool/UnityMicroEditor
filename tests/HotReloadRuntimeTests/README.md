@@ -16,8 +16,8 @@ Hand-written C# cannot name non-public members of another assembly. `run.sh` the
 ## Run
 
 ```bash
-tests/HotReloadRuntimeTests/run.sh                                                   # 74 processes, about 30 s
-tests/HotReloadRuntimeTests/run.sh --host Temp/hotreload/mono-probe/out/host        # 144 processes, about 40 s
+tests/HotReloadRuntimeTests/run.sh                                                   # 75 processes, about 30 s
+tests/HotReloadRuntimeTests/run.sh --host Temp/hotreload/mono-probe/out/host        # 146 processes, about 40 s
 ```
 
 The script exits 0 when every run printed `RESULT ok`. It uses `UNITY_EDITOR_DIR` (default `$HOME/Unity/Hub/Editor/6000.6.3f1/Editor`) and writes to `HOTRELOAD_TEST_OUT` (default `bin/` beside the script, ignored by Git). It needs bash, sed and the Unity installation. `--cycles N` sets the length of every stress loop (default 200), `--stress N` repeats the three stress runs N times per runtime, `--no-sweep` leaves the 64 processes of the sweep out.
@@ -26,7 +26,7 @@ The script exits 0 when every run printed `RESULT ok`. It uses `UNITY_EDITOR_DIR
 | --- | --- | --- |
 | suite | `mono -O=-float32,-inline` | everything listed below |
 | `undecided` | the same | a check of the JIT that cannot run is no answer and is not kept |
-| `unwind`, `relay`, `fallback` | the same | the three ways of a first redirect, each under three threads that call the method |
+| `unwind`, `relay`, `fallback`, `window` | the same | the four ways of a first redirect, each under three threads that call the method |
 | sweep: `chunk` × 64 | the same | the first request of a process is applied at every fill level of the JIT's code area |
 | suite | `mono` | the canary finds inlining; a patch is refused with stage `inlining`, nothing is written |
 | suite | `mono`, `MONO_INLINELIMIT=0` | the same: forced inlining remains |
@@ -88,7 +88,7 @@ MONO_PATH=$J $M/bin-linux64/mono $O/Harness.exe tokens $O/patches/*.dll
 # standalone
 MONO_PATH=$J $M/bin-linux64/mono -O=-float32,-inline $O/Harness.exe run $O off 200
 MONO_PATH=$J $M/bin-linux64/mono -O=-float32,-inline $O/Harness.exe undecided $O
-MONO_PATH=$J $M/bin-linux64/mono -O=-float32,-inline $O/Harness.exe unwind $O 200        # also: relay, fallback
+MONO_PATH=$J $M/bin-linux64/mono -O=-float32,-inline $O/Harness.exe unwind $O 200        # also: relay, fallback, window
 MONO_PATH=$J $M/bin-linux64/mono -O=-float32,-inline $O/Harness.exe chunk $O 1216       # 0, 64, ... 4032
 MONO_PATH=$J $M/bin-linux64/mono $O/Harness.exe run $O on 200
 MONO_PATH=$J MONO_INLINELIMIT=0 $M/bin-linux64/mono $O/Harness.exe run $O on 200
@@ -115,7 +115,8 @@ The last argument of `run` says whether this JIT inlines (`on`) and so what the 
 - **First redirects**, each way and its bookkeeping:
   - the first byte and an island, for bodies that start with `push rbp`: only that byte changes; a retarget stores the slot and leaves the body alone; a restore puts the byte back; the next first redirect finds its island;
   - an island across the end of a page, two more in its second page, and a later one in a page that is already mapped (the harness compiles filler methods until the JIT's next body lies where its island crosses a page end);
-  - an island address the harness holds with a mapping of its own: refused with stage `write` and nothing written, for a `push rbp` body and for a `sub rsp, imm8` body that does not load a constant; applied once the address is free;
+  - an island address the harness holds with a mapping of its own: refused with stage `write` and nothing written, for a `push rbp` body (whose second instruction begins at byte 1, so bytes 1 to 4 cannot change); applied once the address is free;
+  - a `sub rsp, imm8` body (not one that loads a constant) whose fixed island address the harness holds: redirected through the gate to an island in its 16 MiB window (byte 0 is `E9`, bytes 1 to 3 changed, byte 4 the body's own, counted in `gatedWrites`), a retarget that stores only the slot, a restore of bytes 0 to 3 that leaves byte 4, and the same window island found again; and, with the whole window filled, refused with "no address in the 16 MiB window". The window overlaps the runtime's JIT and heap, which release a chunk as a request runs, so it is filled across one fresh body after another until a first redirect is refused (7 slips on standalone Mono, 9 on the Player runtime in one run);
   - five bodies of ten bytes compiled 16 bytes apart: the island of one overlaps the pointer slot of the one before it (refused), the slot goes before the jump when the next island lies after it, and two of them in one request both find room;
   - the second instruction and a relay, for a body that first loads a constant: its first instruction is untouched, retarget, restore of all five bytes, the relay found again;
   - a whole jump behind the gate, for a body that starts with `sub rsp, imm32` and whose island address the harness holds; through an island once the address is free;
@@ -128,7 +129,7 @@ The last argument of `run` says whether this JIT inlines (`on`) and so what the 
 ## The runs of their own
 
 - `undecided`: the first request needs no check of the JIT and reports it as not checked. The harness then compiles the three probe methods of the applier between two runs of 300 filler methods, so that their pages hold nothing the JIT writes to again, and takes write access from those pages for one request. That request is refused with stage `write` and `The inlining check could not run`, the ack still reports the JIT as not checked, and the next request checks again and is applied.
-- `unwind`, `relay`, `fallback`: the stress loop on `Hot.Guarded` (`push rbp`: island), `Hot.Flat` (loads a constant: relay) and `Hot.Large` (`sub rsp, imm32`, island page held by the harness: gate), each with a check that every first redirect went the expected way.
+- `unwind`, `relay`, `fallback`, `window`: the stress loop on `Hot.Guarded` (`push rbp`: island), `Hot.Flat` (loads a constant: relay), `Hot.Large` (`sub rsp, imm32`, island page held by the harness: gate) and `Hot.Work` (`sub rsp, imm8`, fixed island page held by the harness: gated island in the window), each with a check that every first redirect went the expected way.
 - `chunk N`: compiles N filler methods of 16 bytes and sends the first request of the process. The JIT maps a new chunk whenever one fills, also while the applier compiles its probes and the methods of the request; the sweep puts that boundary at 64 places. With the applier of stage 1, which read the process map before it compiled, 3 of the 64 levels fail on either runtime (standalone 1152 to 1280 methods, Player runtime 640 to 768).
 
 Measured numbers of the stress runs are in `tools/HotReloadRuntime/README.md`.
