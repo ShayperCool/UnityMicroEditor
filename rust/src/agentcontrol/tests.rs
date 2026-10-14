@@ -3903,7 +3903,7 @@ fn a_wait_whose_answer_brought_notes_says_so_first() {
         )
     };
     const HELD: &str = "The edit is applied, with a limit that lasts until the Player restarts: ";
-    const ADVICE: &str = "If what you are checking depends on it, hot_reload with action \"recompile\" restarts the Player on the saved code and resets game state; otherwise go on.";
+    const ADVICE: &str = "If what you are checking depends on it, hot_reload with action \"recompile\" restarts the Player on the saved code and resets game state; otherwise go on. A process of the same game that starts on the saved code meanwhile (another Player of a network game, for instance) runs all of it, so the two may not agree until this Player restarts too.";
 
     script.edit(patch(1, vec![keeps.clone()]));
     run(&c, &mut state, &mut script, &source);
@@ -5248,4 +5248,62 @@ fn a_scene_naming_an_added_method_is_said_by_the_wait_after_the_save() {
         "{:?}",
         ended.hot_reload.new_notes
     );
+}
+
+/// A recompile that puts into effect what the Player did not run (a refused
+/// edit, or a limit that lasts until a restart) says so, and says in
+/// general words that other processes of the same game that took the same
+/// edits live need the same restart (netcode6-4). A recompile of a Player
+/// that ran all of the saved code says nothing of the kind.
+#[test]
+fn a_recompile_says_what_it_put_into_effect_for_other_processes_of_the_game() {
+    use loop_lines::*;
+    let c = controller_fixture("");
+    let ready = start_ready(&c);
+    let (mut state, mut script) = (report_loop(), Script::new(&c, &ready));
+    const OTHERS: &str = "Other processes of the same game that took the same edits without a restart (the other Players of a network game, for instance) still run without it until they are restarted on the saved code too.";
+    let recompile = |state: &mut crate::runner::testing::Loop, script: &mut Script, id: &str| {
+        let worker = recompile_in_background(&c, id);
+        script.compiles.push_back(Compiled::Unchanged);
+        run(&c, state, script, &window(&[], Some(id)));
+        worker.join().unwrap().expect("the recompile")
+    };
+    // A refused edit.
+    script.edit(refused());
+    run(&c, &mut state, &mut script, &window(&["/p/Assets/A.cs"], None));
+    let answered = recompile(&mut state, &mut script, "rc-refused");
+    assert_eq!(
+        answered.attention,
+        format!(
+            "The Player was restarted on the saved code, which puts into effect what it did not run before: Game.Boss: A type was added [type_added]. {OTHERS}"
+        )
+    );
+    // A once-run note of a patch.
+    script.edit(patch(
+        1,
+        vec![Why::new(
+            "runtime_initializer_changed",
+            "Game.Codec::Register()",
+            "Game.Codec::Register() ran when the Player started and does not run again.",
+        )],
+    ));
+    run(&c, &mut state, &mut script, &window(&["/p/Assets/A.cs"], None));
+    let answered = recompile(&mut state, &mut script, "rc-noted");
+    assert!(
+        answered.attention.starts_with("The Player was restarted on the saved code, which puts into effect what it did not run before: Game.Codec::Register(): Game.Codec::Register() ran when the Player started and does not run again [runtime_initializer_changed].")
+            && answered.attention.ends_with(OTHERS),
+        "{}",
+        answered.attention
+    );
+    // A Player that ran all of it: a plain restart.
+    let answered = recompile(&mut state, &mut script, "rc-plain");
+    assert_eq!(answered.attention, "");
+    // A lookup by name alone is no limit worth a sentence.
+    script.edit(patch(
+        2,
+        vec![note("added_method_invisible_by_name", "Game.A::OnJump()")],
+    ));
+    run(&c, &mut state, &mut script, &window(&["/p/Assets/A.cs"], None));
+    let answered = recompile(&mut state, &mut script, "rc-minor");
+    assert_eq!(answered.attention, "");
 }

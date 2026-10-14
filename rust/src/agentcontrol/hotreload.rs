@@ -259,6 +259,16 @@ fn peers(reasons: &[Reason]) -> &'static str {
     }
 }
 
+/// What a restart onto the saved code means for other processes of the
+/// same game: a process that took the same edits without a restart (a
+/// Player of the same network game in a session of its own, for one) still
+/// runs without what this restart put into effect. Said in general words;
+/// `peers` says more for a Netcode reason, and then this is left out.
+const OTHERS_RESTART: &str = " Other processes of the same game that took the same edits without a restart (the other Players of a network game, for instance) still run without it until they are restarted on the saved code too.";
+/// What a limit that lasts until a restart means for other processes of the
+/// same game: one that starts on the saved code meanwhile runs all of it.
+const OTHERS_STARTED: &str = " A process of the same game that starts on the saved code meanwhile (another Player of a network game, for instance) runs all of it, so the two may not agree until this Player restarts too.";
+
 fn no_count(count: &u64) -> bool {
     *count == 0
 }
@@ -535,6 +545,35 @@ impl HotReload {
         self.new_notes_sequence = sequence;
     }
 
+    /// What the running Player does not run of the saved code, as the
+    /// sentence a recompile's answer names: the first reason of a refusal
+    /// that stands, or the heaviest limit that lasts until a restart. Empty
+    /// when the Player runs all of it, or only lookups by name differ.
+    pub(super) fn carried(&self) -> String {
+        let said = |note: &Reason| {
+            let text = [note.member.as_str(), note.message.trim_end_matches('.')]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(": ");
+            format!("{text} [{}]", note.code)
+        };
+        if self.full_recompile_required {
+            return self.unsupported.first().map(said).unwrap_or_else(|| {
+                bounded(self.refused_summary.trim_end_matches('.'))
+            });
+        }
+        let mut notes: Vec<&Reason> = self
+            .notes
+            .iter()
+            .chain(self.last_patch.iter().flat_map(|patch| patch.notes.iter()))
+            .chain(self.brought.iter().flat_map(|answer| answer.notes.iter()))
+            .filter(|note| weight(&note.code).1 == Weight::Held)
+            .collect();
+        notes.sort_by_key(|note| weight(&note.code).0);
+        notes.first().map_or(String::new(), |note| said(note))
+    }
+
     /// What stands in the Player, for a caller whose mark nothing followed:
     /// how its code came to be, and the first limit of it that lasts until a
     /// restart. Another caller of the same server may have been told of the
@@ -626,7 +665,10 @@ impl HotReload {
                             reason.message.trim_end_matches('.'),
                             reason.code
                         )),
-                        peers(&restart.unsupported)
+                        match peers(&restart.unsupported) {
+                            "" => OTHERS_RESTART,
+                            peers => peers,
+                        }
                     ))
                 }
                 _ => None,
@@ -661,7 +703,7 @@ impl HotReload {
             match weight(&first.code).1 {
                 Weight::Told => format!("The edit is applied and its code runs. Note: {limit}."),
                 _ => format!(
-                    "The edit is applied, with a limit that lasts until the Player restarts: {limit}. If what you are checking depends on it, hot_reload with action \"recompile\" restarts the Player on the saved code and resets game state{network}; otherwise go on."
+                    "The edit is applied, with a limit that lasts until the Player restarts: {limit}. If what you are checking depends on it, hot_reload with action \"recompile\" restarts the Player on the saved code and resets game state{network}; otherwise go on.{OTHERS_STARTED}"
                 ),
             }
         });
@@ -776,6 +818,10 @@ impl HotReload {
 #[derive(Clone)]
 pub(super) struct Recompile {
     id: String,
+    /// What the Player that the command restarts did not run of the saved
+    /// code when the command was sent: the refusal that stood, or the first
+    /// limit that lasts until a restart. Empty when it ran all of it.
+    carried: String,
     /// Sequence of the event that answered it; 0 until the runner has.
     answered: u64,
     /// The text of the `update-rejected` that answered it; none for a restart.
@@ -966,8 +1012,10 @@ impl Controller {
                 while inner.recompiles.len() >= RECOMPILE_HISTORY {
                     inner.recompiles.pop_front();
                 }
+                let carried = inner.state.hot_reload.carried();
                 inner.recompiles.push_back(Recompile {
                     id: request_id.into(),
+                    carried,
                     answered: 0,
                     rejection: None,
                 });
@@ -1028,8 +1076,22 @@ impl Controller {
                         // A C# edit that was patched in after the restart may
                         // have brought notes.
                         let mut state = state;
-                        // The restart itself is what the caller asked for.
+                        // The restart itself is what the caller asked for;
+                        // what it put into effect concerns other processes
+                        // of the game that took the same edits live
+                        // (netcode6-4).
                         state.attention = state.hot_reload.attention(sent.answered);
+                        if !sent.carried.is_empty() {
+                            let restarted = format!(
+                                "The Player was restarted on the saved code, which puts into effect what it did not run before: {}.{OTHERS_RESTART}",
+                                sent.carried
+                            );
+                            state.attention = [restarted, state.attention]
+                                .into_iter()
+                                .filter(|part| !part.is_empty())
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                        }
                         state.hot_reload.since(sent.answered);
                         let mut inner = self.lock();
                         inner.told = inner.told.max(state.last_sequence);
