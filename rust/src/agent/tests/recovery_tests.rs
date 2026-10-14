@@ -294,6 +294,47 @@ fn a_receipt_made_from_other_sources_does_not_end_the_player() {
     drop(held);
 }
 
+/// A recompile issued while the saved sources stand rejected for having
+/// left the graph is answered like a wait, with the preparation that
+/// answers the rejection; the Player that runs is not restarted on the old
+/// graph (session6-4).
+#[test]
+fn a_recompile_after_a_graph_rejection_names_the_preparation() {
+    let (rig, initial) = rig("plain");
+    let first = rig.controller.status();
+    rig.save_asmdef();
+    rig.reject(false);
+    // The job of the preparation waits for this lock: no Unity here.
+    let held = rig.service.0.mu.lock().unwrap();
+    let named = identity(&rig.project, &initial.baseline, 0);
+    let recompiled = rig
+        .service
+        .runtime(
+            &ctx(),
+            "hot_reload",
+            &bytes(&json!({"action": "recompile", "requestId": "rc-graph"})),
+        )
+        .map(|value| decoded(&value))
+        .unwrap();
+    assert!(
+        recompiled["status"] == "result_pending"
+            && recompiled["preparation"]["requestId"] == named.as_str(),
+        "{recompiled}"
+    );
+    let after = rig.controller.status();
+    assert!(
+        after.session_id == first.session_id
+            && after.phase == "ready"
+            && after.hot_reload.pending_recompile.is_empty()
+            && alive(first.pid),
+        "the recompile restarted the Player: {after:?}"
+    );
+    assert_eq!(rig.launches().len(), 1);
+    assert_eq!(rig.jobs(), vec![named]);
+    rig.service.close_action_jobs();
+    drop(held);
+}
+
 /// The same receipt once its preparation is the one the session runs on:
 /// the job activated it while the edit was undone, and the edit is made
 /// again. The runner rejects the sources, and the receipt of their name is

@@ -922,6 +922,22 @@ impl Controller {
                     jsondoc::quote(request_id)
                 );
                 let ready = inner.state.phase == "ready";
+                // The saved sources have left the prepared graph. A restart
+                // compiles that graph, so it would answer the save with a
+                // Player that lacks what was added (session6-4).
+                let left_graph = inner.state.preparation_required
+                    || !inner.state.code_refused()
+                        && crate::compiler::requires_new_graph(&inner.state.update_error);
+                if ready && left_graph {
+                    return Err(failed(
+                        inner.state.clone(),
+                        Error::new(format!(
+                            "{}. The change needs a new preparation of the project, which no recompile does: session_control(wait_update) or session_control(status) queues it and the session continues on it when it is done",
+                            inner.state.update_error.trim_end_matches('.')
+                        )),
+                        None,
+                    ));
+                }
                 let Some(commands) = inner.commands.as_mut().filter(|_| ready) else {
                     return Err(failed(
                         inner.state.clone(),
