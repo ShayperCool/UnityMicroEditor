@@ -117,14 +117,24 @@ wait succeeds while that member is true, whatever `afterSequence` is.
 compiled code and resets game state; it returns the new
 session state, or the compiler's text when the sources do not compile, which
 keeps the Player. A change that is applied, or needs no patch, can still leave
-something the Player takes over only after a recompile, such as the body of a
+something the Player takes over only after a restart, such as the body of a
 coroutine that is running: the reply of the wait then starts with `attention`
-and `hotReload.newNotes` lists it, while `hotReload.lastPatch.notes` and
-`hotReload.notes` hold every note that stands. While the runner has marked an
-answer as not its last the state has `updatePending: true` and neither wait
-returns. A session reply lists the newest events of the session and a wait
-those after `afterSequence`; `events` sets how many. The events of a reply
-leave out `notes`, the standing list that the state holds. `status` returns the
+and `hotReload.newNotes` lists every such note that an answer after
+`afterSequence` brought, also when several saves were answered one after the
+other; `hotReload.lastPatch.notes` and `hotReload.notes` hold the notes that
+stand, up to 16 with the counts and the report for the rest. `attention` is
+also how a wait says that the runner restarted the Player by itself, and that
+nothing was applied or rejected after `afterSequence`. A wait reports what
+stands as soon as the runner has answered for the saves made before it and
+works on nothing: it is held while the runner compiles or has marked an
+answer as not its last (`updatePending: true`), not for a save nobody made.
+A compile error and a refused edit are reported for every `afterSequence`
+until an update follows them. A session reply lists the newest events of the
+session and a wait those after `afterSequence` (without the argument: after
+the last wait or recompile that answered); `events` sets how many. The events
+of a reply leave out the lists the state holds (`notes`, `newNotes`,
+`members`, `unsupported`) and all but the beginning of an `error`; the state
+keeps the first 4 KiB of a rejection and names the file with all of it. `status` returns the
 `hotReload` state, also while no session runs. The session options `hotReload: false` (restart on every C# edit) and
 `onUnsupportedEdit: "restart"` (restart instead of the error) select the other
 behaviors. The session state omits `hotReload` while it has nothing to report:
@@ -184,8 +194,8 @@ Error codes of hot reload:
 
 | Code | Returned by | Meaning and `error.details` |
 | --- | --- | --- |
-| `full_recompile_required` | `session_control(wait_update)` and `session_control(wait)`; `hot_reload(recompile)` when an edit compiled after its restart was refused | The C# edit compiled but cannot be applied to the running Player, which keeps the previous code. `unsupported` (at most 16 of `{code, member, message}`), `unsupportedCount`, `report` (file with the complete result) and `next`, the call that applies the edit: `{"tool": "hot_reload", "arguments": {"action": "recompile"}}`. `rejected` (`{error, sequence}`) when the running Player rejected a scene or asset change after `afterSequence` while the refusal stands. |
-| `wait_timeout` | `session_control(wait_update)` and `session_control(wait)` with `timeoutSeconds`, or when the request's own deadline passes | The wait ended without an answer; nothing was decided and the same call can be repeated. `afterSequence`, `phase`, `lastSequence`, `lastUpdateSequence`, `lastUpdateRejectedSequence`, `updatePending`, and `runnerAnswered`: false while the runner has not said that it answered every change saved before the call. |
+| `full_recompile_required` | `session_control(wait_update)` and `session_control(wait)`; `hot_reload(recompile)` when an edit compiled after its restart was refused | The C# edit compiled but cannot be applied to the running Player, which keeps the previous code. `unsupported` (at most 16 of `{code, member, message}`), `unsupportedCount`, `report` (file with the complete result) and `next`, the call that applies the edit: `{"tool": "hot_reload", "arguments": {"action": "recompile"}}`. `rejected` (`{error, sequence}`) when the running Player rejected a scene or asset change after `afterSequence` while the refusal stands. `lastSequence` of the session, the mark for the next wait: a failed call returns no session state. |
+| `wait_timeout` | `session_control(wait_update)` and `session_control(wait)` with `timeoutSeconds` (1 to 86400; a call without it has no limit, and a client that gives up cancels it, which is the reply `cancelled`) | The wait ended without an answer: the session was starting, the runner had not answered or was still working, or a recompile was pending. Nothing was decided and the same call can be repeated. `afterSequence`, `phase`, `lastSequence`, `lastUpdateSequence`, `lastUpdateRejectedSequence`, `updatePending`, and `runnerAnswered`: false while the runner has not said that it answered every change saved before the call. |
 | `session_not_ready` | `hot_reload(recompile)` | No Player is ready. `phase` of the session. |
 | `recompile_pending` | `hot_reload(recompile)` | Another recompile has not been answered. `requestId` of the pending one. |
 
