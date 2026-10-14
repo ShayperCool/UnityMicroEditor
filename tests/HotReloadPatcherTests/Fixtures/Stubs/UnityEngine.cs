@@ -29,3 +29,12 @@ namespace UnityEngine
         void OnAfterDeserialize();
     }
 }
+
+namespace UnityEngine.Serialization
+{
+    [AttributeUsage(AttributeTargets.Field, AllowMultiple = true)]
+    public sealed class FormerlySerializedAsAttribute : Attribute
+    {
+        public FormerlySerializedAsAttribute(string oldName) { }
+    }
+}
