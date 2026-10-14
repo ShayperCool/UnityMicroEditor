@@ -17,5 +17,8 @@ SDK-only check, without a Player or Editor:
 ```bash
 UME_NETCODE_SDK=/absolute/Unity/Editor/Unity \
 UNITY_MICRO_EDITOR_TEST_PROJECT=/absolute/prepared/game/project \
+UME_HOT_RELOAD_HOST=/absolute/prepared/game/project/Library/UnityMicroEditor/stage/project/Builds/UnityMicroEditor/<id>-host/Project.x86_64 \
   cargo test --locked --lib compiler::tests::netcode_postprocessor_sdk -- --nocapture
 ```
+
+`UME_HOT_RELOAD_HOST` names the host Player that `auto-prepare` built for the project, whose `Managed` directory holds the assemblies the fixture is compiled against. Without it the test looks for `Builds/CLIPlayHybridHost/UnityPlayHost.x86_64` in the project, where earlier hosts were built.

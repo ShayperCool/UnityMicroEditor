@@ -2612,13 +2612,23 @@ fn netcode_postprocessor_sdk() {
     let data = join(&[&sysutil::dir(&editor), "Data"]);
     let csc = sys::glob_lossy(&join(&[&data, "DotNetSdk/sdk/*/Roslyn/bincore/csc.dll"]));
     assert_eq!(csc.len(), 1, "expected one pinned SDK");
+    // The host Player of the project: `UME_HOT_RELOAD_HOST` names the
+    // executable that auto-prepare built (below
+    // Library/UnityMicroEditor/stage/project/Builds); without it the test
+    // looks where earlier hosts were built.
+    let player = std::env::var("UME_HOT_RELOAD_HOST")
+        .ok()
+        .filter(|host| !host.is_empty())
+        .map(|host| crate::project::lexpath::abs(&host).unwrap())
+        .unwrap_or_else(|| join(&[&project, "Builds/CLIPlayHybridHost/UnityPlayHost.x86_64"]));
+    let managed = crate::compiler::player_managed(&player);
     let (_guard, root) = temp();
     let ctx = background();
     let mut compiler = Compiler {
         project: project.clone(),
         editor,
         cache: join(&[&root, "compiler"]),
-        player: join(&[&project, "Builds/CLIPlayHybridHost/UnityPlayHost.x86_64"]),
+        player: player.clone(),
         dotnet: join(&[&data, "DotNetSdk/dotnet"]),
         csc: csc[0].clone(),
         configs: NilMap::from([(
@@ -2635,10 +2645,7 @@ fn netcode_postprocessor_sdk() {
     let bcl = join(&[&data, "MonoBleedingEdge/lib/mono/unityaot-linux"]);
     let mut references = sys::glob_lossy(&join(&[&bcl, "*.dll"]));
     references.extend(sys::glob_lossy(&join(&[&bcl, "Facades/*.dll"])));
-    references.extend(sys::glob_lossy(&join(&[
-        &project,
-        "Builds/CLIPlayHybridHost/UnityPlayHost_Data/Managed/*.dll",
-    ])));
+    references.extend(sys::glob_lossy(&join(&[&managed, "*.dll"])));
     let refs = deduplicate_references(&references);
     let source = write_graph_file(
         &root,
@@ -2677,13 +2684,13 @@ fn netcode_postprocessor_sdk() {
     assert!(
         result["rpcCount"] == 1
             && result["rpcs"].as_array().map_or(0, Vec::len) == 1
-            && rpc["Method"] == "UseRpc"
-            && rpc["Handler"]
+            && rpc["method"] == "UseRpc"
+            && rpc["handler"]
                 .as_str()
                 .is_some_and(|name| name.starts_with("__rpc_handler_"))
-            && calls("SendCalls") >= 2
-            && calls("WriteCalls") != 0
-            && calls("ReadCalls") != 0,
+            && calls("sendCalls") >= 2
+            && calls("writeCalls") != 0
+            && calls("readCalls") != 0,
         "RPC send/receive payload code was not generated: {result}"
     );
     assert!(
@@ -3047,4 +3054,61 @@ fn compiler_behaviour_layouts_sdk() {
             "SmbCbMachineInherited"
         ])
     );
+}
+
+/// What a preparation was made from, read off its compiler plan: the
+/// managed inputs it recorded must be as they were, and `Assets` must hold
+/// no managed configuration that the plan does not know. This is the check
+/// of a runner's start, made without one.
+#[test]
+fn a_compiler_plan_accepts_the_sources_it_was_made_with() {
+    let (_guard, project) = temp();
+    let asmdef = join(&[&project, "Assets/Lib/Lib.asmdef"]);
+    write_graph_file(&project, "Assets/Main.unity", "scene");
+    let plan = |name: &str, inputs: &[&str]| -> String {
+        let mut recorded = NilMap::from([("public-input", "verified".to_string())]);
+        for input in inputs {
+            recorded.insert(*input, file_hash(input).unwrap());
+        }
+        let manifest = CompileManifest {
+            schema: 1,
+            project: project.clone(),
+            compiler_inputs: recorded,
+            ..Default::default()
+        };
+        let path = join(&[
+            &project,
+            "Library/UnityMicroEditor/preparations",
+            name,
+            "current.json",
+        ]);
+        fs::create_dir_all(sysutil::dir(&path)).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_vec(
+                &json!({"schemaVersion": 1, "project": project, "compiler": manifest}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        path
+    };
+    let plain = plan("plain", &[]);
+    Compiler::graph_accepts_sources(&project, &plain).unwrap();
+    // An assembly definition the plan does not know.
+    write_graph_file(&project, "Assets/Lib/Lib.asmdef", r#"{"name":"Lib"}"#);
+    let refused = Compiler::graph_accepts_sources(&project, &plain).unwrap_err();
+    assert!(requires_new_graph(&format!("{refused:#}")), "{refused:#}");
+    // A plan that was made with it accepts the sources, until the file
+    // changes or goes.
+    let with_library = plan("with-library", &[&asmdef]);
+    Compiler::graph_accepts_sources(&project, &with_library).unwrap();
+    fs::write(&asmdef, r#"{"name":"Lib","allowUnsafeCode":true}"#).unwrap();
+    assert!(Compiler::graph_accepts_sources(&project, &with_library).is_err());
+    fs::remove_file(&asmdef).unwrap();
+    assert!(Compiler::graph_accepts_sources(&project, &with_library).is_err());
+    Compiler::graph_accepts_sources(&project, &plain).unwrap();
+    // The plan of another project is none of this one.
+    let (_other_guard, other) = temp();
+    assert!(Compiler::graph_accepts_sources(&other, &plain).is_err());
 }

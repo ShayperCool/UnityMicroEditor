@@ -35,7 +35,7 @@ pub use prepare::{
 };
 pub use revision::{CodeRevision, player_files};
 pub use source_graph::{managed_plugin, remove_source_native_initializers};
-pub use sys::{CommandError, compiler_command, glob, path_match};
+pub use sys::{BUILD_WITHOUT_SERVERS, CommandError, compiler_command, glob, path_match};
 pub use sys::{Walk, WalkEntry, glob_lossy, is_not_exist, walk_dir};
 
 use nilable::{is_empty, is_false, nz};
@@ -145,6 +145,16 @@ pub struct CompileAssembly {
         skip_serializing_if = "is_empty"
     )]
     pub netcode_postprocessor: String,
+    /// The key of the lifecycle helper whose rewrite this DLL was compiled
+    /// from; empty in a preparation made before the helper was recorded. A
+    /// session with another helper compiles the assembly again before it
+    /// starts: its other caches are keyed by the helper too.
+    #[serde(
+        rename = "lifecycleHelper",
+        deserialize_with = "nz",
+        skip_serializing_if = "is_empty"
+    )]
+    pub lifecycle_helper: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -483,6 +493,8 @@ pub struct Compiler {
     pub dotnet: String,
     pub csc: String,
     pub helper: String,
+    /// The cache key of `helper`: its sources and the SDK that builds them.
+    pub helper_key: String,
     pub manifest: CompileManifest,
     pub configs: NilMap<AssemblyConfig>,
     pub configuration_hashes: NilMap<String>,

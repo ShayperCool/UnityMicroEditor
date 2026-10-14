@@ -579,6 +579,7 @@ pub fn prepare_compiler_graph_with(
         assembly.sha256 = file_hash(&dll)?;
         assembly.assembly_input_hash = sysutil::base(&sysutil::dir(&dll));
         assembly.lifecycle_barrier = proof.clone();
+        assembly.lifecycle_helper = compiler.helper_key.clone();
         if needs_netcode(&assembly)
             && let Some(processor) = &compiler.netcode
         {
