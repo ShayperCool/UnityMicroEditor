@@ -8,7 +8,10 @@ It is built with the .NET 8 SDK of the Unity installation and uses only `System.
 dotnet HotReloadPatcher.dll <request.json>                       # one JSON document on stdout, exit 0
 dotnet HotReloadPatcher.dll --codes                              # every reason and note code with its meaning
 dotnet HotReloadPatcher.dll --explain <request.json> <member id> # what the comparison sees of one method
+dotnet HotReloadPatcher.dll --serve                              # requests for the life of a watched session
 ```
+
+With `--serve` the builder prints `{"ready":true,"protocol":1}` and then answers one request per line of its standard input, `{"id":3,"directory":"/abs","arguments":["/abs/request.json"]}`, with one line `{"id":3,"exit":0,"output":"<the result document and a newline>","error":"","kind":""}`: the exit code and the two texts a run of its own gives for the same arguments. Only a request path is served; `--codes`, `--explain` and anything else are answered with exit 64. The process keeps nothing from one request to the next: the numbers it gives the closure types of a request (the text of a self-referring layout) start anew with every request, as in a run of its own. The end of its standard input ends it. A watched session sends its attempts to one such process and falls back to a run of its own for an attempt the process does not answer with a result (see [the runner's processes](../../docs/RUNNER.md#processes-a-watched-session-keeps)). The tests in `tests/HotReloadPatcherTests` send every request of the harness to one served process as well and compare result and patch bytes with the run of its own, then send them all again in the reverse order.
 
 A request that cannot be read (bad JSON, a missing or invalid assembly, an unreadable previous result) is a message on stderr and exit code 1. An edit that cannot be patched is a normal result with the verdict `unsupported`. So is a failure of the tool on one assembly: the reason is `internal_error` with the exception, and nothing is written.
 
