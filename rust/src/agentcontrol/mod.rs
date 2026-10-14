@@ -38,6 +38,22 @@ use hotreload::Refused;
 pub use hotreload::{HotReload, LastPatch, LastRestart, Reason};
 
 const STDERR_LOG: &str = "agent-runner-stderr.log";
+/// How a start that another session's lock refuses begins; the reply has
+/// the error code `session_output_in_use`.
+const OUTPUT_IN_USE: &str = "Session output is already in use";
+/// The failure of a start or reset: typed when another session holds the
+/// output, which the caller can act on.
+fn start_failure(error: Error, output: &str) -> Failure {
+    let typed = error.message().starts_with(OUTPUT_IN_USE).then(|| Typed {
+        code: "session_output_in_use",
+        details: serde_json::json!({ "output": output }),
+    });
+    Failure {
+        error,
+        reply: Some(Reply::State(Box::default())),
+        typed,
+    }
+}
 
 /// The `arguments` of a start or reset that the project service takes for a
 /// preparation: the scene, and the inputs of the first one.
@@ -642,6 +658,24 @@ impl Controller {
         }
         canonical_destination(&options.output)?;
         sysutil::mkdir_all(&options.output)?;
+        // One session runs on an output at a time; the runner of another
+        // server would fail on the lock after this start answered, and its
+        // log would be cut short by this one (mcp6-6).
+        if let Some(holder) = crate::util::session_lock_holder(&options.output) {
+            let by = match holder.filter(|pid| *pid > 0) {
+                Some(pid) => format!(
+                    " by process {pid} ({})",
+                    std::fs::read(format!("/proc/{pid}/cmdline"))
+                        .map(|line| String::from_utf8_lossy(&line).replace('\0', " ").trim().chars().take(160).collect::<String>())
+                        .unwrap_or_default()
+                ),
+                None => String::new(),
+            };
+            return Err(Error::new(format!(
+                "{OUTPUT_IN_USE} ({}){by}: another session of this project runs on it, for example one started by another unity-micro-editor mcp server of the project. Stop that session (session_control stop on the server that started it) or use that server; a project runs one session at a time",
+                options.output
+            )));
+        }
         let mut command = Command::new(&options.runner);
         command
             .args(["run", "--project", &options.project])
@@ -1635,11 +1669,7 @@ impl Controller {
                 }
                 return match self.start() {
                     Ok(started) => Ok(state(started, None, REPLY_EVENTS)),
-                    Err(error) => Err(Failure {
-                        error,
-                        reply: Some(Reply::State(Box::default())),
-                        typed: None,
-                    }),
+                    Err(error) => Err(start_failure(error, &self.0.options.output)),
                 };
             }
             "session_stop" => {
@@ -1659,11 +1689,7 @@ impl Controller {
                 }
                 return match self.start() {
                     Ok(started) => Ok(state(started, None, REPLY_EVENTS)),
-                    Err(error) => Err(Failure {
-                        error,
-                        reply: Some(Reply::State(Box::default())),
-                        typed: None,
-                    }),
+                    Err(error) => Err(start_failure(error, &self.0.options.output)),
                 };
             }
             "session_wait" | "session_wait_update" => {

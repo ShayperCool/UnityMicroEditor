@@ -5307,3 +5307,36 @@ fn a_recompile_says_what_it_put_into_effect_for_other_processes_of_the_game() {
     let answered = recompile(&mut state, &mut script, "rc-minor");
     assert_eq!(answered.attention, "");
 }
+
+/// Another session holds the session output of the project (a second MCP
+/// server on the same project): a start is refused with a code and the
+/// holder, before anything is launched, and the other runner's log is not
+/// cut (mcp6-6).
+#[test]
+fn a_start_on_an_output_another_session_holds_is_refused() {
+    let c = controller_fixture("");
+    let output = c.0.options.output.clone();
+    std::fs::create_dir_all(&output).unwrap();
+    let log = sysutil::join(&[&output, "agent-runner-stderr.log"]);
+    std::fs::write(&log, "the other runner's log\n").unwrap();
+    let held = crate::util::lock_session(&output).unwrap();
+    let failure = c
+        .handle(&seconds(3), "session_control", br#"{"action":"start"}"#)
+        .expect_err("a start on an output another session holds");
+    let typed = failure.typed.expect("a typed error");
+    assert_eq!(typed.code, "session_output_in_use");
+    let message = failure.error.to_string();
+    assert!(
+        message.starts_with("Session output is already in use")
+            && message.contains(&format!("by process {}", std::process::id()))
+            && message.contains("a project runs one session at a time"),
+        "{message}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap(),
+        "the other runner's log\n"
+    );
+    assert_eq!(c.status().phase, "stopped");
+    drop(held);
+    start_ready(&c);
+}
