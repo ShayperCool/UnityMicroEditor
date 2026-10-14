@@ -769,12 +769,17 @@ impl Service {
                 }
                 // The inputs of a preparation do nothing to a session that
                 // has one; a caller that gives them must not be told that the
-                // Player runs with them.
-                let given: Vec<&str> = ["hostPlayer", "nativeCatalog", "engineProfile"]
-                    .into_iter()
-                    .filter(|key| !text(&input.arguments, key).is_empty())
-                    .chain(input.arguments.get("rebuildHost").is_some_and(Any::is_true).then_some("rebuildHost"))
-                    .collect();
+                // Player runs with them. The inputs the active preparation
+                // was made with are what the session runs: the start that
+                // began that preparation is reissued with them (session6-5).
+                let inputs = match preparation_inputs(&input.arguments) {
+                    Ok(inputs) => inputs,
+                    Err(error) => return Some(RuntimeOutcome::failed(error)),
+                };
+                let given: Vec<&str> = match self.made_with(&baseline, &inputs) {
+                    true => Vec::new(),
+                    false => inputs.iter().map(|(key, _)| *key).collect(),
+                };
                 if !given.is_empty() {
                     return Some(RuntimeOutcome::failed(fail(
                         "preparation_input_ignored",
@@ -811,14 +816,15 @@ impl Service {
         ]);
         // Optional preparation inputs travel with the start. Without them the
         // preparation finds and reuses the newest valid host by itself.
-        for key in ["hostPlayer", "nativeCatalog", "engineProfile"] {
-            let value = text(&input.arguments, key);
-            if !value.is_empty() {
-                preparation.insert(key.into(), value.into());
-            }
-        }
-        if input.arguments.get("rebuildHost").is_some_and(Any::is_true) {
-            preparation.insert("rebuildHost".into(), true.into());
+        let inputs = match preparation_inputs(&input.arguments) {
+            Ok(inputs) => inputs,
+            Err(error) => return RuntimeOutcome::failed(error),
+        };
+        for (key, value) in inputs {
+            match key {
+                "rebuildHost" => preparation.insert(key.into(), true.into()),
+                _ => preparation.insert(key.into(), value.into()),
+            };
         }
         let encoded = match super::marshal(&Any::Object(preparation)) {
             Ok(encoded) => encoded,
@@ -851,5 +857,67 @@ impl Service {
             self.controller_handle(ctx, name, raw)
         })
         .unwrap_or_else(RuntimeOutcome::failed)
+    }
+}
+
+/// The preparation inputs a start or reset names, as given: a path for
+/// `hostPlayer`, `nativeCatalog` and `engineProfile`, `true` for
+/// `rebuildHost`. Null, an empty path and `false` name none. A value of
+/// another type is refused rather than taken for none (mcp6-3).
+pub(crate) fn preparation_inputs(arguments: &AnyMap) -> Result<Vec<(&'static str, String)>> {
+    let mut given = Vec::new();
+    for key in ["hostPlayer", "nativeCatalog", "engineProfile"] {
+        match arguments.get(key) {
+            None | Some(Any::Null) => {}
+            Some(Any::String(path)) if path.is_empty() => {}
+            Some(Any::String(path)) => given.push((key, path.clone())),
+            Some(_) => {
+                return Err(fail(
+                    "invalid_request",
+                    format!("{key} must be a path (a string) or null"),
+                ));
+            }
+        }
+    }
+    match arguments.get("rebuildHost") {
+        None | Some(Any::Null) | Some(Any::Bool(false)) => {}
+        Some(Any::Bool(true)) => given.push(("rebuildHost", "true".into())),
+        Some(_) => {
+            return Err(fail(
+                "invalid_request",
+                "rebuildHost must be true, false or null",
+            ));
+        }
+    }
+    Ok(given)
+}
+
+impl Service {
+    /// Whether the preparation of `baseline` was requested with every one of
+    /// these inputs: the job record of its request id names them.
+    fn made_with(&self, baseline: &str, inputs: &[(&str, String)]) -> bool {
+        if inputs.is_empty() {
+            return true;
+        }
+        let id = crate::sysutil::base(&crate::sysutil::dir(baseline));
+        let record = join(&[
+            &self.0.project,
+            "Library/UnityMicroEditor/action-jobs",
+            &sha256(id.as_bytes()),
+            "request.json",
+        ]);
+        let Some(record) = std::fs::read(&record)
+            .ok()
+            .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
+        else {
+            return false;
+        };
+        let arguments = &record["arguments"];
+        record["action"] == "project_prepare"
+            && record["identity"] == id.as_str()
+            && inputs.iter().all(|(key, value)| match *key {
+                "rebuildHost" => arguments[key] == serde_json::Value::Bool(true),
+                _ => arguments[key].as_str() == Some(value.as_str()),
+            })
     }
 }
