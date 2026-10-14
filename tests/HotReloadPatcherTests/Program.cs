@@ -846,6 +846,36 @@ internal static class Program
             Refused("unity_message_added App.Stopwatch::Update()"));
     }
 
+    /// A string of the game's other code names an added method, or the game computes the names
+    /// it calls methods of its objects by (Fixtures/Named).
+    static void NamedElsewhere(string unityStub)
+    {
+        string root = Path.Combine(work, "named");
+        string lib = Fixture("Named", "Lib.cs"), game = Fixture("Named", "Game.cs");
+        string Lib(string directory, string? define = null) => Compile(Path.Combine(root, directory, "Lib.dll"), new[] { lib }, new[] { unityStub }, define);
+        string Game(string directory, string lib, string? define = null) => Compile(Path.Combine(root, directory, "Game.dll"), new[] { game }, new[] { unityStub, lib }, define);
+        string libLoaded = Lib("loaded"), libCurrent = Lib("current", "NAMED_ADD");
+        string gameLoaded = Game("loaded", libLoaded), gameCurrent = Game("current", libCurrent, "NAMED_CALL");
+        var named = Patch().Methods("Lib.Target::TakeDamage()", "Lib.Commands::Reset()")
+            .Noted("added_method_named_by_string Lib.Target::TakeDamage()", "added_method_named_by_string Lib.Commands::Reset()");
+        // Both assemblies change in one request.
+        var both = Patcher("named by another entry", Path.Combine(root, "both"), 1, new[] { new AssemblyPair("Lib", libLoaded, libCurrent), new AssemblyPair("Game", gameLoaded, gameCurrent) });
+        Expect("named by another entry", both, "Lib", named);
+        Expect("named by another entry", both, "Game", Patch().Redirects("changed Game.Shooter::Update()"));
+        // The strings stand in an assembly the edit does not touch, next to the loaded one.
+        string calling = Lib("sibling-call");
+        Game("sibling-call", calling, "NAMED_CALL");
+        Expect("named by a sibling", Patcher("named by a sibling", Path.Combine(root, "sibling-call-out"), 1, new[] { new AssemblyPair("Lib", calling, libCurrent) }), "Lib", named);
+        // The sibling calls by a name it computes: any added method of an engine object may be meant.
+        string computing = Lib("sibling-computed");
+        Game("sibling-computed", computing, "NAMED_COMPUTED");
+        Expect("computed name", Patcher("computed name", Path.Combine(root, "sibling-computed-out"), 1, new[] { new AssemblyPair("Lib", computing, libCurrent) }), "Lib",
+            Patch().Methods("Lib.Target::TakeDamage()", "Lib.Commands::Reset()").Noted("added_method_computed_name Lib.Target::TakeDamage()"));
+        // Neither: the note of every added method of an engine object.
+        Expect("not named", Patcher("not named", Path.Combine(root, "plain-out"), 1, new[] { new AssemblyPair("Lib", libLoaded, libCurrent) }), "Lib",
+            Patch().Methods("Lib.Target::TakeDamage()", "Lib.Commands::Reset()").Noted("added_method_invisible_by_name Lib.Target::TakeDamage()"));
+    }
+
     static void Interface()
     {
         string directory = Path.Combine(work, "interface");
@@ -1189,6 +1219,7 @@ internal static class Program
             Classification(unityStub, netcodeStub);
             Quietness();
             CrossAssembly();
+            NamedElsewhere(unityStub);
             Behaviour(unityStub);
             Generations();
             Interface();

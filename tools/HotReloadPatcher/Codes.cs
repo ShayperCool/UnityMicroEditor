@@ -60,6 +60,7 @@ internal static class Codes
     public const string AddedMemberAttributesIgnored = "added_member_attributes_ignored";
     public const string AddedMethodInvisibleByName = "added_method_invisible_by_name";
     public const string AddedMethodNamedByString = "added_method_named_by_string";
+    public const string AddedMethodComputedName = "added_method_computed_name";
     public const string AccessibilityChanged = "accessibility_changed";
     public const string RuntimeInitializerAdded = "runtime_initializer_added";
     public const string RuntimeInitializerRemoved = "runtime_initializer_removed";
@@ -123,7 +124,8 @@ internal static class Codes
         (AddedMethodDelegateIdentity, "Patched code makes a delegate of an added method that the earlier patch also had; each patch has its own copy, so `-=` does not remove a handler subscribed while the earlier patch was applied, until a full recompile."),
         (AddedMemberAttributesIgnored, "Attributes on an added member are invisible to reflection until a full recompile."),
         (AddedMethodInvisibleByName, "An added instance method of an engine object cannot be found by name until a full recompile: SendMessage, Invoke, StartCoroutine(string), UnityEvent, animation events, input messages and reflection look in the loaded class. Calls in code reach it."),
-        (AddedMethodNamedByString, "A string of the game equals the name of an added method: Invoke, SendMessage, StartCoroutine(string) and reflection look in the loaded class and do not find it until a full recompile, so a call by that name does nothing. The note names the types whose code holds the string and is new again when another place names the method."),
+        (AddedMethodNamedByString, "A string of the game equals the name of an added method: Invoke, SendMessage, StartCoroutine(string) and reflection look in the loaded class and do not find it until a full recompile, so a call by that name does nothing. The string may stand in another assembly of the game (another entry of the request, or an assembly next to the loaded one that references it, that it references, or Assembly-CSharp). The note names the types whose code holds the string and is new again when another place names the method."),
+        (AddedMethodComputedName, "An instance method was added to an engine object, and code of the game calls SendMessage, BroadcastMessage, Invoke, InvokeRepeating or StartCoroutine with a name it computes: if such a call means the added method, it does nothing until a full recompile. The note names the types whose code computes the name."),
         (AccessibilityChanged, "The accessibility of an existing member changed; reflection keeps the loaded accessibility until a full recompile. A field that Unity would serialize differently is refused instead (serialization_changed)."),
         (RuntimeInitializerAdded, "A [RuntimeInitializeOnLoadMethod] method was added; it runs at the next start."),
         (RuntimeInitializerRemoved, "A [RuntimeInitializeOnLoadMethod] method was removed or renamed; the change is effective at the next start."),
