@@ -133,6 +133,8 @@ On 2026-10-14, on a copy of `Samples/RawProject` (one game assembly; AMD Ryzen 7
 
 The same measurement after the latency work was rebased onto the stage 5 fixes of the patch builder, the runner and the controller, against the binary with those fixes and without the latency work (32 edits each, load average 2.4 and 2.6): 0.42 s median and 0.47 s p90 against 3.14 s and 3.31 s.
 
+After the stage 6 fixes, a window whose scene manifest would not change publishes no scene revision, so a patched edit no longer waits for the `fsync` below. Alternating sessions on a copy of the sample (`Temp/e2e/hr`, 32 edits each, load average 3.1 and 3.6, 2026-10-14) against the binary of 999e3cc: 0.33 s median and 0.43 s p90 against 0.44 s and 0.55 s; the step after the patch took 0.006 s against 0.112 s (medians of the last session of each).
+
 Where the time of an edit goes, from `UME_TIMINGS=1` (median of 32 edits of this binary):
 
 | Step | Seconds |
@@ -147,7 +149,7 @@ Where the time of an edit goes, from `UME_TIMINGS=1` (median of 32 edits of this
 | The rest of the compile (sources, snapshots, the DLL into the copy, the revision entry) | 0.007 |
 | Patch builder (served) | 0.002 |
 | Request to the Player and its acknowledgement | 0.020 |
-| After the patch: scene preparation for the running Player, the scene check, the events (0.033 s with the old code). Most of it is the `fsync` of the new scene revision, which waits for the filesystem journal of the Player directory the compile copied a moment before: 0.09 to 0.12 s on XFS, against 0.015 to 0.03 s with the old code, which spent 3 s between the copy and that `fsync` | 0.086 |
+| After the patch: scene preparation for the running Player, the scene check, the events (0.033 s with the old code). Most of it was the `fsync` of the new scene revision, which waited for the filesystem journal of the Player directory the compile copied a moment before: 0.09 to 0.12 s on XFS. Since stage 6 no revision is written when the manifest does not change, and the step takes about 0.006 s | 0.086 |
 | In all (`totalSeconds`, the median, not the sum) | 0.413 |
 
 The first edit of a session also starts the three processes below, and took 1.8 s against 3.6 s with the old code (one session of each): the server's first compile 0.84 s, the helper's first rewrite 0.56 s, the builder's first run 0.23 s. A session that compiled at its start (for example because its preparation was made by another build of the helper) has warm processes, and its first edit took 0.29 s of compile. The applier itself needs 2 to 4 ms for a request and 10 to 30 ms for the first one of a Player process. `compileSeconds` of `code-patched` is the whole compile step of the window; with `patchSeconds` and the 35 ms the watcher waits for more changes it adds up to `sourceToAckSeconds`. `compileSeconds` of `code-updated` is the compiler's own time. Sources that the session output has compiled before (an edit that is taken back, a session that repeats edits) are answered from its assembly cache without the helper and the compiler.
