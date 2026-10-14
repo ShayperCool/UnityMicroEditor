@@ -190,8 +190,10 @@ Verified with Unity `6000.6.3f1`, one machine, one project:
 Not verified: a project with native models, audio or UI through the whole
 cycle; `build-project` against a real Editor; `project_tools`; attaching to an
 interactive Editor; the GitHub Actions workflow itself. Of hot reload: content
-routes or Addressables, and a game large enough to occupy the addresses the
-applier's islands need. Of Netcode: another package version, a dedicated server and distributed
+routes or Addressables. Known: the island address of a game method can lie in
+a mapping of the Player (the first edit of one method of the sample was refused
+with `apply_failed` in 5 of about 45 fresh Players in the stage 6 review), and
+that method is then refused for the life of that Player. Of Netcode: another package version, a dedicated server and distributed
 authority. A stage 5 review ran host and two clients (Temp/e2e/nc5, 121
 checks): NetworkList, a NetworkBehaviour whose base class is in another game
 assembly, every universal RPC target and a first use of Netcode in a body
