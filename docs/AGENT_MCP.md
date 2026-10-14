@@ -339,7 +339,10 @@ with `attention`: `Nothing was applied or rejected after afterSequence N: ...`
 (`after sequence N, the last one a wait or recompile of this server reported`
 without the argument), followed by what stands: the code generation the Player
 runs and where it was patched in, or the restart the runner made by itself,
-and the first limit of it that lasts until a restart. That is the answer for a
+and the first limit of it that a restart lifts. When none stands it names a
+lost value (`field_value_reset`) or a callback that threw (`callback_failed`)
+in the same words, as a limit that lasts until the Player restarts, although
+a restart undoes neither. That is the answer for a
 save that changed nothing the runner reads (a path outside `Assets`,
 `Packages` and `ProjectSettings`, a file kind it does not watch, a file that is
 still open) and for a mark that was read after the answer, also when another
