@@ -201,6 +201,12 @@ Error codes of hot reload:
 | `wait_timeout` | `session_control(wait_update)` and `session_control(wait)` with `timeoutSeconds` (1 to 86400; a call without it has no limit, and a client that gives up cancels it, which is the reply `cancelled`) | The wait ended without an answer: the session was starting, the runner had not answered or was still working, or a recompile was pending. Nothing was decided and the same call can be repeated. `afterSequence`, `phase`, `lastSequence`, `lastUpdateSequence`, `lastUpdateRejectedSequence`, `updatePending`, and `runnerAnswered`: false while the runner has not said that it answered every change saved before the call. |
 | `session_not_ready` | `hot_reload(recompile)` | No Player is ready. `phase` of the session. |
 | `recompile_pending` | `hot_reload(recompile)` | Another recompile has not been answered. `requestId` of the pending one. |
+| `session_output_in_use` | `session_control(start)` and `reset` | Another session holds the project's session output (one started by another `mcp` server of the project); nothing was started. `output`; the message names the holding process and what to do. |
+
+A `hot_reload(recompile)` while the saved sources stand rejected for having
+left the prepared graph (a new assembly definition) restarts nothing: it is
+answered like `session_control(wait_update)`, with the preparation that
+answers the rejection (`status: result_pending`).
 
 Both waits return `full_recompile_required` until the code is in the Player:
 for every `afterSequence`, and also after a later scene update, which the
