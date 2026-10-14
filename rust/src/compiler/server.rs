@@ -58,6 +58,8 @@ pub struct CompilerServer {
     prefix: String,
     /// The path a client gets as `DOTNET_HOST_PATH`: nothing is there.
     no_host: String,
+    /// The resident memory above which the server is replaced before a compile.
+    memory_limit: u64,
     state: Mutex<State>,
 }
 
@@ -85,8 +87,15 @@ impl CompilerServer {
             server: sysutil::join(&[&sysutil::dir(csc), "VBCSCompiler.dll"]),
             prefix: format!("ume-{}-{}", &digest[..16], std::process::id()),
             no_host: sysutil::join(&[output, ".no-compiler-server-host"]),
+            memory_limit: super::service::MEMORY_LIMIT,
             state: Mutex::new(State::default()),
         }
+    }
+
+    /// The server with another limit of resident memory.
+    pub fn with_memory_limit(mut self, bytes: u64) -> Self {
+        self.memory_limit = bytes;
+        self
     }
 
     /// The csc this server belongs to.
@@ -129,6 +138,20 @@ impl CompilerServer {
             .any(|(path, hash)| state.seen.get(path).is_some_and(|known| known != hash));
         if changed {
             end(&mut state);
+        }
+        // It grows with every compile and gives nothing back: a new server
+        // takes over above the limit. No failure.
+        if let Some(bytes) = state
+            .child
+            .as_ref()
+            .and_then(|child| super::service::resident_bytes(child.id()))
+            && bytes > self.memory_limit
+        {
+            end(&mut state);
+            eprintln!(
+                "[unity-micro-editor] the compiler server held {} MB and was replaced by a new one",
+                bytes >> 20
+            );
         }
         if state.child.is_none()
             && let Err(error) = self.start(&mut state)

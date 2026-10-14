@@ -34,6 +34,18 @@ use std::{
 
 /// Failures in a row after which a session stops using a service.
 pub const FAILURE_LIMIT: u32 = 3;
+/// The resident memory above which a kept process is ended before its next
+/// request and a new one takes it: the compiler server grows by a few MB
+/// with every compile and does not give them back.
+pub const MEMORY_LIMIT: u64 = 1 << 30;
+
+/// The resident memory of a process, from `/proc`.
+pub fn resident_bytes(pid: u32) -> Option<u64> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
+    let kilobytes: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kilobytes * 1024)
+}
 /// How long a new process gets to say that it is ready.
 const READY_LIMIT: Duration = Duration::from_secs(60);
 /// How much of a process's standard error is kept for a failure message.
@@ -105,6 +117,8 @@ pub struct Service {
     label: &'static str,
     dotnet: String,
     program: String,
+    /// [`MEMORY_LIMIT`]; a test sets another.
+    memory_limit: u64,
     state: Mutex<State>,
 }
 
@@ -125,8 +139,15 @@ impl Service {
             label,
             dotnet: dotnet.into(),
             program: program.into(),
+            memory_limit: MEMORY_LIMIT,
             state: Mutex::new(State::default()),
         }
+    }
+
+    /// The service with another limit of resident memory.
+    pub fn with_memory_limit(mut self, bytes: u64) -> Self {
+        self.memory_limit = bytes;
+        self
     }
 
     /// The program the service runs.
@@ -205,6 +226,18 @@ impl Service {
             eprintln!(
                 "[unity-micro-editor] the {} ended between two requests{tail}",
                 self.label
+            );
+        }
+        // Too large: a new process takes the request. No failure.
+        if let Some(running) = state.running.as_ref()
+            && let Some(bytes) = resident_bytes(running.child.id())
+            && bytes > self.memory_limit
+        {
+            stop(&mut state.running);
+            eprintln!(
+                "[unity-micro-editor] the {} held {} MB and was replaced by a new process",
+                self.label,
+                bytes >> 20
             );
         }
         if state.running.is_none() {
