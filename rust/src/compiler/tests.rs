@@ -4230,3 +4230,46 @@ fn compiler_server_removes_sockets_of_dead_runners() {
         fs::remove_file(path).unwrap();
     }
 }
+
+/// A kept process above its memory limit is replaced before the next
+/// request, and that is no failure: the session keeps using the service.
+#[test]
+fn kept_processes_are_replaced_above_their_memory_limit() {
+    let (_guard, root) = temp();
+    let (dotnet, program, mode) = stand_in_service(&root);
+    sys::write(&mode, b"ok").unwrap();
+    let ctx = background();
+    let limit = std::time::Duration::from_secs(5);
+    // Every process holds more than a kilobyte.
+    let service = Service::new("test helper", &dotnet, &program).with_memory_limit(1024);
+    let mut pids = Vec::new();
+    for index in 0..5 {
+        let reply = service.call(&ctx, &root, &["a"], limit).unwrap();
+        assert_eq!(reply.exit, 0, "{index}");
+        pids.push(service.pid().unwrap());
+    }
+    assert_eq!(
+        service.started(),
+        5,
+        "a process above the limit was used again"
+    );
+    assert!(!service.disabled(), "a replacement counted as a failure");
+    assert!(pids.iter().take(4).all(|pid| !process_alive(*pid)));
+    // Within the limit the process stays.
+    let kept = Service::new("test helper", &dotnet, &program);
+    kept.call(&ctx, &root, &["a"], limit).unwrap();
+    kept.call(&ctx, &root, &["a"], limit).unwrap();
+    assert_eq!(kept.started(), 1);
+    // The same for the compiler server.
+    let (dotnet, csc) = stand_in_server(&root);
+    let server =
+        CompilerServer::new(&dotnet, &csc, &join(&[&root, "output"])).with_memory_limit(1024);
+    let inputs = BTreeMap::new();
+    let first = server.client(&inputs).unwrap();
+    let second = server.client(&inputs).unwrap();
+    assert_ne!(
+        first.pipe, second.pipe,
+        "a server above the limit was used again"
+    );
+    assert!(server.client(&inputs).is_some());
+}
