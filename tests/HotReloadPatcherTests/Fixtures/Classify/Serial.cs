@@ -129,4 +129,35 @@ namespace Serial
         public int Count() => 0;
 #endif
     }
+
+    // Unity 6000.6.3f1 keeps a [SerializeField] Dictionary whose values are dictionaries, and one
+    // whose key it cannot write (a 64-bit enum: the entries stay, the key is dropped) (builder6-6).
+    public class Nest : MonoBehaviour
+    {
+#if SER_DICT_NESTED
+        [SerializeField] Dictionary<string, Dictionary<string, int>> nested = new Dictionary<string, Dictionary<string, int>>();
+#else
+        [SerializeField] readonly Dictionary<string, Dictionary<string, int>> nested = new Dictionary<string, Dictionary<string, int>>();
+#endif
+#if SER_DICT_NESTED_ADD
+        [SerializeField] Dictionary<string, Dictionary<string, int>> more;
+        [SerializeField] Dictionary<Wide, int> drops;
+        public int Count() => more.Count + drops.Count + nested.Count;
+#else
+        public int Count() => nested.Count;
+#endif
+    }
+
+    // A field of an abstract [Serializable] class is not serialized unless it is a
+    // [SerializeReference] (builder6-11).
+    [Serializable]
+    public abstract class Weapon { public int damage; }
+    public class Loadout : MonoBehaviour
+    {
+#if SER_ABSTRACT
+        private Weapon primary;
+#else
+        public Weapon primary;
+#endif
+    }
 }
