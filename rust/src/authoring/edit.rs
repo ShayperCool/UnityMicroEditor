@@ -386,7 +386,7 @@ impl Store {
         if let Err(expected) = fits_declared_type(&field.type_text, value) {
             return Err(Some(failure(
                 "invalid_property_value",
-                &format!(
+                format!(
                     "the field {property} is declared as {} and takes {expected}",
                     field.type_text
                 ),
@@ -604,7 +604,9 @@ fn code_only(source: &str) -> String {
                 i = end;
             }
             b'/' if bytes.get(i + 1) == Some(&b'*') => {
-                let end = source[i + 2..].find("*/").map_or(bytes.len(), |at| i + 2 + at + 2);
+                let end = source[i + 2..]
+                    .find("*/")
+                    .map_or(bytes.len(), |at| i + 2 + at + 2);
                 blank(&mut out, i, end);
                 i = end;
             }
@@ -655,7 +657,8 @@ fn closing(code: &[u8], open: usize) -> usize {
 /// The body of `class <name>` in the code and the first type of its base
 /// list, when it has one.
 fn class_body<'a>(code: &'a str, name: &str) -> Option<(&'a str, Option<String>)> {
-    let pattern = regex::Regex::new(&format!(r"\b(class|struct)\s+{}\b", regex::escape(name))).ok()?;
+    let pattern =
+        regex::Regex::new(&format!(r"\b(class|struct)\s+{}\b", regex::escape(name))).ok()?;
     let found = pattern.find(code)?;
     let open = found.end() + code[found.end()..].find('{')?;
     let head = &code[found.end()..open];
@@ -767,8 +770,19 @@ fn statement_fields(statement: &str, delegates: &[String]) -> Vec<(String, Decla
         return Vec::new();
     };
     let modifiers = [
-        "public", "private", "protected", "internal", "static", "readonly", "const", "volatile",
-        "new", "unsafe", "fixed", "event", "using",
+        "public",
+        "private",
+        "protected",
+        "internal",
+        "static",
+        "readonly",
+        "const",
+        "volatile",
+        "new",
+        "unsafe",
+        "fixed",
+        "event",
+        "using",
     ];
     let has = |word: &str| before.contains(&word);
     let type_text = before
@@ -777,7 +791,8 @@ fn statement_fields(statement: &str, delegates: &[String]) -> Vec<(String, Decla
         .copied()
         .collect::<Vec<_>>()
         .join(" ");
-    if type_text.is_empty() || has("event") || has("using") || has("const") && type_text.is_empty() {
+    if type_text.is_empty() || has("event") || has("using") || has("const") && type_text.is_empty()
+    {
         return Vec::new();
     }
     let attribute = |wanted: &str| {
@@ -792,8 +807,10 @@ fn statement_fields(statement: &str, delegates: &[String]) -> Vec<(String, Decla
     };
     let bare = type_text.split('<').next().unwrap_or(&type_text).trim();
     let bare = bare.rsplit('.').next().unwrap_or(bare);
-    let delegate = matches!(bare, "Action" | "Func" | "Predicate" | "EventHandler" | "Comparison" | "UnityAction")
-        || delegates.iter().any(|known| known == bare);
+    let delegate = matches!(
+        bare,
+        "Action" | "Func" | "Predicate" | "EventHandler" | "Comparison" | "UnityAction"
+    ) || delegates.iter().any(|known| known == bare);
     let serialized = !has("static")
         && !has("const")
         && !has("readonly")
@@ -802,7 +819,12 @@ fn statement_fields(statement: &str, delegates: &[String]) -> Vec<(String, Decla
         && (has("public") || attribute("SerializeField"));
     let mut names = vec![name.to_string()];
     for part in &parts[1..] {
-        if let Some(other) = part.split('=').next().map(str::trim).filter(|other| super::script::identifier(other)) {
+        if let Some(other) = part
+            .split('=')
+            .next()
+            .map(str::trim)
+            .filter(|other| super::script::identifier(other))
+        {
             names.push(other.to_string());
         }
     }
@@ -823,13 +845,18 @@ fn statement_fields(statement: &str, delegates: &[String]) -> Vec<(String, Decla
 
 /// The field `name` of the class `class` as the C# source declares it, and
 /// the base class to look in when it does not.
-pub(crate) fn declared_field(source: &str, class: &str, name: &str) -> (Option<DeclaredField>, Option<String>) {
+pub(crate) fn declared_field(
+    source: &str,
+    class: &str,
+    name: &str,
+) -> (Option<DeclaredField>, Option<String>) {
     let code = code_only(source);
-    let delegates: Vec<String> = regex::Regex::new(r"\bdelegate\s+[^;(]*?\b([A-Za-z_][A-Za-z0-9_]*)\s*[<(]")
-        .unwrap()
-        .captures_iter(&code)
-        .map(|capture| capture[1].to_string())
-        .collect();
+    let delegates: Vec<String> =
+        regex::Regex::new(r"\bdelegate\s+[^;(]*?\b([A-Za-z_][A-Za-z0-9_]*)\s*[<(]")
+            .unwrap()
+            .captures_iter(&code)
+            .map(|capture| capture[1].to_string())
+            .collect();
     let Some((body, base)) = class_body(&code, class) else {
         return (None, None);
     };
@@ -862,7 +889,10 @@ pub(crate) fn declares_serialized_field(source: &str, name: &str) -> bool {
 /// components of a vector, quaternion or color, a sequence of fitting values
 /// for an array or a List, and a mapping or a number (an enum) for a type the
 /// source alone cannot tell (an object reference, a [Serializable] class).
-pub(crate) fn fits_declared_type(type_text: &str, value: &Value) -> std::result::Result<(), String> {
+pub(crate) fn fits_declared_type(
+    type_text: &str,
+    value: &Value,
+) -> std::result::Result<(), String> {
     let text = type_text.trim().trim_start_matches("global::");
     let text = text
         .strip_prefix("System.")

@@ -763,7 +763,8 @@ fn a_new_assembly_in_a_package_needs_a_new_preparation() {
             _ => {
                 let text = format!("{:#}", result.expect_err(case));
                 assert!(
-                    text.contains("R5Gameplay.asmdef") && crate::compiler::requires_new_graph(&text),
+                    text.contains("R5Gameplay.asmdef")
+                        && crate::compiler::requires_new_graph(&text),
                     "{case}: {text}"
                 );
             }

@@ -455,7 +455,8 @@ impl Loop {
                 let (_, field) = note.member.rsplit_once("::")?;
                 let engine = !note.holders.is_empty();
                 let guids: Vec<String> = note.holders.iter().filter_map(|h| script(h)).collect();
-                (!field.is_empty()).then(|| (note, field, (!guids.is_empty()).then_some(guids), engine))
+                (!field.is_empty())
+                    .then(|| (note, field, (!guids.is_empty()).then_some(guids), engine))
             })
             .collect();
         let methods: Vec<(&Reason, &str)> = self
@@ -473,9 +474,16 @@ impl Loop {
         let mut files: Vec<&String> = paths
             .iter()
             .filter(|path| {
-                [".unity", ".prefab", ".asset", ".controller", ".anim", ".meta"]
-                    .iter()
-                    .any(|extension| path.ends_with(extension))
+                [
+                    ".unity",
+                    ".prefab",
+                    ".asset",
+                    ".controller",
+                    ".anim",
+                    ".meta",
+                ]
+                .iter()
+                .any(|extension| path.ends_with(extension))
             })
             .collect();
         files.sort();
@@ -492,7 +500,9 @@ impl Loop {
             if held.iter().all(Option::is_some) && called.iter().all(Option::is_some) {
                 break;
             }
-            let Some(text) = std::fs::read(path).ok().and_then(|bytes| String::from_utf8(bytes).ok())
+            let Some(text) = std::fs::read(path)
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
             else {
                 continue;
             };
@@ -502,7 +512,10 @@ impl Loop {
                     let item = line.trim_start().trim_start_matches("- ");
                     if !named.is_empty() {
                         for key in ["m_MethodName", "functionName"] {
-                            let Some(value) = item.strip_prefix(key).and_then(|rest| rest.strip_prefix(':')) else {
+                            let Some(value) = item
+                                .strip_prefix(key)
+                                .and_then(|rest| rest.strip_prefix(':'))
+                            else {
                                 continue;
                             };
                             for (index, (_, name)) in methods.iter().enumerate() {

@@ -247,7 +247,10 @@ fn prune_keeps_the_player_the_importers_read() {
         &[start.as_str()],
     );
     let pruned = Pruner::new(&output.project, &output.output).prune(&keep);
-    assert!(exists(&start), "a Player the importers read was removed: {pruned:?}");
+    assert!(
+        exists(&start),
+        "a Player the importers read was removed: {pruned:?}"
+    );
     let keep = crate::runner::in_use(
         std::slice::from_ref(&host),
         Some(&running),
@@ -256,7 +259,10 @@ fn prune_keeps_the_player_the_importers_read() {
         &[host.as_str()],
     );
     let pruned = Pruner::new(&output.project, &output.output).prune(&keep);
-    assert!(!exists(&start) && exists(&host) && exists(&running), "{pruned:?}");
+    assert!(
+        !exists(&start) && exists(&host) && exists(&running),
+        "{pruned:?}"
+    );
 }
 
 /// `run --prepare-only` records the Player it prepared; a later session on
@@ -273,19 +279,28 @@ fn prune_keeps_what_a_prepare_only_run_recorded() {
     )
     .unwrap();
     let pruned = Pruner::new(&output.project, &output.output).prune(&[]);
-    assert!(exists(&prepared), "the prepared Player was removed: {pruned:?}");
+    assert!(
+        exists(&prepared),
+        "the prepared Player was removed: {pruned:?}"
+    );
     assert!(!exists(&other), "{pruned:?}");
     for _ in 0..super::prune::KEPT_PREPARED {
         thread::sleep(Duration::from_millis(15));
-        crate::runner::prune::record_prepared(&output.output, &serde_json::json!({"schemaVersion": 1}))
-            .unwrap();
+        crate::runner::prune::record_prepared(
+            &output.output,
+            &serde_json::json!({"schemaVersion": 1}),
+        )
+        .unwrap();
     }
     let records = fs::read_dir(sysutil::join(&[&output.output, super::prune::PREPARED]))
         .unwrap()
         .count();
     assert_eq!(records, super::prune::KEPT_PREPARED);
     Pruner::new(&output.project, &output.output).prune(&[]);
-    assert!(!exists(&prepared), "a Player of a record that is gone stayed");
+    assert!(
+        !exists(&prepared),
+        "a Player of a record that is gone stayed"
+    );
 }
 
 /// Scene revisions and entries of the assembly cache grow by one per scene
@@ -303,8 +318,12 @@ fn prune_bounds_scene_revisions_and_compiled_assemblies() {
                 let file = sysutil::join(&[&directory, "scene.json"]);
                 fs::write(&file, "{}").unwrap();
                 // Ordered by their modification time, the first the oldest.
-                let time = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000 + index as u64);
-                fs::File::open(&directory).unwrap().set_modified(time).unwrap();
+                let time = std::time::SystemTime::UNIX_EPOCH
+                    + Duration::from_secs(1_000_000 + index as u64);
+                fs::File::open(&directory)
+                    .unwrap()
+                    .set_modified(time)
+                    .unwrap();
                 file
             })
             .collect()
@@ -317,7 +336,11 @@ fn prune_bounds_scene_revisions_and_compiled_assemblies() {
         &serde_json::json!({"schemaVersion": 1, "manifest": scenes[1]}),
     )
     .unwrap();
-    let keep = vec![scenes[0].clone(), assemblies[0].clone(), sysutil::dir(&runs[0])];
+    let keep = vec![
+        scenes[0].clone(),
+        assemblies[0].clone(),
+        sysutil::dir(&runs[0]),
+    ];
     let pruned = Pruner::new(&output.project, &output.output).prune(&keep);
     let left = |files: &[String]| files.iter().filter(|file| exists(file)).count();
     assert_eq!(left(&scenes), KEPT_SCENE_REVISIONS + 2, "{pruned:?}");
@@ -328,4 +351,3 @@ fn prune_bounds_scene_revisions_and_compiled_assemblies() {
     assert!(exists(&runs[0]) && !exists(&runs[1]) && left(&runs) == super::prune::KEPT_RUNS + 1);
     assert_eq!(pruned.files, 1 + 1 + 1);
 }
-

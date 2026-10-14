@@ -343,7 +343,10 @@ impl Player {
                 // The counts alone leave the caller to find the log; the
                 // first error it shows is what the caller acts on (mcp6-5).
                 let log = sysutil::join(&[&sysutil::dir(&self.report), "player.log"]);
-                let logged = match (ready.errors + ready.exceptions > 0, first_logged_error(&log)) {
+                let logged = match (
+                    ready.errors + ready.exceptions > 0,
+                    first_logged_error(&log),
+                ) {
                     (true, Some(first)) => format!(
                         "; the Player logged errors or exceptions before it was ready, which a session does not take as started; the first: \"{first}\"; see {log}"
                     ),

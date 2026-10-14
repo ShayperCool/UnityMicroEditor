@@ -666,7 +666,12 @@ impl Controller {
                 Some(pid) => format!(
                     " by process {pid} ({})",
                     std::fs::read(format!("/proc/{pid}/cmdline"))
-                        .map(|line| String::from_utf8_lossy(&line).replace('\0', " ").trim().chars().take(160).collect::<String>())
+                        .map(|line| String::from_utf8_lossy(&line)
+                            .replace('\0', " ")
+                            .trim()
+                            .chars()
+                            .take(160)
+                            .collect::<String>())
                         .unwrap_or_default()
                 ),
                 None => String::new(),
