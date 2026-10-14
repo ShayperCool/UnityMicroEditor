@@ -5306,6 +5306,27 @@ fn a_recompile_says_what_it_put_into_effect_for_other_processes_of_the_game() {
     // A Player that ran all of it: a plain restart.
     let answered = recompile(&mut state, &mut script, "rc-plain");
     assert_eq!(answered.attention, "");
+    // A recompile sent right after a save, whose refusal the runner prints
+    // before the restart: the restart puts the refused edit into effect.
+    let worker = recompile_in_background(&c, "rc-early");
+    script.edit(refused());
+    run(
+        &c,
+        &mut state,
+        &mut script,
+        &window(&["/p/Assets/A.cs"], None),
+    );
+    script.compiles.push_back(Compiled::Unchanged);
+    run(&c, &mut state, &mut script, &window(&[], Some("rc-early")));
+    let answered = worker.join().unwrap().expect("the recompile");
+    assert!(
+        answered
+            .attention
+            .starts_with("The Player was restarted on the saved code, which puts into effect what it did not run before: Game.Boss: A type was added [type_added].")
+            && answered.attention.ends_with(OTHERS),
+        "{}",
+        answered.attention
+    );
     // A lookup by name alone is no limit worth a sentence.
     script.edit(patch(
         2,

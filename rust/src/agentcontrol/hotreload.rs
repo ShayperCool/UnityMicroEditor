@@ -875,6 +875,20 @@ impl Inner {
             self.state.hot_reload.pending_recompile.clear();
         }
     }
+    /// A refusal or a patch the runner answered before the pending
+    /// recompile restarts the Player is what that restart puts into effect
+    /// too: a recompile sent right after a save, before its answer, says so
+    /// as well (netcode6-4).
+    pub(super) fn carry_into_recompile(&mut self) {
+        let carried = self.state.hot_reload.carried();
+        if let Some(recompile) = self
+            .recompiles
+            .back_mut()
+            .filter(|sent| sent.answered == 0 && sent.carried.is_empty())
+        {
+            recompile.carried = carried;
+        }
+    }
     /// The runner is gone, and with it the Player its code state described
     /// and the commands it was given.
     pub(super) fn forget_code(&mut self) {
