@@ -145,11 +145,18 @@ impl Compiler {
     /// declared InternalsVisibleTo API.
     pub fn prepare_netcode_processor(&mut self, ctx: &Context) -> Result<NetcodeProcessor> {
         if let Some(processor) = &self.netcode {
-            if !verify_cache_files(&sysutil::dir(&processor.helper), &processor.files) {
+            if !self
+                .hashes
+                .verify_files(&sysutil::dir(&processor.helper), &processor.files)
+            {
                 bail!("Netcode postprocessor cached executable or dependency changed");
             }
             for (filename, expected) in &processor.inputs {
-                if !file_hash(filename).is_ok_and(|actual| actual == *expected) {
+                if !self
+                    .hashes
+                    .file_hash(filename)
+                    .is_ok_and(|actual| actual == *expected)
+                {
                     bail!("Netcode postprocessor input changed during session: {filename}");
                 }
             }

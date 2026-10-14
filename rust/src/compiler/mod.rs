@@ -42,7 +42,7 @@ pub use revision::{CodeRevision, player_files};
 pub use server::{Client as CompilerClient, CompilerServer, analyzer_failure, csc_command};
 pub use service::{Reply as ServiceReply, Service, ServiceError};
 pub use source_graph::{managed_plugin, remove_source_native_initializers};
-pub use stamp::{PlayerMap, Stamp};
+pub use stamp::{HashCache, PlayerMap, Stamp};
 pub use sys::{BUILD_WITHOUT_SERVERS, CommandError, compiler_command, glob, path_match};
 pub use sys::{Walk, WalkEntry, glob_lossy, is_not_exist, walk_dir};
 
@@ -542,6 +542,9 @@ pub struct Compiler {
     /// The service of the lifecycle helper, kept by every clone of this
     /// compiler and bound to the helper it was started from.
     pub helper_service: Arc<Mutex<Option<Arc<Service>>>>,
+    /// The content hashes of inputs that do not change during a session:
+    /// configuration inputs, references, tools. Off, every check reads.
+    pub hashes: HashCache,
 }
 
 /// `UME_COMPILER_COLD=1`: a session starts no process that outlives one
@@ -562,6 +565,7 @@ impl Compiler {
             return;
         }
         self.serve_helper = true;
+        self.hashes = HashCache::on();
         self.compiler_server = Some(Arc::new(CompilerServer::new(
             &self.dotnet,
             &self.csc,

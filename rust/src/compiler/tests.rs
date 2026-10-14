@@ -4053,3 +4053,144 @@ public static class RawLifecycle {
     drop(service);
     assert!(!process_alive(pid), "the served helper outlived its owner");
 }
+
+/// Makes a file look as written `seconds` ago: its modification time. The
+/// change time cannot be set; a test that needs it old waits.
+fn age(path: &str, seconds: u64) {
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(seconds))
+        .unwrap();
+}
+
+#[test]
+fn hash_cache_answers_settled_files_and_reads_everything_else() {
+    let (_guard, root) = temp();
+    let settled = write_graph_file(&root, "settled.dll", "settled bytes");
+    let same_size = write_graph_file(&root, "same-size.dll", "first  bytes");
+    let replaced = write_graph_file(&root, "replaced.dll", "replaced bytes");
+    for path in [&settled, &same_size, &replaced] {
+        age(path, 60);
+    }
+    // Both times of a file must be two seconds old before its hash is kept.
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    let fresh = write_graph_file(&root, "fresh.dll", "fresh bytes");
+    let cache = HashCache::on();
+    for path in [&settled, &same_size, &replaced, &fresh] {
+        assert_eq!(cache.file_hash(path).unwrap(), hash(path));
+    }
+    assert_eq!(cache.reads(), 4);
+    // Settled and unchanged: answered without a read.
+    for path in [&settled, &same_size, &replaced] {
+        assert_eq!(cache.file_hash(path).unwrap(), hash(path));
+    }
+    assert_eq!(cache.reads(), 4, "a settled file was read again");
+    // A file written within the last two seconds is read every time.
+    assert_eq!(cache.file_hash(&fresh).unwrap(), hash(&fresh));
+    assert_eq!(cache.reads(), 5, "a fresh file was answered from the cache");
+    // Other bytes of the same size under the old modification time.
+    let modified = fs::metadata(&same_size).unwrap().modified().unwrap();
+    sys::write(&same_size, b"second bytes").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&same_size)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    assert_eq!(
+        cache.file_hash(&same_size).unwrap(),
+        sha256(b"second bytes")
+    );
+    // Replaced by a rename: another inode.
+    let other = write_graph_file(&root, "other.dll", "other bytes");
+    fs::rename(&other, &replaced).unwrap();
+    assert_eq!(cache.file_hash(&replaced).unwrap(), sha256(b"other bytes"));
+    // A file that is gone is an error, as it is without the cache.
+    fs::remove_file(&settled).unwrap();
+    assert!(cache.file_hash(&settled).is_err());
+    // Off, every hash is a read.
+    let off = HashCache::default();
+    assert!(!off.is_on());
+    assert_eq!(off.file_hash(&same_size).unwrap(), sha256(b"second bytes"));
+    assert_eq!(off.reads(), 0);
+}
+
+/// A configuration input that changes between two compiles is refused
+/// with the words it always had, also when its hash came from the cache.
+#[test]
+fn hash_cache_sees_a_configuration_input_that_changed() {
+    let (_guard, root) = temp();
+    let asmdef = write_graph_file(&root, "Assets/Game.asmdef", r#"{"name":"Game"}"#);
+    age(&asmdef, 60);
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    let compiler = Compiler {
+        project: root.clone(),
+        configuration: NilMap::from([(asmdef.clone(), hash(&asmdef))]),
+        hashes: HashCache::on(),
+        ..Default::default()
+    };
+    compiler.check_fixed_configuration().unwrap();
+    compiler.check_fixed_configuration().unwrap();
+    assert_eq!(
+        compiler.hashes.reads(),
+        1,
+        "the settled input was read twice"
+    );
+    let modified = fs::metadata(&asmdef).unwrap().modified().unwrap();
+    sys::write(&asmdef, br#"{"name":"Gamf"}"#).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&asmdef)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    let error = compiler
+        .check_fixed_configuration()
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("managed assembly configuration/GUID changed; regenerate source graph"),
+        "{error}"
+    );
+}
+
+/// With the hashes of a session, the revision key still sees a tool, a
+/// generator dependency and a file of the baseline Player that changed in
+/// place under its old size and modification time.
+#[test]
+fn code_revision_identity_tracks_changes_with_the_hash_cache() {
+    let (_guard, mut compiler, sources) = code_revision_fixture();
+    compiler.hashes = HashCache::on();
+    let ctx = background();
+    // Old enough to be kept.
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    let key = compiler.code_revision_key(&ctx, &sources).unwrap();
+    let reads = compiler.hashes.reads();
+    assert_eq!(compiler.code_revision_key(&ctx, &sources).unwrap(), key);
+    assert_eq!(
+        compiler.hashes.reads(),
+        reads,
+        "settled tools were read again"
+    );
+    let staged = sysutil::dir(&compiler.player);
+    for (path, text) in [
+        (
+            join(&[&sysutil::dir(&compiler.csc), "Microsoft.CodeAnalysis.dll"]),
+            "Roslyn dependenca",
+        ),
+        (
+            join(&[&sysutil::dir(&compiler.generators[0]), "Dependency.dll"]),
+            "generator dependencz",
+        ),
+        (join(&[&staged, "UnityPlayer.so"]), "native Unitz"),
+    ] {
+        rewrite_keeping_size_and_mtime(&path, text);
+        assert_ne!(
+            compiler.code_revision_key(&ctx, &sources).unwrap(),
+            key,
+            "a changed input kept the key with the hash cache: {path}"
+        );
+    }
+}

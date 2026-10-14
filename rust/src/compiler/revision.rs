@@ -5,7 +5,7 @@
 //! before that Player is selected again.
 use super::{
     CompileManifest, CompileUpdate, Compiler, LifecycleProof, NilMap, NilVec, PlayerMap,
-    compile::{lifecycle_sources_match, valid_lifecycle_proof, verify_cache_files},
+    compile::{lifecycle_sources_match, valid_lifecycle_proof},
     join,
     netcode::needs_netcode,
     nilable::nz,
@@ -97,7 +97,7 @@ impl Compiler {
                 .ok()
                 .filter(|files| {
                     !files.at("LifecycleCompiler.dll").is_empty()
-                        && verify_cache_files(&helper_directory, files)
+                        && self.hashes.verify_files(&helper_directory, files)
                 })
                 .ok_or_else(|| anyhow!("lifecycle revision helper payload is not verified"))?;
         let mut paths = vec![self.dotnet.clone()];
@@ -111,7 +111,7 @@ impl Compiler {
         let mut tool_files = NilMap::make();
         for path in paths {
             if !tool_files.contains_key(&path) {
-                let hash = file_hash(&path)?;
+                let hash = self.hashes.file_hash(&path)?;
                 tool_files.insert(path, hash);
             }
         }

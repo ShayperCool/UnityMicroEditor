@@ -1028,7 +1028,11 @@ impl Compiler {
                     "previously absent managed input appeared; regenerate source graph: {filename}"
                 );
             }
-            if !file_hash(filename).is_ok_and(|actual| actual == *expected) {
+            if !self
+                .hashes
+                .file_hash(filename)
+                .is_ok_and(|actual| actual == *expected)
+            {
                 bail!(
                     "managed assembly configuration/GUID changed; regenerate source graph: {filename}"
                 );
@@ -1077,7 +1081,7 @@ impl Compiler {
                 if dependency.starts_with("UnityEditor") {
                     bail!("Editor dependency cannot be a Player reference: {dependency}");
                 }
-                file_hash(&filename).map_err(|error| {
+                self.hashes.file_hash(&filename).map_err(|error| {
                     anyhow!("Source dependency {dependency} is unavailable: {error}")
                 })?;
                 refs.push(filename);
@@ -1778,7 +1782,7 @@ impl Compiler {
             }
         }
         for reference in refs {
-            let hash = file_hash(reference)?;
+            let hash = self.hashes.file_hash(reference)?;
             identity.insert(
                 format!("reference:{}", sysutil::base(reference)),
                 hash.clone(),
@@ -1790,7 +1794,7 @@ impl Compiler {
             .into_iter()
             .chain(self.generators.iter().cloned())
         {
-            let hash = file_hash(&executable)?;
+            let hash = self.hashes.file_hash(&executable)?;
             identity.insert(executable.clone(), hash.clone());
             if self.generators.contains(&executable) {
                 served.insert(executable, hash);

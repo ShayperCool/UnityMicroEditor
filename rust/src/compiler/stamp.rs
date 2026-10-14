@@ -6,7 +6,13 @@ use super::{
 };
 use crate::{sysutil, util::file_hash};
 use anyhow::{Result, anyhow, bail};
-use std::{collections::BTreeMap, fs, os::unix::fs::MetadataExt, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    fs,
+    os::unix::fs::MetadataExt,
+    sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 /// Device, inode, size and the two times of a file. A change of content
 /// moves the change time, which no process can set back; a replaced file has
@@ -158,5 +164,105 @@ impl PlayerMap {
     /// The hash of a file of the directory by its absolute path; empty when unknown.
     pub fn hash_of(&self, path: &str) -> &str {
         sysutil::rel(&self.directory, path).map_or("", |relative| self.files.at(&relative))
+    }
+}
+
+/// How long after its last change a file's stamp is trusted: a file
+/// written in the same tick of the clock as it was read could change again
+/// without moving its times (the rule of git's index).
+const SETTLED: i128 = 2_000_000_000;
+
+#[derive(Debug)]
+struct Known {
+    stamp: Stamp,
+    hash: String,
+}
+
+#[derive(Debug, Default)]
+struct Hashes {
+    known: BTreeMap<String, Known>,
+    reads: u64,
+}
+
+/// The SHA-256 of files that do not change, read once per runner and
+/// answered from then on while `stat` gives the same stamp. A file is kept
+/// only when its stamp did not move while it was read and both its times
+/// were at least two seconds old when the read began; any other file is
+/// read every time. Off (`Default`) every hash is a read; one process's
+/// clones share the entries.
+#[derive(Debug, Clone, Default)]
+pub struct HashCache(Option<Arc<Mutex<Hashes>>>);
+
+fn now() -> i128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos() as i128)
+}
+
+impl HashCache {
+    pub fn on() -> Self {
+        Self(Some(Arc::default()))
+    }
+
+    pub fn is_on(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// How many files were read so far.
+    pub fn reads(&self) -> u64 {
+        self.0
+            .as_ref()
+            .map_or(0, |hashes| hashes.lock().unwrap().reads)
+    }
+
+    /// What `util::file_hash` gives for `path`.
+    pub fn file_hash(&self, path: &str) -> Result<String> {
+        let Some(hashes) = &self.0 else {
+            return file_hash(path);
+        };
+        let stamp = |path: &str| fs::metadata(path).ok().map(|info| Stamp::of(&info));
+        let Some(before) = stamp(path) else {
+            return file_hash(path);
+        };
+        if let Some(known) = hashes.lock().unwrap().known.get(path)
+            && known.stamp == before
+        {
+            return Ok(known.hash.clone());
+        }
+        let started = now();
+        let hash = file_hash(path)?;
+        let mut hashes = hashes.lock().unwrap();
+        hashes.reads += 1;
+        match stamp(path) {
+            Some(after)
+                if after == before
+                    && after.modified <= started - SETTLED
+                    && after.changed <= started - SETTLED =>
+            {
+                hashes.known.insert(
+                    path.into(),
+                    Known {
+                        stamp: after,
+                        hash: hash.clone(),
+                    },
+                );
+            }
+            _ => {
+                hashes.known.remove(path);
+            }
+        }
+        Ok(hash)
+    }
+
+    /// What `verify_cache_files` gives for the files of a cache entry.
+    pub fn verify_files(&self, directory: &str, hashes: &NilMap<String>) -> bool {
+        !hashes.is_empty()
+            && hashes.iter().all(|(name, expected)| {
+                sysutil::base(name) == *name
+                    && !expected.is_empty()
+                    && self
+                        .file_hash(&sysutil::join(&[directory, name]))
+                        .is_ok_and(|actual| actual == *expected)
+            })
     }
 }
