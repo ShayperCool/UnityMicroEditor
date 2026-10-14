@@ -344,13 +344,53 @@ impl Store {
             .unwrap_or_default()
             .to_lowercase();
         let script = self.find_script_guid(&guid).map_err(|_| None)?;
-        let source = String::from_utf8(read_limited(&self.root.join(&script)).map_err(|_| None)?)
-            .map_err(|_| None)?;
-        if !declares_serialized_field(&source, property) {
+        let read = |path: &str| {
+            read_limited(&self.root.join(path))
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+        };
+        let source = read(&script).ok_or(None)?;
+        // The script's class is named like its file; an inherited field is
+        // declared by a base class in a file of its own (session6-7).
+        let mut class = script
+            .rsplit('/')
+            .next()
+            .and_then(|file| file.strip_suffix(".cs"))
+            .unwrap_or_default()
+            .to_string();
+        let mut text = source;
+        let mut declared = None;
+        for _ in 0..8 {
+            let (field, base) = declared_field(&text, &class, property);
+            if field.is_some() {
+                declared = field;
+                break;
+            }
+            let Some(next) = base.and_then(|base| {
+                let path = self.find_class_source(&base)?;
+                Some((base, read(&path)?))
+            }) else {
+                break;
+            };
+            (class, text) = next;
+        }
+        let Some(field) = declared.filter(|field| field.serialized) else {
             return Err(Some(failure(
                 "unsupported_property",
                 "property path is absent in authored data, and the component's script declares no field of that name that Unity serializes",
                 Some(json!({"property": property, "script": script})),
+            )));
+        };
+        // A value Unity would read as the field's default is refused, as on
+        // a key the data holds (session6-6).
+        if let Err(expected) = fits_declared_type(&field.type_text, value) {
+            return Err(Some(failure(
+                "invalid_property_value",
+                &format!(
+                    "the field {property} is declared as {} and takes {expected}",
+                    field.type_text
+                ),
+                Some(json!({"property": property, "script": script, "type": field.type_text})),
             )));
         }
         asset
@@ -360,6 +400,30 @@ impl Store {
                 &super::yaml_edit::normalize(value).map_err(Some)?,
             )
             .map_err(Some)
+    }
+
+    /// The script source under Assets that declares `class <name>`, when
+    /// one file does.
+    fn find_class_source(&self, name: &str) -> Option<String> {
+        let pattern =
+            regex::Regex::new(&format!(r"\b(class|struct)\s+{}\b", regex::escape(name))).ok()?;
+        let mut found = Vec::new();
+        for path in self.walk_assets().ok()? {
+            let relative = self.relative(&path);
+            if !relative.ends_with(".cs") {
+                continue;
+            }
+            let Some(text) = read_limited(&path)
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+            else {
+                continue;
+            };
+            if pattern.is_match(&code_only(&text)) {
+                found.push(relative);
+            }
+        }
+        (found.len() == 1).then(|| found.remove(0))
     }
 
     /// The script source under Assets whose `.meta` holds `guid`.
@@ -509,23 +573,353 @@ impl Store {
     }
 }
 
-/// Whether C# source declares `name` as a field Unity serializes: a
-/// declaration line that is public or carries `[SerializeField]`, ends the
-/// name with `=` or `;`, and is not static, const or readonly.
+/// A field a class declares, as its source has it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeclaredField {
+    /// The type as written (`int`, `List<string>`, `Vector3`, `Stats[]`).
+    pub type_text: String,
+    /// Unity serializes it: public or `[SerializeField]`, not static, const,
+    /// readonly or `[NonSerialized]`, and not of a delegate type.
+    pub serialized: bool,
+}
+
+/// The source with its comments and the text of its string and character
+/// literals blanked, at the same byte offsets.
+fn code_only(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut i = 0;
+    let blank = |out: &mut Vec<u8>, from: usize, to: usize| {
+        for byte in &mut out[from..to] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    };
+    while i < bytes.len() {
+        match bytes[i] {
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                let end = source[i..].find('\n').map_or(bytes.len(), |at| i + at);
+                blank(&mut out, i, end);
+                i = end;
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                let end = source[i + 2..].find("*/").map_or(bytes.len(), |at| i + 2 + at + 2);
+                blank(&mut out, i, end);
+                i = end;
+            }
+            quote @ (b'"' | b'\'') => {
+                let verbatim = i > 0 && bytes[i - 1] == b'@';
+                let mut j = i + 1;
+                while j < bytes.len() {
+                    if bytes[j] == b'\\' && !verbatim {
+                        j += 2;
+                        continue;
+                    }
+                    if bytes[j] == quote {
+                        if verbatim && bytes.get(j + 1) == Some(&quote) {
+                            j += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    j += 1;
+                }
+                let end = (j + 1).min(bytes.len());
+                blank(&mut out, i + 1, end.saturating_sub(1).max(i + 1));
+                i = end;
+            }
+            _ => i += 1,
+        }
+    }
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// The byte after the bracket that closes the one at `open`.
+fn closing(code: &[u8], open: usize) -> usize {
+    let (left, right) = (code[open], if code[open] == b'{' { b'}' } else { b')' });
+    let mut depth = 0usize;
+    for (offset, byte) in code[open..].iter().enumerate() {
+        if *byte == left {
+            depth += 1;
+        } else if *byte == right {
+            depth -= 1;
+            if depth == 0 {
+                return open + offset + 1;
+            }
+        }
+    }
+    code.len()
+}
+
+/// The body of `class <name>` in the code and the first type of its base
+/// list, when it has one.
+fn class_body<'a>(code: &'a str, name: &str) -> Option<(&'a str, Option<String>)> {
+    let pattern = regex::Regex::new(&format!(r"\b(class|struct)\s+{}\b", regex::escape(name))).ok()?;
+    let found = pattern.find(code)?;
+    let open = found.end() + code[found.end()..].find('{')?;
+    let head = &code[found.end()..open];
+    let base = head
+        .split_once(':')
+        .map(|(_, list)| list.split(" where ").next().unwrap_or(list))
+        .and_then(|list| {
+            let mut depth = 0i32;
+            let mut first = String::new();
+            for character in list.chars() {
+                match character {
+                    '<' => depth += 1,
+                    '>' => depth -= 1,
+                    ',' if depth == 0 => break,
+                    _ => {}
+                }
+                first.push(character);
+            }
+            let first = first.trim();
+            let bare = first.split('<').next().unwrap_or(first).trim();
+            let bare = bare.rsplit('.').next().unwrap_or(bare);
+            (!bare.is_empty()).then(|| bare.to_string())
+        });
+    let end = closing(code.as_bytes(), open);
+    Some((&code[open + 1..end.saturating_sub(1)], base))
+}
+
+/// The fields a class body declares, by name. A member with a body (a
+/// method, a property, a nested type) is skipped, and so is an
+/// expression-bodied one; a field initializer may hold braces.
+fn body_fields(body: &str, delegates: &[String]) -> Vec<(String, DeclaredField)> {
+    let code = body.as_bytes();
+    let mut fields = Vec::new();
+    let mut statement = String::new();
+    let mut i = 0;
+    while i < code.len() {
+        match code[i] {
+            b'{' if !(statement.contains('=') && !statement.contains("=>")) => {
+                // A member's body ends the member.
+                i = closing(code, i);
+                statement.clear();
+                continue;
+            }
+            b'{' | b'(' => {
+                let end = closing(code, i);
+                statement.push_str(&body[i..end]);
+                i = end;
+                continue;
+            }
+            b';' => {
+                fields.extend(statement_fields(&statement, delegates));
+                statement.clear();
+            }
+            byte => statement.push(byte as char),
+        }
+        i += 1;
+    }
+    fields
+}
+
+/// The fields one declaration statement declares (`public int ammo, clips`).
+fn statement_fields(statement: &str, delegates: &[String]) -> Vec<(String, DeclaredField)> {
+    let mut text = statement.trim();
+    if text.starts_with('#') {
+        text = text.split_once('\n').map_or("", |(_, rest)| rest).trim();
+    }
+    // Preprocessor lines inside the statement are no part of it.
+    let text: String = text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut text = text.trim();
+    let mut attributes = Vec::new();
+    while text.starts_with('[') {
+        let Some(end) = text.find(']') else {
+            return Vec::new();
+        };
+        attributes.push(text[1..end].to_string());
+        text = text[end + 1..].trim_start();
+    }
+    let assigned = text.find('=');
+    if text.contains("=>") && assigned.is_none_or(|at| text[at..].starts_with("=>")) {
+        return Vec::new();
+    }
+    let head_end = assigned.unwrap_or(text.len());
+    if text[..head_end].contains('(') {
+        return Vec::new();
+    }
+    // Declarators split at commas outside brackets; initializers dropped.
+    let mut parts = Vec::new();
+    let (mut depth, mut current) = (0i32, String::new());
+    for character in text.chars() {
+        match character {
+            '<' | '(' | '[' | '{' => depth += 1,
+            '>' | ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(std::mem::take(&mut current));
+                continue;
+            }
+            _ => {}
+        }
+        current.push(character);
+    }
+    parts.push(current);
+    let head = parts[0].split('=').next().unwrap_or("").trim().to_string();
+    let words: Vec<&str> = head.split_whitespace().collect();
+    let Some((name, before)) = words.split_last() else {
+        return Vec::new();
+    };
+    let modifiers = [
+        "public", "private", "protected", "internal", "static", "readonly", "const", "volatile",
+        "new", "unsafe", "fixed", "event", "using",
+    ];
+    let has = |word: &str| before.contains(&word);
+    let type_text = before
+        .iter()
+        .filter(|word| !modifiers.contains(word))
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if type_text.is_empty() || has("event") || has("using") || has("const") && type_text.is_empty() {
+        return Vec::new();
+    }
+    let attribute = |wanted: &str| {
+        attributes.iter().any(|group| {
+            group.split(',').any(|item| {
+                let item = item.trim();
+                let item = item.split('(').next().unwrap_or(item).trim();
+                let item = item.rsplit('.').next().unwrap_or(item);
+                item == wanted || item == format!("{wanted}Attribute")
+            })
+        })
+    };
+    let bare = type_text.split('<').next().unwrap_or(&type_text).trim();
+    let bare = bare.rsplit('.').next().unwrap_or(bare);
+    let delegate = matches!(bare, "Action" | "Func" | "Predicate" | "EventHandler" | "Comparison" | "UnityAction")
+        || delegates.iter().any(|known| known == bare);
+    let serialized = !has("static")
+        && !has("const")
+        && !has("readonly")
+        && !attribute("NonSerialized")
+        && !delegate
+        && (has("public") || attribute("SerializeField"));
+    let mut names = vec![name.to_string()];
+    for part in &parts[1..] {
+        if let Some(other) = part.split('=').next().map(str::trim).filter(|other| super::script::identifier(other)) {
+            names.push(other.to_string());
+        }
+    }
+    names
+        .into_iter()
+        .filter(|name| super::script::identifier(name))
+        .map(|name| {
+            (
+                name,
+                DeclaredField {
+                    type_text: type_text.clone(),
+                    serialized,
+                },
+            )
+        })
+        .collect()
+}
+
+/// The field `name` of the class `class` as the C# source declares it, and
+/// the base class to look in when it does not.
+pub(crate) fn declared_field(source: &str, class: &str, name: &str) -> (Option<DeclaredField>, Option<String>) {
+    let code = code_only(source);
+    let delegates: Vec<String> = regex::Regex::new(r"\bdelegate\s+[^;(]*?\b([A-Za-z_][A-Za-z0-9_]*)\s*[<(]")
+        .unwrap()
+        .captures_iter(&code)
+        .map(|capture| capture[1].to_string())
+        .collect();
+    let Some((body, base)) = class_body(&code, class) else {
+        return (None, None);
+    };
+    let field = body_fields(body, &delegates)
+        .into_iter()
+        .find(|(declared, _)| declared == name)
+        .map(|(_, field)| field);
+    (field, base)
+}
+
+/// Whether C# source declares `name` as a field Unity serializes in its
+/// first class (the script's): see [`declared_field`].
+#[cfg(test)]
 pub(crate) fn declares_serialized_field(source: &str, name: &str) -> bool {
-    let pattern = regex::Regex::new(&format!(
-        r"(?m)^[ \t]*((?:\[[^\]\n]*\][ \t]*)*)([A-Za-z_][^;=(){{}}\n]*?)\b{}\s*(=[^;]*)?;",
-        regex::escape(name)
-    ))
-    .unwrap();
-    pattern.captures_iter(source).any(|capture| {
-        let (attributes, declaration) = (&capture[1], &capture[2]);
-        let words: Vec<&str> = declaration.split_whitespace().collect();
-        let modifiers = |word: &str| words.contains(&word);
-        !modifiers("static")
-            && !modifiers("const")
-            && !modifiers("readonly")
-            && !modifiers("return")
-            && (modifiers("public") || attributes.contains("SerializeField"))
-    })
+    let code = code_only(source);
+    let Some(class) = regex::Regex::new(r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)")
+        .unwrap()
+        .captures(&code)
+        .map(|capture| capture[1].to_string())
+    else {
+        return false;
+    };
+    declared_field(source, &class, name)
+        .0
+        .is_some_and(|field| field.serialized)
+}
+
+/// Whether a JSON value fits a field of the C# type: a number for a number
+/// or an enum, a boolean or 0/1 for bool, a string for string, the
+/// components of a vector, quaternion or color, a sequence of fitting values
+/// for an array or a List, and a mapping or a number (an enum) for a type the
+/// source alone cannot tell (an object reference, a [Serializable] class).
+pub(crate) fn fits_declared_type(type_text: &str, value: &Value) -> std::result::Result<(), String> {
+    let text = type_text.trim().trim_start_matches("global::");
+    let text = text
+        .strip_prefix("System.")
+        .or_else(|| text.strip_prefix("UnityEngine."))
+        .unwrap_or(text);
+    if let Some(element) = text.strip_suffix("[]") {
+        return match value {
+            Value::Array(items) => items
+                .iter()
+                .try_for_each(|item| fits_declared_type(element, item)),
+            _ => Err(format!("a sequence of {element}")),
+        };
+    }
+    if let Some(element) = text
+        .strip_prefix("List<")
+        .or_else(|| text.strip_prefix("Collections.Generic.List<"))
+        .and_then(|rest| rest.strip_suffix('>'))
+    {
+        return match value {
+            Value::Array(items) => items
+                .iter()
+                .try_for_each(|item| fits_declared_type(element, item)),
+            _ => Err(format!("a sequence of {element}")),
+        };
+    }
+    let number = |value: &Value| matches!(value, Value::Number(_));
+    let components = |keys: &[&str]| match value {
+        Value::Object(map)
+            if map.len() == keys.len()
+                && keys.iter().all(|key| map.get(*key).is_some_and(number)) =>
+        {
+            Ok(())
+        }
+        _ => Err(format!("a mapping of {}", keys.join(", "))),
+    };
+    match text {
+        "int" | "uint" | "long" | "ulong" | "short" | "ushort" | "byte" | "sbyte" | "float"
+        | "double" | "char" | "Int32" | "UInt32" | "Int64" | "UInt64" | "Int16" | "UInt16"
+        | "Byte" | "SByte" | "Single" | "Double" => {
+            number(value).then_some(()).ok_or_else(|| "a number".into())
+        }
+        "bool" | "Boolean" => match value {
+            Value::Bool(_) => Ok(()),
+            Value::Number(n) if n.as_i64().is_some_and(|n| n == 0 || n == 1) => Ok(()),
+            _ => Err("true, false, 0 or 1".into()),
+        },
+        "string" | "String" => matches!(value, Value::String(_))
+            .then_some(())
+            .ok_or_else(|| "a string".into()),
+        "Vector2" | "Vector2Int" => components(&["x", "y"]),
+        "Vector3" | "Vector3Int" => components(&["x", "y", "z"]),
+        "Vector4" | "Quaternion" => components(&["x", "y", "z", "w"]),
+        "Color" | "Color32" => components(&["r", "g", "b", "a"]),
+        "Rect" | "RectInt" => components(&["x", "y", "width", "height"]),
+        _ => match value {
+            Value::Object(_) | Value::Number(_) => Ok(()),
+            _ => Err("a reference ({\"fileID\": ...}), the fields of the object, or the number of an enum value".into()),
+        },
+    }
 }
