@@ -228,3 +228,34 @@ fn prune_bounds_the_output_and_keeps_the_newest_unpublished_compiles() {
         "compiler/.code-revision-f0"
     ])));
 }
+
+/// The importers of a session read the built-in shaders of the host from
+/// the data of the Player they were made with. A Player directory they
+/// read is kept, also when it is a compile of the session's start that no
+/// Player runs any more and whose revision entry is gone (caches6-1).
+#[test]
+fn prune_keeps_the_player_the_importers_read() {
+    let output = output();
+    let host = staged(&output, "current");
+    let start = published(&output, "start", None);
+    let running = published(&output, "running", None);
+    let keep = crate::runner::in_use(
+        std::slice::from_ref(&host),
+        Some(&running),
+        &host,
+        std::iter::once(running.as_str()),
+        &[start.as_str()],
+    );
+    let pruned = Pruner::new(&output.project, &output.output).prune(&keep);
+    assert!(exists(&start), "a Player the importers read was removed: {pruned:?}");
+    let keep = crate::runner::in_use(
+        std::slice::from_ref(&host),
+        Some(&running),
+        &host,
+        std::iter::once(running.as_str()),
+        &[host.as_str()],
+    );
+    let pruned = Pruner::new(&output.project, &output.output).prune(&keep);
+    assert!(!exists(&start) && exists(&host) && exists(&running), "{pruned:?}");
+}
+
