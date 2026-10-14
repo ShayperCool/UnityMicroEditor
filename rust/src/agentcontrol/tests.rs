@@ -4393,6 +4393,20 @@ fn a_recompile_that_needs_a_new_graph_names_what_applies_the_change() {
             && message.contains("session_control(wait_update)"),
         "{message}"
     );
+    // While the rejection stands another recompile is refused before the
+    // runner is asked (session6-4); an update ends it.
+    let again = c
+        .recompile(&seconds(1), "rc-again")
+        .expect_err("a recompile while the rejection stands");
+    assert!(
+        again.error.message().starts_with(&format!(
+            "{REJECTION}. The change needs a new preparation of the project"
+        )),
+        "{}",
+        again.error
+    );
+    emit_fixture_event(&c, updated(c.status().pid));
+    wait_for("the update", || !c.status().preparation_required);
     // A compile error is the compiler's text and nothing else.
     let worker = recompile_in_background(&c, "rc-error");
     emit_fixture_event(
@@ -4403,6 +4417,46 @@ fn a_recompile_that_needs_a_new_graph_names_what_applies_the_change() {
         .join()
         .unwrap()
         .expect_err("a compile error restarted");
+    assert_eq!(failure.error.message(), "CS1002: ; expected");
+}
+
+/// A save that left the prepared graph stands as a rejection; a recompile
+/// issued then would restart the Player on the old graph without what was
+/// added, and is refused before anything is sent to the runner
+/// (session6-4).
+#[test]
+fn a_recompile_while_the_sources_have_left_the_graph_is_refused() {
+    let c = controller_fixture("");
+    let ready = start_ready(&c);
+    const REJECTION: &str = "managed configuration/metadata is outside the prepared managed graph: Packages/com.s6.core/Runtime/Gameplay/S6Gameplay.asmdef";
+    emit_fixture_event(
+        &c,
+        json!({"event": "update-rejected", "error": REJECTION, "preparationRequired": true}),
+    );
+    wait_for("the rejection", || c.status().preparation_required);
+    let failure = c
+        .recompile(&seconds(1), "rc-left")
+        .expect_err("a recompile restarted on a graph the sources have left");
+    let message = failure.error.message();
+    assert!(
+        message.starts_with(&format!(
+            "{REJECTION}. The change needs a new preparation of the project"
+        )),
+        "{message}"
+    );
+    assert!(
+        !commands(&c).iter().any(|line| line.contains("rc-left")),
+        "the command was sent"
+    );
+    // An update that follows ends it: the sources are back in the graph.
+    emit_fixture_event(&c, updated(ready.pid));
+    wait_for("the update", || !c.status().preparation_required);
+    let worker = recompile_in_background(&c, "rc-back");
+    emit_fixture_event(
+        &c,
+        json!({"event": "update-rejected", "error": "CS1002: ; expected", "requestId": "rc-back"}),
+    );
+    let failure = worker.join().unwrap().expect_err("a compile error");
     assert_eq!(failure.error.message(), "CS1002: ; expected");
 }
 

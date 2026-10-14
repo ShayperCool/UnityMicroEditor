@@ -649,6 +649,42 @@ impl Service {
         raw: &[u8],
     ) -> RuntimeOutcome {
         const SCENE: &str = "prepare and activate the selected scene with project_prepare before starting or resetting this runtime";
+        // A recompile restarts the Player on the prepared graph. Sources that
+        // have left it need a new preparation, which no recompile makes: the
+        // caller is answered as a wait would be, with the preparation that
+        // answers the rejection (session6-4).
+        if name == "hot_reload"
+            && let Some(controller) = &self.0.controller
+            && matches!(
+                jsondoc::parse(raw),
+                Ok(Json::Object(members)) if members.iter().any(|member| member.key == "action" && member.value.as_str() == Some("recompile"))
+            )
+        {
+            let state = controller.status();
+            if state.phase == "ready"
+                && !state.code_refused()
+                && (state.preparation_required
+                    || crate::compiler::requires_new_graph(&state.update_error))
+            {
+                let standing = RuntimeOutcome {
+                    value: RuntimeValue::Controller(crate::agentcontrol::Reply::State(Box::new(
+                        state,
+                    ))),
+                    error: None,
+                };
+                let recovered = self.recover_configuration(
+                    ctx,
+                    "session_control",
+                    br#"{"action":"wait_update"}"#,
+                    standing,
+                );
+                // Without a recovery to name the controller refuses the
+                // recompile itself; the state of the session is no answer.
+                if !matches!(recovered.value, RuntimeValue::Controller(_)) {
+                    return recovered;
+                }
+            }
+        }
         if name != "session_control" {
             return self.controller_handle(ctx, name, raw);
         }
