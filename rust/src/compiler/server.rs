@@ -196,6 +196,11 @@ impl CompilerServer {
             .env("DOTNET_SKIP_FIRST_TIME_EXPERIENCE", "1")
             .env("DOTNET_NOLOGO", "1")
             .env("DOTNET_HOST_PATH", &self.dotnet)
+            // The SDK's server runs with the server collector, which keeps
+            // about four times the memory per compile in a session's long
+            // run of small compiles; the workstation one compiles as fast
+            // (served6-3, mcp6-4).
+            .env("DOTNET_gcServer", "0")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
