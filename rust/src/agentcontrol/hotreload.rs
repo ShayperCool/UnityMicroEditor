@@ -9,7 +9,7 @@ use crate::{
 };
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use std::{io::Write, os::fd::AsRawFd, process::ChildStdin};
+use std::{collections::VecDeque, io::Write, os::fd::AsRawFd, process::ChildStdin};
 
 // The runner caps the lists of its events the same way and names the report
 // file that holds every entry. The state is repeated in each session reply.
@@ -18,6 +18,62 @@ const TEXT_MAXIMUM: usize = 1024;
 /// The `recompile` commands of a runner whose outcome is kept for a repeated
 /// request id.
 pub(super) const RECOMPILE_HISTORY: usize = 16;
+/// The answers of a Player process whose new notes are kept, the newest.
+/// The session keeps as many events.
+const BROUGHT_MAXIMUM: usize = 64;
+
+/// The notes one answer of the runner brought: what of the edit it applied
+/// is not in effect. A wait that covers several answers reports those of
+/// all of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Brought {
+    sequence: u64,
+    /// At most 16 of them.
+    notes: Vec<Reason>,
+    count: u64,
+    /// The file that lists every note of the answer.
+    report: String,
+}
+
+/// What a note means for a caller that has just been told "applied".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Weight {
+    /// A part of the saved code does not run, or not for what exists, until
+    /// the Player restarts.
+    Held,
+    /// All of the code runs; something else happened that no restart undoes.
+    Told,
+    /// Only a lookup by name or by reflection from outside the edit differs.
+    /// Listed, and no reason to read anything first.
+    Minor,
+}
+
+/// The note codes by how much a caller must know of them, the first the
+/// most. A code that is not listed (a newer builder) leads.
+const WEIGHTS: [(&str, Weight); 16] = [
+    ("added_method_named_by_string", Weight::Held),
+    ("serialized_field_not_restored", Weight::Held),
+    ("running_coroutines_keep_old_code", Weight::Held),
+    ("started_objects_keep_state", Weight::Held),
+    ("lambda_not_remapped", Weight::Held),
+    ("earlier_patch_delegates_keep_old_code", Weight::Held),
+    ("constructor_applies_to_new_objects", Weight::Held),
+    ("existing_instances_keep_default", Weight::Held),
+    ("runtime_initializer_added", Weight::Held),
+    ("added_member_attributes_ignored", Weight::Held),
+    ("callback_failed", Weight::Told),
+    ("field_value_reset", Weight::Told),
+    ("runtime_initializer_removed", Weight::Held),
+    ("added_method_delegate_identity", Weight::Held),
+    ("accessibility_changed", Weight::Minor),
+    ("added_method_invisible_by_name", Weight::Minor),
+];
+fn weight(code: &str) -> (usize, Weight) {
+    WEIGHTS
+        .iter()
+        .position(|(known, _)| *known == code)
+        .map_or((0, Weight::Held), |index| (index + 1, WEIGHTS[index].1))
+}
 
 /// The code state of a session. It is left out of the session state while it
 /// equals the default: hot reload enabled and a Player that runs exactly the
@@ -54,7 +110,9 @@ pub struct HotReload {
     /// code before it did not have: what of that edit is not in effect. At
     /// most 16; `new_notes_count` counts all, and `new_notes_sequence` is the
     /// event that brought them. Notes that stood before are in
-    /// `last_patch.notes` or `notes`.
+    /// `last_patch.notes` or `notes`. In the reply of a wait or a recompile
+    /// these are the notes of every answer after the caller's mark, the most
+    /// important first, and the sequence is that of the newest of them.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub new_notes: Vec<Reason>,
     #[serde(skip_serializing_if = "no_count")]
@@ -81,6 +139,11 @@ pub struct HotReload {
     /// is wrong by itself; the caller is given the text to tell them apart.
     #[serde(skip)]
     scene_rejected: (u64, String),
+    /// The new notes of each answer of this Player process, oldest first.
+    /// A refusal does not end them: the patch they came with is still in
+    /// the Player. A note that a later answer shows to be gone is dropped.
+    #[serde(skip)]
+    brought: VecDeque<Brought>,
 }
 impl Default for HotReload {
     fn default() -> Self {
@@ -103,6 +166,7 @@ impl Default for HotReload {
             refused_sequence: 0,
             refused_summary: String::new(),
             scene_rejected: (0, String::new()),
+            brought: VecDeque::new(),
         }
     }
 }
@@ -157,9 +221,10 @@ pub struct LastRestart {
 pub(super) enum Refused<'a> {
     /// Nothing but the refusal answers the caller's wait.
     Edit,
-    /// A scene or asset update was confirmed after this sequence, the
-    /// caller's mark.
-    UpdatedAfter(u64),
+    /// After the caller's mark the session confirmed an update, the newest
+    /// of them by this event at this sequence: an earlier edit of the same
+    /// wait that was patched in, a scene or asset change, a restart.
+    After(&'a str, u64),
     /// The `recompile` command with this id restarted the Player before the
     /// refused edit compiled. It is answered, so the next one needs another id.
     Recompiled(&'a str),
@@ -254,9 +319,9 @@ impl HotReload {
         self.code_generation = generation;
         self.clear_refusal();
         self.clear_notes();
-        self.take_new_notes(sequence, event);
         let number = |key: &str| count(event.get(key)).unwrap_or(0);
         let notes = reasons(event.get("notes"));
+        self.take_new_notes(sequence, event, &text(event, "report"));
         self.last_patch = Some(LastPatch {
             sequence,
             code_generation: generation,
@@ -270,6 +335,7 @@ impl HotReload {
             notes,
             report: text(event, "report"),
         });
+        self.forget_ended();
     }
     /// `update-rejected` with `fullRecompileRequired`; `summary` is its text.
     pub(super) fn refused(&mut self, sequence: u64, event: &Map<String, Value>, summary: &str) {
@@ -315,8 +381,10 @@ impl HotReload {
                     .as_ref()
                     .is_some_and(|patch| patch.sequence == self.new_notes_sequence);
                 if event.contains_key("newNotes") || self.notes_count == 0 && !of_patch {
-                    self.take_new_notes(sequence, event);
+                    let report = text(event, "hotReloadReport");
+                    self.take_new_notes(sequence, event, &report);
                 }
+                self.forget_ended();
             }
             // The reasons come with the rejection of the same change, which
             // the runner may print after this event.
@@ -335,13 +403,56 @@ impl HotReload {
         self.new_notes_count = 0;
         self.new_notes_sequence = 0;
     }
-    fn take_new_notes(&mut self, sequence: u64, event: &Map<String, Value>) {
+    fn take_new_notes(&mut self, sequence: u64, event: &Map<String, Value>, report: &str) {
         self.new_notes = reasons(event.get("newNotes"));
         self.new_notes_count = total(event, "newNotesCount", self.new_notes.len());
         self.new_notes_sequence = match self.new_notes_count {
             0 => 0,
             _ => sequence,
         };
+        if self.new_notes_count > 0 {
+            while self.brought.len() >= BROUGHT_MAXIMUM {
+                self.brought.pop_front();
+            }
+            self.brought.push_back(Brought {
+                sequence,
+                notes: self.new_notes.clone(),
+                count: self.new_notes_count,
+                report: report.to_string(),
+            });
+        }
+    }
+    /// Drops from the kept answers the notes that stand no more. A patch
+    /// repeats every note of the code it carries, and a compile that needs
+    /// no patch lists its own, so a note in neither list has ended: the
+    /// edit was taken back or made again without it. Lists that were cut
+    /// to 16 prove nothing, and everything is kept then.
+    fn forget_ended(&mut self) {
+        let whole = |listed: &[Reason], count: u64| listed.len() as u64 == count;
+        let patch = self.last_patch.as_ref();
+        if !whole(&self.notes, self.notes_count)
+            || patch.is_some_and(|patch| !whole(&patch.notes, patch.notes_count))
+        {
+            return;
+        }
+        let standing: Vec<(&str, &str)> = self
+            .notes
+            .iter()
+            .chain(patch.into_iter().flat_map(|patch| patch.notes.iter()))
+            .map(|note| (note.code.as_str(), note.member.as_str()))
+            .collect();
+        // What happened once is no state that could end.
+        let stated = |note: &Reason| note.code == "callback_failed";
+        for answer in &mut self.brought {
+            let before = answer.notes.len();
+            answer.notes.retain(|note| {
+                stated(note) || standing.contains(&(note.code.as_str(), note.member.as_str()))
+            });
+            answer.count = answer
+                .count
+                .saturating_sub((before - answer.notes.len()) as u64);
+        }
+        self.brought.retain(|answer| answer.count > 0);
     }
     fn clear_refusal(&mut self) {
         self.full_recompile_required = false;
@@ -353,32 +464,117 @@ impl HotReload {
         self.report.clear();
     }
 
-    /// What a caller reads first when its wait or recompile succeeded and
-    /// the answer, an event after `after`, brought notes: the edit is
-    /// applied, and a part of the saved code is still not in effect. Empty
-    /// when the answer brought none.
-    pub(super) fn attention(&self, after: u64) -> String {
-        let Some(first) = self.new_notes.first() else {
-            return String::new();
-        };
-        if self.new_notes_sequence <= after {
-            return String::new();
+    /// Makes `new_notes` those of every answer after `after`: a wait or a
+    /// recompile that covers several windows reports what each of them
+    /// brought. The most important stand first, each note once.
+    pub(super) fn since(&mut self, after: u64) {
+        let mut notes: Vec<Reason> = Vec::new();
+        let (mut count, mut sequence) = (0u64, 0u64);
+        for answer in self.brought.iter().filter(|answer| answer.sequence > after) {
+            let mut added = 0;
+            for note in &answer.notes {
+                let known = notes
+                    .iter()
+                    .any(|kept| kept.code == note.code && kept.member == note.member);
+                if !known {
+                    notes.push(note.clone());
+                    added += 1;
+                }
+            }
+            // The notes an answer did not list are counted as they are.
+            count += added + answer.count.saturating_sub(answer.notes.len() as u64);
+            sequence = answer.sequence;
         }
-        let more = match self.new_notes_count.saturating_sub(1) {
-            0 => String::new(),
-            more => format!(" (and {more} more in hotReload.newNotes)"),
-        };
-        format!(
-            "Not all of the saved code is in effect in the running Player: {} [{}]{more}. The rest of the edit is applied. hot_reload with action \"recompile\" restarts the Player on the saved code; game state is reset.",
-            first.message.trim_end_matches('.'),
-            first.code
-        )
+        notes.sort_by_key(|note| weight(&note.code).0);
+        notes.truncate(LIST_MAXIMUM);
+        self.new_notes = notes;
+        self.new_notes_count = count.max(self.new_notes.len() as u64);
+        self.new_notes_sequence = sequence;
+    }
+
+    /// What a caller reads first when its wait or recompile succeeded:
+    /// what the answers after `after` brought that a caller who is told
+    /// "applied" would not expect. The edit is applied either way. Empty
+    /// when there is nothing of that kind.
+    ///
+    /// The sentence does not say more than is known. A note is a limit of
+    /// the patch, and whether it matters depends on the game: a coroutine
+    /// that was not running lost nothing. So it names the limit and leaves
+    /// the restart to the caller, and it does not offer one for what a
+    /// restart does not undo. Notes about lookups by name alone stay in
+    /// the list and out of the sentence.
+    pub(super) fn attention(&self, after: u64) -> String {
+        let mut answered = self.clone();
+        answered.since(after);
+        let restarted = self
+            .last_restart
+            .as_ref()
+            .filter(|restart| restart.sequence > after)
+            .and_then(|restart| match restart.reason.as_str() {
+                "hot_reload_failed" => Some(format!(
+                    "The runner restarted the Player by itself and game state is reset: a code patch left the Player unusable ({}). The Player runs the saved code.",
+                    restart.error.trim_end_matches('.')
+                )),
+                "hot_reload_unsupported" => {
+                    let first = restart.unsupported.first();
+                    Some(format!(
+                        "The edit could not be applied to the running Player ({}), so the runner restarted it on the saved code, as onUnsupportedEdit restart asks; game state is reset.",
+                        first.map_or("the report lists the reasons".into(), |reason| format!(
+                            "{} [{}]",
+                            reason.message.trim_end_matches('.'),
+                            reason.code
+                        ))
+                    ))
+                }
+                _ => None,
+            });
+        let first = answered
+            .new_notes
+            .iter()
+            .find(|note| weight(&note.code).1 != Weight::Minor);
+        let noted = first.map(|first| {
+            let listed = answered.new_notes.len() as u64;
+            let more = match answered.new_notes_count.saturating_sub(1) {
+                0 => String::new(),
+                more if answered.new_notes_count > listed => {
+                    let report = self
+                        .brought
+                        .iter()
+                        .rev()
+                        .find(|answer| answer.sequence > after && !answer.report.is_empty())
+                        .map_or(String::new(), |answer| format!(", {} all", answer.report));
+                    format!(
+                        " (and {more} more notes: hotReload.newNotes lists {listed} of them{report})"
+                    )
+                }
+                more => format!(" (and {more} more in hotReload.newNotes)"),
+            };
+            let limit = format!("{} [{}]{more}", first.message.trim_end_matches('.'), first.code);
+            match weight(&first.code).1 {
+                Weight::Told => format!("The edit is applied and its code runs. Note: {limit}."),
+                _ => format!(
+                    "The edit is applied, with a limit that lasts until the Player restarts: {limit}. If what you are checking depends on it, hot_reload with action \"recompile\" restarts the Player on the saved code and resets game state; otherwise go on."
+                ),
+            }
+        });
+        [restarted, noted]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// The failure that reports the refusal that stands to a caller.
     /// `scene_after`: a scene or asset change that the Player rejected after
     /// this sequence is named with its own error.
-    pub(super) fn refusal(&self, told: Refused, scene_after: u64) -> (Error, Typed) {
+    /// `last_sequence`: the session's, for the mark of the caller's next
+    /// wait. A failed call returns no state to read it from.
+    pub(super) fn refusal(
+        &self,
+        told: Refused,
+        scene_after: u64,
+        last_sequence: u64,
+    ) -> (Error, Typed) {
         let first = self.unsupported.first().cloned().unwrap_or_default();
         let code = match first.code.as_str() {
             "" => String::new(),
@@ -407,7 +603,7 @@ impl HotReload {
                 "the reasons are not reported yet, hot_reload with action \"status\" lists them";
         }
         let refused = format!(
-            "The C# edit compiled but cannot be applied to the running Player: {reason}. The Player still runs the previous code"
+            "The C# edit compiled but cannot be applied to the running Player: {reason}. The Player keeps the code it ran before this edit"
         );
         const NEXT: &str = "Call hot_reload with action \"recompile\" to restart the Player on the new code; game state is reset.";
         // The Player's own words for a scene it would not load. A scene that
@@ -423,9 +619,23 @@ impl HotReload {
         };
         let message = match told {
             Refused::Edit => format!("{refused}.{rejected} {NEXT}"),
-            Refused::UpdatedAfter(sequence) => format!(
-                "{refused}; a scene or asset change confirmed after sequence {sequence} is applied.{rejected} {NEXT}"
-            ),
+            // What the caller's wait did bring, so that it is not taken for
+            // nothing: of two edits one may be in the Player.
+            Refused::After(update, sequence) => {
+                let applied = match update {
+                    "code-patched" => format!(
+                        "; an earlier C# edit was applied at sequence {sequence} and is in the Player (hotReload.lastPatch)"
+                    ),
+                    "updated" => format!(
+                        "; a scene or asset change confirmed at sequence {sequence} is applied"
+                    ),
+                    "code-updated" | "content-updated" | "ready" => format!(
+                        "; the Player was restarted at sequence {sequence}, before this edit compiled"
+                    ),
+                    _ => String::new(),
+                };
+                format!("{refused}{applied}.{rejected} {NEXT}")
+            }
             Refused::Recompiled(id) => format!(
                 "Recompile {id} restarted the Player, and a C# edit compiled after it cannot be applied to the running Player: {reason}.{rejected} Call hot_reload with action \"recompile\" and a new requestId to restart the Player on the new code; game state is reset."
             ),
@@ -435,6 +645,7 @@ impl HotReload {
             "unsupportedCount": self.unsupported_count,
             "report": self.report,
             "next": {"tool": "hot_reload", "arguments": {"action": "recompile"}},
+            "lastSequence": last_sequence,
         });
         if let Some((sequence, error)) = scene {
             details["rejected"] = json!({"error": error, "sequence": sequence});
@@ -679,16 +890,22 @@ impl Controller {
                     // The restart cleared every earlier refusal, so this one is
                     // of an edit compiled after it. Success would hide it.
                     None if state.hot_reload.full_recompile_required => {
-                        let (error, typed) = state
-                            .hot_reload
-                            .refusal(Refused::Recompiled(request_id), sent.answered);
+                        let (error, typed) = state.hot_reload.refusal(
+                            Refused::Recompiled(request_id),
+                            sent.answered,
+                            state.last_sequence,
+                        );
                         Err(failed(state, error, Some(typed)))
                     }
                     None => {
                         // A C# edit that was patched in after the restart may
                         // have brought notes.
                         let mut state = state;
+                        // The restart itself is what the caller asked for.
                         state.attention = state.hot_reload.attention(sent.answered);
+                        state.hot_reload.since(sent.answered);
+                        let mut inner = self.lock();
+                        inner.told = inner.told.max(state.last_sequence);
                         Ok(state)
                     }
                 };

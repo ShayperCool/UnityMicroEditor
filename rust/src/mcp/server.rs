@@ -33,11 +33,11 @@ pub const SERVER_NAME: &str = "unity-micro-editor";
 pub const SERVER_VERSION: &str = "0.2.0";
 pub const INSTRUCTIONS: &str = "This service edits authored Unity project files. Read sourceRevision or asset_read revision before each write and send a unique operationId. Resolved hierarchy revision binds the entire prefab dependency graph; composite IDs are read-only and provenance identifies editable local/source IDs. Repeating identical arguments with the same operationId safely replays the original result. Source writes preserve .meta GUIDs. Source write success does not imply compilation, import or Player success. Use explicit source prefab override operations or prefab_edit for source prefab authoring. Read project_capabilities to inspect supported behavior.";
 /// Added to [`INSTRUCTIONS`] by a server that controls a Player session.
-const SESSION_INSTRUCTIONS: &str = " With a running Player session a saved C# edit is compiled and applied to the running Player when possible; the Player keeps its process and its game state. Call session_control(wait_update) after saving: it reports the outcome of every source change that was saved before the call. Success means the Player runs the saved code; when a part of it is not in effect yet, the reply starts with attention and hotReload.newNotes lists the parts. When a reply has the error code full_recompile_required, or the session state has hotReload.fullRecompileRequired true, the edit cannot be applied live and the Player still runs the previous code: call hot_reload with action recompile. A recompile restarts the Player and resets game state.";
+const SESSION_INSTRUCTIONS: &str = " With a running Player session a saved C# edit is compiled and patched into the running Player when that is exact; the Player keeps its process and game state. After saving call session_control(wait_update), which reports whether the saved code runs; its error code full_recompile_required means hot_reload with action recompile, which restarts the Player and resets game state.";
 // What the same server adds to the two tools that write C# source. A server
 // without a session has neither tool these sentences name.
-const SCRIPT_CREATE_SESSION: &str = " A running Player session compiles the file. A type it adds cannot be applied live: unless the session restarts by itself (onUnsupportedEdit restart or hotReload false), session_control(wait_update) fails with full_recompile_required and hot_reload(recompile) restarts the Player on the new code.";
-const SCRIPT_EDIT_SESSION: &str = " A running Player session compiles the saved change and applies it to the running Player when possible, keeping game state; session_control(wait_update) reports the outcome, and its error code full_recompile_required means hot_reload(recompile).";
+const SCRIPT_CREATE_SESSION: &str = " In a running Player session a new type cannot be applied live: session_control(wait_update) fails with full_recompile_required until hot_reload(recompile), unless the session restarts by itself.";
+const SCRIPT_EDIT_SESSION: &str = " In a running Player session, session_control(wait_update) reports whether the saved change is in the Player.";
 pub const PROJECT_URI: &str = "unitymicroeditor://project";
 pub const CAPABILITIES_URI: &str = "unitymicroeditor://capabilities";
 
@@ -167,13 +167,13 @@ struct UndoInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
 pub struct SessionInput {
     pub action: String,
-    pub after_sequence: i64,
-    pub timeout_seconds: i64,
+    /// Absent is "after the last wait that answered"; 0 is the whole session.
+    pub after_sequence: Option<i64>,
+    /// Absent is a wait without a limit.
+    pub timeout_seconds: Option<i64>,
     /// Absent is the default number of events; 0 asks for none.
     pub events: Option<i64>,
     pub request_id: String,
-    pub expected_pid: i64,
-    pub expected_revision: String,
     pub arguments: Option<Map<String, Value>>,
 }
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -332,14 +332,16 @@ impl SessionInput {
     fn marshal(&self) -> Vec<u8> {
         let mut out = Encoder::new();
         out.text("action", &self.action);
-        out.int_omitempty("afterSequence", self.after_sequence);
-        out.int_omitempty("timeoutSeconds", self.timeout_seconds);
-        if let Some(events) = self.events {
-            out.raw("events", &events.to_string());
+        for (key, value) in [
+            ("afterSequence", self.after_sequence),
+            ("timeoutSeconds", self.timeout_seconds),
+            ("events", self.events),
+        ] {
+            if let Some(value) = value {
+                out.raw(key, &value.to_string());
+            }
         }
         out.text_omitempty("requestId", &self.request_id);
-        out.int_omitempty("expectedPid", self.expected_pid);
-        out.text_omitempty("expectedRevision", &self.expected_revision);
         out.map_omitempty("arguments", &self.arguments);
         out.finish()
     }
@@ -1051,7 +1053,7 @@ fn source_tools(session: bool) -> Vec<StaticTool> {
     ]
 }
 fn runtime_tools() -> Vec<StaticTool> {
-    use schema::{ANY, integer, map, object, string};
+    use schema::{ANY, integer, integer_between, map, object, string};
     let runtime_input = || {
         object(&[
             ("operation", string(RUNTIME_OPERATIONS), true),
@@ -1079,7 +1081,7 @@ fn runtime_tools() -> Vec<StaticTool> {
         static_tool(
             write_tool(
                 "session_control",
-                "Control the configured Player session: start, stop, status, reset, wait, wait_update. Start can be asynchronous: while it prepares, start, status and wait report the preparation stage and log path. After saving source changes call wait_update: it asks the runner first and returns the outcome of every change that was saved before the call, so several edits may precede one call; an edit made while the call runs is not covered. wait returns when a Player is ready (after a start or a restart) and reports an edit as wait_update does. A C# edit is applied to the running Player when possible: same pid, game state kept, hotReload.codeGeneration advanced. When a part of an applied edit is not in effect yet (a running coroutine, a value of an existing object), the reply starts with attention and hotReload.newNotes lists the parts. An edit that cannot be applied live fails with the error code full_recompile_required and the Player keeps the previous code; while hotReload.fullRecompileRequired is true neither wait succeeds, and hot_reload with action recompile restarts the Player on the new code and resets game state. A compile error fails both waits with the compiler's text. start/reset arguments that are given stay for later launches of this server; null restores a default. expectedPid/revision guard stale runtime sessions.",
+                "Control the configured Player session: start, stop, status, reset, wait, wait_update. Start can be asynchronous: while it prepares, start, status and wait report the preparation stage and log path. wait_update lets the runner finish every source change saved before the call (several edits may precede one call; an edit made while it runs is not covered) and then reports what stands. Success: the Player runs the saved sources; a C# edit was patched in (same pid, game state kept, hotReload.codeGeneration advanced). When the reply has attention, read it first: it names what an applied edit leaves out until a restart (hotReload.newNotes lists every such note since afterSequence), a restart the runner made by itself, or that nothing followed afterSequence. Error code full_recompile_required: the edit compiled and cannot be patched, the Player keeps the code from before it; hot_reload with action recompile restarts the Player on the saved code and resets game state. Any other failure is the rejection that stands: a compile error with the compiler's text, or a scene the Player would not load. Both kinds are reported whatever afterSequence is, until a save or a recompile ends them. wait does the same once a Player is ready (after a start or a restart). start/reset arguments that are given stay for later launches of this server (rebuildHost for one launch); null restores a default.",
                 false,
                 object(&[
                     (
@@ -1089,28 +1091,32 @@ fn runtime_tools() -> Vec<StaticTool> {
                     ),
                     (
                         "afterSequence",
-                        integer(
-                            "wait, wait_update: status.lastSequence read before the first of the edits; only what follows it answers. Omitted: any update or rejection of the session answers",
+                        integer_between(
+                            0,
+                            u32::MAX as u64,
+                            "wait, wait_update: status.lastSequence read before the first of the edits; the reply reports the events and notes after it. Omitted: after the last wait or recompile that answered. A failed call returns no state: the details of full_recompile_required and wait_timeout carry lastSequence",
                         ),
                         false,
                     ),
                     (
                         "timeoutSeconds",
-                        integer(
-                            "wait, wait_update: give up after this many seconds with the error code wait_timeout, whose details say what the session was doing; nothing was decided and the same call can be repeated. Default: no limit",
+                        integer_between(
+                            1,
+                            86400,
+                            "wait, wait_update: give up after this many seconds with the error code wait_timeout, whose details say what the session was doing; nothing was decided and the call can be repeated. Omitted: no limit",
                         ),
                         false,
                     ),
                     (
                         "events",
-                        integer(
-                            "How many of the newest session events the reply lists, 0 to 64. Default 8; a wait lists those after afterSequence, at most 16. eventsOmitted counts the rest",
+                        integer_between(
+                            0,
+                            64,
+                            "How many of the newest session events the reply lists. Default 8; a wait lists those after afterSequence, at most 16. eventsOmitted counts the rest",
                         ),
                         false,
                     ),
                     ("requestId", string(""), false),
-                    ("expectedPid", integer(""), false),
-                    ("expectedRevision", string(""), false),
                     (
                         "arguments",
                         map(
@@ -1217,7 +1223,7 @@ fn runtime_tools() -> Vec<StaticTool> {
         static_tool(
             write_tool(
                 "hot_reload",
-                "C# hot reload of the Player session: status, recompile. A saved C# edit is compiled and applied to the running Player when possible; the Player keeps its process and game state, and session_control(wait_update) reports it. An edit that cannot be applied live is never approximated: the Player keeps the previous code, wait_update fails with full_recompile_required and the session state has hotReload.fullRecompileRequired true with the unsupported members and reasons, until a recompile. recompile restarts the Player on the newest compiled code and resets game state; it returns the new session state like wait_update, or the compile error when the sources do not compile, which keeps the Player. It also works for a session started with hotReload false. One recompile runs at a time. requestId names one command: repeating it waits for that command while it is pending and returns its outcome afterwards, without a second restart, so omit it for a new recompile. status returns enabled, codeGeneration, fullRecompileRequired, unsupported, lastPatch, notes, newNotes and onUnsupportedEdit, also while no session runs.",
+                "C# hot reload of the Player session: status, recompile. recompile restarts the Player on the newest saved sources and resets game state: the answer to the error code full_recompile_required of session_control. It returns the new session state like wait_update, or the compile error when the sources do not compile, which keeps the Player. It also works for a session started with hotReload false. One recompile runs at a time. requestId names one command: repeating it waits for that command while it is pending and returns its outcome afterwards, without a second restart, so omit it for a new recompile. status returns the code state of the session (hotReload of the session state) and onUnsupportedEdit, also while no session runs.",
                 false,
                 object(&[
                     ("action", string("status,recompile"), true),

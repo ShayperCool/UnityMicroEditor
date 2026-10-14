@@ -44,6 +44,9 @@ const SYNC_PREFIX: &str = "sync-";
 /// those after its mark, unless the caller asks for another number.
 const REPLY_EVENTS: usize = 8;
 const WAIT_REPLY_EVENTS: usize = 16;
+/// The text of a rejection in the session state, and in a listed event.
+const ERROR_MAXIMUM: usize = 4096;
+const EVENT_ERROR_MAXIMUM: usize = 512;
 const RUNNER_STDERR_MAXIMUM: usize = 8 * 1024;
 const EVENT_LINE_MAXIMUM: usize = 4 * 1024 * 1024;
 const CONTROL_ARTIFACT_MAXIMUM: i64 = 4 * 1024 * 1024;
@@ -156,6 +159,15 @@ impl Launch {
             && self.addressables.is_none()
             && self.hot_reload.is_none()
             && self.on_unsupported_edit.is_empty()
+    }
+    /// The launch with every default written out: what the runner is given.
+    fn effective(&self) -> Launch {
+        Launch {
+            addressables: Some(self.addressables != Some(false)),
+            hot_reload: Some(self.hot_reload != Some(false)),
+            on_unsupported_edit: self.fallback().into(),
+            ..self.clone()
+        }
     }
     /// The runner's `--hot-reload-fallback` value.
     fn fallback(&self) -> &'static str {
@@ -381,6 +393,15 @@ struct Inner {
     /// that was saved before that command.
     syncs_sent: u64,
     synced: u64,
+    /// The event that confirmed the newest update (`last_update_sequence`).
+    last_update_event: String,
+    /// The last sequence of the session when a wait or a recompile last
+    /// answered with success. A wait without `afterSequence` reports what
+    /// came after it: its caller has read the rest.
+    told: u64,
+    /// The newest answer of a window: its event, its sequence and whether
+    /// the runner marked it `pending`.
+    answered: (String, u64, bool),
 }
 impl Inner {
     fn notify(&mut self) {
@@ -474,6 +495,9 @@ impl Controller {
             recompiles: VecDeque::new(),
             syncs_sent: 0,
             synced: 0,
+            last_update_event: String::new(),
+            told: 0,
+            answered: (String::new(), 0, false),
         };
         let controller = Controller(Arc::new(Shared {
             options,
@@ -915,6 +939,16 @@ impl Controller {
         ) {
             inner.state.update_pending = event.get("pending") == Some(&Value::Bool(true));
         }
+        // The answer before this one, for an event that is the second word
+        // of the same window.
+        let before = match name.as_str() {
+            "code-updated" | "content-updated" | "updated" | "unchanged" | "code-patched"
+            | "update-rejected" => std::mem::replace(
+                &mut inner.answered,
+                (name.clone(), sequence, inner.state.update_pending),
+            ),
+            _ => (String::new(), 0, false),
+        };
         match name.as_str() {
             "ready" | "code-updated" | "content-updated" => {
                 let (report, manifest) = (text(event.get("report")), text(event.get("manifest")));
@@ -988,6 +1022,7 @@ impl Controller {
                 inner.state.last_ready_sequence = sequence;
                 if name != "ready" || inner.preparation_update_pending {
                     inner.state.last_update_sequence = sequence;
+                    inner.last_update_event = name.clone();
                     inner.state.update_error.clear();
                     inner.state.preparation_required = false;
                 }
@@ -1024,6 +1059,7 @@ impl Controller {
                 }
                 inner.state.revision = revision;
                 inner.state.last_update_sequence = sequence;
+                inner.last_update_event = name.clone();
                 inner.state.last_ready_sequence = sequence;
                 inner.state.last_error.clear();
                 inner.state.update_error.clear();
@@ -1046,6 +1082,7 @@ impl Controller {
                     ));
                 }
                 inner.state.last_update_sequence = sequence;
+                inner.last_update_event = name.clone();
                 inner.state.last_error.clear();
                 inner.state.update_error.clear();
                 inner.state.preparation_required = false;
@@ -1071,6 +1108,7 @@ impl Controller {
                 }
                 inner.state.hot_reload.patched(sequence, generation, &event);
                 inner.state.last_update_sequence = sequence;
+                inner.last_update_event = name.clone();
                 inner.state.last_error.clear();
                 inner.state.update_error.clear();
                 inner.state.preparation_required = false;
@@ -1080,6 +1118,28 @@ impl Controller {
                 if message.is_empty() {
                     message = "runner rejected the source update".into();
                 }
+                // The rejection of a scene part says whose error it is: its
+                // text is the Player's or the importer's and reads like a
+                // failure of the whole save. When the C# part of the same
+                // window was patched, that edit is in the Player.
+                let refusal = event.get("fullRecompileRequired") == Some(&Value::Bool(true));
+                if !refusal && event.get("part").and_then(Value::as_str) == Some("scene") {
+                    let patched = match (before.0.as_str(), before.2) {
+                        ("code-patched", true) => format!(
+                            " The C# edit of the same save is applied (code generation {}).",
+                            inner.state.hot_reload.code_generation
+                        ),
+                        _ => String::new(),
+                    };
+                    message = format!(
+                        "The scene or asset part of the save was rejected: {}.{patched}",
+                        message.trim_end_matches('.')
+                    );
+                }
+                // A compiler prints every error of the sources, and the text
+                // is repeated in each reply for as long as it stands: the
+                // state keeps its beginning and a file all of it.
+                let message = self.bounded_error(sequence, message);
                 inner.state.last_error = message.clone();
                 inner.state.update_error = message.clone();
                 inner.state.preparation_required =
@@ -1087,7 +1147,7 @@ impl Controller {
                 inner.state.last_update_rejected_sequence = sequence;
                 // A restart needs no patch, so a refusal is about a source
                 // edit and never the answer to a `recompile` command.
-                if event.get("fullRecompileRequired") == Some(&Value::Bool(true)) {
+                if refusal {
                     inner.state.hot_reload.refused(sequence, &event, &message);
                 } else {
                     // The rejection of a scene part says when no refusal
@@ -1175,32 +1235,69 @@ impl Controller {
         }
     }
 
-    /// Blocks until the session answered for what followed sequence `after`,
-    /// or it failed, stopped, or `ctx` ended. A confirmed or rejected source
-    /// update answers an update wait (`!ready`). A readiness wait needs a
-    /// ready Player, and that Player becoming ready answers it too. Neither
-    /// succeeds while hot reload refused an edit whose code is not in the
-    /// Player: both fail with the typed `full_recompile_required`.
+    /// The text of a rejection as the state keeps it: at most
+    /// `ERROR_MAXIMUM` bytes, cut at a line where one ends in time. The
+    /// whole text of a longer one is written below the session output and
+    /// named at the end.
+    fn bounded_error(&self, sequence: u64, message: String) -> String {
+        if message.len() <= ERROR_MAXIMUM {
+            return message;
+        }
+        let mut end = ERROR_MAXIMUM;
+        while !message.is_char_boundary(end) {
+            end -= 1;
+        }
+        if let Some(line) = message[..end].rfind('\n').filter(|line| *line >= end / 2) {
+            end = line;
+        }
+        let directory = sysutil::join(&[&self.0.options.output, "rejections"]);
+        let path = sysutil::join(&[&directory, &format!("{sequence}.txt")]);
+        let written = std::fs::create_dir_all(&directory)
+            .and_then(|()| std::fs::write(&path, message.as_bytes()))
+            .is_ok();
+        let rest = message.len() - end;
+        match written {
+            true => format!(
+                "{}\n[{rest} more bytes: the whole text is in {path}]",
+                &message[..end]
+            ),
+            false => format!("{}\n[{rest} more bytes]", &message[..end]),
+        }
+    }
+
+    /// Reports what stands once the session has answered for every source
+    /// change that was saved before the call, or fails when the session
+    /// failed, stopped, or `ctx` ended. A readiness wait and an update wait
+    /// (`!ready`) both need a ready Player; they differ in what makes
+    /// sequence `after` old news.
     ///
     /// Before anything else the runner is asked to say when it has answered
     /// every source change that was saved before this call, and no answer is
     /// given before it has. A save that is complete when the call begins is
-    /// therefore part of the outcome, whenever it was made.
+    /// therefore part of the outcome, whenever it was made. Once the runner
+    /// has said so and works on nothing, the call returns: a rejection that
+    /// no update followed (a compile error, a refused edit, a scene the
+    /// Player would not load) as the failure it is, whatever the caller has
+    /// read of it, and otherwise the state, also when nothing followed
+    /// `after`. Nothing but a new save could answer then, and a caller that
+    /// waited for one would wait for good.
     pub fn wait(
         &self,
         ctx: &Context,
         after: u64,
         ready: bool,
     ) -> std::result::Result<State, StateError> {
-        self.wait_within(ctx, after, ready, None)
+        self.wait_within(ctx, Some(after), ready, None)
     }
 
     /// [`Controller::wait`] that gives up after `limit` with the typed
     /// `wait_timeout`, which says what the session was still doing.
+    /// `after: None` stands for the last sequence a wait or a recompile of
+    /// this session reported: its caller has read the rest.
     pub fn wait_within(
         &self,
         ctx: &Context,
-        after: u64,
+        after: Option<u64>,
         ready: bool,
         limit: Option<Duration>,
     ) -> std::result::Result<State, StateError> {
@@ -1215,56 +1312,56 @@ impl Controller {
     fn answer(
         &self,
         ctx: &Context,
-        after: u64,
+        mark: Option<u64>,
         ready: bool,
     ) -> std::result::Result<State, StateError> {
         let barrier = self.sync()?;
         loop {
-            let (state, changed, synced) = {
+            let (state, changed, synced, update, told) = {
                 let inner = self.lock();
                 // Another runner has started since: it compiled what was saved
                 // before it, and its own events say how that ended.
                 let synced = barrier.is_none_or(|(runner, number)| {
                     inner.command.map(|owned| owned.id) != Some(runner) || inner.synced >= number
                 });
-                (inner.state.clone(), inner.changed.clone(), synced)
+                (
+                    inner.state.clone(),
+                    inner.changed.clone(),
+                    synced,
+                    inner.last_update_event.clone(),
+                    inner.told,
+                )
             };
+            let after = mark.unwrap_or(told);
             let ended = state.phase == "failed" || state.phase == "stopped";
-            let confirmed =
-                state.last_update_sequence > after || ready && state.last_ready_sequence > after;
-            let rejected = state.last_update_rejected_sequence > after;
-            // A refusal that stands is the answer whatever the caller has read
-            // of it: the Player does not run the newest compiled code.
+            // A rejection that no update followed stands, and so does a
+            // refusal: the Player does not run the newest saved sources. It
+            // is the outcome whatever the caller has read of it.
+            let standing = state.last_update_rejected_sequence > state.last_update_sequence;
             let refused = state.hot_reload.full_recompile_required;
-            // An edit that was patched in, refused or rejected starts no
-            // Player, and a readiness wait must not outlast it. An answer the
-            // runner marked as not its last is none: the changes it is still
-            // working on may be the caller's.
-            let answered = synced
-                && (confirmed || rejected || refused)
-                && (!ready || state.phase == "ready")
-                && !state.update_pending;
-            if ended || answered {
-                // A rejection is the outcome while no update followed it,
-                // also for a readiness wait: a Player that is ready on older
-                // code must not pass for one that runs what was saved.
-                let rejection =
-                    rejected && state.last_update_rejected_sequence > state.last_update_sequence;
+            // An answer the runner marked as not its last is none: the
+            // changes it is still working on may be the caller's. A restart
+            // that a `recompile` command asked for is on its way too.
+            let settled = synced
+                && state.phase == "ready"
+                && !state.update_pending
+                && state.hot_reload.pending_recompile.is_empty();
+            if ended || settled {
                 let message = if state.phase == "failed" {
                     state.last_error.clone()
                 } else if state.phase == "stopped" {
                     "runtime session stopped before the requested readiness/update".into()
-                } else if rejection && !state.code_refused() {
+                } else if standing && !state.code_refused() {
                     state.update_error.clone()
                 } else if refused {
                     // Success would say that the Player runs the caller's C#
-                    // edit. A scene update confirmed since proves nothing
-                    // about the code, whatever the caller has read before.
+                    // edit. What was confirmed since the caller's mark is
+                    // named, so that it is not taken for nothing.
                     let told = match state.last_update_sequence > after {
-                        true => Refused::UpdatedAfter(after),
+                        true => Refused::After(&update, state.last_update_sequence),
                         false => Refused::Edit,
                     };
-                    let (error, typed) = state.hot_reload.refusal(told, after);
+                    let (error, typed) = state.hot_reload.refusal(told, after, state.last_sequence);
                     return Err(StateError {
                         state: Box::new(state),
                         error,
@@ -1272,7 +1369,40 @@ impl Controller {
                     });
                 } else {
                     let mut state = state;
-                    state.attention = state.hot_reload.attention(after);
+                    let followed = state.last_update_sequence > after
+                        || state.last_update_rejected_sequence > after
+                        || ready && state.last_ready_sequence > after;
+                    let mut attention = state.hot_reload.attention(after);
+                    if !followed {
+                        // The call has nothing to report, and says so: a
+                        // caller that takes a bare success for "my edit is
+                        // applied" would be wrong about a save that the
+                        // runner never saw.
+                        let since = match mark {
+                            Some(mark) => format!("afterSequence {mark}"),
+                            None => format!(
+                                "sequence {after}, the last one a wait or recompile of this session reported"
+                            ),
+                        };
+                        attention = match after > state.last_sequence {
+                            // A mark of another session: the one that ran
+                            // before a restart, most often. Nothing of this
+                            // session can follow it, and the reply says which
+                            // numbers are this session's.
+                            true => format!(
+                                "Nothing was applied or rejected after {since}: that mark is above lastSequence {} of this session, so it was read from another one (a session that starts again counts its events anew). In this session the runner has answered for every source change saved before this call and nothing is rejected or refused (lastUpdateSequence {}).",
+                                state.last_sequence, state.last_update_sequence
+                            ),
+                            false => format!(
+                                "Nothing was applied or rejected after {since}: the runner has answered for every source change saved before this call (lastSequence {}, lastUpdateSequence {}). A save you expected here changed nothing the runner reads (a path outside Assets, Packages and ProjectSettings, a file kind it does not watch, a file that is still open), or it was answered at or before that sequence.",
+                                state.last_sequence, state.last_update_sequence
+                            ),
+                        };
+                    }
+                    state.attention = attention;
+                    state.hot_reload.since(after);
+                    let mut inner = self.lock();
+                    inner.told = inner.told.max(state.last_sequence);
                     return Ok(state);
                 };
                 return Err(StateError {
@@ -1288,19 +1418,22 @@ impl Controller {
                 // nothing was decided, and the same call can be made again.
                 let typed = (canceled == crate::cancel::Canceled::DeadlineExceeded).then(|| {
                     let waiting = if state.phase == "starting" {
-                        "the session is still starting"
+                        "the session is still starting".to_string()
                     } else if !synced {
-                        "the runner has not yet answered for the source changes saved before this call; it may still be compiling them"
+                        "the runner has not yet answered for the source changes saved before this call; it may still be compiling them".into()
                     } else if state.update_pending {
-                        "the session is still working on saved source changes"
-                    } else if ready && state.phase != "ready" {
-                        "no Player is ready yet"
+                        "the session is still working on saved source changes".into()
+                    } else if !state.hot_reload.pending_recompile.is_empty() {
+                        format!(
+                            "recompile {} has not been answered yet",
+                            state.hot_reload.pending_recompile
+                        )
                     } else {
-                        "no source change was applied or rejected after afterSequence"
+                        format!("no Player is ready yet (phase {})", state.phase)
                     };
                     (
                         format!(
-                            "The wait ended without an answer: {waiting}. Nothing was decided. Repeat the call with the same afterSequence, or read session_control(status)."
+                            "The wait ended without an answer: {waiting}. Nothing was decided. Repeat the call, or read session_control(status)."
                         ),
                         Typed {
                             code: "wait_timeout",
@@ -1398,7 +1531,9 @@ impl Controller {
                 let previous = self.lock().launch.clone();
                 if let Some(launch) = Launch::from_arguments(&previous, args.get("arguments"))? {
                     let mut inner = self.lock();
-                    if inner.command.is_some() && inner.launch != launch {
+                    // A value that is written out and equals the default the
+                    // Player runs with is no other launch.
+                    if inner.command.is_some() && inner.launch.effective() != launch.effective() {
                         return Err(Error::new(
                             "the Player already runs with other launch arguments; use session_control(reset) to relaunch with these",
                         )
@@ -1440,23 +1575,40 @@ impl Controller {
                 };
             }
             "session_wait" | "session_wait_update" => {
-                let mut after = 0u64;
-                if let Some(value) = args.get("afterSequence") {
+                // The MCP server answers a value outside the schema before
+                // this is reached; here the decoder's own words stand.
+                let number = |key: &str| -> Result<Option<u64>> {
+                    let Some(value) = args.get(key) else {
+                        return Ok(None);
+                    };
+                    let mut number = 0u64;
                     unmarshal(Some(value), |value| {
-                        jsondoc::set_uint64(&mut after, value, Target::VALUE)
+                        jsondoc::set_uint64(&mut number, value, Target::VALUE)
                     })?;
-                }
-                let mut seconds = 0u64;
-                if let Some(value) = args.get("timeoutSeconds") {
-                    unmarshal(Some(value), |value| {
-                        jsondoc::set_uint64(&mut seconds, value, Target::VALUE)
-                    })?;
-                }
-                let limit = (seconds != 0).then(|| Duration::from_secs(seconds.min(86400)));
+                    Ok(Some(number))
+                };
+                let told = self.lock().told;
+                // A mark above the session's last sequence (of another
+                // session, or of a server that was restarted since) is taken
+                // like any other: what stands is reported whatever the mark
+                // is, and a reply that nothing followed names both numbers.
+                let mark = number("afterSequence")?;
+                let limit = match number("timeoutSeconds")? {
+                    Some(0) => {
+                        return Err(Error::new(
+                            "timeoutSeconds must be at least 1; omit it for a wait without a limit, and read session_control(status) for the state without a wait",
+                        )
+                        .into());
+                    }
+                    Some(seconds) => Some(Duration::from_secs(seconds.min(86400))),
+                    None => None,
+                };
                 let ready = operation == "session_wait";
-                return match self.wait_within(ctx, after, ready, limit) {
-                    Ok(answered) => Ok(state(answered, Some(after), WAIT_REPLY_EVENTS)),
-                    Err(failure) => Err(failed(failure, Some(after), WAIT_REPLY_EVENTS)),
+                // The events of the reply are those the answer is about.
+                let after = Some(mark.unwrap_or(told));
+                return match self.wait_within(ctx, mark, ready, limit) {
+                    Ok(answered) => Ok(state(answered, after, WAIT_REPLY_EVENTS)),
+                    Err(failure) => Err(failed(failure, after, WAIT_REPLY_EVENTS)),
                 };
             }
             "hot_reload_status" => return Ok(Reply::Value(self.hot_reload())),
@@ -1667,12 +1819,34 @@ fn shaped(mut state: State, after: Option<u64>, limit: usize) -> State {
     state.events.drain(..excess);
     // An event in a reply says what happened. What stands since then is in
     // the state beside it: the notes that still apply are `hotReload.notes`
-    // and `hotReload.lastPatch.notes`, and every event of a patch repeats up
-    // to sixteen of them. The count, the notes the event itself brought and
-    // the report stay.
+    // and `hotReload.lastPatch.notes`, the new ones `hotReload.newNotes`,
+    // the reasons of a refusal `hotReload.unsupported`, the members of the
+    // patch `hotReload.lastPatch.members`, the text of a rejection
+    // `updateError`. An event repeats each of those lists with up to
+    // sixteen entries and the whole output of a compiler; listed several
+    // times they were most of a reply. The counts and the report stay, and
+    // the beginning of an error.
     for event in &mut state.events {
-        event.data.remove("sourceHashes");
-        event.data.remove("notes");
+        for key in [
+            "sourceHashes",
+            "notes",
+            "newNotes",
+            "unsupported",
+            "members",
+        ] {
+            event.data.remove(key);
+        }
+        if let Some(Value::String(error)) = event.data.get_mut("error")
+            && error.len() > EVENT_ERROR_MAXIMUM
+        {
+            let mut end = EVENT_ERROR_MAXIMUM;
+            while !error.is_char_boundary(end) {
+                end -= 1;
+            }
+            let rest = error.len() - end;
+            error.truncate(end);
+            error.push_str(&format!(" [{rest} more bytes]"));
+        }
     }
     state.events_omitted = (kept - state.events.len()) as u64;
     state
