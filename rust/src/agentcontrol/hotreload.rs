@@ -240,8 +240,13 @@ pub(super) enum Refused<'a> {
 /// and read what it sends out of step until they are restarted on the new
 /// code too. Empty for other reasons.
 fn peers(reasons: &[Reason]) -> &'static str {
-    match reasons.iter().any(|reason| reason.code.starts_with("netcode_")) {
-        true => " This Player leaves its network session and starts on the new code; other Players of the same network game that still run the old code (a client of another session, the host) must be restarted on the new code too, or they read what this Player sends out of step.",
+    match reasons
+        .iter()
+        .any(|reason| reason.code.starts_with("netcode_"))
+    {
+        true => {
+            " This Player leaves its network session and starts on the new code; other Players of the same network game that still run the old code (a client of another session, the host) must be restarted on the new code too, or they read what this Player sends out of step."
+        }
         false => "",
     }
 }
@@ -521,7 +526,9 @@ impl HotReload {
                 Some(first) => {
                     let more = match notes.len() - 1 {
                         0 => String::new(),
-                        more => format!(" (and {more} more in hotReload.lastPatch.notes and hotReload.notes)"),
+                        more => format!(
+                            " (and {more} more in hotReload.lastPatch.notes and hotReload.notes)"
+                        ),
                     };
                     format!(
                         "; this limit of it lasts until the Player restarts: {} [{}]{more}",
