@@ -16,4 +16,13 @@ namespace UnityEngine
 
     [AttributeUsage(AttributeTargets.Field)]
     public sealed class SerializeField : Attribute { }
+
+    [AttributeUsage(AttributeTargets.Method)]
+    public sealed class RuntimeInitializeOnLoadMethodAttribute : Attribute { }
+
+    public interface ISerializationCallbackReceiver
+    {
+        void OnBeforeSerialize();
+        void OnAfterDeserialize();
+    }
 }

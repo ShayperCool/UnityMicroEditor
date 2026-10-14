@@ -664,16 +664,27 @@ Only a recompile applies what a note names:
   field, and the field behind an auto-property that became a full property,
   are a removed and an added field.
 - A changed field initializer or constructor affects objects created later.
-- A changed parameterless `Start` of a MonoBehaviour, or `Awake` of a
-  MonoBehaviour or ScriptableObject, does not run again for the objects that
-  already ran it (`started_objects_keep_state`). A changed `OnNetworkSpawn`,
+- A changed parameterless `Start` of a MonoBehaviour, `Awake` of a
+  MonoBehaviour or ScriptableObject, `OnEnable` (an enabled object runs it
+  again only when it is disabled and enabled; what the old body subscribed
+  stays, and a changed `OnDisable` does not undo it), `OnEnable` of a
+  ScriptableObject and `OnAfterDeserialize` do not run again for the objects
+  that already ran them (`started_objects_keep_state`); neither does a private
+  or protected method that only such methods call, a template-method hook of a
+  base class's `Awake` for example. A changed `OnNetworkSpawn`,
   `OnNetworkPreSpawn`, `OnNetworkPostSpawn`, `OnNetworkSessionSynchronized` or
-  `OnInSceneObjectsSpawned` of a NetworkBehaviour does not run again for the
-  objects that are spawned; objects spawned later run the new body
-  (`spawned_objects_keep_state`).
+  `OnInSceneObjectsSpawned` of a NetworkBehaviour, or a method only they call,
+  does not run again for the objects that are spawned; objects spawned later
+  run the new body (`spawned_objects_keep_state`). The same note is given for
+  `OnIsServerAuthoritative` of a `NetworkTransform`, which is read at spawn.
+- A changed `[RuntimeInitializeOnLoadMethod]` method, or a method only it calls,
+  ran when the Player started and does not run again: its new body is not in
+  effect before a recompile (`runtime_initializer_changed`). A serializer or
+  message handler it registers stays as the old body registered it.
 - A coroutine or `async` method that is already running finishes on the old
   code; new calls run the new code. A coroutine that never ends keeps its old
-  loop until a recompile.
+  loop until a recompile; that holds also when the method was removed or
+  renamed (`running_coroutines_keep_old_code`).
 - A delegate created before the patch can keep the old body of an edited
   lambda. A method marked `[InvokeOnHotReloadLocal]` is run again whenever its
   own code, a lambda or local function in it, or a method a patch added that it

@@ -1149,6 +1149,146 @@ namespace Edits
 #endif
     }
 
+    // ---- methods that run once for what exists ----------------------------------------------
+
+    // A [RuntimeInitializeOnLoadMethod] method, its bridge and a helper only it calls: they ran
+    // when the Player started and do not run again.
+    public static class BootC
+    {
+        public static int mode;
+        [RuntimeInitializeOnLoadMethod]
+        private static void Init()
+        {
+#if CASE_ONCE_INITIALIZER
+            mode = 2;
+#else
+            mode = 1;
+#endif
+            Register();
+        }
+        private static void Register()
+        {
+#if CASE_ONCE_INITIALIZER
+            mode += 20;
+#else
+            mode += 10;
+#endif
+        }
+        public static void __UnityPlay_RuntimeInitialize_9() { Init(); }
+    }
+
+    // What the lifecycle rewrite makes of OnEnable and OnDisable. Enabled objects do not run
+    // OnEnable again; a changed OnDisable runs, and does not remove what the old OnEnable added.
+    public class Listener : MonoBehaviour
+    {
+        public static event Action Scored;
+        public int hits;
+        private void OnEnable() { __UnityPlay_OnEnable(); }
+        private void __UnityPlay_OnEnable()
+        {
+#if CASE_ONCE_ENABLE
+            Scored += OnBonus;
+#else
+            Scored += OnScored;
+#endif
+        }
+        private void OnDisable() { __UnityPlay_OnDisable(); }
+        private void __UnityPlay_OnDisable()
+        {
+#if CASE_ONCE_ENABLE
+            Scored -= OnBonus;
+#else
+            Scored -= OnScored;
+#endif
+        }
+        private void OnScored() { hits++; }
+        private void OnBonus() { hits += 2; }
+    }
+
+    // OnEnable of an asset runs when it loads; OnAfterDeserialize when an object is deserialized.
+    public class Settings : ScriptableObject
+    {
+        public int limit;
+        private void OnEnable() { __UnityPlay_OnEnable(); }
+        private void __UnityPlay_OnEnable()
+        {
+#if CASE_ONCE_ASSET
+            limit = 9;
+#else
+            limit = 5;
+#endif
+        }
+    }
+
+    public class Table : ISerializationCallbackReceiver
+    {
+        public string key = "";
+        public void OnBeforeSerialize() { }
+        public void OnAfterDeserialize()
+        {
+#if CASE_ONCE_DESERIALIZED
+            key = key.ToLowerInvariant();
+#else
+            key = key.ToUpperInvariant();
+#endif
+        }
+    }
+
+    // A hook that only Awake calls (the template method of a base class), a helper only Awake
+    // calls, and one that Update calls too.
+    public abstract class Actor : MonoBehaviour
+    {
+        protected int health;
+        private void Awake() { __UnityPlay_Awake(); }
+        private void __UnityPlay_Awake() { OnSetup(); Prepare(); }
+        protected abstract void OnSetup();
+        private void Prepare()
+        {
+#if CASE_ONCE_HOOK
+            health += Bonus() * 2;
+#else
+            health += Bonus();
+#endif
+        }
+#if CASE_ONCE_HOOK
+        private int Bonus() => 2;
+#else
+        private int Bonus() => 1;
+#endif
+        private void Update() { health -= Bonus(); }
+    }
+
+    public class Enemy : Actor
+    {
+        protected override void OnSetup()
+        {
+#if CASE_ONCE_HOOK
+            health = 250;
+#else
+            health = 100;
+#endif
+        }
+    }
+
+    // A coroutine method that is renamed while instances of it run.
+    public class Blinker : MonoBehaviour
+    {
+        private IEnumerator running;
+        private void Update()
+        {
+#if CASE_COROUTINE_REMOVED
+            running = Pulse();
+#else
+            running = Blink();
+#endif
+        }
+#if CASE_COROUTINE_REMOVED
+        private IEnumerator Pulse() { while (true) yield return 2; }
+#else
+        private IEnumerator Blink() { while (true) yield return 1; }
+#endif
+    }
+
     // ---- generated code that nothing names -------------------------------------------------
 
     // The compiler emits the method of a lambda or a local function also when no code leads to

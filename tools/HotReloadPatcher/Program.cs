@@ -318,7 +318,8 @@ internal static class Program
         if (verdict != Unsupported)
             foreach (var outcome in outcomes)
                 foreach (var c in outcome.Changes)
-                    foreach (var (code, message) in c.Notes) outcome.Notes.Add((code, c.Member, message, c.Revision));
+                    // A note names what the user wrote: Awake, not the lifecycle rewrite's helper.
+                    foreach (var (code, message) in c.Notes) outcome.Notes.Add((code, Differ.Authored(c.Member), message, c.Revision));
         long emitMs = watch.ElapsedMilliseconds;
         return Result(request, outcomes, verdict, readMs, diffMs, emitMs);
     }

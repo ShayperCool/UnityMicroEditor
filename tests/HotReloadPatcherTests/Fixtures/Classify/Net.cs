@@ -59,6 +59,17 @@ namespace Net
 #else
             seen = 1;
 #endif
+            Arm();
+        }
+
+        // Only OnNetworkSpawn calls it.
+        private void Arm()
+        {
+#if CASE_NET_SPAWN_HOOK
+            seen += 20;
+#else
+            seen += 10;
+#endif
         }
 
         // ---- an RPC with one parameter ----------------------------------------------------
@@ -281,6 +292,17 @@ namespace Net
 
 #if CASE_NET_UNKNOWN_MEMBER
         protected void __initializeSomethingNew() { seen = 3; }
+#endif
+    }
+
+    // The owner-authoritative NetworkTransform of the NGO documentation: NetworkTransform reads
+    // the override when an object is spawned and keeps it.
+    public class ClientMover : Unity.Netcode.Components.NetworkTransform
+    {
+#if CASE_NET_AUTHORITY
+        protected override bool OnIsServerAuthoritative() => true;
+#else
+        protected override bool OnIsServerAuthoritative() => false;
 #endif
     }
 
