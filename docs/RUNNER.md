@@ -123,24 +123,77 @@ Both programs are built from the tool's sources with the SDK of the Unity instal
 
 ### Measured
 
-On 2026-10-13, on a copy of `Samples/RawProject` with a few more scripts (one game assembly of ten source files; AMD Ryzen 7 5700X3D; other builds ran on the machine), eight edits of one method body in a row took 3.1 s at best and 3.4 s in the median from the save to the Player's acknowledgement (`sourceToAckSeconds`): 3.1 s of it the compile step (`compileSeconds`) and 0.22 s the patch (`patchSeconds`). In an earlier run of eight, one edit took 13.3 s, 11.9 s of it in the compile. The same edit with `--no-hot-reload` took 6.6 s to a ready Player (`sourceToReadySeconds`, median of five) and lost the game's state.
+On 2026-10-14, on a copy of `Samples/RawProject` (one game assembly; AMD Ryzen 7 5700X3D; other agents' builds and Players ran on the machine), edits of one method body, each a source state the session had not compiled, took from the write of the file to the runner's answer (`code-patched` read from its standard output), in sessions that alternated between the two binaries:
 
-Where the 3.6 s of an edit went in a traced run, mean of six:
+| Binary | Edits | Median (s) | p90 (s) | Load average while measured (median) |
+| --- | --- | --- | --- | --- |
+| Before (f84be4d) | 32 | 3.36 | 3.90 | 4.2 |
+| Now | 32 | 0.41 | 0.55 | 5.2 |
+| Now, with `UME_COMPILER_COLD=1` (no kept processes, no hash cache; measured after the two, not alternated) | 6 | 2.35 | 2.39 | 3.5 |
+
+Where the time of an edit goes, from `UME_TIMINGS=1` (median of 32 edits of this binary):
 
 | Step | Seconds |
 | --- | --- |
-| From the save to the first compiler process: the 35 ms the watcher waits for more changes, the hashes of the configuration inputs (two of the three passes a compile makes over them, about 0.1 s each), the source hashes and the hash of the Player directory that keys the code revision | 0.54 |
-| Lifecycle rewrite (`tools/LifecycleCompiler`) | 0.70 |
-| Roslyn | 0.96 |
-| Script type and declaration checks, two more runs of the helper | 0.22 |
-| Last check of the sources, which is the third pass over the configuration inputs (about 0.1 s), and the copy of the Player directory | 0.13 |
-| Publishing the DLLs and hashing the new Player directory for the revision cache | 0.85 |
-| Patch builder | 0.22 |
-| Request, acknowledgement and event | 0.03 |
+| The 35 ms the watcher waits for more changes of the save | 0.035 |
+| Roslyn through the compiler server | 0.123 |
+| Copy of the Player directory (`cp --reflink`) and the map of the copy | 0.023 |
+| The candidate graph and the configuration inputs (three checks, now by `stat`) | 0.037 |
+| References of the assembly and the key of the revision | 0.024 |
+| Lifecycle rewrite (served) | 0.016 |
+| Script type and declaration checks (served) | 0.001 |
+| The rest of the compile (sources, snapshots, the DLL into the copy, the revision entry) | 0.007 |
+| Patch builder (served) | 0.002 |
+| Request to the Player and its acknowledgement | 0.020 |
+| After the patch: scene preparation for the running Player, the scene check, the events (0.033 s with the old code; the difference is not explained yet) | 0.086 |
+| In all (`totalSeconds`, the median, not the sum) | 0.413 |
 
-The configuration inputs are every compiler input that is no game source: 3404 files with 103.5 MB in that project (engine and package assemblies, assembly definitions, project settings) beside ten sources with 10 KB. They are hashed at the start of a compile, at the start of its graph step and after it, to prove that the prepared graph still holds; about 0.3 s of an edit go there. The share was measured outside the runner, with SHA-256 over the same files.
+The first edit of a session also starts the three processes below, and took 1.8 s against 3.6 s with the old code (one session of each): the server's first compile 0.84 s, the helper's first rewrite 0.56 s, the builder's first run 0.23 s. A session that compiled at its start (for example because its preparation was made by another build of the helper) has warm processes, and its first edit took 0.29 s of compile. The applier itself needs 2 to 4 ms for a request and 10 to 30 ms for the first one of a Player process. `compileSeconds` of `code-patched` is the whole compile step of the window; with `patchSeconds` and the 35 ms the watcher waits for more changes it adds up to `sourceToAckSeconds`. `compileSeconds` of `code-updated` is the compiler's own time. Sources that the session output has compiled before (an edit that is taken back, a session that repeats edits) are answered from its assembly cache without the helper and the compiler.
 
-The applier itself needs 2 to 4 ms for such a request and 10 to 30 ms for the first one of a Player process. `compileSeconds` of `code-patched` is the whole compile step of the window, from the source hashes to the revision cache; with `patchSeconds` and the 35 ms the watcher waits for more changes it adds up to `sourceToAckSeconds`. `compileSeconds` of `code-updated` is the compiler's own time, as before: it ends before the new Player directory is hashed. Sources that the session output has compiled before (an edit that is taken back, a session that repeats edits) are answered from its cache in 0.6 s, and such an edit took 1.9 s. Nearly all of the time is the compile every C# change goes through; the patch adds a quarter of a second to it and saves the restart of the Player. The hash of the new Player directory reads 177 MB that no process has read before: while another build filled the disk queue it took 10 to 27 s instead of 0.7 s, and a restart of the Player, which reads the same files, took 36 s instead of 4 s in one test and more than 160 s in another.
+The same steps took 3.3 s before (median of 8 edits of the old code with `UME_TIMINGS=1`, load 4.4): hashing the new Player directory 0.90 s, Roslyn 0.73 s, the lifecycle rewrite 0.53 s, the patch builder 0.19 s, the baseline Player directory and the tools for the revision key 0.19 s, the configuration inputs three times 0.38 s, the two checks of the helper 0.21 s. Single edits of the old code took 35 to 58 s while other builds filled the disk queue (4 of 24 edits at load 18 to 48 on the same day), and 10 to 27 s in earlier tests: the compile hashed every file of the Player directory it had just copied (177 MB that no process had read), the configuration inputs three times (3404 files, 103.5 MB) and the baseline Player directory, and started five .NET processes. Now the baseline Player directory is hashed once per session and checked by `stat`; the map of a new Player directory is that of the directory it was copied from when `stat` finds that directory as it was hashed after the copy and the copy with the size and modification time of every file, with the files the compile wrote hashed as written (anything that moved is read in full, as before, and a revision is restored at a later start only when a full read of its directory equals its map); unchanged inputs are answered from the hash cache; and the compiler, the helper and the patch builder are processes the session keeps.
+
+### Processes a watched session keeps
+
+A watched session (`--watch`) does not start the compiler and its helpers anew for every edit. It keeps three .NET processes of the Unity installation's SDK, each started at its first use on the thread that runs the session:
+
+| Process | What it does | What it keeps between two edits |
+| --- | --- | --- |
+| The Roslyn compiler server (`dotnet exec VBCSCompiler.dll -pipename:ume-<16 hex of the output>-<runner pid>-<n>`) | compiles every game assembly; `csc.dll` connects to it with `-shared` | the metadata of references and analyzers, by path and modification time |
+| The lifecycle helper (`LifecycleCompiler.dll --serve`) | the lifecycle rewrite of an assembly, `--type-definitions`, `--declaration-hashes` | the metadata of references, under the SHA-256 the runner checked before the request |
+| The patch builder (`HotReloadPatcher.dll --serve`) | the comparison and the patch of a C# edit | nothing |
+
+Besides them, the compiler keeps the SHA-256 of the inputs that do not change during a session (the configuration inputs, the references, the SDK and generator files, the helper) and answers it while `stat` gives the same device, inode, size, modification and change time. A hash is kept only when the file did not move while it was read and both its times were at least two seconds old when the read began; any other file is read every time. Game sources are always read. The start of a session, the restore of a revision, a cached assembly before it is used and every preparation read everything.
+
+Nothing a process keeps decides a result:
+
+- The compiler server would compile against the old bytes of a reference that was rewritten in place under its old modification time (reproduced with the SDK). The runner hands it every reference and analyzer with the content it checked; a path that arrives with other content than before ends the server, and the compile goes to a new one under a new name.
+- The helper takes a reference from its memory only under the hash the runner sent, and checks a reference it reads against that hash.
+- The patch builder keeps nothing; the numbers it gives the closure types of one request start anew with every request, as in a run of its own.
+
+What happens when one fails:
+
+- A served compile that fails or reports an analyzer failure (CS8032, CS8784, CS8785) runs again in a process of its own, and that result counts. A helper or builder request that fails in any other way than a compile error of the sources, or a process that died, did not answer in time (120 s for the compiler and the helper, the builder's 60 s) or answered out of protocol, is killed and the same request runs once in a process of its own. A compile error is reported only as the process of its own would report it, in the same words.
+- The next request starts a new process. After three failures in a row the session runs that program once per request, as before, and says so on standard error.
+- A builder that does not finish within its 60 s is the timeout of that attempt (`patch_builder_failed`), as without the service.
+- No `csc.dll` client starts a server of its own: its `DOTNET_HOST_PATH` names no executable, so a client that reaches no server compiles in its own process. No server of the machine is shared.
+- The processes end with the session: the helper and the builder at the end of their standard input, all three by a signal when the runner drops them, and by the kernel (`PR_SET_PDEATHSIG`) when the runner is killed. The socket file of a killed runner's server stays in `/tmp` until the next session on the same output removes it.
+
+In the sample the three processes held 381 MB together after 3 edits, 650 MB after 40 and 985 MB after 120: the compiler server grows by about 2.5 MB with every compile and gives nothing back (167, 329 and 623 MB), the helper stays near 250 MB, and the builder grew from 53 to 107 MB. A process that holds more than 1 GiB is ended before its next request and a new one takes it, which costs that request the time of a first one (about 1 s) and is no failure. A larger game holds more in the first two. `UME_COMPILER_COLD=1` in the runner's environment runs a session without any of them and without the hash cache, as before. `UME_COMPILER_VERIFY=1` compiles every assembly a second time in a process of its own into the same paths and fails the compile when a byte of the DLL or the PDB differs. `UME_TIMINGS=1` prints one JSON line per window on standard error with the time of every step of the compile and of the patch (`timings`, `totalSeconds`, `compile`, `patch`); nothing reads it.
+
+### What a session output keeps
+
+Every start of a session copies the host Player into `<output>/players/<id>/`, and every compile publishes a Player directory of its own under `<output>/compiler/.code-revision-<id>/Player/` (177 MB in the sample, copied with `cp --reflink=auto`: on XFS with reflinks it shares the blocks of its source, on ext4 or tmpfs it is a full copy). The sessions of one `mcp` server share one output across every start and reset.
+
+The runner removes what nothing uses any more: once a started Player is ready, and after every window that compiled or restarted the Player, after its events are printed. It never removes
+
+- the staged host and the prepared baseline of the running session,
+- the Player directory of the running Player, of the newest compile and of the compile the running Player was started on,
+- a directory that holds the executable of any running process (a Player whose runner died, a Player of another session),
+- a directory that a recorded preparation names (`Library/UnityMicroEditor/preparations/*/*.json`; one that cannot be read keeps everything),
+- the directories of the four newest revision entries (`<output>/compiler/code-revisions/*.json`), which let a later start take a compiled revision instead of compiling, and of an older entry whose directory is in use for one of the reasons above,
+- the two newest directories of compiles that published nothing (the diagnostics of a compile error).
+
+Everything else among `players/*` and `compiler/.code-revision-*` is removed, older revision entries first. An output therefore holds at most about ten Player directories however many edits and starts it saw. The smaller files of a session are not bounded: every Player process leaves its run directory (`runs/<id>`, 76 KB in the sample, with the patches of its edits) and every scene revision its manifest (`revisions/<id>`, 30 KB); the assembly cache (`compiler/assemblies/<key>`) keeps a DLL and a PDB per source state that compiled.
 
 ### Commands
 
@@ -186,7 +239,8 @@ A line that is no command is reported as `command-rejected` with `error` and the
 - The Player of a session with hot reload runs without JIT inlining. Script code that mostly calls small methods is about half as fast as in a session with `--no-hot-reload`: 200 million calls of a one-line static method took 365 ms against 179 ms, and 20 million `Vector3` additions and scalings 582 ms against 249 ms (2026-10-13). Engine code is not affected.
 - A Player process keeps every patch assembly it loaded. Its resident memory grew by 17 MB over the first ten patches of a process, most of it once, and by 2.3 MB over the thirty after them.
 - A code patch is acknowledged on the Player's main thread. Game callbacks marked `[InvokeOnHotReload]` run inside that time; one that blocks for 20 s makes the runner restart the Player.
-- Nothing of a session's hot reload is removed while it runs: every attempt leaves its small directory under the run (3 MB for 54 attempts), as every compile leaves its Player directory. A Player directory of the sample is 177 MB, copied with `cp --reflink`: 60 compiles of one session were 9.4 GB of file sizes and about 2 GB of disk on XFS with reflinks, and are the full size on a filesystem without them. Hot reload makes many compiles a session ordinary. Nothing removes them: the sessions of one `mcp` server share its output directory across every start and reset (97 GB of file sizes after three hours of edits in one test), and only a new output directory starts empty.
+- A session output keeps at most about ten Player directories, whatever number of edits and starts it saw (see [What a session output keeps](#what-a-session-output-keeps)); its smaller files are not bounded: every attempt leaves its small directory under the run (3 MB for 54 attempts), and every Player process its run directory.
+- A watched session keeps three .NET processes alive, 0.4 to 1 GB together in the sample, each replaced when it holds more than 1 GiB (see [Processes a watched session keeps](#processes-a-watched-session-keeps)); `UME_COMPILER_COLD=1` runs it without them.
 - Compatibility with every Unity project, and full Editor Play Mode behavior, are not claimed.
 
 ## Events and reports
