@@ -1195,6 +1195,7 @@ impl Controller {
                     ));
                 }
                 inner.state.hot_reload.patched(sequence, generation, &event);
+                inner.carry_into_recompile();
                 inner.state.last_update_sequence = sequence;
                 inner.last_update_event = name.clone();
                 inner.state.last_error.clear();
@@ -1237,6 +1238,7 @@ impl Controller {
                 // edit and never the answer to a `recompile` command.
                 if refusal {
                     inner.state.hot_reload.refused(sequence, &event, &message);
+                    inner.carry_into_recompile();
                 } else {
                     // The rejection of a scene part says when no refusal
                     // stands, as a confirmation does.
