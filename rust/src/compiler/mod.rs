@@ -13,6 +13,7 @@ mod prepare;
 mod revision;
 mod script_types;
 mod source_graph;
+mod stamp;
 mod sys;
 #[cfg(test)]
 mod tests;
@@ -37,11 +38,13 @@ pub use prepare::{
 };
 pub use revision::{CodeRevision, player_files};
 pub use source_graph::{managed_plugin, remove_source_native_initializers};
+pub use stamp::{PlayerMap, Stamp};
 pub use sys::{BUILD_WITHOUT_SERVERS, CommandError, compiler_command, glob, path_match};
 pub use sys::{Walk, WalkEntry, glob_lossy, is_not_exist, walk_dir};
 
 use nilable::{is_empty, is_false, nz};
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 
 pub const UNITY_VERSION: &str = crate::ENGINE_VERSION;
 
@@ -518,6 +521,12 @@ pub struct Compiler {
     pub behaviour_code: BehaviourCode,
     /// Where the time of the last `compile` went.
     pub last_phases: Phases,
+    /// The file map of the baseline Player directory, kept by every clone
+    /// of this compiler: a compile that fails must not lose it.
+    pub baseline_map: Arc<Mutex<Option<Arc<PlayerMap>>>>,
+    /// The file map of the directory of `player`, when this process made
+    /// or read it.
+    pub player_map: Option<Arc<PlayerMap>>,
 }
 
 /// `<player dir>/<player stem>_Data`.

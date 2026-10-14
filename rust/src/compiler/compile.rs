@@ -2,7 +2,8 @@
 //! incremental compilation and the Roslyn/lifecycle helper invocations.
 use super::{
     AssemblyConfig, CompileAssembly, CompileManifest, CompileUpdate, CompiledCache, Compiler,
-    LifecycleCallback, LifecycleProof, NilMap, NilVec, RuntimeInitializer, float_layout, join,
+    LifecycleCallback, LifecycleProof, NilMap, NilVec, PlayerMap, RuntimeInitializer, float_layout,
+    join,
     netcode::needs_netcode,
     nilable::{nz, unmarshal},
     player_data,
@@ -1318,6 +1319,12 @@ impl Compiler {
         )
         .map_err(|error| anyhow!("stage immutable Player: {error}"))?;
         lap = self.last_phases.lap("player_copy", lap);
+        // The copy holds the bytes of its source, which this process hashed
+        // before and checks by `stat` now, after the copy; the files written
+        // below are hashed as written. Anything else is read again.
+        let source_directory = sysutil::dir(&self.player);
+        let mut map =
+            PlayerMap::after_copy(self.known_player_map(&source_directory), &player_folder)?;
         let player = join(&[&player_folder, &sysutil::base(&self.player)]);
         let managed = super::player_managed(&player);
         let mut update = CompileUpdate {
@@ -1332,16 +1339,22 @@ impl Compiler {
             let destination = join(&[&managed, &format!("{}.dll", assembly.name)]);
             if rebuilt.contains(&assembly.name) {
                 let source = &built[&assembly.name];
-                sys::write(&destination, &sys::read(source)?)?;
+                let data = sys::read(source)?;
+                sys::write(&destination, &data)?;
+                map.wrote(&destination, sha256(&data))?;
                 let stem = source.strip_suffix(".dll").unwrap_or(source);
                 if let Ok(data) = sys::read(&format!("{stem}.pdb")) {
                     let target = destination.strip_suffix(".dll").unwrap_or(&destination);
-                    sys::write(&format!("{target}.pdb"), &data)?;
+                    let target = format!("{target}.pdb");
+                    sys::write(&target, &data)?;
+                    map.wrote(&target, sha256(&data))?;
                 }
             }
-            update
-                .dll_hashes
-                .insert(&assembly.name, file_hash(&destination)?);
+            let hash = map.hash_of(&destination);
+            if hash.is_empty() {
+                bail!("compiled Player lacks game assembly {}", assembly.name);
+            }
+            update.dll_hashes.insert(&assembly.name, hash.to_string());
             update.assemblies.push(destination);
             if declarations_changed.get(&assembly.name) == Some(&true) {
                 update.declaration_changed.push(assembly.name.clone());
@@ -1357,8 +1370,9 @@ impl Compiler {
         update.elapsed_seconds = float_layout(started.elapsed().as_secs_f64());
         atomic_json(&join(&[&staging, "compile-update.json"]), &update)?;
         lap = self.last_phases.lap("player_dlls", lap);
-        self.save_code_revision(&revision_key, &update, &proofs)?;
+        self.save_code_revision(&revision_key, &update, &proofs, &map)?;
         self.last_phases.lap("save_revision", lap);
+        self.player_map = Some(std::sync::Arc::new(map));
         self.use_code_revision(&update, proofs);
         Ok(Some(update))
     }

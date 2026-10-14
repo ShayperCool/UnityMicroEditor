@@ -1850,8 +1850,35 @@ fn marked_lines(text: &str) -> Vec<(u32, u32)> {
 #[test]
 fn hot_reload_compiled_revisions_sdk() {
     use crate::compiler::{
-        AssemblyConfig, CompileScript, Compiler, CompilerGraphAssembly, CompilerGraphExport,
-        NilVec, UNITY_VERSION, deduplicate_references, prepare_compiler_graph,
+        AssemblyConfig, CodeRevision, CompileScript, CompileUpdate, Compiler,
+        CompilerGraphAssembly, CompilerGraphExport, NilVec, UNITY_VERSION, deduplicate_references,
+        player_files, prepare_compiler_graph,
+    };
+    // The entry a compile saved names exactly the bytes of its Player
+    // directory, and the hashes of the update are those of its files.
+    let saved_as_on_disk = |cache: &str, update: &CompileUpdate| {
+        let player = sysutil::rel(cache, &update.player).unwrap();
+        let entries = sysutil::join(&[cache, "code-revisions"]);
+        let entry = fs::read_dir(&entries)
+            .unwrap()
+            .flatten()
+            .map(|item| read_json(&item.path().to_string_lossy()))
+            .find(|entry| entry["player"] == player.as_str())
+            .unwrap_or_else(|| panic!("no revision entry names {player}"));
+        let entry: CodeRevision = serde_json::from_value(entry).unwrap();
+        assert_eq!(
+            entry.files,
+            player_files(&sysutil::dir(&update.player)).unwrap(),
+            "the revision entry of {player} does not name the bytes of its directory"
+        );
+        for (index, dll) in update.assemblies.iter().enumerate() {
+            let name = sysutil::base(dll).trim_end_matches(".dll").to_string();
+            assert_eq!(
+                update.dll_hashes.at(&name),
+                file_hash(dll).unwrap(),
+                "{index}"
+            );
+        }
     };
     let Some(editor) = sdk("hot reload of compiled revisions needs the Unity SDK") else {
         return;
@@ -2147,6 +2174,7 @@ public static class RawPrefabTransforms {
     let update = recompile();
     assert_eq!(update.compiled_assemblies.to_vec(), ["Assembly-CSharp"]);
     assert!(!update.cache_reused);
+    saved_as_on_disk(&older_cache, &update);
     // The next session of that preparation takes the revision from the cache.
     assert!(recompile().cache_reused);
     // A cache entry that fails its check is replaced, not a reason to
@@ -2165,6 +2193,7 @@ public static class RawPrefabTransforms {
     assert_eq!(damaged, 1);
     let update = recompile();
     assert_eq!(update.compiled_assemblies.to_vec(), ["Assembly-CSharp"]);
+    saved_as_on_disk(&older_cache, &update);
     assert_eq!(
         fs::read_dir(&entries).unwrap().count(),
         1,
@@ -2227,6 +2256,7 @@ public static class RawPrefabTransforms {
             .compile(&ctx, Some(std::slice::from_ref(&source)))
             .unwrap()
             .expect("a changed source compiles to a new revision");
+        saved_as_on_disk(&compiler.cache, &update);
         let newest = newest_assemblies(compiler).unwrap();
         // The newest compile is a Player directory of its own; the one the
         // "running" Player loaded stays as it was.
