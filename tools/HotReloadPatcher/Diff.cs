@@ -707,8 +707,11 @@ internal sealed partial class Differ
                     string name = n.TypeRefName(generic.Reference, bare: true);
                     if (name == "System.Collections.Generic.List`1")
                         return !element && shape.Arguments.Length == 1 && CanSerialize(shape.Arguments[0], reference, element: true);
+                    // Unity 6000.6.3f1 keeps the entries of a [SerializeField] Dictionary whose values it
+                    // serializes, a Dictionary among them, whatever the key: a key it cannot write
+                    // (a 64-bit enum, an object) is dropped and the entries stay (builder6-6).
                     if (name == "System.Collections.Generic.Dictionary`2" && dictionary && !element && shape.Arguments.Length == 2
-                        && CanSerialize(shape.Arguments[0], false, element: false) && CanSerialize(shape.Arguments[1], false, element: false))
+                        && CanSerialize(shape.Arguments[1], false, element: false, dictionary: true))
                         return true;
                     // HashSet, Nullable, a tuple, Action<T>, any other dictionary: no enum is among them.
                     return reference && !generic.ValueType;
@@ -788,7 +791,9 @@ internal sealed partial class Differ
         if (IsDelegate(a, type)) return false;
         if (a.IsInterface(type)) return reference;
         if (!a.IsValueType(type) && UnityTypes.Classify(workspace, a, type).Kind != UnityKind.No) return true;
-        return reference || (a.MD.GetTypeDefinition(type).Attributes & SerializableType) != 0;
+        // Unity serializes no field of an abstract class but a [SerializeReference] (builder6-11).
+        var flags = a.MD.GetTypeDefinition(type).Attributes;
+        return reference || ((flags & SerializableType) != 0 && (flags & TypeAttributes.Abstract) == 0);
     }
 
     /// Why a field cannot be a `FieldStore` slot of its type. Null when it can.

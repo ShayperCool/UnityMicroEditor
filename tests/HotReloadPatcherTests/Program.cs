@@ -747,6 +747,13 @@ internal static class Program
             ["SER_DICT_ADD"] = Patch().Fields("Serial.Shop::stock", "Serial.Shop::lists", "Serial.Shop::unmarked", "Serial.Shop::set").Redirects("changed Serial.Shop::Count()")
                 .Noted("serialized_field_not_restored Serial.Shop::stock", "serialized_field_not_restored Serial.Shop::lists",
                     "added_member_attributes_ignored Serial.Shop::stock", "added_member_attributes_ignored Serial.Shop::lists", "added_member_attributes_ignored Serial.Shop::set"),
+            // Dictionaries of dictionaries, and a key Unity cannot write (builder6-6).
+            ["SER_DICT_NESTED"] = Refused("serialization_changed Serial.Nest::nested"),
+            ["SER_DICT_NESTED_ADD"] = Patch().Fields("Serial.Nest::more", "Serial.Nest::drops").Redirects("changed Serial.Nest::Count()")
+                .Noted("serialized_field_not_restored Serial.Nest::more", "serialized_field_not_restored Serial.Nest::drops",
+                    "added_member_attributes_ignored Serial.Nest::more", "added_member_attributes_ignored Serial.Nest::drops"),
+            // An abstract [Serializable] class is not serialized: a note (builder6-11).
+            ["SER_ABSTRACT"] = Unchanged().Noted("accessibility_changed Serial.Loadout::primary"),
         };
         foreach (var (name, expectation) in cases)
         {
