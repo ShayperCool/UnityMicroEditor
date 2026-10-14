@@ -347,8 +347,9 @@ internal static class Program
             .Noted("started_objects_keep_state Edits.Listener::OnEnable()"),
         ["ONCE_ASSET"] = Patch().Redirects("changed Edits.Settings::__UnityPlay_OnEnable()").Noted("started_objects_keep_state Edits.Settings::OnEnable()"),
         ["ONCE_DESERIALIZED"] = Patch().Redirects("changed Edits.Table::OnAfterDeserialize()").Noted("started_objects_keep_state Edits.Table::OnAfterDeserialize()"),
-        // Bonus() is called by Update as well: it runs again, and gets no note.
-        ["ONCE_HOOK"] = Patch().Redirects("changed Edits.Enemy::OnSetup()", "changed Edits.Actor::Prepare()", "changed Edits.Actor::Bonus()")
+        // Bonus() is called by Update as well, and Rebuild() has an attribute a framework calls it
+        // by: they run again, and get no note.
+        ["ONCE_HOOK"] = Patch().Redirects("changed Edits.Enemy::OnSetup()", "changed Edits.Actor::Prepare()", "changed Edits.Actor::Bonus()", "changed Edits.Actor::Rebuild()")
             .Noted("started_objects_keep_state Edits.Enemy::OnSetup()", "started_objects_keep_state Edits.Actor::Prepare()"),
         // The instances of a renamed coroutine that run keep the removed code.
         ["COROUTINE_REMOVED"] = Patch().Methods("Edits.Blinker::Pulse()").Redirects("changed Edits.Blinker::Update()")

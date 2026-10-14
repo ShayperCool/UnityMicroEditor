@@ -1358,9 +1358,9 @@ internal sealed partial class Differ
 
     /// Which methods of the new compilation run only when methods that run once run: every
     /// caller in the assembly is such a method or one of these. A public method, a method a
-    /// delegate or a string of the assembly can reach, an override of a method declared
-    /// outside the assembly and a message of the engine can be called from where the
-    /// assembly does not show, and are none of them.
+    /// delegate or a string of the assembly can reach, a method with an attribute, an override
+    /// of a method declared outside the assembly and a message of the engine can be called from
+    /// where the assembly does not show, and are none of them.
     internal sealed class Callers
     {
         public readonly Dictionary<MethodDefinitionHandle, HashSet<MethodDefinitionHandle>> Of = new();
@@ -1454,6 +1454,9 @@ internal sealed partial class Differ
             if (result.Roots.ContainsKey(m) || a.Kind(t) != GenKind.User || Canon.Owned(name, d.Attributes) || escaped.Contains(m)) continue;
             if ((d.Attributes & MethodAttributes.MemberAccessMask) == MethodAttributes.Public || name is ".ctor" or ".cctor" || strings.Contains(name)) continue;
             if (UnityTypes.Messages.Contains(name) && Classify(t).Kind != UnityKind.No) continue;
+            // An attribute is how a framework finds a method to call: the bridge runs an
+            // [InvokeOnHotReloadLocal] method again after a patch, for one.
+            if (AuthoredAttributes(a, d.GetCustomAttributes()).Count > 0) continue;
             if (Foreign(m, d)) continue;
             candidates.Add(m);
         }
@@ -1505,11 +1508,12 @@ internal sealed partial class Differ
                 else queue.Enqueue(caller);
             }
         string from = string.Join(", ", reached.Take(3)) + (reached.Count > 3 ? $" and {reached.Count - 3} more" : "");
+        bool one = reached.Count == 1;
         if (kinds.Contains(Once.Initializer))
-            return (Codes.RuntimeInitializerChanged, $"{shown} is called only from {from}, which ran when the Player started and does not run again; its new body is not in effect before the next start.");
+            return (Codes.RuntimeInitializerChanged, $"{shown} is called only from {from}, which ran when the Player started and {(one ? "does" : "do")} not run again; its new body is not in effect before the next start.");
         if (kinds.Count == 1 && kinds.Contains(Once.Spawned))
             return (Codes.SpawnedObjectsKeepState, $"{shown} is called only from {from}, which Netcode does not run again for the objects that are spawned; its new body runs for objects spawned after the patch.");
-        return (Codes.StartedObjectsKeepState, $"{shown} is called only from {from}, which do not run again for the objects that already ran them; its new body runs for objects that start after the patch.");
+        return (Codes.StartedObjectsKeepState, $"{shown} is called only from {from}, which {(one ? "does" : "do")} not run again for the objects that already ran {(one ? "it" : "them")}; its new body runs for objects that start after the patch.");
     }
 
     // ---- lambdas and state machines --------------------------------------------------------
