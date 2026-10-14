@@ -45,7 +45,11 @@ internal sealed class Canon
     /// The definitions that member references of this module name; nil for a foreign member.
     readonly Dictionary<int, EntityHandle> definitions = new();
     readonly string cycle = "$cycle" + Interlocked.Increment(ref instances);
+    /// Numbers the instances of one request, so that a self-referring layout of one never
+    /// matches one of another; reset by every request, so that a request served by a process
+    /// that lives on writes what a one-shot run of it writes.
     static int instances;
+    public static void StartRequest() => Interlocked.Exchange(ref instances, 0);
     readonly Queue<EntityHandle> queue = new();
     readonly HashSet<int> seen = new();
     Closure cur = new();

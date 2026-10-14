@@ -5,6 +5,8 @@
 //   dotnet HotReloadPatcher.dll --codes            the reason and note codes with their meaning
 //   dotnet HotReloadPatcher.dll --explain <request.json> <member id>
 //                                                  what the comparison sees of one method, both sides
+//   dotnet HotReloadPatcher.dll --serve            requests for the life of a watched session: one JSON
+//                                                  line each way per request (see Serve)
 //
 // Request (camelCase, absolute paths):
 //   {"schemaVersion":1,"generation":3,"output":"/dir/of/this/generation","runtimeAssembly":"UnityMicroEditor.HotReload",
@@ -143,6 +145,7 @@ internal static class Program
 
     public static int Main(string[] args)
     {
+        if (args.Length == 1 && args[0] == "--serve") return Serve();
         try
         {
             if (args.Length == 1 && args[0] == "--codes") { Write(CodeTable()); return 0; }
@@ -157,6 +160,83 @@ internal static class Program
             Console.Error.WriteLine(error is InvalidDataException or IOException or JsonException ? error.Message : error.ToString());
             return 1;
         }
+    }
+
+    /// <summary>
+    /// The builder for the life of a watched session. Standard input carries one request per line,
+    /// <c>{"id":3,"directory":"/abs","arguments":["/abs/request.json"]}</c>; standard output one answer
+    /// per line, <c>{"id":3,"exit":0,"output":"&lt;result document&gt;\n","error":"","kind":""}</c>, with
+    /// what the one-shot run of the arguments exits with and prints. The first line says
+    /// <c>{"ready":true,"protocol":1}</c>. Only a request path is served (<c>--codes</c> and
+    /// <c>--explain</c> are answered with exit 64). Nothing is kept from one request to the next;
+    /// the end of standard input ends the process.
+    /// </summary>
+    static int Serve()
+    {
+        using var frames = Console.OpenStandardOutput();
+        using var input = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false));
+        TextWriter console = Console.Out, consoleError = Console.Error;
+        void Frame(object value)
+        {
+            frames.Write(JsonSerializer.SerializeToUtf8Bytes(value));
+            frames.WriteByte((byte)'\n');
+            frames.Flush();
+        }
+        Frame(new Dictionary<string, object> { ["ready"] = true, ["protocol"] = 1 });
+        string? line;
+        while ((line = input.ReadLine()) != null)
+        {
+            if (line.Length == 0) continue;
+            long id = 0;
+            string? directory = null;
+            string[] arguments = Array.Empty<string>();
+            try
+            {
+                using var document = JsonDocument.Parse(line);
+                var request = document.RootElement;
+                id = request.GetProperty("id").GetInt64();
+                if (request.TryGetProperty("directory", out var where) && where.ValueKind == JsonValueKind.String) directory = where.GetString();
+                arguments = request.GetProperty("arguments").EnumerateArray().Select(a => a.GetString() ?? "").ToArray();
+            }
+            catch (Exception e) when (e is JsonException or KeyNotFoundException or InvalidOperationException) { arguments = Array.Empty<string>(); }
+            var output = new StringWriter();
+            var error = new StringWriter();
+            int exit;
+            if (arguments.Length != 1 || arguments[0].StartsWith("--", StringComparison.Ordinal))
+            {
+                exit = 64;
+                error.WriteLine("Not served: " + string.Join(" ", arguments));
+            }
+            else
+            {
+                // A stray console write goes into the answer, never between two frames.
+                Console.SetOut(output);
+                Console.SetError(error);
+                try
+                {
+                    if (!string.IsNullOrEmpty(directory)) Directory.SetCurrentDirectory(directory);
+                    Canon.StartRequest();
+                    output.Write(Encoding.UTF8.GetString(Run(Request.Read(arguments[0]))));
+                    output.Write('\n');
+                    exit = 0;
+                }
+                catch (Exception e)
+                {
+                    error.WriteLine(e is InvalidDataException or IOException or JsonException ? e.Message : e.ToString());
+                    exit = 1;
+                }
+                finally
+                {
+                    Console.SetOut(console);
+                    Console.SetError(consoleError);
+                }
+            }
+            Frame(new Dictionary<string, object>
+            {
+                ["id"] = id, ["exit"] = exit, ["output"] = output.ToString(), ["error"] = error.ToString(), ["kind"] = "",
+            });
+        }
+        return 0;
     }
 
     static void Write(byte[] json)

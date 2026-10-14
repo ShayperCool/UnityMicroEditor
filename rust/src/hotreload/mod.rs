@@ -16,7 +16,9 @@ pub use attempt::{
     CODE_CALLBACK_FAILED, CODE_FIELD_NOT_RESTORED, Failure, Outcome, Patched, PlayerCode, Refusal,
     Unchanged, bounded, loaded_assemblies, newest_assemblies, wait_code_ack,
 };
-pub use tools::{Applier, BUILD_TIMEOUT, Sdk, Setup, Tools, prepare_patcher, stage_applier};
+pub use tools::{
+    Applier, BUILD_TIMEOUT, BuilderService, Sdk, Setup, Tools, prepare_patcher, stage_applier,
+};
 pub use wire::{
     Ack, AckFailure, BuilderAssembly, BuilderRequest, BuilderResult, Descriptor,
     DescriptorAssembly, Detour, RUNTIME_ASSEMBLY, Reason, ReloadRequest,

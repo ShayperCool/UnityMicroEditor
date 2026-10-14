@@ -1246,6 +1246,11 @@ fn run_session(
     // its C# edits restart the Player, as they do without hot reload.
     let hot = match setup.map(hotreload::Setup::finish) {
         Some(Ok((tools, applier))) => {
+            // A watched session patches edit after edit: its builder stays.
+            let tools = match opts.watch {
+                true => tools.served(),
+                false => tools,
+            };
             let loaded =
                 hotreload::loaded_assemblies(&compiler, &baseline.player).unwrap_or_default();
             Some(Hot {
