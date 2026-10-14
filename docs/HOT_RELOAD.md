@@ -377,11 +377,11 @@ On one machine: AMD Ryzen 7 5700X3D (8 cores, 16 threads), 30 GiB, XFS, Unity `6
 | A body edit, from the write of the file to `code-patched` read from the runner (32 edits in sessions alternating with the binary before the stage 6 fixes, load 3.1; 2026-10-14) | median 0.33 s, p90 0.43 s, max 0.45 s (before: 0.44 s, 0.55 s) |
 | The same through MCP: the `wait_update` call after the `script_edit` of a patched edit (15 calls in four MCP sessions of the stage 6 checks, 2026-10-14; the session outputs had been used before) | median 0.43 s, 0.36 to 0.92 s |
 | A refusal through MCP, the `wait_update` call | 0.13 to 0.30 s for an edit of an existing file, 1.38 to 1.65 s for a new script file |
-| The first edit on a new session output, which starts the kept processes (stage 6 review): compiler server 0.80 s, lifecycle helper 0.55 s, the loaded Player hashed once 0.47 s, builder 0.25 s | 2.40 s |
+| The first edit on a new session output, which starts the kept processes (stage 6 review): compiler server 0.80 s, lifecycle helper 0.55 s, the loaded Player hashed once 0.47 s, builder 0.25 s | 2.40 s (one of 43.2 s, with 15 GB of swap in use, did not reproduce; its cause is not known) |
 | `hot_reload(recompile)`, the call (four sessions, 2026-10-14) | 4.26, 4.36, 4.63, 4.81 s |
 | A restart the runner made by itself for a refused edit (`onUnsupportedEdit: "restart"`), the `wait_update` call | 4.57 and 6.20 s |
 | A C# edit with `hotReload: false` (a restart for every edit), the `wait_update` call | 4.89 s (one) |
-| `session_control(start)` and `wait` until the Player is ready (seven starts) | 5.3 to 7.4 s |
+| `session_control(start)` and `wait` until the Player is ready (seven starts on a prepared project) | 5.3 to 7.4 s; a start that prepares first 12 to 24 s |
 | The applier in the Player, per request | 2 to 4 ms; 10 to 30 ms for the first one of a Player process |
 
 Where the time of a body edit goes (Roslyn about 0.13 s, the copy of the Player directory, the lifecycle rewrite, the request to the Player 0.02 s) is in [RUNNER.md](RUNNER.md#measured), from `UME_TIMINGS=1`.
