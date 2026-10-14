@@ -2683,6 +2683,315 @@ fn hot_reload_applier_on_a_staged_host_sdk() {
     assert_eq!(tools.applier(&ctx).unwrap(), applier);
 }
 
+/// The Netcode rules on images the package's own post-processor wrote: one
+/// source with one edit per symbol is compiled against the assemblies of a
+/// host that was built with Netcode for GameObjects, post-processed as in a
+/// session and compared by the real patch builder. Needs `UME_NETCODE_SDK`,
+/// the Unity executable, and `UME_HOT_RELOAD_HOST`, the Player executable of
+/// a prepared host of a project that has the package.
+#[test]
+fn hot_reload_netcode_sdk() {
+    use crate::compiler::{
+        AssemblyConfig, CompileAssembly, Compiler, LifecycleProof, NilMap, NilVec,
+        deduplicate_references, player_managed,
+    };
+    let variable = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+    let (Some(editor), Some(host)) = (variable("UME_NETCODE_SDK"), variable("UME_HOT_RELOAD_HOST"))
+    else {
+        eprintln!(
+            "skipped: the Netcode rules need UME_NETCODE_SDK and the host of a Netcode project in UME_HOT_RELOAD_HOST"
+        );
+        return;
+    };
+    let managed = player_managed(&host);
+    if !std::path::Path::new(&sysutil::join(&[&managed, "Unity.Netcode.Runtime.dll"])).exists() {
+        eprintln!("skipped: the host {host} was built without Netcode for GameObjects");
+        return;
+    }
+    let (_guard, root) = temp();
+    let ctx = Context::background();
+    let config = |name: &str| AssemblyConfig {
+        name: name.into(),
+        defines: NilVec::from(["UNITY_STANDALONE_LINUX"].as_slice()),
+        ..Default::default()
+    };
+    let mut compiler = Compiler {
+        project: root.clone(),
+        editor: editor.clone(),
+        cache: sysutil::join(&[&root, "compiler"]),
+        player: host.clone(),
+        configs: NilMap::from([("Rules", config("Rules")), ("First", config("First"))]),
+        ..Default::default()
+    };
+    compiler.initialize_sdk().unwrap();
+    let mut references: Vec<String> = compiler.base_references.to_vec();
+    references.extend(glob(&sysutil::join(&[&managed, "*.dll"])).unwrap());
+    let references = deduplicate_references(&references);
+    // One image per assembly and symbol, post-processed as in a session; ""
+    // is what the Player loaded. Returns the image and whether the
+    // post-processor rewrote it.
+    let mut image = |assembly: &str, source: &str, symbol: &str| -> (String, bool) {
+        let folder = sysutil::join(&[
+            &root,
+            "images",
+            assembly,
+            if symbol.is_empty() { "loaded" } else { symbol },
+        ]);
+        fs::create_dir_all(&folder).unwrap();
+        let dll = sysutil::join(&[&folder, &format!("{assembly}.dll")]);
+        let mut arguments: Vec<String> = [
+            compiler.csc.as_str(),
+            "-nologo",
+            "-target:library",
+            "-nostdlib+",
+            "-langversion:9.0",
+            "-deterministic+",
+            "-debug:portable",
+            "-optimize-",
+        ]
+        .map(String::from)
+        .to_vec();
+        arguments.push(format!("-out:{dll}"));
+        if !symbol.is_empty() {
+            arguments.push(format!("-define:{symbol}"));
+        }
+        arguments.extend(references.iter().map(|path| format!("-reference:{path}")));
+        arguments.push(format!("{TESTDATA}/{source}"));
+        let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        if let Err(error) = compiler_command(&ctx, &folder, &compiler.dotnet, &arguments) {
+            panic!("compile {assembly} {symbol}: {error}");
+        }
+        let proof = LifecycleProof {
+            schema_version: 1,
+            verified: true,
+            scriptable_object_barrier: true,
+            phases: NilVec::from(["Awake", "OnEnable", "OnDisable", "OnDestroy"].as_slice()),
+            ..Default::default()
+        };
+        let unit = CompileAssembly {
+            name: assembly.into(),
+            references: NilVec::from(["Unity.Netcode.Runtime"].as_slice()),
+            ..Default::default()
+        };
+        let (processed, _) = compiler
+            .postprocess_netcode(&ctx, &folder, &dll, &unit, &references, proof)
+            .unwrap_or_else(|error| panic!("post-process {assembly} {symbol}: {error}"));
+        let rewritten = file_hash(&dll).unwrap() != file_hash(&processed).unwrap();
+        (processed, rewritten)
+    };
+    let sdk = Sdk::locate(&editor).unwrap();
+    let patcher =
+        prepare_patcher(&ctx, &sdk, &sysutil::join(&[&root, "hot-reload/patcher"])).unwrap();
+    let tools = Tools {
+        sdk,
+        editor: editor.clone(),
+        managed: String::new(),
+        output: root.clone(),
+        patcher,
+        limit: None,
+    };
+    let compare = |label: &str, assembly: &str, loaded: &str, current: &str| -> BuilderResult {
+        let request = sysutil::join(&[&root, "requests", &format!("{label}.json")]);
+        fs::create_dir_all(sysutil::dir(&request)).unwrap();
+        crate::util::atomic_json(
+            &request,
+            &BuilderRequest {
+                schema_version: 1,
+                generation: 1,
+                output: sysutil::join(&[&root, "patches", label]),
+                runtime_assembly: RUNTIME_ASSEMBLY.into(),
+                previous_result: String::new(),
+                assemblies: vec![BuilderAssembly {
+                    name: assembly.into(),
+                    loaded: loaded.into(),
+                    current: current.into(),
+                }],
+            },
+        )
+        .unwrap();
+        let printed = tools.build(&ctx, &request).unwrap();
+        BuilderResult::decode(&printed, 1).unwrap_or_else(|error| {
+            panic!("{label}: {error}: {}", String::from_utf8_lossy(&printed))
+        })
+    };
+    let codes = |result: &BuilderResult| -> Vec<String> {
+        let mut codes: Vec<String> = result
+            .unsupported()
+            .into_iter()
+            .map(|reason| reason.code)
+            .collect();
+        codes.sort();
+        codes.dedup();
+        codes
+    };
+    let check = |label: &str,
+                 result: &BuilderResult,
+                 verdict: &str,
+                 members: &[&str],
+                 notes: &[&str],
+                 refused: &[&str]| {
+        let noted: Vec<String> = result.notes().into_iter().map(|note| note.code).collect();
+        assert!(
+            result.verdict == verdict
+                && result.members() == members
+                && noted == notes
+                && codes(result) == refused,
+            "{label}: verdict {} reasons {:?} members {:?} notes {noted:?}; expected {verdict} {members:?} {notes:?} {refused:?}",
+            result.verdict,
+            result.unsupported(),
+            result.members(),
+        );
+    };
+    let (loaded, rewritten) = image("Rules", "NetcodeRules.cs", "");
+    assert!(rewritten, "the post-processor did not rewrite Rules");
+    // Patched: the symbol, the member the patch redirects and the notes.
+    let patched: [(&str, &str, &[&str]); 5] = [
+        ("CASE_BODY", "Rules.Ball::Compute(System.Int32)", &[]),
+        ("CASE_PLAIN", "Rules.Plain::Twice(System.Int32)", &[]),
+        (
+            "CASE_SPAWN",
+            "Rules.Ball::OnNetworkSpawn()",
+            &["spawned_objects_keep_state"],
+        ),
+        (
+            "CASE_RPC_BODY",
+            "Rules.Ball::AnnounceRpc(System.Int32)",
+            &[],
+        ),
+        (
+            "CASE_RPC_STRUCT_BODY",
+            "Rules.Ball::ShootRpc(Rules.Shot,Unity.Netcode.RpcParams)",
+            &[],
+        ),
+    ];
+    for (symbol, member, notes) in patched {
+        let (current, _) = image("Rules", "NetcodeRules.cs", symbol);
+        check(
+            symbol,
+            &compare(symbol, "Rules", &loaded, &current),
+            "patch",
+            &[member],
+            notes,
+            &[],
+        );
+    }
+    // Unchanged: the same registrations in another order (two RPCs, two
+    // classes with the types of their network variables swapped).
+    for symbol in ["CASE_RPC_REORDERED", "CASE_CLASS_ORDER"] {
+        let (current, _) = image("Rules", "NetcodeRules.cs", symbol);
+        check(
+            symbol,
+            &compare(symbol, "Rules", &loaded, &current),
+            "unchanged",
+            &[],
+            &[],
+            &[],
+        );
+    }
+    // Refused: the symbol and the reason codes.
+    let refused: [(&str, &[&str]); 6] = [
+        ("CASE_RPC_ADDED", &["netcode_rpc_changed"]),
+        ("CASE_RPC_PARAMETER", &["netcode_rpc_changed"]),
+        (
+            "CASE_RPC_TARGET",
+            &["custom_attributes_changed", "netcode_rpc_changed"],
+        ),
+        ("CASE_VARIABLE_ADDED", &["netcode_variable_changed"]),
+        (
+            "CASE_VARIABLE_TYPE",
+            &["netcode_serialization_changed", "netcode_variable_changed"],
+        ),
+        ("CASE_SERIALIZE_BODY", &["generic_method"]),
+    ];
+    for (symbol, codes) in refused {
+        let (current, _) = image("Rules", "NetcodeRules.cs", symbol);
+        check(
+            symbol,
+            &compare(symbol, "Rules", &loaded, &current),
+            "unsupported",
+            &[],
+            &[],
+            codes,
+        );
+    }
+    // Another compilation of the same source means the same to the builder.
+    let (unused, _) = image("Rules", "NetcodeRules.cs", "UNUSED_SYMBOL");
+    assert_ne!(file_hash(&unused).unwrap(), file_hash(&loaded).unwrap());
+    let result = compare("UNUSED_SYMBOL", "Rules", &loaded, &unused);
+    assert!(
+        result.verdict == "unchanged" && result.unsupported().is_empty(),
+        "{:?}",
+        result
+    );
+    // An assembly whose first use of the Netcode API is an ordinary method
+    // body: the post-processor rewrites it from then on and writes its
+    // start-up types, which register nothing. That is no change of what the
+    // Player registered, and the body is patched; the same backwards. An
+    // assembly that also asks for a serializer is refused.
+    let (plain, rewritten) = image("First", "NetcodeFirstUse.cs", "");
+    assert!(
+        !rewritten,
+        "an image without Netcode must be returned as it is"
+    );
+    let (uses, rewritten) = image("First", "NetcodeFirstUse.cs", "CASE_USES");
+    assert!(
+        rewritten,
+        "the post-processor did not rewrite First with CASE_USES"
+    );
+    let (registers, _) = image("First", "NetcodeFirstUse.cs", "CASE_REGISTERS");
+    let hosting = ["First.Lobby::Hosting()"];
+    check(
+        "first use",
+        &compare("first-use", "First", &plain, &uses),
+        "patch",
+        &hosting,
+        &[],
+        &[],
+    );
+    check(
+        "last use",
+        &compare("last-use", "First", &uses, &plain),
+        "patch",
+        &hosting,
+        &[],
+        &[],
+    );
+    check(
+        "first use that registers",
+        &compare("first-registers", "First", &plain, &registers),
+        "unsupported",
+        &[],
+        &[],
+        &[
+            "custom_attributes_changed",
+            "netcode_generated_code_changed",
+        ],
+    );
+    // The post-processor gives the same bytes for the same input.
+    let again = sysutil::join(&[&root, "images/again"]);
+    fs::create_dir_all(&again).unwrap();
+    let copy = sysutil::join(&[&again, "Rules.dll"]);
+    let source = sysutil::join(&[&root, "images/Rules/loaded/Rules.dll"]);
+    fs::copy(&source, &copy).unwrap();
+    fs::copy(source.replace(".dll", ".pdb"), copy.replace(".dll", ".pdb")).unwrap();
+    let proof = LifecycleProof {
+        schema_version: 1,
+        verified: true,
+        scriptable_object_barrier: true,
+        phases: NilVec::from(["Awake", "OnEnable", "OnDisable", "OnDestroy"].as_slice()),
+        ..Default::default()
+    };
+    let unit = CompileAssembly {
+        name: "Rules".into(),
+        references: NilVec::from(["Unity.Netcode.Runtime"].as_slice()),
+        ..Default::default()
+    };
+    let (repeated, _) = compiler
+        .postprocess_netcode(&ctx, &again, &copy, &unit, &references, proof)
+        .unwrap();
+    assert_eq!(file_hash(&repeated).unwrap(), file_hash(&loaded).unwrap());
+}
+
 /// Copies what a C# harness reads into a staging directory, so that its
 /// build output and a source that changes meanwhile stay apart.
 fn stage_tree(root: &str, relative: &[&str]) -> String {

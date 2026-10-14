@@ -10,6 +10,7 @@
 //   {"schemaVersion":1,"generation":3,"output":"/dir/of/this/generation","runtimeAssembly":"UnityMicroEditor.HotReload",
 //    "previousResult":"/dir/of/generation/2/result.json",
 //    "assemblies":[{"name":"Assembly-CSharp","loaded":"/loaded/Assembly-CSharp.dll","current":"/new/Assembly-CSharp.dll"}]}
+// Whether an assembly was rewritten by the Netcode post-processor is read from its image.
 // `previousResult` is the result document of the patch the Player runs now, when it runs one: what
 // that patch defined and this one changes or drops is reported, because nothing redirects it.
 // Diagnostic members: `threads`, `forceAll` (every comparable body becomes a change), `fault`
@@ -132,6 +133,7 @@ internal static class Program
         public Entry Entry = null!;
         public Emitter Emitter = null!;
         public List<Change> Changes = new();
+        public string? NetcodeUnknown;
         public string Verdict = Unchanged;
         public Patch? Patch;
         public string Path = "", Sha256 = "", Pdb = "";
@@ -197,18 +199,6 @@ internal static class Program
         catch { workspace.Dispose(); throw; }
     }
 
-    // The post-processor rewrites every assembly whose emitted image references the Netcode runtime
-    // and returns all others as they are, so the reference of the two images is what tells. The
-    // project's assembly graph does not: there Assembly-CSharp references every auto-referenced
-    // assembly, whatever its code uses.
-    static bool Netcode(Entry e)
-    {
-        foreach (var a in new[] { e.Loaded, e.Current })
-            foreach (var h in a.MD.AssemblyReferences)
-                if (a.MD.GetString(a.MD.GetAssemblyReference(h).Name) == "Unity.Netcode.Runtime") return true;
-        return false;
-    }
-
     /// A defect of the tool on one assembly must neither pass for an applied patch nor take the
     /// runner's fallback away: the assembly is refused, with the exception as the reason.
     static bool Guard(Outcome outcome, string stage, Action action)
@@ -245,6 +235,7 @@ internal static class Program
                 var differ = new Differ(workspace, entry, blind: request.Fault == "owner") { ForceAll = request.ForceAll };
                 differ.Run(request.Threads);
                 outcome.Changes = differ.Changes;
+                outcome.NetcodeUnknown = differ.NetcodeUnknown;
             });
         }
         long diffMs = watch.ElapsedMilliseconds;
@@ -253,13 +244,16 @@ internal static class Program
         foreach (var outcome in outcomes)
         {
             if (outcome.Verdict == Unsupported) continue;
-            if (Netcode(outcome.Entry))
+            // What the Netcode post-processor registered at start-up is read from the images
+            // (Netcode.cs). An assembly it cannot be read from gets no patch at all: it was
+            // compared without those rules, only to see whether anything differs.
+            if (outcome.NetcodeUnknown is { } form)
             {
                 var first = outcome.Changes.FirstOrDefault(c => c.Action is Actions.Patch or Actions.Unsupported);
                 if (first == null) continue;
                 outcome.Verdict = Unsupported;
                 outcome.Unsupported.Add((Codes.NetcodeAssembly, first.Member,
-                    $"{outcome.Entry.Name} is rewritten by the Netcode post-processor; its edit of {first.Member} cannot be patched."));
+                    $"{outcome.Entry.Name} uses Netcode for GameObjects and is not in the form its post-processor is known to write ({form}), so nothing says what Netcode registered when the Player started; its edit of {first.Member} cannot be patched."));
                 continue;
             }
             if (!Guard(outcome, "planning the patch of", () => outcome.Emitter.Prepare(outcome.Changes))) continue;

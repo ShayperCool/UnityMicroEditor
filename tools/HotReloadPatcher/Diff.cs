@@ -1,8 +1,9 @@
 // Classifies every difference between the assembly the Player loaded (old) and the new compilation.
 //
-// The policy lives here, in one file. Its rule: an edit is "patch" only when the emitter and the
-// runtime are known to carry it exactly; everything else is refused with a code, because an edit
-// that is reported as applied and is not is worse than a restart.
+// The policy lives here, and for what the Netcode post-processor generates in Netcode.cs. Its
+// rule: an edit is "patch" only when the emitter and the runtime are known to carry it exactly;
+// everything else is refused with a code, because an edit that is reported as applied and is not
+// is worse than a restart.
 using System.Globalization;
 using System.Reflection;
 using System.Reflection.Metadata;
@@ -28,7 +29,7 @@ internal sealed class Change
     public List<LambdaPair>? Lambdas;
 }
 
-internal sealed class Differ
+internal sealed partial class Differ
 {
     readonly Workspace workspace;
     readonly Asm o, n;
@@ -54,6 +55,7 @@ internal sealed class Differ
         co = new Canon(o) { Blind = blind }; cn = new Canon(n) { Blind = blind };
         userStrings = strings ?? new Lazy<HashSet<string>>(() => UserStrings(n));
         namedByString = named ?? new Lazy<Dictionary<string, SortedDictionary<string, int>>>(() => NamedByString(n));
+        netcode = Netcode.Uses(o) || Netcode.Uses(n);
     }
 
     /// The closure of a user method of the loaded assembly, remembered as walked.
@@ -79,6 +81,7 @@ internal sealed class Differ
     public void Run(int threads)
     {
         DiffAssembly();
+        CheckNetcodeForm();
         var set = new SortedSet<string>(StringComparer.Ordinal);
         foreach (var (name, h) in o.Types) if (IsUser(o, h)) set.Add(name);
         foreach (var (name, h) in n.Types) if (IsUser(n, h)) set.Add(name);
@@ -93,7 +96,7 @@ internal sealed class Differ
         var workers = new Differ[threads];
         Parallel.For(0, threads, new ParallelOptions { MaxDegreeOfParallelism = threads }, worker =>
         {
-            var d = workers[worker] = new Differ(workspace, o, n, userStrings, namedByString, blind) { ForceAll = ForceAll };
+            var d = workers[worker] = new Differ(workspace, o, n, userStrings, namedByString, blind) { ForceAll = ForceAll, netcode = netcode };
             for (int i = worker; i < names.Length; i += threads)
             {
                 int before = d.Changes.Count;
@@ -216,7 +219,8 @@ internal sealed class Differ
     {
         bool inOld = o.Types.TryGetValue(name, out var ot) && IsUser(o, ot);
         bool inNew = n.Types.TryGetValue(name, out var nt) && IsUser(n, nt);
-        if (inOld && inNew) DiffType(ot, nt, name);
+        if (netcode && name.StartsWith(Netcode.GeneratedNamespace, StringComparison.Ordinal)) DiffGenerated(name, inOld ? ot : default, inNew ? nt : default);
+        else if (inOld && inNew) DiffType(ot, nt, name);
         else if (inOld && IsEmbeddedAttribute(o, ot))
             Add("type_removed", name, Actions.None, message: "The compiler no longer embeds an attribute type; the loaded one stays and nothing reads it.");
         else if (inOld) Refuse("type_removed", name, Codes.TypeRemoved, $"Type {name} was removed or renamed.");
@@ -399,6 +403,7 @@ internal sealed class Differ
         CompareAttributes("type", name, od.GetCustomAttributes(), nd.GetCustomAttributes());
         DiffFields(ot, nt, name);
         DiffMethods(ot, nt, name);
+        if (netcode) DiffNetworked(ot, nt, name);
         DiffOverrides(od, nd, name);
         DiffProperties(od, nd, name);
         DiffEvents(od, nd, name);
@@ -757,16 +762,17 @@ internal sealed class Differ
 
     static bool IsBridge(string name) => name.StartsWith(UnityTypes.RuntimeInitializerPrefix, StringComparison.Ordinal);
 
-    static Dictionary<string, MethodDefinitionHandle> UserMethods(Asm a, TypeDefinitionHandle t)
+    static Dictionary<string, MethodDefinitionHandle> UserMethods(Asm a, TypeDefinitionHandle t, bool networked)
     {
         var map = new Dictionary<string, MethodDefinitionHandle>(StringComparer.Ordinal);
         foreach (var m in a.MD.GetTypeDefinition(t).GetMethods())
         {
             // <M>b__1_0 and <M>g__Local|1_0 belong to the user method that reaches them; start-up
-            // bridges are compared as a set.
+            // bridges are compared as a set, and so is what the Netcode post-processor added to a
+            // NetworkBehaviour (DiffNetworked).
             var d = a.MD.GetMethodDefinition(m);
             string name = a.MD.GetString(d.Name);
-            if (Canon.Owned(name, d.Attributes) || IsBridge(name)) continue;
+            if (Canon.Owned(name, d.Attributes) || IsBridge(name) || (networked && Netcode.Generated(name))) continue;
             map[a.MethodKey(m)] = m;
         }
         return map;
@@ -782,8 +788,8 @@ internal sealed class Differ
 
     void DiffMethods(TypeDefinitionHandle ot, TypeDefinitionHandle nt, string type)
     {
-        var om = UserMethods(o, ot);
-        var nm = UserMethods(n, nt);
+        var om = UserMethods(o, ot, netcode && Netcode.Networked(o, ot));
+        var nm = UserMethods(n, nt, netcode && Netcode.Networked(n, nt));
         var removed = new List<string>();
         var added = new List<string>();
         foreach (var k in om.Keys) if (!nm.ContainsKey(k)) removed.Add(k);
@@ -836,6 +842,12 @@ internal sealed class Differ
     {
         var d = n.MD.GetMethodDefinition(method);
         string name = n.MD.GetString(d.Name), id = n.MemberId(method);
+        if (netcode && Netcode.IsRpc(n, d))
+        {
+            rpcReported.Add(id);
+            Refuse("method_added", id, Codes.NetcodeRpcChanged, $"The RPC {id} was added, or an RPC was renamed or its parameters changed; the RPCs of a class are registered by an id of their signature when its first object is initialized.").NewMethod = method;
+            return;
+        }
         if (AddedMethodObstacle(method, type, id) is { } obstacle)
         {
             Refuse("method_added", id, obstacle.Code, obstacle.Message).NewMethod = method;
@@ -910,6 +922,12 @@ internal sealed class Differ
     {
         var d = o.MD.GetMethodDefinition(method);
         string name = o.MD.GetString(d.Name), id = o.MemberId(method);
+        if (netcode && Netcode.IsRpc(o, d))
+        {
+            rpcReported.Add(id);
+            Refuse("method_removed", id, Codes.NetcodeRpcChanged, $"The RPC {id} was removed or renamed, or its parameters changed; the Player keeps it registered, and other peers may still send it.");
+            return;
+        }
         if ((d.Attributes & MethodAttributes.Virtual) != 0)
         {
             Refuse("method_removed", id, Codes.VirtualMethodRemoved, $"The removed method {id} is virtual, an override or an interface implementation; the loaded class keeps dispatching to it.");
@@ -1032,6 +1050,7 @@ internal sealed class Differ
                 Refuse("method", id, Codes.ExternMethodChanged, $"The direction or marshalling of a parameter or of the return value of {id} changed; the runtime keeps the stub it made for the loaded method.");
             return;
         }
+        if (netcode && !NetcodeRpc(oh, nh, od, nd, id)) return;
         var oc = Old(oh);
         var nc = New(nh);
         bool generic = nd.GetGenericParameters().Count > 0, genericType = n.IsGenericType(nt);
@@ -1062,6 +1081,9 @@ internal sealed class Differ
             if ((nd.Attributes & MethodAttributes.Static) == 0 && nd.DecodeSignature(n.Plain, null).ParameterTypes.Length == 0
                 && (name == "Start" ? Unity(nt).Starts : (name == "Awake" || name.TrimEnd('_') == "__UnityPlay_Awake") && Unity(nt).Awakes))
                 change.Notes.Add((Codes.StartedObjectsKeepState, $"{id} does not run again for the objects that already ran it; its new body runs for objects that start after the patch."));
+            // Netcode calls these once for an object that is spawned.
+            if (netcode && (nd.Attributes & MethodAttributes.Static) == 0 && Netcode.SpawnCallback(name) && Netcode.Networked(n, nt))
+                change.Notes.Add((Codes.SpawnedObjectsKeepState, $"{id} does not run again for the objects that are spawned; its new body runs for objects spawned after the patch."));
             if (StaleStateMachines(oc, nc))
                 change.Notes.Add((Codes.RunningCoroutinesKeepOldCode, $"Calls of {id} made after the patch run the new code; a coroutine, iterator or async call that is already running finishes on the old code."));
             MapLambdas(change, id, oh, nh, oc, nc);
