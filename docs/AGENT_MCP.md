@@ -324,19 +324,28 @@ the answer, and no wait is held for one.
 after it and reports the notes they brought. Take
 `session_control(status).lastSequence` before the first of the edits. Without
 the argument the mark is the last sequence that a `wait`, a `wait_update` or a
-`hot_reload(recompile)` of this session reported, which is right for a caller
-that waits after each of its edits. When nothing was applied or rejected after
-the mark, the reply is a success that starts with `attention`:
-`Nothing was applied or rejected after afterSequence N: ...`. That is the
-answer for a save that changed nothing the runner reads (a path outside
-`Assets`, `Packages` and `ProjectSettings`, a file kind it does not watch, a
-file that is still open) and for a mark that was read after the answer. A
-failed call returns no session state; the `details` of
-`full_recompile_required` and of `wait_timeout` carry `lastSequence`. An
-`afterSequence` above `lastSequence` (a mark read before the session started
-again, which counts its events anew) is answered like any other mark: what
-stands is reported, and otherwise `attention` says that the mark is of another
-session and names this session's `lastSequence`.
+`hot_reload(recompile)` of this server reported, to any of its callers. That is
+right for one caller that waits after each of its edits; callers that share a
+server (subagents on one stdio connection, agents on one HTTP server, whose
+requests carry no session of their own) take each other's answers that way
+and should pass `afterSequence`. The mark is read once per call: the events,
+the notes and `attention` of one reply are about the same mark. When nothing
+was applied or rejected after the mark, the reply is a success that starts
+with `attention`: `Nothing was applied or rejected after afterSequence N: ...`
+(`after sequence N, the last one a wait or recompile of this server reported`
+without the argument), followed by what stands: the code generation the Player
+runs and where it was patched in, or the restart the runner made by itself,
+and the first limit of it that lasts until a restart. That is the answer for a
+save that changed nothing the runner reads (a path outside `Assets`,
+`Packages` and `ProjectSettings`, a file kind it does not watch, a file that is
+still open) and for a mark that was read after the answer, also when another
+caller's wait read it first. A failed call returns no session state; the
+`details` of `full_recompile_required` and of `wait_timeout` carry
+`lastSequence`. The events of a server are numbered from 1 when it starts, and
+a `start`, a `reset` and a recovery continue the count. An `afterSequence`
+above `lastSequence` therefore comes from an earlier server process or another
+project: the reply covers every event of this server, as for 0, and
+`attention` says so.
 
 `wait` reports an edit exactly as `wait_update` does; it is the call after a
 start or a restart, where the Player becoming ready is the news. Both are held
@@ -418,8 +427,11 @@ lists that repeat it are left out of a listed event: the hashes of every
 source that a `code-updated` carries, `notes`, `newNotes`, `members` and
 `unsupported` (`hotReload.notes`, `hotReload.lastPatch`, `hotReload.newNotes`
 and `hotReload.unsupported` have them; the event keeps the counts and the
-report), and all but the first 512 bytes of an `error`. The session keeps its
-events as the runner printed them.
+report), all but the first 512 bytes of an `error`, and all but the first 8
+`paths` (each once; `pathsCount` counts them when there are more). The session
+keeps its events as the runner printed them. A rejection longer than 4 KiB is
+kept whole in `<output>/rejections/<server>-<sequence>.txt`; the file is
+written whole under a name of this server process, and the newest 64 are kept.
 
 All source mutations require a stable `operationId`. Exact retry returns its
 original durable result; changed arguments with that ID conflict. Stale source or

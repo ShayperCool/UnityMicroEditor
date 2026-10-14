@@ -131,7 +131,10 @@ answer as not its last (`updatePending: true`), not for a save nobody made.
 A compile error and a refused edit are reported for every `afterSequence`
 until an update follows them. A session reply lists the newest events of the
 session and a wait those after `afterSequence` (without the argument: after
-the last wait or recompile that answered); `events` sets how many. The events
+the last wait or recompile of this server that answered, to any caller, so
+callers that share a server pass it; a mark above `lastSequence` is of an
+earlier server and the reply covers all of this one); `events` sets how many,
+and a listed event keeps its first 8 `paths` with `pathsCount`. The events
 of a reply leave out the lists the state holds (`notes`, `newNotes`,
 `members`, `unsupported`) and all but the beginning of an `error`; the state
 keeps the first 4 KiB of a rejection and names the file with all of it. `status` returns the
