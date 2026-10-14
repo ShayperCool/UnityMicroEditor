@@ -1088,6 +1088,9 @@ fn import_workers_of_the_editor_are_ended() {
                 "-projectPath",
                 path,
             ])
+            // A failed assertion must not leave the test's output open.
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap()
     };
