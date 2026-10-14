@@ -1,0 +1,230 @@
+//! Tests of the bound of a session output.
+use super::prune::{KEPT_REVISIONS, KEPT_UNPUBLISHED, Pruner};
+use crate::sysutil;
+use std::{fs, process::Command, thread, time::Duration};
+
+struct Output {
+    _guard: tempfile::TempDir,
+    project: String,
+    output: String,
+}
+
+fn output() -> Output {
+    let guard = tempfile::TempDir::new().unwrap();
+    let root = sysutil::eval_symlinks(&guard.path().to_string_lossy()).unwrap();
+    let project = sysutil::join(&[&root, "Project"]);
+    let output = sysutil::join(&[&project, "Library/UnityMicroEditor/agent"]);
+    fs::create_dir_all(sysutil::join(&[&output, "compiler/code-revisions"])).unwrap();
+    fs::create_dir_all(sysutil::join(&[
+        &project,
+        "Library/UnityMicroEditor/preparations",
+    ]))
+    .unwrap();
+    Output {
+        _guard: guard,
+        project,
+        output,
+    }
+}
+
+/// A Player directory as a compile publishes one, with its revision entry
+/// when `entry` is given. Returns the Player executable.
+fn published(output: &Output, id: &str, entry: Option<&str>) -> String {
+    let directory = sysutil::join(&[&output.output, "compiler", &format!(".code-revision-{id}")]);
+    let player = sysutil::join(&[&directory, "Player/Project.x86_64"]);
+    fs::create_dir_all(sysutil::dir(&player)).unwrap();
+    fs::write(&player, "player").unwrap();
+    fs::write(sysutil::join(&[&directory, "compile-update.json"]), "{}").unwrap();
+    if let Some(key) = entry {
+        let path = sysutil::join(&[
+            &output.output,
+            "compiler/code-revisions",
+            &format!("{key}.json"),
+        ]);
+        fs::write(
+            &path,
+            format!(r#"{{"schemaVersion":1,"key":"{key}","player":".code-revision-{id}/Player/Project.x86_64"}}"#),
+        )
+        .unwrap();
+        // Entries are ordered by their modification time.
+        thread::sleep(Duration::from_millis(15));
+    }
+    player
+}
+
+fn staged(output: &Output, id: &str) -> String {
+    let player = sysutil::join(&[&output.output, "players", id, "Project.x86_64"]);
+    fs::create_dir_all(sysutil::dir(&player)).unwrap();
+    fs::write(&player, "host").unwrap();
+    player
+}
+
+fn exists(path: &str) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
+fn revision_directory(player: &str) -> String {
+    sysutil::dir(&sysutil::dir(player))
+}
+
+#[test]
+fn prune_keeps_the_baseline_and_what_the_session_names() {
+    let output = output();
+    let current = staged(&output, "current");
+    let earlier = staged(&output, "earlier");
+    let running = published(&output, "running", None);
+    let unused = published(&output, "unused", None);
+    let mut pruner = Pruner::new(&output.project, &output.output);
+    let pruned = pruner.prune(&[current.clone(), running.clone()]);
+    assert!(
+        exists(&current),
+        "the staged host of the session was removed"
+    );
+    assert!(exists(&running), "the Player the session runs was removed");
+    assert!(
+        !exists(&sysutil::dir(&earlier)),
+        "an earlier staged host stayed"
+    );
+    assert!(
+        !exists(&revision_directory(&unused)),
+        "an unused Player stayed"
+    );
+    assert_eq!(pruned.removed.len(), 2, "{pruned:?}");
+}
+
+#[test]
+fn prune_keeps_a_directory_a_running_process_was_started_from() {
+    let output = output();
+    let player = published(&output, "foreign", None);
+    // A process of this test, started from inside the directory.
+    let executable = sysutil::join(&[&sysutil::dir(&player), "sleep"]);
+    fs::copy("/bin/sleep", &executable).unwrap();
+    let mut child = Command::new(&executable).arg("30").spawn().unwrap();
+    let started = std::time::Instant::now();
+    while fs::read_link(format!("/proc/{}/exe", child.id()))
+        .map(|path| path.to_string_lossy().into_owned())
+        .ok()
+        .as_deref()
+        != Some(executable.as_str())
+        && started.elapsed() < Duration::from_secs(5)
+    {
+        thread::sleep(Duration::from_millis(5));
+    }
+    let pruned = Pruner::new(&output.project, &output.output).prune(&[]);
+    let kept = exists(&player);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(
+        kept,
+        "the directory of a running process was removed: {pruned:?}"
+    );
+    let pruned = Pruner::new(&output.project, &output.output).prune(&[]);
+    assert!(
+        !exists(&player),
+        "a directory nothing runs from stayed: {pruned:?}"
+    );
+}
+
+#[test]
+fn prune_keeps_what_a_recorded_preparation_names() {
+    let output = output();
+    let named = published(&output, "named", None);
+    let other = published(&output, "other", None);
+    let preparation = sysutil::join(&[&output.project, "Library/UnityMicroEditor/preparations/p1"]);
+    fs::create_dir_all(&preparation).unwrap();
+    let current = sysutil::join(&[&preparation, "current.json"]);
+    fs::write(
+        &current,
+        format!(r#"{{"schemaVersion":1,"player":"{named}"}}"#),
+    )
+    .unwrap();
+    let mut pruner = Pruner::new(&output.project, &output.output);
+    pruner.prune(&[]);
+    assert!(exists(&named), "a Player a preparation names was removed");
+    assert!(!exists(&other));
+    // The preparation is read again once it changed.
+    fs::write(&current, r#"{"schemaVersion":1,"player":"/elsewhere"}"#).unwrap();
+    pruner.prune(&[]);
+    assert!(
+        !exists(&named),
+        "a Player no preparation names any more stayed"
+    );
+}
+
+#[test]
+fn prune_keeps_the_newest_revision_entries_and_their_directories() {
+    let output = output();
+    let mut players = Vec::new();
+    for index in 0..KEPT_REVISIONS + 3 {
+        players.push(published(
+            &output,
+            &format!("r{index}"),
+            Some(&format!("key{index}")),
+        ));
+    }
+    let mut pruner = Pruner::new(&output.project, &output.output);
+    // The oldest is the running one; its entry stays as well.
+    let pruned = pruner.prune(&[players[0].clone()]);
+    let entry = |index: usize| {
+        sysutil::join(&[
+            &output.output,
+            &format!("compiler/code-revisions/key{index}.json"),
+        ])
+    };
+    for (index, player) in players.iter().enumerate() {
+        let newest = index >= players.len() - KEPT_REVISIONS;
+        let expected = newest || index == 0;
+        assert_eq!(exists(player), expected, "Player {index}: {pruned:?}");
+        assert_eq!(exists(&entry(index)), expected, "entry {index}: {pruned:?}");
+    }
+    assert_eq!(pruned.entries.len(), 2, "{pruned:?}");
+}
+
+#[test]
+fn prune_bounds_the_output_and_keeps_the_newest_unpublished_compiles() {
+    let output = output();
+    let current = staged(&output, "current");
+    let mut players = Vec::new();
+    for index in 0..20 {
+        staged(&output, &format!("old{index}"));
+        players.push(published(
+            &output,
+            &format!("p{index}"),
+            Some(&format!("k{index}")),
+        ));
+        let failed = sysutil::join(&[
+            &output.output,
+            "compiler",
+            &format!(".code-revision-f{index}/Sources"),
+        ]);
+        fs::create_dir_all(&failed).unwrap();
+        thread::sleep(Duration::from_millis(2));
+    }
+    let running = players[3].clone();
+    let newest = players.last().unwrap().clone();
+    Pruner::new(&output.project, &output.output).prune(&[current, running, newest]);
+    let left = fs::read_dir(sysutil::join(&[&output.output, "compiler"]))
+        .unwrap()
+        .flatten()
+        .filter(|item| {
+            item.file_name()
+                .to_string_lossy()
+                .starts_with(".code-revision-")
+        })
+        .count();
+    // The newest entries (the newest compile among them), the running one,
+    // and the newest compiles that published nothing.
+    assert_eq!(left, KEPT_REVISIONS + 1 + KEPT_UNPUBLISHED);
+    let hosts = fs::read_dir(sysutil::join(&[&output.output, "players"]))
+        .unwrap()
+        .count();
+    assert_eq!(hosts, 1, "earlier staged hosts stayed");
+    assert!(exists(&sysutil::join(&[
+        &output.output,
+        "compiler/.code-revision-f19"
+    ])));
+    assert!(!exists(&sysutil::join(&[
+        &output.output,
+        "compiler/.code-revision-f0"
+    ])));
+}
