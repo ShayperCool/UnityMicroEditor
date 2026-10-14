@@ -12,12 +12,12 @@ Hot reload works in a watched session (`run --watch`, or a session of an `mcp` s
 
 - a changed body of a method of a non-generic type that is not itself generic: instance, static and struct methods, virtual and override bodies, property, indexer and event accessors, operators, instance constructors and field initializers, lambdas, local functions, iterators (coroutines) and `async` methods;
 - added non-virtual methods, properties, events and indexers; a changed name, signature or `static` of a non-virtual method (a removed and an added method, and its callers are patched with it); removed methods (a removed `void` Unity message such as `Update` stops running);
-- added instance fields of classes, added static fields without an initializer, removed fields, changed constants and default parameter values;
+- added instance fields of classes, added static fields without an initializer, removed fields of classes, changed constants and default parameter values;
 - the same in an assembly that uses Netcode for GameObjects, the body of an existing RPC included.
 
 Some live edits leave something out until a restart: a `Start` that already ran does not run again, a running coroutine finishes its old body, objects that existed read the default of an added field. The reply says so with a **note** ([the list](#patched-with-a-note)).
 
-**Refused:** added, removed or renamed types (a new script is a new type), anything in generic code, added virtual or override methods, added Unity messages (`Update`, `OnCollisionEnter`, ...), added constructors, static constructors and static field initializers, attribute changes of existing members, fields added to a struct, a field whose accessibility makes Unity start or stop serializing it, and what Netcode registers when the Player starts. Every refused member is named with a reason code ([the list](#refused)). Nothing is approximated.
+**Refused:** added, removed or renamed types (a new script is a new type), anything in generic code, added virtual or override methods, added Unity messages (`Update`, `OnCollisionEnter`, ...), added constructors, static constructors and static field initializers, attribute changes of existing members, fields added to or removed from a struct, a field whose accessibility makes Unity start or stop serializing it, and what Netcode registers when the Player starts. Every refused member is named with a reason code ([the list](#refused)). Nothing is approximated.
 
 **What a refusal costs.** The Player keeps running the code it ran before the edit. Scene and asset edits keep working on it. Every later C# edit waits with the refused one, because a patch holds every difference from the code the Player loaded: revert the edit to go on patching, or recompile. A recompile restarts the Player process: the scene is loaded again, static fields start over and game state is lost. It took 4.3 to 4.8 s on the sample project ([Measured](#measured)).
 
@@ -109,7 +109,7 @@ The patch builder decides alone; the tables below follow its code table (`dotnet
 | Name, signature or `static` of a non-virtual method changed | Patched as a removed and an added method; every caller in the assembly changed too and is patched. |
 | Removed method | No redirect, except a removed `void` Unity message of an existing class, which is redirected to an empty method and stops running. |
 | Added instance field of a class, added static field without an initializer | Patched through the side table. Notes `existing_instances_keep_default`, `serialized_field_not_restored` (a field Unity would serialize), `field_value_reset` (a field whose type or `static` changed). |
-| Removed field | Nothing to do; no new code reads it. |
+| Removed field (an instance field of a struct, or of a class with sequential or explicit layout, is refused: `struct_layout_changed`) | Nothing to do; no new code reads it. |
 | Constant, default parameter value | Patched: the bodies that use it changed, also in other files and assemblies. |
 | Accessibility of a method, or of a field Unity does not serialize differently | Nothing to patch; note `accessibility_changed`. |
 | Comment, blank line, moved member | No change. While a patch is applied, a new generation with the same bodies; no callback runs for it. |
