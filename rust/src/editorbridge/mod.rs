@@ -956,20 +956,22 @@ impl Client {
             );
             let _ = publish(&root, &format!("owner-{owner}.stop.json"), body.as_bytes());
         }
-        if done.wait(Some(grace)) {
-            return Ok(());
+        let exited = done.wait(Some(grace)) || {
+            signal(libc::SIGTERM);
+            done.wait(Some(Duration::from_secs(3))) || {
+                signal(libc::SIGKILL);
+                done.wait(Some(Duration::from_secs(3)))
+            }
+        };
+        // The import workers of the Editor run on after it, reparented: they
+        // are of this project's Editor and nobody else's.
+        end_import_workers(command.pid, &inner.options.project);
+        match exited {
+            true => Ok(()),
+            false => Err(Error::new(
+                "owned Editor did not exit after bounded cleanup",
+            )),
         }
-        signal(libc::SIGTERM);
-        if done.wait(Some(Duration::from_secs(3))) {
-            return Ok(());
-        }
-        signal(libc::SIGKILL);
-        if done.wait(Some(Duration::from_secs(3))) {
-            return Ok(());
-        }
-        Err(Error::new(
-            "owned Editor did not exit after bounded cleanup",
-        ))
     }
 
     fn wait(&self, ctx: &Context) -> Result<()> {
@@ -1223,6 +1225,55 @@ fn process(pid: i64) -> Result<Process> {
         started,
         args: data.split(|&byte| byte == 0).map(<[u8]>::to_vec).collect(),
     })
+}
+/// Ends the AssetImportWorker processes that the Editor `parent` of
+/// `project` started (`-parentPid` and `-projectPath` name them), with
+/// SIGTERM and, after three seconds, SIGKILL.
+pub(crate) fn end_import_workers(parent: i64, project: &str) {
+    let parent = parent.to_string();
+    let workers = || -> Vec<(i64, String)> {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<i64>().ok())
+            .filter_map(|pid| Some((pid, process(pid).ok()?)))
+            .filter(|(_, process)| {
+                import_worker(&process.args)
+                    && argument(&process.args, "-parentPid") == parent.as_bytes()
+                    && {
+                        let path = argument(&process.args, "-projectPath");
+                        path.first() == Some(&b'/')
+                            && std::fs::canonicalize(sysutil::os_str(path))
+                                .is_ok_and(|path| path.as_os_str().as_bytes() == project.as_bytes())
+                    }
+            })
+            .map(|(pid, process)| (pid, process.started))
+            .collect()
+    };
+    let found = workers();
+    if found.is_empty() {
+        return;
+    }
+    let signal = |signal: libc::c_int| {
+        for (pid, started) in &found {
+            if process(*pid).is_ok_and(|now| now.started == *started) {
+                let _ = sysutil::kill(*pid, signal);
+            }
+        }
+    };
+    signal(libc::SIGTERM);
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        if found
+            .iter()
+            .all(|(pid, started)| !process(*pid).is_ok_and(|now| now.started == *started))
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    signal(libc::SIGKILL);
 }
 fn import_worker(args: &[Vec<u8>]) -> bool {
     argument(args, "-name").starts_with(b"AssetImportWorker")
