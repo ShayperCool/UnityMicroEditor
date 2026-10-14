@@ -191,12 +191,16 @@ Not verified: a project with native models, audio or UI through the whole
 cycle; `build-project` against a real Editor; `project_tools`; attaching to an
 interactive Editor; the GitHub Actions workflow itself. Of hot reload: content
 routes or Addressables, and a game large enough to occupy the addresses the
-applier's islands need. Of Netcode: another package version, more than one
-client, a dedicated server, distributed authority, scene management and
-in-scene placed NetworkObjects, NetworkList, generic NetworkBehaviours, a
-NetworkBehaviour whose base class is in another game assembly, and an
-assembly whose first use of Netcode is a method body (shown on real
-post-processed images in `hot_reload_netcode_sdk`, not in a Player).
+applier's islands need. Of Netcode: another package version, a dedicated server and distributed
+authority. A stage 5 review ran host and two clients (Temp/e2e/nc5, 121
+checks): NetworkList, a NetworkBehaviour whose base class is in another game
+assembly, every universal RPC target and a first use of Netcode in a body
+behaved in every Player as a restart on the new code would. Known not to
+work in a session, with or without hot reload: a generic NetworkBehaviour
+cannot be prepared (the lifecycle rewrite refuses generic MonoBehaviours);
+with scene management on (NGO's default) clients never synchronize, because
+the session's scene has no build-settings path; without it, clients do not
+find in-scene placed NetworkObjects.
 
 Measured on 2026-10-08 (AMD Ryzen 7 5700X3D, rustc 1.99.0) by a client driving
 the MCP server, median of five sessions: `session_control start` to Player
