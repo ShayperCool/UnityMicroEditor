@@ -4934,4 +4934,18 @@ mod stage5_waits {
         left.sort();
         assert_eq!(left, ["s-2.txt", "s-3.txt", "s-4.txt"]);
     }
+
+    /// A misspelled launch argument is refused; one a preparation reads is
+    /// left to the project service.
+    #[test]
+    fn an_unknown_launch_argument_is_refused() {
+        let c = controller_fixture("");
+        let ready = start_ready(&c);
+        for arguments in [r#"{"hotreload":false}"#, r#"{"onUnsupportedEdits":"restart"}"#] {
+            let answered = wait_update(&c, &format!(r#"{{"action":"start","arguments":{arguments}}}"#));
+            assert!(answered["error"].as_str().unwrap().starts_with("unknown start/reset argument"), "{answered}");
+        }
+        let answered = wait_update(&c, r#"{"action":"start","arguments":{"rebuildHost":true,"scene":"Assets/Main.unity"}}"#);
+        assert_eq!(answered["pid"].as_i64(), Some(ready.pid), "{answered}");
+    }
 }

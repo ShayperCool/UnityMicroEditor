@@ -656,6 +656,18 @@ impl Service {
         if input.action != "start" && input.action != "reset" {
             return self.session_with_preparation(ctx, name, raw, &input.action);
         }
+        // A misspelled key is refused before a preparation of minutes runs.
+        if let Some(key) = input
+            .arguments
+            .keys()
+            .find(|key| !crate::agentcontrol::LAUNCH_ARGUMENTS.contains(&key.as_str()))
+        {
+            return RuntimeOutcome::failed(anyhow!(
+                "unknown start/reset argument {}; the arguments are {}",
+                jsondoc::quoted_text(key),
+                crate::agentcontrol::LAUNCH_ARGUMENTS.join(", ")
+            ));
+        }
         // A preparation holds the project action lock for as long as it
         // runs, minutes for a large project. A start or a reset that waited
         // for the lock would hang that long; it comes back with the stage
@@ -700,6 +712,24 @@ impl Service {
                     return Some(RuntimeOutcome::failed(fail(
                         "scene_requires_preparation",
                         SCENE,
+                    )));
+                }
+                // The inputs of a preparation do nothing to a session that
+                // has one; a caller that gives them must not be told that the
+                // Player runs with them.
+                let given: Vec<&str> = ["hostPlayer", "nativeCatalog", "engineProfile"]
+                    .into_iter()
+                    .filter(|key| !text(&input.arguments, key).is_empty())
+                    .chain(input.arguments.get("rebuildHost").is_some_and(Any::is_true).then_some("rebuildHost"))
+                    .collect();
+                if !given.is_empty() {
+                    return Some(RuntimeOutcome::failed(fail(
+                        "preparation_input_ignored",
+                        format!(
+                            "{} {} an input of a preparation, and this session already has one, so a start or reset would ignore it; call project_prepare with this scene, the input, a new requestId and activate true: the session restarts on that preparation when it activates",
+                            given.join(", "),
+                            if given.len() == 1 { "is" } else { "are" }
+                        ),
                     )));
                 }
                 Some(self.controller_handle(ctx, name, raw))

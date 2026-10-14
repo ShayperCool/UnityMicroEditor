@@ -632,6 +632,41 @@ fn start_does_not_ignore_different_explicit_scene() {
     }
 }
 
+/// A start or reset of a session that has a preparation cannot take the
+/// inputs of one: it names the call that does, instead of returning the
+/// running session as if they were used. A misspelled key is refused.
+#[test]
+fn start_does_not_ignore_preparation_inputs_or_unknown_keys() {
+    let (_guard, project) = review_project();
+    let service = Service::new(Options {
+        project,
+        baseline: "/prepared/current.json".into(),
+        scene: "Assets/Main.unity".into(),
+        ..Default::default()
+    });
+    for action in ["start", "reset"] {
+        for arguments in [json!({"rebuildHost": true}), json!({"hostPlayer": "/elsewhere/Player"}), json!({"engineProfile": "/p.json", "nativeCatalog": "/c"})] {
+            let raw = bytes(&json!({"action": action, "arguments": arguments}));
+            let outcome = service.runtime_with_action_jobs(&ctx(), "session_control", &raw);
+            let detail = outcome.error.as_ref().and_then(typed);
+            assert_eq!(
+                detail.map(|detail| detail.code.as_str()),
+                Some("preparation_input_ignored"),
+                "{action} {arguments} was taken for a launch with it"
+            );
+            assert!(
+                outcome.error.as_ref().unwrap().to_string().contains("call project_prepare with this scene"),
+                "{:?}",
+                outcome.error
+            );
+        }
+        let raw = bytes(&json!({"action": action, "arguments": {"hotreload": false}}));
+        let outcome = service.runtime_with_action_jobs(&ctx(), "session_control", &raw);
+        let text = format!("{:#}", outcome.error.expect("a misspelled key is refused"));
+        assert!(text.contains("unknown start/reset argument \"hotreload\""), "{text}");
+    }
+}
+
 /// The receipt bytes written for the same outcomes, which the persisted format fixes.
 #[test]
 fn receipts_have_fixed_layout() {

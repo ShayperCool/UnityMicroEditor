@@ -314,7 +314,7 @@ fn hot_reload_is_a_runtime_tool_that_forwards_status_and_recompile() {
         "a compile error with the compiler's text",
         "Both kinds are reported whatever afterSequence is",
         "Other failures are no rejection",
-        "stay for later launches of this server (rebuildHost for one launch); null restores a default",
+        "stay for later launches of this server; null restores a default; rebuildHost is for the first preparation",
     ] {
         assert!(
             session.description.contains(promise),
