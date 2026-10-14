@@ -6,6 +6,10 @@ internal static class Codes
 {
     // Reasons an edit cannot be applied to the running Player ("unsupported").
     public const string NetcodeAssembly = "netcode_assembly";
+    public const string NetcodeRpcChanged = "netcode_rpc_changed";
+    public const string NetcodeVariableChanged = "netcode_variable_changed";
+    public const string NetcodeSerializationChanged = "netcode_serialization_changed";
+    public const string NetcodeGeneratedCodeChanged = "netcode_generated_code_changed";
     public const string AssemblyIdentityChanged = "assembly_identity_changed";
     public const string CustomAttributesChanged = "custom_attributes_changed";
     public const string TypeAdded = "type_added";
@@ -48,6 +52,7 @@ internal static class Codes
     public const string FieldValueReset = "field_value_reset";
     public const string ConstructorAppliesToNewObjects = "constructor_applies_to_new_objects";
     public const string StartedObjectsKeepState = "started_objects_keep_state";
+    public const string SpawnedObjectsKeepState = "spawned_objects_keep_state";
     public const string RunningCoroutinesKeepOldCode = "running_coroutines_keep_old_code";
     public const string LambdaNotRemapped = "lambda_not_remapped";
     public const string EarlierPatchDelegatesKeepOldCode = "earlier_patch_delegates_keep_old_code";
@@ -61,7 +66,11 @@ internal static class Codes
 
     public static readonly (string Code, string Meaning)[] Unsupported =
     {
-        (NetcodeAssembly, "The assembly is rewritten by the Netcode post-processor; its generated RPC code cannot be patched."),
+        (NetcodeAssembly, "The assembly uses Netcode for GameObjects and its post-processed image is not of the form the patch builder knows (another version of the package, an image that was not post-processed, the Netcode runtime itself), so nothing says what Netcode registered when the Player started; no edit of it is patched."),
+        (NetcodeRpcChanged, "An RPC was added, removed or renamed, or its parameters, its attribute or the code that sends or receives it changed; Netcode registers the RPCs of a class by an id of their signature when the first object of the class is initialized, and both ends of a connection must agree on them. An edit of the body of an RPC is patched."),
+        (NetcodeVariableChanged, "A NetworkVariable (or another NetworkVariableBase field) of a NetworkBehaviour was added, removed, renamed, retyped or reordered; every object lists its network variables once, when it is initialized, and both ends of a connection replicate them by their position in that list."),
+        (NetcodeSerializationChanged, "The value types that Netcode registers serializers for changed (the type of a network variable, [GenerateSerializationForType]); they are registered once, when the Player starts."),
+        (NetcodeGeneratedCodeChanged, "Code that the Netcode post-processor generates and that runs when the Player starts or an object is initialized changed for another reason (the name of a NetworkBehaviour, a class that became one or stopped being one, a generated member the patch builder does not know)."),
         (AssemblyIdentityChanged, "The name, version, culture or public key of the assembly changed."),
         (CustomAttributesChanged, "Custom attributes of an existing assembly, type, member or parameter changed; they are read through reflection when the game starts."),
         (TypeAdded, "A type (class, struct, enum, interface or delegate) was added or renamed."),
@@ -106,6 +115,7 @@ internal static class Codes
         (FieldValueReset, "A field whose type or static modifier changed is stored anew; its previous value is lost."),
         (ConstructorAppliesToNewObjects, "A changed constructor or instance field initializer affects only objects constructed after the patch."),
         (StartedObjectsKeepState, "A changed parameterless Start of a MonoBehaviour, or Awake of a MonoBehaviour or ScriptableObject, does not run again for the objects that already ran it; it runs for objects that start after the patch."),
+        (SpawnedObjectsKeepState, "A changed OnNetworkSpawn, OnNetworkPreSpawn, OnNetworkPostSpawn, OnNetworkSessionSynchronized or OnInSceneObjectsSpawned of a NetworkBehaviour does not run again for the objects that are spawned; it runs for objects spawned after the patch."),
         (RunningCoroutinesKeepOldCode, "Coroutines, iterators and async methods that are already running finish on the old code; new calls run the new code."),
         (LambdaNotRemapped, "A lambda or local function was edited, moved or removed and its old version is not redirected: which lambda it became is only known while the code that creates it is unchanged, and a redirect needs the same captures, none of them taken by reference. Delegates and calls made by code from before the patch keep the old body."),
         (EarlierPatchDelegatesKeepOldCode, "An added method, lambda, local function or state machine that an earlier patch brought was changed or dropped; delegates, coroutines and async calls created while that patch was applied keep running its code."),

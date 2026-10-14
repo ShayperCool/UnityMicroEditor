@@ -129,6 +129,120 @@ internal sealed class Canon
         return Convert.ToHexString(Finish().Hash).ToLowerInvariant();
     }
 
+    /// The members a body names, in order, each with the opcode that names it.
+    public List<(ushort OpCode, string Text)> Tokens(MethodDefinitionHandle method)
+    {
+        var list = new List<(ushort, string)>();
+        var d = md.GetMethodDefinition(method);
+        if (d.RelativeVirtualAddress == 0) return list;
+        Reset(false);
+        byte[] il = a.PE.GetMethodBody(d.RelativeVirtualAddress).GetILBytes() ?? Array.Empty<byte>();
+        var r = new IL.Reader(il);
+        while (r.Read())
+        {
+            if (!IL.IsToken(r.Operand) || r.Operand == OperandType.InlineString) continue;
+            list.Add((r.OpCode, Tok(MetadataTokens.EntityHandle(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(r.OperandOffset))))));
+        }
+        return list;
+    }
+
+    /// A straight body as its statements: the instructions up to and including each call of a
+    /// member whose text contains `end`, in order, and the instructions after the last one as the
+    /// last element. Null when the body branches, has local variables or a protected region: then
+    /// the order of its parts may carry meaning. A generated registration is of this form, one
+    /// call per entry of a table.
+    public List<string>? Statements(MethodDefinitionHandle method, string end)
+    {
+        var d = md.GetMethodDefinition(method);
+        if (d.RelativeVirtualAddress == 0) return null;
+        Reset(false);
+        var body = a.PE.GetMethodBody(d.RelativeVirtualAddress);
+        if (!body.LocalSignature.IsNil || body.ExceptionRegions.Length > 0) return null;
+        byte[] il = body.GetILBytes() ?? Array.Empty<byte>();
+        var list = new List<string>();
+        var statement = new StringBuilder();
+        var r = new IL.Reader(il);
+        while (r.Read())
+        {
+            if (r.Operand is OperandType.ShortInlineBrTarget or OperandType.InlineBrTarget or OperandType.InlineSwitch) return null;
+            if (!IL.IsToken(r.Operand))
+            {
+                statement.Append(Convert.ToHexString(il, r.Offset, r.Next - r.Offset)).Append('\n');
+                continue;
+            }
+            int token = BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(r.OperandOffset));
+            string name = r.Operand == OperandType.InlineString ? "S:" + md.GetUserString(MetadataTokens.UserStringHandle(token & 0xFFFFFF)) : Tok(MetadataTokens.EntityHandle(token));
+            statement.Append(r.OpCode.ToString("X")).Append(' ').Append(name).Append('\n');
+            if (r.OpCode != IL.Call || !name.Contains(end, StringComparison.Ordinal)) continue;
+            list.Add(statement.ToString());
+            statement.Clear();
+        }
+        list.Add(statement.ToString());
+        return list;
+    }
+
+    /// The start of a body, up to and including its first store into a field whose text contains
+    /// `endField`; null when the body has no such store, or when that part is not a block of its
+    /// own (a branch leaves it, or a protected region begins in it). A local variable is written
+    /// as its type and the order of first use: code that a post-processor puts in front of a body
+    /// takes the slots after those of the body, so its indices move with every local the body
+    /// gains, and its meaning does not.
+    public string? Head(MethodDefinitionHandle method, string endField)
+    {
+        var d = md.GetMethodDefinition(method);
+        if (d.RelativeVirtualAddress == 0) return null;
+        Reset(false);
+        var body = a.PE.GetMethodBody(d.RelativeVirtualAddress);
+        var locals = body.LocalSignature.IsNil ? System.Collections.Immutable.ImmutableArray<string>.Empty : md.GetStandaloneSignature(body.LocalSignature).DecodeLocalSignature(prov, null);
+        byte[] il = body.GetILBytes() ?? Array.Empty<byte>();
+        var head = new StringBuilder(body.LocalVariablesInitialized ? "init\n" : "noinit\n");
+        var order = new Dictionary<int, int>();
+        int furthest = 0;
+        var r = new IL.Reader(il);
+        while (r.Read())
+        {
+            (string? access, int local) = r.OpCode switch
+            {
+                >= 0x06 and <= 0x09 => ("ldloc", r.OpCode - 0x06),
+                >= 0x0A and <= 0x0D => ("stloc", r.OpCode - 0x0A),
+                0x11 => ("ldloc", il[r.OperandOffset]),
+                0x12 => ("ldloca", il[r.OperandOffset]),
+                0x13 => ("stloc", il[r.OperandOffset]),
+                0xFE0C => ("ldloc", BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(r.OperandOffset))),
+                0xFE0D => ("ldloca", BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(r.OperandOffset))),
+                0xFE0E => ("stloc", BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(r.OperandOffset))),
+                _ => ((string?)null, 0),
+            };
+            if (access != null)
+            {
+                if (local >= locals.Length) return null;
+                if (!order.TryGetValue(local, out int position)) order[local] = position = order.Count;
+                head.Append(access).Append(" L").Append(position).Append(':').Append(locals[local]).Append('\n');
+                continue;
+            }
+            switch (r.Operand)
+            {
+                case OperandType.ShortInlineBrTarget: furthest = Math.Max(furthest, r.Next + (sbyte)il[r.OperandOffset]); break;
+                case OperandType.InlineBrTarget: furthest = Math.Max(furthest, r.Next + BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(r.OperandOffset))); break;
+                case OperandType.InlineSwitch: return null;
+            }
+            if (!IL.IsToken(r.Operand))
+            {
+                head.Append(Convert.ToHexString(il, r.Offset, r.Next - r.Offset)).Append('\n');
+                continue;
+            }
+            int token = BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(r.OperandOffset));
+            string name = r.Operand == OperandType.InlineString ? "S:" + md.GetUserString(MetadataTokens.UserStringHandle(token & 0xFFFFFF)) : Tok(MetadataTokens.EntityHandle(token));
+            head.Append(r.OpCode.ToString("X")).Append(' ').Append(name).Append('\n');
+            if (r.OpCode != IL.Stfld || !name.Contains(endField, StringComparison.Ordinal)) continue;
+            if (furthest > r.Next) return null;
+            foreach (var eh in body.ExceptionRegions)
+                if (eh.TryOffset < r.Next || eh.HandlerOffset < r.Next) return null;
+            return head.ToString();
+        }
+        return null;
+    }
+
     /// Structure of one compiler-generated type on its own (an anonymous type, a generic closure),
     /// to find the identical type in another compilation.
     public string TypeHash(TypeDefinitionHandle type)

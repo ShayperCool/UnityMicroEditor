@@ -477,7 +477,7 @@ internal static class Program
         foreach (string line in File.ReadLines(source))
             foreach (string word in line.Split(new[] { ' ', '!', '(', ')', '|', '&' }, StringSplitOptions.RemoveEmptyEntries))
                 if (word.StartsWith("CASE_", StringComparison.Ordinal) && line.TrimStart().StartsWith('#')) declared.Add(word["CASE_".Length..]);
-        foreach (string name in declared) Check(cases.ContainsKey(name) || name == "NET_BODY", $"Fixture symbol CASE_{name} has no expectation.");
+        foreach (string name in declared) Check(cases.ContainsKey(name), $"Fixture symbol CASE_{name} has no expectation.");
         foreach (string name in cases.Keys) Check(declared.Contains(name), $"Expectation {name} has no fixture symbol.");
 
         // The same patchable edit in a patch generation whose holder name a loaded type already has:
@@ -547,11 +547,7 @@ internal static class Program
         // references no Netcode, the post-processor returned it as it was, and it is patched.
         Expect("netcode named by the request", Patcher("netcode named by the request", Path.Combine(root, "netcode-flag"), 1, new[] { new AssemblyPair("Edits", loaded, body) }, netcode: true), "Edits",
             Patch().Redirects("changed Edits.Bodies::Instance()"));
-        string net = Fixture("Classify", "Net.cs");
-        string netLoaded = Compile(Path.Combine(root, "net", "loaded", "Net.dll"), new[] { net }, new[] { unityStub, netcodeStub });
-        string netCurrent = Compile(Path.Combine(root, "net", "current", "Net.dll"), new[] { net }, new[] { unityStub, netcodeStub }, define: "CASE_NET_BODY");
-        Expect("netcode reference", Patcher("netcode reference", Path.Combine(root, "netcode-reference"), 1, new[] { new AssemblyPair("Net", netLoaded, netCurrent) }), "Net",
-            Refused("netcode_assembly Net.NetThing::Value()"));
+        Netcode(root, unityStub, netcodeStub);
 
         // The real engine module: its classes are recognised by name at the top of the chain.
         string real = Path.Combine(unityData, "PlaybackEngines", "LinuxStandaloneSupport", "Variations", "mono", "Managed", "UnityEngine.CoreModule.dll");
@@ -597,6 +593,144 @@ internal static class Program
         if (wide) { image[offset + 2] = 0; image[offset + 3] = 0; }
         File.WriteAllBytes(path, image);
         return true;
+    }
+
+    // ---- Netcode for GameObjects ----------------------------------------------------------
+
+    const string Thing = "Net.NetThing", Ping = Thing + "::PingRpc(System.Int32)";
+
+    /// One CASE_NET_* symbol of Fixtures/Classify/Net.cs per kind of edit in an assembly the
+    /// Netcode post-processor rewrote. What it registers once is refused, with a code that names
+    /// the cause; everything else is patched as in any assembly, the body of an RPC included.
+    static Dictionary<string, Expectation> NetcodeCases() => new()
+    {
+        // Patched: code like any other.
+        ["BODY"] = Patch().Redirects("changed " + Thing + "::Value()"),
+        ["PLAIN"] = Patch().Redirects("changed Net.Plain::Twice(System.Int32)"),
+        ["SPAWN"] = Patch().Redirects("changed " + Thing + "::OnNetworkSpawn()").Noted("spawned_objects_keep_state " + Thing + "::OnNetworkSpawn()"),
+        ["METHOD_ADDED"] = Patch().Methods(Thing + "::Helper()").Noted("added_method_invisible_by_name " + Thing + "::Helper()"),
+        ["FIELD_ADDED"] = Patch().Redirects("changed " + Thing + "::Value()").Fields(Thing + "::plain").Noted("serialized_field_not_restored " + Thing + "::plain"),
+        // Patched: the body of an RPC, while the code in front of it that sends it is as it was.
+        ["RPC_BODY"] = Patch().Redirects("changed " + Ping),
+        ["RPC_BODY_LOCALS"] = Patch().Redirects("changed " + Ping),
+        ["RPC_BODY_LAMBDA"] = Patch().Redirects("changed " + Ping),
+        // No change: the registrations in another order. The RPCs are looked up by id, and every
+        // serializer belongs to one type.
+        ["RPC_REORDERED"] = Unchanged(),
+        ["SERIALIZATION_ORDER"] = Unchanged(),
+        // Refused: the set of RPCs of a class and their ids.
+        ["RPC_ADDED"] = Refused("netcode_rpc_changed " + Thing + "::FreshServerRpc()"),
+        ["RPC_REMOVED"] = Refused("netcode_rpc_changed " + Thing + "::DropClientRpc()"),
+        ["RPC_RENAMED"] = Refused("netcode_rpc_changed " + Thing + "::DropClientRpc()", "netcode_rpc_changed " + Thing + "::GoneClientRpc()"),
+        ["RPC_PARAMETER"] = Refused("netcode_rpc_changed " + Ping, "netcode_rpc_changed " + Thing + "::PingRpc(System.Int64)"),
+        ["RPC_NO_LONGER"] = Refused("custom_attributes_changed " + Ping, "netcode_rpc_changed " + Ping),
+        // Refused: what an RPC sends, and how it is received.
+        ["RPC_ATTRIBUTE"] = Refused("custom_attributes_changed " + Ping, "netcode_rpc_changed " + Ping),
+        ["RPC_DELIVERY"] = Refused("custom_attributes_changed " + Ping, "netcode_rpc_changed " + Ping),
+        ["RPC_SEND"] = Refused("netcode_rpc_changed " + Ping),
+        ["RPC_RECEIVE"] = Refused("netcode_rpc_changed " + Ping),
+        ["RPC_SERIALIZATION"] = Refused("netcode_rpc_changed " + Ping),
+        ["RPC_PERMISSION"] = Refused("netcode_rpc_changed " + Thing + "::__initializeRpcs()"),
+        // Refused: the network variables of a class.
+        ["VARIABLE_ADDED"] = Refused("netcode_variable_changed " + Thing + "::Extra"),
+        ["VARIABLE_REMOVED"] = Refused("netcode_variable_changed " + Thing + "::Speed", "netcode_serialization_changed __GEN.NetworkVariableSerializationHelper::InitializeSerialization()"),
+        ["VARIABLE_RENAMED"] = Refused("netcode_variable_changed " + Thing + "::Count", "netcode_variable_changed " + Thing + "::Total"),
+        ["VARIABLE_RETYPED"] = Refused("netcode_variable_changed " + Thing + "::Count"),
+        ["VARIABLE_REORDERED"] = Refused("netcode_variable_changed " + Thing + "::__initializeVariables()"),
+        // Refused: the rest of what is registered at start-up.
+        ["SERIALIZATION"] = Refused("netcode_serialization_changed __GEN.NetworkVariableSerializationHelper::InitializeSerialization()"),
+        ["TYPE_NAME"] = Refused("netcode_generated_code_changed " + Thing + "::__getTypeName()"),
+        ["UNKNOWN_MEMBER"] = Refused("netcode_generated_code_changed " + Thing + "::__initializeSomethingNew()"),
+        ["BRIDGE"] = Refused("netcode_generated_code_changed __GEN.UnityPlayNetcodeInitializers"),
+        ["BECAME"] = Refused("base_type_changed Net.Late", "netcode_generated_code_changed Net.Late"),
+    };
+
+    static void Netcode(string root, string unityStub, string netcodeStub)
+    {
+        string source = Fixture("Classify", "Net.cs");
+        var references = new[] { unityStub, netcodeStub };
+        string loaded = Compile(Path.Combine(root, "net", "loaded", "Net.dll"), new[] { source }, references);
+        var cases = NetcodeCases();
+        Parallel.ForEach(cases, new ParallelOptions { MaxDegreeOfParallelism = 8 }, pair =>
+        {
+            string label = "CASE_NET_" + pair.Key, directory = Path.Combine(root, "net", pair.Key);
+            try
+            {
+                string current = Compile(Path.Combine(directory, "Net.dll"), new[] { source }, references, define: label);
+                Expect(label, Patcher(label, directory, 1, new[] { new AssemblyPair("Net", loaded, current) }), "Net", pair.Value);
+            }
+            catch (Exception e) { Check(false, $"{label}: {e.Message}"); }
+        });
+        var declared = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (string line in File.ReadLines(source))
+            foreach (string word in line.Split(new[] { ' ', '!', '(', ')', '|', '&' }, StringSplitOptions.RemoveEmptyEntries))
+                if (word.StartsWith("CASE_NET_", StringComparison.Ordinal) && line.TrimStart().StartsWith('#')) declared.Add(word["CASE_NET_".Length..]);
+        foreach (string name in declared) Check(cases.ContainsKey(name), $"Fixture symbol CASE_NET_{name} has no expectation.");
+        foreach (string name in cases.Keys) Check(declared.Contains(name), $"Expectation NET_{name} has no fixture symbol.");
+
+        // Another compilation of the same source means the same: nothing to report.
+        string again = Compile(Path.Combine(root, "net", "again", "Net.dll"), new[] { source }, references, define: "NOTHING");
+        Check(!File.ReadAllBytes(loaded).AsSpan().SequenceEqual(File.ReadAllBytes(again)), "netcode, no edit: the two compilations must differ in bytes for the test to mean anything.");
+        Expect("netcode, no edit", Patcher("netcode, no edit", Path.Combine(root, "net-again"), 1, new[] { new AssemblyPair("Net", loaded, again) }), "Net", Silent());
+
+        // An image that references the Netcode runtime and is not in the post-processor's form:
+        // no start-up registration, a NetworkBehaviour without the generated members, an RPC
+        // without its handler, an RPC whose body does not start with its send code. No edit of
+        // such an assembly is patched, and the reason says what is missing.
+        string raw = Fixture("Classify", "NetRaw.cs");
+        foreach (var (form, said) in new[] { ("RAW_NO_REGISTRATION", "InitializeSerialization is missing"), ("RAW_BEHAVIOUR", "has no __initializeRpcs"),
+            ("RAW_HANDLER", "has 1 RPCs and 0 methods named __rpc_handler_"), ("RAW_HEAD", "does not start with the code that sends it") })
+        {
+            string rawLoaded = Compile(Path.Combine(root, "raw", form, "loaded", "NetRaw.dll"), new[] { raw }, references, define: form);
+            string rawCurrent = Compile(Path.Combine(root, "raw", form, "current", "NetRaw.dll"), new[] { raw }, references, define: form + ";CASE_RAW_BODY");
+            string member = form == "RAW_NO_REGISTRATION" ? "NetRaw.Uses::Target()" : "NetRaw.Thing::Value()";
+            var refused = Patcher("netcode, " + form, Path.Combine(root, "raw-" + form), 1, new[] { new AssemblyPair("NetRaw", rawLoaded, rawCurrent) });
+            Expect("netcode, " + form, refused, "NetRaw", Refused("netcode_assembly " + member));
+            Check(Message(refused, "netcode_assembly").Contains(said, StringComparison.Ordinal), $"netcode, {form}: the reason does not say '{said}': {Message(refused, "netcode_assembly")}");
+            Expect("netcode, " + form + ", no edit", Patcher("netcode, " + form + ", no edit", Path.Combine(root, "raw-same-" + form), 1, new[] { new AssemblyPair("NetRaw", rawLoaded, rawLoaded) }), "NetRaw", Silent());
+        }
+        // The loaded assembly is in the form and the new compilation is not: refused the same way.
+        string formed = Compile(Path.Combine(root, "raw", "formed", "NetRaw.dll"), new[] { raw }, references, define: "RAW_FORMED");
+        string unformed = Compile(Path.Combine(root, "raw", "unformed", "NetRaw.dll"), new[] { raw }, references, define: "RAW_HANDLER;CASE_RAW_BODY");
+        Expect("netcode, the new compilation is not in the form", Patcher("netcode, the new compilation is not in the form", Path.Combine(root, "raw-unformed"), 1, new[] { new AssemblyPair("NetRaw", formed, unformed) }), "NetRaw",
+            Refused("netcode_assembly NetRaw.Thing::PingRpc(System.Int32)"));
+
+        // The Netcode runtime itself registers more than a game assembly (its messages, its own
+        // NetworkBehaviours), and none of it is read: an edit of it is refused.
+        string runtimeSource = Fixture("Stubs", "Netcode.cs");
+        string runtimeEdited = Compile(Path.Combine(root, "runtime", "Unity.Netcode.Runtime.dll"), new[] { runtimeSource }, new[] { unityStub }, define: "CASE_RUNTIME_BODY");
+        var runtime = Patcher("netcode, the runtime itself", Path.Combine(root, "runtime-edit"), 1, new[] { new AssemblyPair("Unity.Netcode.Runtime", netcodeStub, runtimeEdited) });
+        Expect("netcode, the runtime itself", runtime, "Unity.Netcode.Runtime", Refused("netcode_assembly Unity.Netcode.NetworkManager::Version()"));
+        Check(Message(runtime, "netcode_assembly").Contains("the Netcode runtime itself", StringComparison.Ordinal), $"netcode, the runtime itself: the reason does not say so: {Message(runtime, "netcode_assembly")}");
+
+        // An assembly that starts to use Netcode in ordinary code: the post-processor writes its
+        // start-up types also when there is nothing to register, and then there is nothing a
+        // running Player lacks. With something to register it is refused; the last use going
+        // away is the same edit backwards.
+        string first = Fixture("Classify", "NetFirst.cs");
+        string without = Compile(Path.Combine(root, "first", "without", "NetFirst.dll"), new[] { first }, references);
+        string with = Compile(Path.Combine(root, "first", "with", "NetFirst.dll"), new[] { first }, references, define: "USES");
+        string registers = Compile(Path.Combine(root, "first", "registers", "NetFirst.dll"), new[] { first }, references, define: "USES;REGISTERS");
+        Check(!References(without, "Unity.Netcode.Runtime") && References(with, "Unity.Netcode.Runtime"), "netcode, first use: only the image that uses the API may reference the runtime.");
+        Expect("netcode, first use", Patcher("netcode, first use", Path.Combine(root, "first-use"), 1, new[] { new AssemblyPair("NetFirst", without, with) }), "NetFirst",
+            Patch().Redirects("changed NetFirst.Lobby::Hosting()"));
+        Expect("netcode, last use", Patcher("netcode, last use", Path.Combine(root, "last-use"), 1, new[] { new AssemblyPair("NetFirst", with, without) }), "NetFirst",
+            Patch().Redirects("changed NetFirst.Lobby::Hosting()"));
+        Expect("netcode, first use that registers", Patcher("netcode, first use that registers", Path.Combine(root, "first-registers"), 1, new[] { new AssemblyPair("NetFirst", without, registers) }), "NetFirst",
+            Refused("netcode_generated_code_changed __GEN.NetworkVariableSerializationHelper"));
+        Expect("netcode, last use that registered", Patcher("netcode, last use that registered", Path.Combine(root, "last-registers"), 1, new[] { new AssemblyPair("NetFirst", registers, without) }), "NetFirst",
+            Refused("netcode_generated_code_changed __GEN.NetworkVariableSerializationHelper"));
+    }
+
+    /// The message of the first reason with this code in a result.
+    static string Message(JsonElement? result, string code) =>
+        result?.GetProperty("assemblies")[0].GetProperty("unsupported").EnumerateArray().Where(u => u.GetProperty("code").GetString() == code).Select(u => u.GetProperty("message").GetString()).FirstOrDefault() ?? "";
+
+    static bool References(string image, string assembly)
+    {
+        using var pe = new System.Reflection.PortableExecutable.PEReader(File.OpenRead(image));
+        var md = System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader(pe);
+        return md.AssemblyReferences.Any(h => md.GetString(md.GetAssemblyReference(h).Name) == assembly);
     }
 
     static void Quietness()

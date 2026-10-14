@@ -664,7 +664,11 @@ Only a recompile applies what a note names:
 - A changed field initializer or constructor affects objects created later.
 - A changed parameterless `Start` of a MonoBehaviour, or `Awake` of a
   MonoBehaviour or ScriptableObject, does not run again for the objects that
-  already ran it (`started_objects_keep_state`).
+  already ran it (`started_objects_keep_state`). A changed `OnNetworkSpawn`,
+  `OnNetworkPreSpawn`, `OnNetworkPostSpawn`, `OnNetworkSessionSynchronized` or
+  `OnInSceneObjectsSpawned` of a NetworkBehaviour does not run again for the
+  objects that are spawned; objects spawned later run the new body
+  (`spawned_objects_keep_state`).
 - A coroutine or `async` method that is already running finishes on the old
   code; new calls run the new code. A coroutine that never ends keeps its old
   loop until a recompile.
@@ -695,6 +699,25 @@ added to an existing class; a field added to a struct; an anonymous type the
 loaded assembly lacks; a method or type added to one assembly and used from
 another in the same change. The builder treats an edit as patchable only when
 it can prove it, so the reply, not this list, decides.
+
+In an assembly that uses Netcode for GameObjects the same holds, and the body
+of an existing RPC is patched too: the changed ServerRpc, ClientRpc or `Rpc`
+runs in this Player, sends and receives as before, and works with a peer that
+still runs the old body. What Netcode registers once when the Player starts or
+an object is initialized needs a recompile, with a reason code of its own: an
+RPC added, removed or renamed, or its parameters, its attribute or the code
+that sends or receives it changed (`netcode_rpc_changed`); a network variable
+added, removed, renamed, retyped or reordered (`netcode_variable_changed`); a
+serializer Netcode registers for a new value type
+(`netcode_serialization_changed`); any other change of the generated start-up
+code (`netcode_generated_code_changed`). An assembly whose post-processed image
+is not of the form the builder knows (another package version than 2.13.2)
+gets no patch at all (`netcode_assembly`). A patch reaches the Player of this
+session only: a second Player of the same network game, a client in another
+session, takes the edit from its own session, and until then the two run
+different bodies. A `recompile` restarts this Player, which leaves the network
+session: the other Players see it disconnect, and its network state starts
+over.
 
 Launch options, in `arguments` of `session_control(start)` or `reset`:
 

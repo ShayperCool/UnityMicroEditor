@@ -27,13 +27,14 @@ pub const BUILD_TIMEOUT: Duration = Duration::from_secs(60);
 /// The sources of the patch builder. The project file compiles every `.cs`
 /// beside it, so a source missing here would be left out of the build and
 /// of the cache key; a test compares the list with the directory.
-pub(crate) const PATCHER_SOURCES: [&str; 10] = [
+pub(crate) const PATCHER_SOURCES: [&str; 11] = [
     "HotReloadPatcher.csproj",
     "Canon.cs",
     "Codes.cs",
     "Diff.cs",
     "Emit.cs",
     "Model.cs",
+    "Netcode.cs",
     "Pdb.cs",
     "Program.cs",
     "Unity.cs",
