@@ -149,6 +149,7 @@ runs() { # runs <runtime label> <command...>: everything that needs a JIT withou
         run "$label: first redirects of a push rbp body under three threads ($round of $stress)" "$@" "$out/Harness.exe" unwind "$out" "$cycles"
         run "$label: first redirects through the second instruction under three threads ($round of $stress)" "$@" "$out/Harness.exe" relay "$out" "$cycles"
         run "$label: the gated whole jump under three threads ($round of $stress)" "$@" "$out/Harness.exe" fallback "$out" "$cycles"
+        run "$label: the gated island of a sub rsp, imm8 body under three threads ($round of $stress)" "$@" "$out/Harness.exe" window "$out" "$cycles"
     done
     if [ "$sweep" = 1 ]; then sweep "$label: the first request at every fill level of the code area" "$@"; fi
 }

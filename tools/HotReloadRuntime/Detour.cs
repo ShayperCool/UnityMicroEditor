@@ -27,7 +27,11 @@ namespace UnityMicroEditor.HotReload
     {
         // E9 rel32 occupies bytes 0-4 of the first word; bytes 5-7 stay the method's own.
         internal const ulong JumpBytes = 0xFFFFFFFFFFUL;
+        // The whole first instruction of a sub rsp, imm8 body: bytes 0-3.
+        private const ulong FirstInstruction = 0xFFFFFFFFUL;
         private const ulong GateBytes = 0xFFFFUL;
+        // Bytes 2 and 3, the middle of the displacement a gated island write puts behind the gate.
+        private const ulong MiddleBytes = 0xFFFF0000UL;
         private const ulong Gate = 0xFEEBUL;
 
         // Writable and executable mappings as of the last read of the process map.
@@ -149,6 +153,53 @@ namespace UnityMicroEditor.HotReload
         internal static bool Gateable(ulong original)
         {
             return (original & 0xFFFFFF) == 0xEC8148;
+        }
+
+        /// <summary>
+        /// Whether the body starts with sub rsp, imm8 (bytes 0-3 a four-byte first instruction).
+        /// LoadsConstant is the subset of these whose second instruction is mov r32, imm32.
+        /// </summary>
+        internal static bool SubImm8(ulong original)
+        {
+            return (original & 0xFFFFFF) == 0xEC8348;
+        }
+
+        /// <summary>
+        /// First redirect of a sub rsp, imm8 body whose fixed island address is taken, to an island
+        /// chosen in the 16 MiB window whose top displacement byte is the body's fifth byte. Only
+        /// bytes 0 to 3, the whole four-byte first instruction, change; byte 4, the first byte of
+        /// the second instruction, stays. Written behind the gate like the whole jump: EB FE over
+        /// bytes 0 and 1 (Close), one drain for the batch, then the displacement middle (bytes 2
+        /// and 3), then E9 and the first displacement byte in one aligned store. No thread can be
+        /// inside bytes 1 to 3, which lie within the first instruction, once the gate holds byte 0.
+        /// </summary>
+        internal static void OpenIsland(IntPtr from, long island)
+        {
+            ulong* word = (ulong*)from;
+            ulong jump = IslandJump(from, island);
+            // Bytes 2 and 3 of the displacement; the gate stays on bytes 0 and 1, byte 4 untouched.
+            Volatile.Write(ref *word, (Volatile.Read(ref *word) & ~MiddleBytes) | (jump & MiddleBytes));
+            // E9 and the first displacement byte in one aligned store; bytes 2 to 7 kept.
+            Volatile.Write(ref *word, (Volatile.Read(ref *word) & ~GateBytes) | (jump & GateBytes));
+        }
+
+        /// <summary>
+        /// Puts the saved first instruction back over an island jump of ours: one aligned store of
+        /// bytes 0 to 3, keeping bytes 4 to 7. The four-byte instruction flips whole, and byte 4,
+        /// the second instruction the jump borrowed as its top displacement byte, never changed.
+        /// </summary>
+        internal static void RestoreIsland(IntPtr from, ulong original)
+        {
+            ulong* word = (ulong*)from;
+            Volatile.Write(ref *word, (Volatile.Read(ref *word) & ~FirstInstruction) | (original & FirstInstruction));
+        }
+
+        // E9 at byte 0 and the low three displacement bytes at bytes 1 to 3. The top displacement
+        // byte stays the body's own fifth byte, which the window the island was chosen in makes equal.
+        private static ulong IslandJump(IntPtr from, long island)
+        {
+            uint distance = (uint)(int)(island - (from.ToInt64() + 5));
+            return 0xE9UL | ((distance & 0xFFFFFFUL) << 8);
         }
 
         // The first redirect of such a body without an island: the gated write of the design

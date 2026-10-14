@@ -52,7 +52,9 @@ namespace UnityMicroEditor.HotReload
         }
 
         // The ways into a replacement. Each replaces bytes of one instruction of the body only.
-        private const int ByFirstByte = 0, BySecondInstruction = 1, ByWholeJump = 2;
+        // ByGatedIsland rewrites the whole first instruction (sub rsp, imm8) behind the gate to
+        // reach an island in a 16 MiB window, when the fixed island address is taken.
+        private const int ByFirstByte = 0, BySecondInstruction = 1, ByWholeJump = 2, ByGatedIsland = 3;
 
         private sealed class Step
         {
@@ -386,7 +388,9 @@ namespace UnityMicroEditor.HotReload
                     ulong start = Detour.Read(step.From);
                     if (Detour.LoadsConstant(redirect.Saved) ? start != redirect.Saved || Detour.Rest(step.From) != redirect.Rest : ((start ^ redirect.Saved) & Detour.JumpBytes) != 0)
                         result.Fail(step.Assembly, step.Member, "write", "The start of the compiled body is not what it was when the applier first read it; something else rewrites this method.");
-                    else if (redirect.Island == null) unmapped.Add(step);
+                    // An island already mapped is used again; the way it took is the way it takes now.
+                    else if (redirect.Island != null) step.Way = redirect.Way;
+                    else unmapped.Add(step);
                 }
             // Highest entry first: of two bodies 16 bytes apart the lower one then takes the slot before its jump.
             unmapped.Sort((left, right) => right.From.ToInt64().CompareTo(left.From.ToInt64()));
@@ -401,6 +405,15 @@ namespace UnityMicroEditor.HotReload
                     if (redirect.Relay == null) redirect.Relay = Island.Relay(step.From, (byte)(redirect.Saved >> 24), out other);
                     if (redirect.Relay != null) step.Way = BySecondInstruction;
                     else result.Fail(step.Assembly, step.Member, "write", "The method cannot be redirected. Its island cannot be mapped: " + problem + ". The relay of its second instruction cannot either: " + other + ".");
+                }
+                else if (Detour.SubImm8(redirect.Saved))
+                {
+                    // Its first instruction is four bytes, so bytes 1 to 3 can be rewritten behind
+                    // the gate to reach an island anywhere in the 16 MiB window of its fifth byte.
+                    redirect.Island = Island.MapInWindow(step.From, out string window);
+                    if (redirect.Island != null) step.Way = ByGatedIsland;
+                    else result.Fail(step.Assembly, step.Member, "write", "The method cannot be redirected while other threads may run it. Its fixed island address is taken (" + problem
+                        + ") and " + window + ".");
                 }
                 else if (!Detour.Gateable(redirect.Saved))
                     result.Fail(step.Assembly, step.Member, "write", "The method cannot be redirected while other threads may run it. Its island cannot be mapped: " + problem
@@ -424,7 +437,16 @@ namespace UnityMicroEditor.HotReload
                     if (!step.First) continue;
                     Redirect redirect = step.Redirect;
                     redirect.Way = step.Way;
-                    if (step.Way == ByWholeJump) { Detour.Close(step.From); gated.Add(step); continue; }
+                    // A gated write (a whole jump, or a sub rsp, imm8 body reaching an island in its
+                    // window) closes the gate now and completes after the one drain. The island slot
+                    // of the gated-island form is aimed first, as the island's own slot always is.
+                    if (step.Way == ByWholeJump || step.Way == ByGatedIsland)
+                    {
+                        if (step.Way == ByGatedIsland) redirect.Island.Aim(step.To);
+                        Detour.Close(step.From);
+                        gated.Add(step);
+                        continue;
+                    }
                     // The slot first: what opens the way to it is written last.
                     Via(redirect).Aim(step.To);
                     if (step.Way == BySecondInstruction) Detour.EnterSecond(step.From, redirect.Relay.Code);
@@ -435,7 +457,8 @@ namespace UnityMicroEditor.HotReload
             if (gated.Count != 0) Detour.Drain();
             foreach (Step step in gated)
             {
-                Detour.Open(step.From, step.To);
+                if (step.Way == ByGatedIsland) Detour.OpenIsland(step.From, step.Redirect.Island.Code);
+                else Detour.Open(step.From, step.To);
                 result.GatedWrites++;
             }
             foreach (Target target in targets)
@@ -456,6 +479,7 @@ namespace UnityMicroEditor.HotReload
             {
                 if (redirect.Replacement == null || kept.Contains(redirect.From.ToInt64())) continue;
                 if (redirect.Way == ByWholeJump) Detour.Restore(redirect.From, redirect.Saved);
+                else if (redirect.Way == ByGatedIsland) Detour.RestoreIsland(redirect.From, redirect.Saved);
                 else if (redirect.Way == BySecondInstruction) Detour.LeaveSecond(redirect.From, redirect.Saved, redirect.Rest);
                 else Detour.Leave(redirect.From, redirect.Saved);
                 changes.Add(new Change { Original = redirect.Original, Previous = redirect.Replacement, Current = redirect.Original });
