@@ -168,12 +168,35 @@ Verified with Unity `6000.6.3f1`, one machine, one project:
   it; with the same sources saved again in a later server process, which the
   project was prepared for already, the session continued on that preparation
   after 7 s, and the removal of the `.asmdef` was prepared anew in 18 s.
+- Hot reload with Netcode for GameObjects 2.13.2, on 2026-10-14, on a copy of
+  `Samples/RawProject` with the package and a small networked game, as a host
+  and a client Player on localhost, each in its own `run --watch` session. In
+  both Players, without a restart and with the network session kept: ordinary
+  bodies of a NetworkBehaviour and of plain classes, `Update`, `OnNetworkSpawn`
+  (with `spawned_objects_keep_state`), an `OnValueChanged` handler, a lambda,
+  an added method and field, and the bodies of a ServerRpc, a ClientRpc, two
+  `Rpc` (one taking an `INetworkSerializable` struct) were patched, and every
+  patched RPC was sent, received and run across the two processes, also
+  between a patched and an unpatched Player in both roles. RPCs, and classes
+  with registered serializers, declared in another order gave `unchanged`.
+  Added, removed, renamed and re-attributed RPCs, changed parameters, added,
+  removed and retyped network variables, a new serialized type, a class that
+  became a NetworkBehaviour and a `__` method added to one were refused with
+  their `netcode_*` codes while both Players kept running and replicating the
+  old code, and `recompile` applied them. Through MCP: a patched RPC body, the
+  refusal with `netcode_rpc_changed` and the call to make, the recompile, and
+  the spawn note as `attention`.
 
-Not verified: a project with native models, audio, UI or Netcode through the
-whole cycle; `build-project` against a real Editor; `project_tools`; attaching
-to an interactive Editor; the GitHub Actions workflow itself. Of hot reload:
-a project with Netcode, content routes or Addressables, and a game large
-enough to occupy the addresses the applier's islands need.
+Not verified: a project with native models, audio or UI through the whole
+cycle; `build-project` against a real Editor; `project_tools`; attaching to an
+interactive Editor; the GitHub Actions workflow itself. Of hot reload: content
+routes or Addressables, and a game large enough to occupy the addresses the
+applier's islands need. Of Netcode: another package version, more than one
+client, a dedicated server, distributed authority, scene management and
+in-scene placed NetworkObjects, NetworkList, generic NetworkBehaviours, a
+NetworkBehaviour whose base class is in another game assembly, and an
+assembly whose first use of Netcode is a method body (shown on real
+post-processed images in `hot_reload_netcode_sdk`, not in a Player).
 
 Measured on 2026-10-08 (AMD Ryzen 7 5700X3D, rustc 1.99.0) by a client driving
 the MCP server, median of five sessions: `session_control start` to Player
