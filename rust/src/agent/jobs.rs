@@ -565,15 +565,22 @@ impl Service {
         // that continues on a known one): the caller has nothing to start
         // and repeats its call. Before the first preparation it is the start
         // itself that reports the progress.
+        let swapping = || self.0.swapping.load(std::sync::atomic::Ordering::SeqCst);
         let pending = |phase: &str, progress: Option<AnyMap>| {
-            let message = match (self.baseline().is_empty(), progress.is_some()) {
-                (true, _) => {
+            // A preparation starts a session that ran when it replaces it; a
+            // session that was stopped stays stopped.
+            let stopped = controller.status().phase == "stopped" && !swapping();
+            let message = match (self.baseline().is_empty(), progress.is_some(), stopped) {
+                (true, _, _) => {
                     "preparation is still running and no Player has started; reissue the same session_control(start) until it completes, then wait"
                 }
-                (false, true) => {
-                    "a preparation of the project is running; the session starts on it by itself when it is done, reissue this call"
+                (false, true, true) => {
+                    "a preparation of the project is running, and the session is stopped: nothing starts it by itself. Call session_control(start) once the preparation has ended (until then it returns the stage)"
                 }
-                (false, false) => {
+                (false, true, false) => {
+                    "a preparation of the project is running; when it activates, the session starts on it by itself, reissue this call"
+                }
+                (false, false, _) => {
                     "the session is being restarted on another preparation of the project, reissue this call"
                 }
             };
@@ -592,7 +599,6 @@ impl Service {
         // The Player is replaced by a stop and a start. A wait that was held
         // through that sees the session stopped, which is no failure of
         // anything: it is told to ask again, like a wait that comes later.
-        let swapping = || self.0.swapping.load(std::sync::atomic::Ordering::SeqCst);
         let through = |began: bool| -> RuntimeOutcome {
             let outcome = self.controller_handle(ctx, name, raw);
             let stopped = outcome.error.is_some()
@@ -675,16 +681,27 @@ impl Service {
         if !self.baseline().is_empty()
             && let Some(progress) = self.preparation_progress()
         {
+            // The job starts a session that ran when it replaces it, and
+            // leaves a stopped one stopped.
+            let stopped = self
+                .0
+                .controller
+                .as_ref()
+                .is_some_and(|controller| controller.status().phase == "stopped");
+            let message = match stopped {
+                true => {
+                    "a preparation of the project is running, and it does not start a stopped session: reissue this call after the preparation has ended (preparation names its stage)"
+                }
+                false => {
+                    "a preparation of the project is running; when it activates, the session starts on it by itself: wait with session_control(wait), and reissue this call only after the preparation has ended"
+                }
+            };
             let reply = map_reply(obj([
                 ("success", false.into()),
                 ("status", "result_pending".into()),
                 ("phase", "preparing".into()),
                 ("backend", "project_action_job".into()),
-                (
-                    "message",
-                    "a preparation of the project is running; when it activates, the session starts on it by itself: wait with session_control(wait), and reissue this call only after the preparation has ended"
-                        .into(),
-                ),
+                ("message", message.into()),
                 ("preparation", Any::Object(progress)),
             ]));
             return match reply {

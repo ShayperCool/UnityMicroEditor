@@ -743,6 +743,14 @@ impl Compiler {
                 read_assembly_configuration(&baseline_path, assembly, Some(&manifest))?;
             compiler.configs.insert(&assembly.name, config);
             compiler.configuration_hashes.insert(&assembly.name, hash);
+            // The plan's assembly is the slot a new source under Assets is
+            // compiled into, as the runner's start takes it; without one
+            // every addition misfit.
+            let slot = match assembly.path.is_empty() {
+                true => format!("{}.dll", assembly.name),
+                false => assembly.path.clone(),
+            };
+            compiler.current_dlls.insert(&assembly.name, slot);
             for source in &assembly.sources {
                 let digest = manifest.compiler_inputs.at(source);
                 if digest.is_empty() {

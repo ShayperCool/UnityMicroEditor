@@ -529,6 +529,10 @@ fn calls_during_a_preparation_are_told_to_ask_again() {
     };
     thread::sleep(Duration::from_millis(200));
     assert!(!waiting.is_finished());
+    rig.service
+        .0
+        .swapping
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     rig.controller.stop(&ctx()).unwrap();
     let swapped = waiting.join().unwrap().unwrap();
     assert!(
@@ -539,7 +543,8 @@ fn calls_during_a_preparation_are_told_to_ask_again() {
                 .is_some_and(|text| text.contains("reissue this call")),
         "{swapped}"
     );
-    // The session is stopped while the job goes on: a wait says who starts it.
+    // The session is stopped by the job while it goes on: a wait says who
+    // starts it.
     let stopped = rig.call("wait").unwrap();
     assert!(
         stopped["status"] == "result_pending"
@@ -549,6 +554,28 @@ fn calls_during_a_preparation_are_told_to_ask_again() {
                 .is_some_and(|text| text.contains("the session starts on it by itself")
                     && !text.contains("session_control(start)")),
         "{stopped}"
+    );
+    // A session that was stopped otherwise stays stopped: the wait names
+    // the call that starts it (stage 5 recovery5-6), and so does a start.
+    rig.service
+        .0
+        .swapping
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let stopped = rig.call("wait").unwrap();
+    assert!(
+        stopped["status"] == "result_pending"
+            && stopped["message"]
+                .as_str()
+                .is_some_and(|text| text.contains("nothing starts it by itself")
+                    && text.contains("session_control(start)")),
+        "{stopped}"
+    );
+    let start = rig.call("start").unwrap();
+    assert!(
+        start["message"]
+            .as_str()
+            .is_some_and(|text| text.contains("does not start a stopped session")),
+        "{start}"
     );
     rig.service.progress_end();
     assert_eq!(rig.service.baseline(), initial.baseline);
@@ -573,4 +600,238 @@ fn a_recovery_request_is_current_while_the_sources_are_what_it_names() {
     // The same sources again: the same names.
     rig.save_asmdef();
     assert!(rig.service.recovery_current(&first, SCENE));
+}
+
+// ---------------------------------------------------------------------------
+// Stage 5 (recovery5-1, -2, -3, -4).
+// ---------------------------------------------------------------------------
+
+/// A new script in an embedded package belongs to a prepared assembly that a
+/// session cannot extend: a preparation made without it does not fit. A
+/// sample folder (`Samples~`) and the folder of another definition are not
+/// that assembly.
+#[test]
+fn a_new_script_in_an_embedded_package_needs_a_new_preparation() {
+    let (_guard, project) = review_project();
+    let package = "Packages/com.r5.core";
+    write(
+        &join(&[&project, package, "package.json"]),
+        r#"{"name":"com.r5.core","version":"1.0.0"}"#,
+    );
+    write(
+        &join(&[&project, package, "Runtime/R5Core.asmdef"]),
+        r#"{"name":"R5Core"}"#,
+    );
+    write(
+        &join(&[&project, package, "Runtime/CoreMarker.cs"]),
+        "namespace R5Core { public static class CoreMarker {} }\n",
+    );
+    // Neither a sample nor a folder of another definition is compiled into R5Core.
+    write(
+        &join(&[&project, package, "Samples~/Demo.cs"]),
+        "public class Demo {}\n",
+    );
+    write(
+        &join(&[&project, package, "Runtime/Tests/R5Tests.asmdef"]),
+        r#"{"name":"R5Tests"}"#,
+    );
+    write(
+        &join(&[&project, package, "Runtime/Tests/CoreTest.cs"]),
+        "public class CoreTest {}\n",
+    );
+    let inputs = [
+        format!("{package}/package.json"),
+        format!("{package}/Runtime/R5Core.asmdef"),
+        format!("{package}/Runtime/CoreMarker.cs"),
+    ];
+    let inputs: Vec<&str> = inputs.iter().map(String::as_str).collect();
+    let (made, _, _) = preparation_of(&project, "before-the-probe", &inputs);
+    crate::compiler::Compiler::graph_accepts_sources(&project, &made.baseline).unwrap();
+    write(
+        &join(&[&project, package, "Runtime/R5Probe.cs"]),
+        "namespace R5Core { public static class R5Probe {} }\n",
+    );
+    write(
+        &join(&[&project, package, "Runtime/R5Probe.cs.meta"]),
+        "fileFormatVersion: 2\nguid: 5e5c0e00000000000000000000000005\nMonoImporter:\n  serializedVersion: 2\n",
+    );
+    let in_package = crate::compiler::Compiler::graph_accepts_sources(&project, &made.baseline)
+        .expect_err("a preparation made without the package's new script was taken as fitting");
+    let text = format!("{in_package:#}");
+    assert!(
+        text.contains("Runtime/R5Probe.cs") && crate::compiler::requires_new_graph(&text),
+        "{text}"
+    );
+}
+
+/// A C# save or a scene save while the job of a recovery runs: the request
+/// still names the sources, so the job activates its preparation and no
+/// second one is queued.
+#[test]
+fn a_save_during_the_preparation_of_a_recovery_keeps_it() {
+    let (rig, initial) = rig("plain");
+    rig.save_asmdef();
+    let id = identity(&rig.project, &initial.baseline, 0);
+    assert!(rig.service.recovery_current(&id, SCENE));
+    write(
+        &join(&[&rig.project, "Assets/Sample.cs"]),
+        "public class Sample { public int value = 3; }\n",
+    );
+    write(
+        &join(&[&rig.project, SCENE]),
+        "selected scene, one object moved",
+    );
+    assert!(
+        rig.service.recovery_current(&id, SCENE),
+        "a content save voided the request of the recovery"
+    );
+    rig.reject(false);
+    let held = rig.service.0.mu.lock().unwrap();
+    let first = rig.call("status").unwrap();
+    assert_eq!(first["preparation"]["requestId"], id.as_str(), "{first}");
+    write(
+        &join(&[&rig.project, "Assets/Sample.cs"]),
+        "public class Sample { public int value = 4; }\n",
+    );
+    rig.reject(false);
+    let again = rig.call("status").unwrap();
+    assert_eq!(again["preparation"]["requestId"], id.as_str(), "{again}");
+    let jobs = rig.jobs();
+    rig.service.close_action_jobs();
+    drop(held);
+    assert_eq!(
+        jobs.len(),
+        1,
+        "a second preparation was queued for a C# save: {jobs:?}"
+    );
+}
+
+/// A failed preparation of a recovery answers the sources it was made for,
+/// with the call that tries again; an edit of the sources since is tried
+/// anew by itself.
+#[test]
+fn a_failed_recovery_names_the_retry_and_an_edit_retries() {
+    let (rig, initial) = rig("plain");
+    rig.save_asmdef();
+    let id = identity(&rig.project, &initial.baseline, 0);
+    let earlier = plain_service(&rig.project);
+    let arguments = marshal(&Any::Object(obj([
+        ("scene", SCENE.into()),
+        ("requestId", id.clone().into()),
+        ("activate", true.into()),
+    ])))
+    .unwrap();
+    let _ = wait_job(
+        &earlier,
+        "project_prepare",
+        &arguments,
+        &run(|_, _, _| {
+            Err(fail(
+                "project_action_failed",
+                "owned Editor did not exit after bounded cleanup",
+            ))
+        }),
+    );
+    earlier.close();
+    let selection = ConfigurationSelection {
+        scene: SCENE.into(),
+        baseline: initial.baseline.clone(),
+    };
+    rig.service.note_recovery_sources(
+        &id,
+        &configuration::sources_revision(&rig.project, &[selection]).unwrap(),
+    );
+    rig.reject(false);
+    let status = rig.call("status").unwrap();
+    let error = status["preparationError"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        error.contains("owned Editor did not exit")
+            && error.contains(
+                "call project_prepare with this scene, a new requestId and activate true"
+            ),
+        "{status}"
+    );
+    // The fix of the sources: a new attempt under the next name.
+    write(
+        &join(&[&rig.project, "Assets/Sample.cs"]),
+        "public class Sample { public int value = 5; }\n",
+    );
+    rig.reject(false);
+    let held = rig.service.0.mu.lock().unwrap();
+    let retried = rig.call("status").unwrap();
+    rig.service.close_action_jobs();
+    drop(held);
+    assert_eq!(
+        retried["preparation"]["requestId"],
+        identity(&rig.project, &initial.baseline, 1).as_str(),
+        "{retried}"
+    );
+}
+
+/// Eight preparations of another scene that are newer do not hide the one
+/// of this scene that fits.
+#[test]
+fn newer_preparations_of_another_scene_do_not_hide_one_that_fits() {
+    let (rig, _) = rig("plain");
+    rig.save_asmdef();
+    let (fitting, _, _) = preparation_of(&rig.project, "fits-oldest", &[ASMDEF]);
+    for n in 0..9 {
+        thread::sleep(Duration::from_millis(20));
+        let directory = join(&[
+            &rig.project,
+            "Library/UnityMicroEditor/preparations",
+            &format!("other-scene-{n}"),
+        ]);
+        let other = Preparation {
+            schema_version: 1,
+            project: rig.project.clone(),
+            request_id: format!("other-scene-{n}"),
+            scene: "Assets/Other.unity".into(),
+            baseline: join(&[&directory, "current.json"]),
+            ..Default::default()
+        };
+        write(
+            &join(&[&directory, "result.json"]),
+            serde_json::to_vec(&other).unwrap(),
+        );
+    }
+    rig.reject(false);
+    let held = rig.service.0.mu.lock().unwrap();
+    let status = rig.call("status").unwrap();
+    rig.service.close_action_jobs();
+    drop(held);
+    assert_eq!(
+        status["preparation"]["requestId"],
+        fitting.request_id.as_str(),
+        "a new preparation was requested: {status}"
+    );
+}
+
+/// On a real prepared project (UME_FIT_PROJECT, UME_FIT_BASELINE, a
+/// baseline whose plan has Assembly-CSharp): a new script under Assets goes
+/// into that assembly, so the preparation still fits. Ignored unless asked
+/// for; it writes and removes Assets/FitProbe.cs.
+#[test]
+#[ignore]
+fn a_new_script_under_assets_fits_a_real_preparation() {
+    let project = std::env::var("UME_FIT_PROJECT").unwrap();
+    let baseline = std::env::var("UME_FIT_BASELINE").unwrap();
+    crate::compiler::Compiler::graph_accepts_sources(&project, &baseline).unwrap();
+    let script = join(&[&project, "Assets/FitProbe.cs"]);
+    write(&script, "public static class FitProbe {}\n");
+    write(
+        &format!("{script}.meta"),
+        "fileFormatVersion: 2\nguid: 5e5c0e00000000000000000000000007\nMonoImporter:\n  serializedVersion: 2\n",
+    );
+    let fit = crate::compiler::Compiler::graph_accepts_sources(&project, &baseline);
+    let _ = fs::remove_file(&script);
+    let _ = fs::remove_file(format!("{script}.meta"));
+    assert!(
+        fit.is_ok(),
+        "{:?}",
+        fit.map_err(|error| format!("{error:#}"))
+    );
 }
