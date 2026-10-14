@@ -2616,11 +2616,17 @@ fn a_scene_update_finds_overrides_and_named_methods_and_skips_other_scripts() {
     );
     let mut added = patch(1);
     added.notes = vec![
-        Reason::new(
-            "serialized_field_not_restored",
-            "Game.Lamp::boost",
-            "The added field Game.Lamp::boost is not restored.",
-        ),
+        // A field of a component: the builder names the classes whose
+        // documents hold it.
+        Reason {
+            holders: vec!["Game.Lamp".into()],
+            ..Reason::new(
+                "serialized_field_not_restored",
+                "Game.Lamp::boost",
+                "The added field Game.Lamp::boost is not restored.",
+            )
+        },
+        // A field of a [Serializable] class: no holders, any document.
         Reason::new(
             "serialized_field_not_restored",
             "Game.Tuning::armor",
@@ -2754,4 +2760,119 @@ fn timings_line_names_every_phase_and_only_when_asked() {
     assert_eq!(value["compile"]["an_extra_phase"].as_f64(), Some(0.001));
     assert_eq!(value["compile"]["lifecycle_rewrite"].as_f64(), Some(0.0));
     assert_eq!(value["patch"]["builder"].as_f64(), Some(0.03));
+}
+
+/// A field added to a base class is a key of the documents of the classes
+/// that derive from it, where Unity writes inherited fields; a field added
+/// to a [Serializable] class is a key below the field of the component that
+/// holds the object inline (session6-2). The builder names the holders.
+#[test]
+fn a_scene_update_finds_inherited_and_inline_fields() {
+    let (_guard, root) = crate::sysutil::testing::temp_dir();
+    let enemy = "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0";
+    let base = "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0";
+    let lamp = "a01ac09a24c8493b862564ce94c80306";
+    let tuning = "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0";
+    let file = |name: &str, text: &str| {
+        let path = sysutil::join(&[&root, name]);
+        fs::write(&path, text).unwrap();
+        path
+    };
+    let inherited = file(
+        "Arena.unity",
+        &format!(
+            "%YAML 1.1\n--- !u!114 &105\nMonoBehaviour:\n  m_Script: {{fileID: 11500000, guid: {enemy}, type: 3}}\n  m_Name: \n  health: 10\n  boost: 3\n"
+        ),
+    );
+    let nested = file(
+        "Lamp.unity",
+        &format!(
+            "%YAML 1.1\n--- !u!114 &106\nMonoBehaviour:\n  m_Script: {{fileID: 11500000, guid: {lamp}, type: 3}}\n  m_Name: \n  tuning:\n    armor: 7\n"
+        ),
+    );
+    // A class that does not derive from the base has a field of that name.
+    let unrelated = file(
+        "Other.unity",
+        &format!(
+            "%YAML 1.1\n--- !u!114 &107\nMonoBehaviour:\n  m_Script: {{fileID: 11500000, guid: {lamp}, type: 3}}\n  boost: 5\n"
+        ),
+    );
+    let mut added = patch(1);
+    added.notes = vec![
+        Reason {
+            holders: vec!["Game.EnemyBase".into(), "Game.Enemy".into()],
+            ..Reason::new(
+                "serialized_field_not_restored",
+                "Game.EnemyBase::boost",
+                "The added field Game.EnemyBase::boost is not restored.",
+            )
+        },
+        Reason::new(
+            "serialized_field_not_restored",
+            "Game.Tuning::armor",
+            "The added field Game.Tuning::armor is not restored.",
+        ),
+    ];
+    let mut state = Loop::new(true, Fallback::Report);
+    let mut steps = Script::new().updated().patched(Outcome::Patched(added));
+    for (name, guid) in [
+        ("Game.Enemy", enemy),
+        ("Game.EnemyBase", base),
+        ("Game.Lamp", lamp),
+        ("Game.Tuning", tuning),
+    ] {
+        steps.scripts.insert(name.into(), guid.into());
+    }
+    run(&mut state, &mut steps, &window(&["/p/Assets/EnemyBase.cs"]));
+    steps.clear();
+    let mut noted = |path: &str| -> Vec<String> {
+        steps.compiles.push_back(Ok(Compiled::Unaffected));
+        steps.reloads.push_back(Reload::Updated);
+        run(&mut state, &mut steps, &window(&[path]));
+        let events = steps.clear();
+        events
+            .iter()
+            .flat_map(|event| event["newNotes"].as_array().cloned().unwrap_or_default())
+            .map(|note| note["member"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(noted(&inherited), ["Game.EnemyBase::boost"]);
+    assert_eq!(noted(&nested), ["Game.Tuning::armor"]);
+    assert!(noted(&unrelated).is_empty());
+}
+
+/// An override of a position (`m_LocalPosition.x`) is no value of an added
+/// field `x` of a component; an override of the component's own field is
+/// (session6-8).
+#[test]
+fn a_position_override_is_no_value_of_an_added_field() {
+    let (_guard, root) = crate::sysutil::testing::temp_dir();
+    let path = sysutil::join(&[&root, "Level.unity"]);
+    fs::write(&path, "%YAML 1.1\n--- !u!1001 &500\nPrefabInstance:\n  m_Modification:\n    m_Modifications:\n    - target: {fileID: 400000, guid: 9f0c9f0c9f0c9f0c9f0c9f0c9f0c9f0c, type: 3}\n      propertyPath: m_LocalPosition.x\n      value: 3\n      objectReference: {fileID: 0}\n").unwrap();
+    let own = sysutil::join(&[&root, "Wave.unity"]);
+    fs::write(&own, "%YAML 1.1\n--- !u!1001 &500\nPrefabInstance:\n  m_Modification:\n    m_Modifications:\n    - target: {fileID: 400000, guid: 9f0c9f0c9f0c9f0c9f0c9f0c9f0c9f0c, type: 3}\n      propertyPath: x\n      value: 3\n      objectReference: {fileID: 0}\n").unwrap();
+    let mut added = patch(1);
+    added.notes = vec![Reason {
+        holders: vec!["Game.Wave".into()],
+        ..Reason::new(
+            "serialized_field_not_restored",
+            "Game.Wave::x",
+            "The added field Game.Wave::x is not restored.",
+        )
+    }];
+    let mut state = Loop::new(true, Fallback::Report);
+    let mut steps = Script::new().updated().patched(Outcome::Patched(added));
+    steps.scripts.insert("Game.Wave".into(), "abababababababababababababababab".into());
+    run(&mut state, &mut steps, &window(&["/p/Assets/Wave.cs"]));
+    steps.clear();
+    steps.compiles.push_back(Ok(Compiled::Unaffected));
+    steps.reloads.push_back(Reload::Updated);
+    run(&mut state, &mut steps, &window(&[path.as_str()]));
+    let events = steps.clear();
+    assert!(events.iter().all(|event| event.get("newNotes").is_none()), "{events:?}");
+    steps.compiles.push_back(Ok(Compiled::Unaffected));
+    steps.reloads.push_back(Reload::Updated);
+    run(&mut state, &mut steps, &window(&[own.as_str()]));
+    let events = steps.clear();
+    assert!(events.iter().any(|event| event.get("newNotes").is_some()), "{events:?}");
 }

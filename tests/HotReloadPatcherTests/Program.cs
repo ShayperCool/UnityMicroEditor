@@ -1074,6 +1074,14 @@ internal static class Program
         Check(Message(package, "added_method_computed_name", "Lib.Target::OnJump()").Contains("Unity.Messages.Sender (Unity.Messages)", StringComparison.Ordinal),
             "package message: the note does not name the package's call: " + Message(package, "added_method_computed_name", "Lib.Target::OnJump()"));
 
+        // A field added to a class that a class of another assembly derives from: the note names
+        // both, whose documents hold its value (session6-2).
+        string fielded = Lib("holders");
+        Game("holders", fielded);
+        var holders = Patcher("holders", Path.Combine(root, "holders-out"), 1, new[] { new AssemblyPair("Lib", fielded, Lib("current-field", "NAMED_FIELD")) });
+        Expect("holders", holders, "Lib", Patch().Fields("Lib.Target::armor").Noted("serialized_field_not_restored Lib.Target::armor"));
+        Check(HoldersOf(holders, "Lib.Target::armor") == "Game.Boss,Lib.Target", "holders: the classes whose documents hold Lib.Target::armor are [" + HoldersOf(holders, "Lib.Target::armor") + "], expected [Game.Boss,Lib.Target].");
+
         // An override of a hook that a base class of another assembly calls only from Start (builder6-3).
         string hookLib = Lib("hook");
         string orcLoaded = Game("hook", hookLib), orcCurrent = Game("hook-current", hookLib, "NAMED_ORC");
@@ -1091,6 +1099,17 @@ internal static class Program
                 foreach (var note in assembly.GetProperty("notes").EnumerateArray())
                     if (note.GetProperty("code").GetString() == code && note.GetProperty("member").GetString() == member)
                         return note.GetProperty("message").GetString()!;
+        return "?";
+    }
+
+    /// The `holders` of a serialized_field_not_restored note, comma-separated; "?" without the note.
+    static string HoldersOf(JsonElement? result, string member)
+    {
+        if (result is { } root)
+            foreach (var assembly in root.GetProperty("assemblies").EnumerateArray())
+                foreach (var note in assembly.GetProperty("notes").EnumerateArray())
+                    if (note.GetProperty("code").GetString() == "serialized_field_not_restored" && note.GetProperty("member").GetString() == member)
+                        return note.TryGetProperty("holders", out var list) ? string.Join(",", list.EnumerateArray().Select(x => x.GetString())) : "";
         return "?";
     }
 
