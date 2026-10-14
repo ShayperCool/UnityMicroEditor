@@ -508,6 +508,11 @@ An edit outside the supported set is never approximated. The Player keeps
 running the previous code and the caller is told, so that it decides when the
 game loses its state.
 
+[HOT_RELOAD.md](HOT_RELOAD.md) is the guide: which edits are applied live and
+which are refused, every reason and note code with what to do, the API for
+game code, an example exchange, measured timings and the limits. This section
+is the contract of the replies.
+
 | The C# edit | `session_control(wait_update)` | Session state |
 | --- | --- | --- |
 | Applied live | Success; same `pid` and `revision`; the last event is `code-patched` | `hotReload.codeGeneration` is the patch generation, `hotReload.lastPatch` describes the patch |
@@ -542,11 +547,11 @@ make:
   "success": false,
   "error": {
     "code": "full_recompile_required",
-    "message": "The C# edit compiled but cannot be applied to the running Player: Game.Boss: a type was added [type_added] (and 2 more). The Player keeps the code it ran before this edit. Call hot_reload with action \"recompile\" to restart the Player on the new code; game state is reset.",
+    "message": "The C# edit compiled but cannot be applied to the running Player: Game.Boss: Type Game.Boss was added or renamed [type_added] (and 2 more). The Player keeps the code it ran before this edit. Call hot_reload with action \"recompile\" to restart the Player on the new code; game state is reset.",
     "details": {
       "unsupported": [
-        {"code": "type_added", "member": "Game.Boss", "message": "a type was added"},
-        {"code": "generic_method", "member": "Game.Pool::Take()", "message": "a generic method is not patched"}
+        {"code": "type_added", "member": "Game.Boss", "message": "Type Game.Boss was added or renamed."},
+        {"code": "generic_method", "member": "Game.Pool::Take`1()", "message": "Game.Pool::Take`1() is a generic method; its code is shared between instantiations."}
       ],
       "unsupportedCount": 3,
       "report": "ABSOLUTE_PATH_OF_THE_COMPLETE_RESULT",
@@ -568,8 +573,8 @@ caller's next wait: a failed call returns no session state.
 
 `unsupported` holds at most 16 entries; `unsupportedCount` counts all of them
 and `report` names the file with the complete result. Each entry has a
-lower_snake_case reason `code`, the `member` and a `message`. The patch builder
-in `tools/HotReloadPatcher` defines the codes. The same list stays in
+lower_snake_case reason `code`, the `member` and a `message`; the guide lists
+[every code](HOT_RELOAD.md#refused). The same list stays in
 `session_control(status)` and `hot_reload(status)` as
 `hotReload.unsupported` until the code is applied.
 
@@ -665,8 +670,9 @@ not take over until it restarts. The builder says so in notes, each with
   threw (`callback_failed`) it offers nothing, since a restart undoes
   neither. For a limit it also says that a process of the same game that
   starts on the saved code meanwhile (another Player of a network game) runs
-  all of it, so the two may not agree until this Player restarts too. A limit always leads such a note. Notes about lookups by name or
-  reflection alone (`added_method_invisible_by_name`, `accessibility_changed`)
+  all of it, so the two may not agree until this Player restarts too. A limit
+  ranks before those two, so the sentence never hides one. Notes about lookups
+  by name or reflection alone (`added_method_invisible_by_name`, `accessibility_changed`)
   are listed and make no sentence; an added method that a string of the game
   names (`added_method_named_by_string`) or that the game may call by a name it
   computes (`added_method_computed_name`) does. With more new notes than a list
@@ -685,180 +691,40 @@ not take over until it restarts. The builder says so in notes, each with
 - `hotReload.notes`: the notes of a change that needed no patch, absent when
   there are none.
 
-Only a recompile applies what a note names:
+Every note code, what it means and what to do is in
+[the guide](HOT_RELOAD.md#patched-with-a-note). Two notes come from the runner
+when a scene, prefab or asset edit meets what a patch added:
+`serialized_field_not_restored`, when the saved data holds a value for a field
+a patch added (the rebuilt object has what the initializer gives, not the
+value), and `added_method_named_by_string`, when a UnityEvent (`m_MethodName`)
+or an animation event (`functionName`) names a method a patch added (the call
+does nothing until a recompile). Both name the file, and both stand, also for
+a wait whose mark nothing followed, as long as the patch notes the member. A
+value of an added field is a key in a component of the declaring script or of
+a script that derives from it (where Unity writes an inherited field), a key
+below the field that holds an object of a `[Serializable]` class, or a prefab
+instance's override (`propertyPath`) in a scene or prefab variant. An override
+of a field the prefab's document has no key for (a field added after the
+prefab was saved) is applied as Unity applies it.
 
-- A method whose accessibility changed keeps the loaded one for reflection
-  (`accessibility_changed`). A field that is made `public` or private, or
-  given or relieved of `readonly`, so that Unity starts or stops serializing
-  it is not a note but a refusal (`serialization_changed`), like
-  `[SerializeField]` added to it: nothing of such an edit is in the Player
-  before a restart. A field of a type Unity never serializes (a delegate, a
-  dictionary without `[SerializeField]`, an interface, a class without
-  `[Serializable]`, a 64-bit enum, engine types such as `Coroutine`, `Ray` or
-  `NativeArray<T>`) is the note.
-- An added field has its default value in objects that existed before the
-  patch, also when the source gives it an initializer; an added serialized
-  field is not filled from the scene until a restart. A later scene, prefab or
-  asset edit that sets such a field is applied to the Player without the
-  value: the object is rebuilt and has what the initializer gives. The reply
-  to that edit says so in `attention` (`serialized_field_not_restored`, with
-  the file). A value is a key in a component of the declaring script or of a
-  script that derives from it (where Unity writes an inherited field), a key
-  below the field that holds an object of a `[Serializable]` class, or a
-  prefab instance's override (`propertyPath`) in a scene or prefab variant.
-  An override of a field the prefab's document has no key for (a field added
-  after the prefab was saved) is applied as Unity applies it.
-  A UnityEvent (`m_MethodName`) or animation event (`functionName`) saved
-  after the patch that names an added method says so too
-  (`added_method_named_by_string`): it does nothing until a recompile. Both
-  notes stand, also for a wait whose mark nothing followed, as long as the
-  patch notes the member.
-  The session's loader does not apply `[FormerlySerializedAs]`, also not
-  after a recompile: a renamed field loses the scene value of its old name
-  until the data is saved again under the new name, and the note of the
-  renamed field says so.
-  `scene_edit` `set_property` writes a field the scene does not hold yet when
-  the component's script, or a base class of it in a file of its own,
-  declares it in its class body as one Unity serializes (public or
-  `[SerializeField]`, not static, const, readonly or `[NonSerialized]`, not a
-  delegate), so the value of a field a patch added can be given in the scene.
-  The value must fit the declared type (a number, a boolean, a string, the
-  components of a vector, quaternion, color or rect, a sequence for an array
-  or a `List`, a mapping or a number where the type is a reference, a
-  `[Serializable]` class or an enum); another is refused with
-  `invalid_property_value`. The wait after the save says that the Player does
-  not read the value before a recompile.
-- An added method whose name the game passes to a call by name is not found
-  that way (`added_method_named_by_string`): `Invoke("Blast", 1f)`,
-  `SendMessage`, `StartCoroutine("Blast")` and `GetMethod("Blast")` look in the
-  loaded class and do nothing. The call may stand in any other assembly of the
-  game, also one that references nothing of the method's; a string that only
-  equals the name (an input axis `"Jump"`, an animator trigger) calls nothing
-  and makes no note. The note comes with the edit that adds the method when a
-  call names it then, and again with a later edit that starts to. When the
-  game calls such methods with a name it computes (`SendMessage("On" +
-  kind)`), an added instance method of an engine object with at most one
-  parameter has the note `added_method_computed_name`; so does one named like
-  a message (`On` and a capital letter) when a package next to the game sends
-  messages by a name it computes, as an input component in Send Messages mode
-  sends `On<Action>`. A field whose type
-  changed is stored anew and loses its value (`field_value_reset`); a renamed
-  field, and the field behind an auto-property that became a full property,
-  are a removed and an added field.
-- A changed field initializer or constructor affects objects created later.
-- A changed parameterless `Start` of a MonoBehaviour, `Awake` of a
-  MonoBehaviour or ScriptableObject, `OnEnable` (an enabled object runs it
-  again only when it is disabled and enabled; what the old body subscribed
-  stays, and a changed `OnDisable` does not undo it), `OnEnable` of a
-  ScriptableObject and `OnAfterDeserialize` do not run again for the objects
-  that already ran them (`started_objects_keep_state`); neither does a method
-  that only such methods call in the game's code (a public one included,
-  unless another assembly calls it; its note says that a call from saved data
-  such as a UnityEvent runs the new body), a method one of them calls by a
-  name it writes (`Invoke(nameof(LateInit), 1f)` in `Start`), or an override
-  of a hook that a base class in another assembly of the game calls only from
-  such a method. A method that only constructors and field initializers call
-  ran when the objects that exist were constructed
-  (`constructor_applies_to_new_objects`), and one that only a static
-  constructor (a static field initializer) calls ran when its type was first
-  used (`runtime_initializer_changed`). An edit that lies only in a lambda one
-  of these methods subscribes, redirected to its new version, is live: the
-  subscribed delegate runs the new body, and there is no note. A handler
-  subscribed to an event in such a method runs as often as the event fires,
-  which the code does not show: it gets no note. A changed `OnNetworkSpawn`,
-  `OnNetworkPreSpawn` (with its `ref NetworkManager`), `OnNetworkPostSpawn`, `OnNetworkSessionSynchronized` or
-  `OnInSceneObjectsSpawned` of a NetworkBehaviour, or a method only they call,
-  does not run again for the objects that are spawned; objects spawned later
-  run the new body (`spawned_objects_keep_state`). The same note is given for
-  `OnIsServerAuthoritative` of a `NetworkTransform`, which is read at spawn.
-- A changed `[RuntimeInitializeOnLoadMethod]` method, or a method only it calls,
-  ran when the Player started and does not run again: its new body is not in
-  effect before a recompile (`runtime_initializer_changed`). A serializer or
-  message handler it registers stays as the old body registered it.
-- A coroutine or `async` method that is already running finishes on the old
-  code; new calls run the new code. A coroutine that never ends keeps its old
-  loop until a recompile; that holds also when the method was removed or
-  renamed (`running_coroutines_keep_old_code`).
-- A delegate created before the patch can keep the old body of an edited
-  lambda. A method marked `[InvokeOnHotReloadLocal]` is run again whenever its
-  own code, a lambda or local function in it, or a method a patch added that it
-  calls has changed, which is the place to build such delegates anew.
-- An attribute on an added member is not visible until a recompile. An added
-  `[AgentTool]` method is therefore not in the tool catalog, and an added
-  `[RuntimeInitializeOnLoadMethod]` does not run.
+`scene_edit` `set_property` writes a field the scene does not hold yet when
+the component's script, or a base class of it in a file of its own, declares
+it in its class body as one Unity serializes (public or `[SerializeField]`, not
+static, const, readonly or `[NonSerialized]`, not a delegate), so the value of
+a field a patch added can be given in the scene. The value must fit the
+declared type (a number, a boolean, a string, the components of a vector,
+quaternion, color or rect, a sequence for an array or a `List`, a mapping or a
+number where the type is a reference, a `[Serializable]` class or an enum);
+another is refused with `invalid_property_value`. The wait after the save says
+that the Player does not read the value before a recompile.
 
-Edits that are applied live, as the patch builder classifies them: bodies of
-non-generic methods in non-generic types, including property accessors,
-constructors, lambdas, iterators and `async` methods; added non-virtual
-methods; a changed signature, name or `static` of a non-virtual method
-together with its callers; removed methods, where a removed `void` Unity
-message stops running at once; added instance fields of classes and added
-static fields without an initializer; added or changed constants and default
-parameter values, which also reach the callers in files that were not edited
-and in other assemblies. Edits that need a recompile: anything in a generic
-type or generic method, also an edit that lies only in a lambda or local
-function of one; added, removed or renamed types; enum, base type and
-interface changes; added or removed virtual, abstract, override or interface
-methods and a method made virtual; a changed static constructor or static
-field initializer; attribute changes on existing members; a field whose
-accessibility changes what Unity serializes; a Unity message such as `Update`
-added to an existing class; a field added to a struct; an anonymous type the
-loaded assembly lacks; a method or type added to one assembly and used from
-another in the same change. The builder treats an edit as patchable only when
-it can prove it, so the reply, not this list, decides.
-
-In an assembly that uses Netcode for GameObjects the same holds, and the body
-of an existing RPC is patched too: the changed ServerRpc, ClientRpc or `Rpc`
-runs in this Player, sends and receives as before, and works with a peer that
-still runs the old body. What Netcode registers once when the Player starts or
-an object is initialized needs a recompile, with a reason code of its own: an
-RPC added, removed or renamed, or its parameters, its attribute or the code
-that sends or receives it changed (`netcode_rpc_changed`); a network variable
-added, removed, renamed, retyped or reordered, or its read permission changed
-where it is written as an argument of the construction in a method of the
-NetworkBehaviour (`netcode_variable_changed`); a
-serializer Netcode registers for a new value type
-(`netcode_serialization_changed`); any other change of the generated start-up
-code (`netcode_generated_code_changed`). An assembly whose post-processed image
-is not of the form the builder knows (another package version than 2.13.2)
-gets no patch at all (`netcode_assembly`). A patch reaches the Player of this
-session only: a second Player of the same network game, a client in another
-session, takes the edit from its own session, and until then the two run
-different bodies. That is safe for what Netcode generates, but not for code
-of the game that writes or reads data both ends exchange (a struct's
-`NetworkSerialize`, a named message, a custom serializer): a peer still on the
-old code reads what the patched one sends wrongly, without an error, until it
-takes the edit too. What constructors built stays as it was built: a read
-permission that a property, a helper (also of another class), a local of
-`Awake`, a subclass's base constructor or a factory supplies, the write
-permission and the initial value are patched with the note of the code that
-ran them, and copies of an existing object that two Players built with
-different code (one patched at another moment, or started on the saved code)
-disagree on it for as long as the object lives, also after both took the edit:
-a client may write a value the host refuses without a log line at NGO's
-default level, or read the spawn data out of step. Comparing those forms would
-need a rule for this one library; the notes say the general part, and a
-recompile of every Player of the game ends it. A `recompile` restarts this
-Player, which leaves the network session: the other Players see it
-disconnect, and its network state starts over. A Player restarted for a
-`netcode_*` reason runs the new registrations; the other Players of the game
-that still run the old code reconnect and read what it sends out of step until
-they are restarted on the new code too, which the reply says: the refusal and
-the runner's own restart for a `netcode_*` reason, and the reply of the
-recompile that applies a refused or noted edit, in general words. A handler of
-a Netcode event (`OnServerStarted`) subscribed in `Start` is patched without a
-note.
-
-Limits of a session for a Netcode game, found in Players with
-`com.unity.netcode.gameobjects` 2.13.2, independent of hot reload: a generic
-NetworkBehaviour (or any generic MonoBehaviour) cannot be prepared (the
-lifecycle rewrite refuses it: "Synthetic Awake on nested/generic MonoBehaviour
-classes is unsupported", or "Lifecycle callbacks on generic engine object
-classes are unsupported"); with scene management on, which is NGO's default,
-the host's connection approval fails because the session's scene has no
-build-settings path, so clients never synchronize; without it, clients do not
-find in-scene placed NetworkObjects. Spawn network objects from prefabs, and
-turn scene management off, for a session.
+In a game that uses Netcode for GameObjects ([the guide](HOT_RELOAD.md#netcode-for-gameobjects)),
+the refusal and the runner's own restart for a `netcode_*` reason say that the
+other Players of the game that still run the old code must be restarted on the
+new code too, and the reply of a recompile that puts a refused or noted edit
+into effect says it in general words. A `recompile` restarts this Player, which
+leaves the network session: the other Players see it disconnect, and its
+network state starts over.
 
 Launch options, in `arguments` of `session_control(start)` or `reset`:
 
@@ -873,11 +739,9 @@ has it off until `hotReload` is given again; `null` restores the default. The
 session state shows the values in `launch`, and `hot_reload(status)` names
 what the next launch uses.
 
-The runtime package declares `[InvokeOnHotReload]` and
-`[InvokeOnHotReloadLocal]` for game code that has to react to a patch. They
-run when a patch changed code the Player runs: not for a comment or a blank
-line saved while a patch is applied, and with a list that leaves out a removed
-Unity message.
+Game code that has to react to a patch marks methods with
+`[InvokeOnHotReload]` or `[InvokeOnHotReloadLocal]`
+([API](HOT_RELOAD.md#api-for-game-code)).
 
 Limits:
 
@@ -931,8 +795,9 @@ Limits:
 - Changes of packages, assembly definitions or other compiler configuration
   are not hot reload: they queue a new preparation, as described above. So
   does a deleted script file, unlike an added one, which is a refused edit.
-- A stack trace of patched code names `HotReload.G<generation>.<type>.<method>`
-  with the file and line of the source under `Assets`.
+- The limits of hot reload itself (a method that cannot be redirected in a
+  Player, inlining off, running coroutines, stack traces of patched code) are
+  in [the guide](HOT_RELOAD.md#limits-and-known-problems).
 
 ## Game arguments and runtime content
 
@@ -1144,12 +1009,29 @@ Limits:
   frames after they were drawn (asynchronous GPU readback). Row order is
   verified on OpenGL Core, the verified graphics path. Audio is not streamed.
 
+## Limits of a session
+
+These hold for a session with or without hot reload.
+
+- A generic MonoBehaviour cannot be prepared. The lifecycle rewrite refuses a
+  lifecycle callback in a generic engine object class ("Lifecycle callbacks on
+  generic engine object classes are unsupported"), and a generic or nested
+  MonoBehaviour with no `Awake` in its class chain ("Synthetic Awake on
+  nested/generic MonoBehaviour classes is unsupported"). A generic
+  NetworkBehaviour is one.
+- Netcode for GameObjects, found in Players with
+  `com.unity.netcode.gameobjects` 2.13.2: with scene management on, which is
+  NGO's default, the host's connection approval fails because the session's
+  scene has no build-settings path, so clients never synchronize; without it,
+  clients do not find in-scene placed NetworkObjects. Spawn network objects
+  from prefabs, and turn scene management off, for a session.
+
 ## Known differences from the Editor
 
 - Rendering is close but not pixel-identical. Geometry and background match in the reference scene; shading and antialiasing differ slightly.
 - In the standalone Player, `Transform.GetSiblingIndex()` returns `0` for root objects. MCP hierarchy reports root order from authored order and `Scene.GetRootGameObjects()`. Game code that depends on the native root index can behave differently. Child sibling order uses the native API.
 - Legacy `pause` sets scaled time to zero. It does not suspend the whole PlayerLoop the way Editor Pause does; use `simulation_pause` and `simulation_step` for that.
-- A C# change is patched into the running Player when the edit is supported; the Player then keeps its state. Other C# changes need `hot_reload(recompile)`, which restarts the Player and resets game state. There is no domain reload equivalent: static state is either kept by a patch or lost by a restart.
+- A C# change is patched into the running Player when the edit is supported; the Player then keeps its state. Other C# changes need `hot_reload(recompile)`, which restarts the Player and resets game state. There is no domain reload equivalent: static state is either kept by a patch or lost by a restart ([C# hot reload](HOT_RELOAD.md)).
 - Fresh native import is bound to verified profiles. Baked lighting and navigation, arbitrary shader and importer settings, complete animation behavior and multiplayer state are not implied by a successful preparation.
 - General `CustomEditor`/`EditorWindow` execution and an EditMode test runner are out of scope.
 
