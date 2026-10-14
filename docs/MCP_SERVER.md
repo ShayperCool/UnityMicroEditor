@@ -79,10 +79,12 @@ A configured Player adds `session_control`, `runtime_query`, `runtime_command`,
 input on a listener of its own; see [AGENT_MCP.md](AGENT_MCP.md)). Start can return `phase: starting`; wait for readiness before
 queries. While start still prepares the project it returns `result_pending` with
 `progress` (stage and Editor log path), and `status`/`wait` report the same
-preparation. `start`/`reset` take `gameArguments`, `contentScenes`,
-`contentPrefabs`, `addressables`, `rebuildHost`, `hotReload` and
-`onUnsupportedEdit` in `arguments`; see
-[AGENT_MCP.md](AGENT_MCP.md). Query operations are `status`, `hierarchy`, `inspect`, `logs`, `raycast`
+preparation. `start`/`reset` take `scene`, `gameArguments`, `contentScenes`,
+`contentPrefabs`, `addressables`, `hotReload`, `onUnsupportedEdit` and the
+inputs of the first preparation (`rebuildHost`, `hostPlayer`, `nativeCatalog`,
+`engineProfile`) in `arguments`; another key is refused. A start or reset while
+another `mcp` server of the project holds the session output is refused with
+`session_output_in_use`; see [AGENT_MCP.md](AGENT_MCP.md). Query operations are `status`, `hierarchy`, `inspect`, `logs`, `raycast`
 and `tools`. Commands include `screenshot`, `pause`, `resume`, `wait_frames`,
 `custom`, `invoke`, `simulation_pause`, `simulation_resume`, `simulation_step` and
 `input`. Arguments go in `arguments`; `requestId`, `expectedPid` and
@@ -101,49 +103,21 @@ after the end of the frame; preserve the request identity while waiting.
 compiled by the running session and applied to the running Player when
 possible; the Player keeps its process and game state, and
 `session_control(wait_update)` succeeds with the same PID and an advanced
-`hotReload.codeGeneration`. `session_control(wait)` reports an edit in the
-same way once a Player is ready, and also returns for a start or a restart.
-Both waits first ask the runner to say when it has answered every source
-change that was saved before the call, so one wait after several edits gives
-the outcome of the last, however far apart they were saved; an edit made while
-the call runs is not covered. `timeoutSeconds` bounds a wait, which then fails
-with `wait_timeout`.
-An edit that cannot be applied live is refused, not approximated: the Player
-keeps the previous code, both waits fail with the error code
-`full_recompile_required`, and the session state has
-`hotReload.fullRecompileRequired: true` with the members and reasons. Neither
-wait succeeds while that member is true, whatever `afterSequence` is.
-`hot_reload` with `action: recompile` then restarts the Player on the newest
-compiled code and resets game state; it returns the new
-session state, or the compiler's text when the sources do not compile, which
-keeps the Player. A change that is applied, or needs no patch, can still leave
-something the Player takes over only after a restart, such as the body of a
-coroutine that is running: the reply of the wait then starts with `attention`
-and `hotReload.newNotes` lists every such note that an answer after
-`afterSequence` brought, also when several saves were answered one after the
-other; `hotReload.lastPatch.notes` and `hotReload.notes` hold the notes that
-stand, up to 16 with the counts and the report for the rest. `attention` is
-also how a wait says that the runner restarted the Player by itself, and that
-nothing was applied or rejected after `afterSequence`. A wait reports what
-stands as soon as the runner has answered for the saves made before it and
-works on nothing: it is held while the runner compiles or has marked an
-answer as not its last (`updatePending: true`), not for a save nobody made.
-A compile error and a refused edit are reported for every `afterSequence`
-until an update follows them. A session reply lists the newest events of the
-session and a wait those after `afterSequence` (without the argument: after
-the last wait or recompile of this server that answered, to any caller, so
-callers that share a server pass it; a mark above `lastSequence` is of an
-earlier server and the reply covers all of this one); `events` sets how many,
-and a listed event keeps its first 8 `paths` with `pathsCount`. The events
-of a reply leave out the lists the state holds (`notes`, `newNotes`,
-`members`, `unsupported`) and all but the beginning of an `error`; the state
-keeps the first 4 KiB of a rejection and names the file with all of it. `status` returns the
-`hotReload` state, also while no session runs. The session options `hotReload: false` (restart on every C# edit) and
-`onUnsupportedEdit: "restart"` (restart instead of the error) select the other
-behaviors. The session state omits `hotReload` while it has nothing to report:
-hot reload is enabled, no patch is applied, no edit is refused, no note
-stands, no recompile is pending and hot reload did not restart this Player.
-[AGENT_MCP.md](AGENT_MCP.md) describes the flow and its limits.
+`hotReload.codeGeneration`. An edit that cannot be applied live is refused,
+not approximated: both waits fail with `full_recompile_required` until the
+code is in the Player, and `hot_reload(recompile)` restarts the Player on the
+newest compiled code and resets game state. A change that is applied can
+leave something out until a restart; the reply of the wait then starts with
+`attention`, and `hotReload.newNotes` lists the notes. The session options
+`hotReload: false` (restart on every C# edit) and `onUnsupportedEdit:
+"restart"` (restart instead of the error) select the other behaviors. The
+session state omits `hotReload` while it has nothing to report: hot reload is
+enabled, no patch is applied, no edit is refused, no note stands, no
+recompile is pending and hot reload did not restart this Player.
+[HOT_RELOAD.md](HOT_RELOAD.md) is the guide (the edits, every code, the API
+for game code, the agent flow, timings and limits), and
+[AGENT_MCP.md](AGENT_MCP.md#hot-reload) the contract of the waits, their
+marks (`afterSequence`), the events a reply lists and the state.
 
 `project_tools` publishes public attributed/registered methods as
 `project.<name>` MCP tools. Their `parameters` follow the project's DTO schema,
@@ -206,18 +180,11 @@ Error codes of hot reload:
 A `hot_reload(recompile)` while the saved sources stand rejected for having
 left the prepared graph (a new assembly definition) restarts nothing: it is
 answered like `session_control(wait_update)`, with the preparation that
-answers the rejection (`status: result_pending`).
-
-Both waits return `full_recompile_required` until the code is in the Player:
-for every `afterSequence`, and also after a later scene update, which the
-message then reports as applied, or a later scene edit that the running Player
-rejected; the message and `details.rejected` then have that rejection's own
-text, and `session_control(status).updateError` has it too. A C# compile error
-keeps the code `operation_failed` with the compiler's text, from both waits
-and from `hot_reload(recompile)` alike. So does a `recompile` whose runner no longer
-reads commands; its message names `session_control(reset)`. A `requestId` of
-`recompile` names one command: a repeated id returns that command's outcome
-and does not restart the Player again.
+answers the rejection (`status: result_pending`). A C# compile error is
+`operation_failed` with the compiler's text, from both waits and from
+`hot_reload(recompile)` alike, and keeps the Player. So is a `recompile`
+whose runner no longer reads commands; its message names
+`session_control(reset)`.
 
 ```sh
 cargo test --locked --lib mcp::
