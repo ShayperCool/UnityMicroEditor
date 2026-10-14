@@ -101,6 +101,8 @@ pub(crate) trait Steps {
     fn script_guid(&self, _type_name: &str) -> Option<String> {
         None
     }
+    /// Called after the events of a window were printed, also when it failed.
+    fn window_done(&mut self, _window: &Window) {}
 }
 
 /// Why the next decision restarts the Player on the newest compile.

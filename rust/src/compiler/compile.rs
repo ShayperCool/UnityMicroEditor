@@ -1102,17 +1102,28 @@ impl Compiler {
         changed_paths: Option<&[String]>,
     ) -> Result<Option<CompileUpdate>> {
         ctx.err()?;
+        self.last_phases.clear();
         if let Some(changed) = changed_paths
             && !self.compiler_changes(changed)
         {
             return Ok(None);
         }
+        let started = Instant::now();
         let mut candidate = self.source_graph_candidate(changed_paths.unwrap_or(&[]))?;
-        let update = candidate.compile_graph(ctx, changed_paths)?;
-        // Graph extensions become visible together with their verified DLLs.
-        // Rejected edits retain the last accepted graph and immutable Player.
-        *self = candidate;
-        Ok(update)
+        candidate.last_phases.clear();
+        candidate.last_phases.lap("graph_candidate", started);
+        match candidate.compile_graph(ctx, changed_paths) {
+            Ok(update) => {
+                // Graph extensions become visible together with their verified DLLs.
+                // Rejected edits retain the last accepted graph and immutable Player.
+                *self = candidate;
+                Ok(update)
+            }
+            Err(error) => {
+                self.last_phases = candidate.last_phases;
+                Err(error)
+            }
+        }
     }
 
     pub fn compile_graph(
@@ -1130,7 +1141,9 @@ impl Compiler {
         {
             return Ok(None);
         }
+        let mut lap = Instant::now();
         self.check_configuration(changed_paths.unwrap_or(&[]))?;
+        lap = self.last_phases.lap("configuration_check", lap);
         let assemblies = self.manifest.assemblies.to_vec();
         let mut current_sources = NilMap::make();
         for assembly in &assemblies {
@@ -1138,6 +1151,7 @@ impl Compiler {
                 current_sources.insert(source, file_hash(source)?);
             }
         }
+        lap = self.last_phases.lap("source_hashes", lap);
         let mut dirty = dirty_assemblies(&assemblies, &self.sources, &current_sources);
         // A preparation holds the output of the lifecycle rewrite that made
         // it. Another build of the helper writes other text for the same
@@ -1188,9 +1202,13 @@ impl Compiler {
             return Ok(None);
         }
         let revision_key = self.code_revision_key(ctx, &current_sources)?;
-        if !self.startup_complete
-            && let Some(mut update) = self.restore_code_revision(&revision_key, &current_sources)
-        {
+        lap = self.last_phases.lap("revision_key", lap);
+        let restored = match self.startup_complete {
+            true => None,
+            false => self.restore_code_revision(&revision_key, &current_sources),
+        };
+        lap = self.last_phases.lap("revision_restore", lap);
+        if let Some(mut update) = restored {
             self.check_configuration(&[])?;
             for (source, expected) in &current_sources {
                 if !file_hash(source).is_ok_and(|actual| actual == *expected) {
@@ -1228,6 +1246,7 @@ impl Compiler {
             }
         }
         let helper = self.prepare_lifecycle_helper(ctx)?;
+        self.last_phases.lap("snapshots", lap);
         let mut built: BTreeMap<String, String> = BTreeMap::new();
         let mut proofs: NilMap<LifecycleProof> = NilMap::make();
         let mut direct_dirty =
@@ -1246,7 +1265,9 @@ impl Compiler {
                 proofs.insert(&assembly.name, self.proofs.value(&assembly.name));
                 continue;
             }
+            let started = Instant::now();
             let refs = self.references(assembly, &built)?;
+            self.last_phases.lap("references", started);
             let (dll, proof) = self.compile_assembly(
                 ctx,
                 &staging,
@@ -1259,16 +1280,20 @@ impl Compiler {
             built.insert(assembly.name.clone(), dll.clone());
             proofs.insert(&assembly.name, proof);
             let previous = self.current_dlls.at(&assembly.name).to_string();
+            let started = Instant::now();
             self.validate_compiled_script_types(ctx, &helper, &assembly.name, &previous, &dll)?;
+            let started = self.last_phases.lap("type_definitions", started);
             rebuilt.insert(assembly.name.clone());
             // A fingerprint is an optimization. Unknown metadata retains the
             // original conservative dependent rebuild instead of guessing.
             let changed = self
                 .declarations_changed(ctx, &helper, &previous, &dll)
                 .unwrap_or(true);
+            self.last_phases.lap("declaration_hashes", started);
             declarations_changed.insert(assembly.name.clone(), changed);
             compiled.push(assembly.name.clone());
         }
+        lap = Instant::now();
         self.check_configuration(&[])?;
         for (filename, expected) in &current_sources {
             if !file_hash(filename).is_ok_and(|hash| hash == *expected) {
@@ -1277,6 +1302,7 @@ impl Compiler {
                 );
             }
         }
+        lap = self.last_phases.lap("final_check", lap);
         let player_folder = join(&[&staging, "Player"]);
         sys::mkdir(&player_folder)?;
         compiler_command(
@@ -1291,6 +1317,7 @@ impl Compiler {
             ],
         )
         .map_err(|error| anyhow!("stage immutable Player: {error}"))?;
+        lap = self.last_phases.lap("player_copy", lap);
         let player = join(&[&player_folder, &sysutil::base(&self.player)]);
         let managed = super::player_managed(&player);
         let mut update = CompileUpdate {
@@ -1329,7 +1356,9 @@ impl Compiler {
         }
         update.elapsed_seconds = float_layout(started.elapsed().as_secs_f64());
         atomic_json(&join(&[&staging, "compile-update.json"]), &update)?;
+        lap = self.last_phases.lap("player_dlls", lap);
         self.save_code_revision(&revision_key, &update, &proofs)?;
+        self.last_phases.lap("save_revision", lap);
         self.use_code_revision(&update, proofs);
         Ok(Some(update))
     }
@@ -1654,6 +1683,7 @@ impl Compiler {
         hashes: &NilMap<String>,
     ) -> Result<(String, LifecycleProof)> {
         let config = self.configs.value(&assembly.name);
+        let mut lap = Instant::now();
         let mut identity: BTreeMap<String, String> = BTreeMap::new();
         identity.insert(
             "configuration".into(),
@@ -1687,6 +1717,7 @@ impl Compiler {
             identity.insert("netcodePostprocessor".into(), netcode_key.clone());
         }
         let key = sha256(&marshal(&identity)?);
+        lap = self.last_phases.lap("assembly_identity", lap);
         let entry = join(&[&self.cache, "assemblies", &key]);
         let library = format!("{}.dll", assembly.name);
         // The entry as it stands, when every part of it holds.
@@ -1706,6 +1737,7 @@ impl Compiler {
                 })
         };
         if let Some(cached) = cached() {
+            self.last_phases.lap("assembly_cache", lap);
             return Ok((join(&[&entry, &library]), cached.proof));
         }
         let folder = join(&[staging, "Compile", &assembly.name]);
@@ -1748,8 +1780,10 @@ impl Compiler {
                 sources: &sources,
             },
         )?;
+        lap = self.last_phases.lap("assembly_cache", lap);
         let output = compiler_command(ctx, staging, &self.dotnet, &[helper, &request])
             .map_err(|error| anyhow!("verify lifecycle {}: {error}", assembly.name))?;
+        lap = self.last_phases.lap("lifecycle_rewrite", lap);
         let wire: WireProof = unmarshal(&output)?;
         let mut proof = LifecycleProof {
             schema_version: wire.schema_version,
@@ -1844,9 +1878,11 @@ impl Compiler {
             );
         }
         fs::metadata(&dll).map_err(|e| sys::os_error("stat", &dll, &e))?;
+        lap = self.last_phases.lap("csc", lap);
         if network {
             (dll, proof) = self.postprocess_netcode(ctx, &folder, &dll, assembly, refs, proof)?;
         }
+        lap = self.last_phases.lap("netcode", lap);
         sys::mkdir_all(&sysutil::dir(&entry))?;
         let payload = sys::mkdir_temp(&sysutil::dir(&entry), ".assembly-")?;
         let mut files = NilMap::make();
@@ -1872,6 +1908,7 @@ impl Compiler {
         // entry is the one to use then, with the proof it recorded.
         sys::publish(&payload, &entry, || cached().is_some())?;
         let proof = cached().map_or(proof, |cached| cached.proof);
+        self.last_phases.lap("assembly_cache", lap);
         Ok((join(&[&entry, &library]), proof))
     }
 }

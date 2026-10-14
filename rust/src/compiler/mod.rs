@@ -8,6 +8,7 @@ mod host;
 mod metadata;
 mod netcode;
 mod nilable;
+mod phases;
 mod prepare;
 mod revision;
 mod script_types;
@@ -29,6 +30,7 @@ pub use metadata::{
 };
 pub use netcode::{HOST_CODEGEN_DIRECTORY, NetcodeProcessor, needs_netcode};
 pub use nilable::{NilMap, NilVec};
+pub use phases::{COMPILE_PHASES, PATCH_PHASES, Phases};
 pub use prepare::{
     PublishBaseline, canonical_configuration, order_compiler_assemblies, prepare_compiler_graph,
     prepare_compiler_graph_with, publish_baseline, register_compiler_assembly_slots,
@@ -514,6 +516,8 @@ pub struct Compiler {
     pub startup_complete: bool,
     /// What runs the code of the script classes that were last laid out.
     pub behaviour_code: BehaviourCode,
+    /// Where the time of the last `compile` went.
+    pub last_phases: Phases,
 }
 
 /// `<player dir>/<player stem>_Data`.
