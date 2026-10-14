@@ -96,6 +96,11 @@ pub(crate) trait Steps {
     fn merged_recompile(&mut self) -> Option<String>;
     /// Brings the running Player to the revision `prepare` published.
     fn scene(&mut self, ctx: &Context, window: &Window, started: Instant) -> Result<Scene>;
+    /// The GUID of the script that declares the type, as the running
+    /// Player's script types have it; `None` for a type no script names.
+    fn script_guid(&self, _type_name: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Why the next decision restarts the Player on the newest compile.
@@ -136,6 +141,10 @@ pub(crate) struct Loop {
     /// builder's notes. The Player does not fill them from a scene, so a
     /// scene update that brings a value for one is not all in the Player.
     unrestored: Vec<Reason>,
+    /// The instance methods the applied patch added to engine objects, as
+    /// the builder's notes. A UnityEvent or an animation event of the data
+    /// looks them up by name in the loaded class and does not find them.
+    unnamed: Vec<Reason>,
 }
 
 /// What a window says when its work is done.
@@ -150,6 +159,59 @@ struct Tail {
     /// The notes that the compile of this window brought and the outcome
     /// before did not have, when it needed no patch.
     fresh: Vec<Reason>,
+}
+
+/// The note of a method that data names by a string.
+const CODE_METHOD_NAMED: &str = "added_method_named_by_string";
+/// The builder's notes of an added instance method of an engine object
+/// that no string of the code names.
+const CODES_METHOD_ADDED: [&str; 2] = [
+    "added_method_invisible_by_name",
+    "added_method_computed_name",
+];
+
+/// The documents of a Unity YAML text: each `--- !u!` line begins one, and
+/// what stands before the first is one too.
+fn documents(text: &str) -> impl Iterator<Item = &str> {
+    let mut starts: Vec<usize> = vec![0];
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        if offset > 0 && line.starts_with("--- !u!") {
+            starts.push(offset);
+        }
+        offset += line.len();
+    }
+    starts.push(text.len());
+    let pieces: Vec<&str> = starts
+        .windows(2)
+        .map(|pair| &text[pair[0]..pair[1]])
+        .collect();
+    pieces.into_iter()
+}
+/// The GUID of the script a document's `m_Script` names.
+fn document_script(document: &str) -> Option<&str> {
+    let line = document
+        .lines()
+        .find(|line| line.trim_start().starts_with("m_Script:"))?;
+    let rest = &line[line.find("guid:")? + 5..];
+    let guid = rest.trim_start();
+    Some(&guid[..guid.find([',', '}', ' ']).unwrap_or(guid.len())])
+}
+/// The key of a YAML line, also of a list item.
+fn key_of(line: &str) -> Option<&str> {
+    let line = line.trim_start().trim_start_matches("- ");
+    let colon = line.find(':')?;
+    let key = &line[..colon];
+    (!key.is_empty() && !key.contains(char::is_whitespace)).then_some(key)
+}
+/// Whether a prefab instance's override in the document sets the field:
+/// its property path has the field as one of its parts.
+fn overridden(document: &str, field: &str) -> bool {
+    document.lines().any(|line| {
+        let line = line.trim_start().trim_start_matches("- ");
+        line.strip_prefix("propertyPath:")
+            .is_some_and(|path| path.trim().split('.').any(|part| part == field))
+    })
 }
 
 fn capped<T: Clone>(list: &[T]) -> Vec<T> {
@@ -358,53 +420,115 @@ impl Loop {
             noted: None,
             told: BTreeSet::new(),
             unrestored: Vec::new(),
+            unnamed: Vec::new(),
         }
     }
 
     /// The notes for a scene update the Player took over: each field that
-    /// the applied patch added and that one of the changed scenes, prefabs
-    /// or assets holds a value for. The Player rebuilt its objects from that
-    /// file and the field has what its initializer gave it; a caller that
-    /// is told `updated` and nothing else takes the saved value for applied.
-    /// The files are text (Unity's YAML), a field is the key of a line.
-    fn unfilled(&self, paths: &[String]) -> Vec<Reason> {
-        if self.unrestored.is_empty() {
+    /// the applied patch added and that one of the changed files holds a
+    /// value for, and each method it added that the data names. The Player
+    /// rebuilt its objects from that file: the field has what its
+    /// initializer gave it, and a UnityEvent or an animation event that
+    /// names the method finds nothing. A caller that is told `updated` and
+    /// nothing else takes the saved value or call for applied. The files are
+    /// Unity's YAML. A value of the field is a key of a document of the
+    /// declaring type's script (any document when no script declares the
+    /// type, a [Serializable] class held by another), or the property path
+    /// of a prefab instance's override (`propertyPath: field`, also as a part
+    /// of a longer path such as `tuning.field` or `field.Array.data[0]`).
+    fn unfilled(&self, paths: &[String], script: &dyn Fn(&str) -> Option<String>) -> Vec<Reason> {
+        if self.unrestored.is_empty() && self.unnamed.is_empty() {
             return Vec::new();
         }
-        let mut files: Vec<&String> = paths
-            .iter()
-            .filter(|path| {
-                [".unity", ".prefab", ".asset"]
-                    .iter()
-                    .any(|extension| path.ends_with(extension))
-            })
-            .collect();
-        files.sort();
-        files.dedup();
-        let texts: Vec<(&String, String)> = files
-            .into_iter()
-            .filter_map(|path| Some((path, String::from_utf8(std::fs::read(path).ok()?).ok()?)))
-            .collect();
+        let read = |extensions: &[&str]| -> Vec<(String, String)> {
+            let mut files: Vec<&String> = paths
+                .iter()
+                .filter(|path| extensions.iter().any(|extension| path.ends_with(extension)))
+                .collect();
+            files.sort();
+            files.dedup();
+            files
+                .into_iter()
+                .filter_map(|path| {
+                    Some((
+                        path.clone(),
+                        String::from_utf8(std::fs::read(path).ok()?).ok()?,
+                    ))
+                })
+                .collect()
+        };
         let mut notes = Vec::new();
-        for note in &self.unrestored {
-            let field = note.member.rsplit("::").next().unwrap_or_default();
-            let holder = texts.iter().find(|(_, text)| {
-                !field.is_empty()
-                    && text.lines().any(|line| {
-                        let key = line.trim_start().trim_start_matches("- ");
-                        key.strip_prefix(field)
-                            .is_some_and(|rest| rest.starts_with(':'))
+        if !self.unrestored.is_empty() {
+            let texts = read(&[".unity", ".prefab", ".asset", ".controller"]);
+            for note in &self.unrestored {
+                let Some((declaring, field)) = note.member.rsplit_once("::") else {
+                    continue;
+                };
+                let guid = script(declaring);
+                let holder = texts.iter().find(|(_, text)| {
+                    !field.is_empty()
+                        && documents(text).any(|document| {
+                            let own = match (&guid, document_script(document)) {
+                                (Some(guid), Some(script)) => guid == script,
+                                (Some(_), None) => false,
+                                (None, _) => true,
+                            };
+                            (own && document.lines().any(|line| key_of(line) == Some(field)))
+                                || overridden(document, field)
+                        })
+                });
+                if let Some((path, _)) = holder {
+                    notes.push(Reason::new(
+                        CODE_FIELD_NOT_RESTORED,
+                        &note.member,
+                        &format!(
+                            "{path} holds a value for the added field {}, which the Player does not read from scenes, prefabs or assets until a restart; its objects keep what the field's initializer gave them.",
+                            note.member
+                        ),
+                    ));
+                }
+            }
+        }
+        if !self.unnamed.is_empty() {
+            let texts = read(&[
+                ".unity",
+                ".prefab",
+                ".asset",
+                ".controller",
+                ".anim",
+                ".meta",
+            ]);
+            for note in &self.unnamed {
+                let Some(name) = note
+                    .member
+                    .rsplit_once("::")
+                    .and_then(|(_, method)| method.split_once('(').map(|(name, _)| name))
+                else {
+                    continue;
+                };
+                let named = texts.iter().find_map(|(path, text)| {
+                    text.lines().find_map(|line| {
+                        let line = line.trim_start().trim_start_matches("- ");
+                        ["m_MethodName", "functionName"]
+                            .into_iter()
+                            .find(|key| {
+                                line.strip_prefix(key)
+                                    .and_then(|rest| rest.strip_prefix(':'))
+                                    .is_some_and(|value| value.trim() == name)
+                            })
+                            .map(|key| (path, key))
                     })
-            });
-            if let Some((path, _)) = holder {
-                notes.push(Reason::new(
-                    CODE_FIELD_NOT_RESTORED,
-                    &note.member,
-                    &format!(
-                        "{path} holds a value for the added field {}, which the Player does not read from scenes, prefabs or assets until a restart; its objects keep what the field's initializer gave them.",
-                        note.member
-                    ),
-                ));
+                });
+                if let Some((path, key)) = named {
+                    notes.push(Reason::new(
+                        CODE_METHOD_NAMED,
+                        &note.member,
+                        &format!(
+                            "{path} names the added method {} ({key}); a UnityEvent or an animation event looks it up by name in the loaded class and does not find it until a full recompile, so that call does nothing.",
+                            note.member
+                        ),
+                    ));
+                }
             }
         }
         notes
@@ -569,6 +693,12 @@ impl Loop {
                             .filter(|note| note.code == CODE_FIELD_NOT_RESTORED)
                             .cloned()
                             .collect();
+                        self.unnamed = patch
+                            .notes
+                            .iter()
+                            .filter(|note| CODES_METHOD_ADDED.contains(&note.code.as_str()))
+                            .cloned()
+                            .collect();
                         let fresh = self.fresh(&patch.notes);
                         let (pid, revision) = (steps.pid(), steps.revision());
                         tail.events.push(patched_event(
@@ -585,6 +715,7 @@ impl Loop {
                         self.refused = None;
                         // No redirect is live: the Player runs what it loaded.
                         self.unrestored.clear();
+                        self.unnamed.clear();
                         tail.fresh = self.fresh(&unchanged.notes);
                         self.noted = (!unchanged.notes.is_empty()).then_some(unchanged);
                     }
@@ -658,6 +789,7 @@ impl Loop {
             (self.refused, self.noted) = (None, None);
             self.told.clear();
             self.unrestored.clear();
+            self.unnamed.clear();
             tail.refusal = false;
             let merged = match request {
                 Some(_) => None,
@@ -676,7 +808,7 @@ impl Loop {
             Scene::Unchanged(event) => tail.events.push(self.stated(event, &tail.fresh)),
             Scene::Updated(event) => {
                 let mut fresh = tail.fresh.clone();
-                fresh.extend(self.unfilled(paths));
+                fresh.extend(self.unfilled(paths, &|name| steps.script_guid(name)));
                 tail.events.push(self.stated(event, &fresh));
             }
             Scene::Rejected { event, fatal } => {
