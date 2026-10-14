@@ -1240,7 +1240,7 @@ namespace Edits
     {
         protected int health;
         private void Awake() { __UnityPlay_Awake(); }
-        private void __UnityPlay_Awake() { OnSetup(); Prepare(); }
+        private void __UnityPlay_Awake() { OnSetup(); Prepare(); Rebuild(); }
         protected abstract void OnSetup();
         private void Prepare()
         {
@@ -1256,7 +1256,20 @@ namespace Edits
         private int Bonus() => 1;
 #endif
         private void Update() { health -= Bonus(); }
+        // A framework calls it as well: the bridge runs an [InvokeOnHotReloadLocal] method again.
+        [Rebuilt]
+        private void Rebuild()
+        {
+#if CASE_ONCE_HOOK
+            health += 3;
+#else
+            health += 2;
+#endif
+        }
     }
+
+    [AttributeUsage(AttributeTargets.Method)]
+    public sealed class RebuiltAttribute : Attribute { }
 
     public class Enemy : Actor
     {
