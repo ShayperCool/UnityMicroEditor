@@ -70,6 +70,7 @@ namespace Serial
         private LazyLoadReference<Texture2D> lazy;
         private ExposedReference<Texture> exposed;
         private Texture2D texture;
+        private UnityEngine.Object asset;
 #else
         public Narrow narrow;
         public Bounds bounds;
@@ -89,6 +90,7 @@ namespace Serial
         public LazyLoadReference<Texture2D> lazy;
         public ExposedReference<Texture> exposed;
         public Texture2D texture;
+        public UnityEngine.Object asset;
 #endif
     }
 

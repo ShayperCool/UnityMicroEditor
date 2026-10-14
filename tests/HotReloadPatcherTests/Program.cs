@@ -596,7 +596,7 @@ internal static class Program
         var cases = new Dictionary<string, Expectation>
         {
             // Long enums and the engine's types it skips: a note, as for any field Unity never serializes.
-            ["SER_ENGINE_ACCESS"] = Refused(new[] { "narrow", "bounds", "mask", "hash", "matrix", "cell", "gradient", "curve", "offset", "rect", "tint", "property", "turn", "clicked", "scored", "lazy", "exposed", "texture" }
+            ["SER_ENGINE_ACCESS"] = Refused(new[] { "narrow", "bounds", "mask", "hash", "matrix", "cell", "gradient", "curve", "offset", "rect", "tint", "property", "turn", "clicked", "scored", "lazy", "exposed", "texture", "asset" }
                 .Select(field => "serialization_changed Serial.Kept::" + field).ToArray()),
             ["SER_FIXED"] = Refused("serialization_changed Serial.Packed::bytes"),
             ["SER_DICT_READONLY"] = Refused("serialization_changed Serial.Shop::prices"),
