@@ -1278,6 +1278,17 @@ fn run_session(
             .emit();
     }
     if opts.prepare_only {
+        // A later session on this output keeps what a `--prepared` launch
+        // of this preparation needs (caches6-2).
+        prune::record_prepared(
+            &output,
+            &serde_json::json!({
+                "schemaVersion": 1,
+                "player": baseline.player,
+                "manifest": prepared.manifest,
+                "contentRoutes": opts.raw_routes,
+            }),
+        )?;
         Event::new("prepared")
             .with("player", &baseline.player)
             .with("manifest", &prepared.manifest)
