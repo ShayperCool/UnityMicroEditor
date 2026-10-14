@@ -191,12 +191,16 @@ Not verified: a project with native models, audio or UI through the whole
 cycle; `build-project` against a real Editor; `project_tools`; attaching to an
 interactive Editor; the GitHub Actions workflow itself. Of hot reload: content
 routes or Addressables. Known: the fixed island address of a game method can
-lie in a mapping of the Player; a `sub rsp, imm8` body (89 % of methods) is now
-reached through the gate to an island anywhere in a 16 MiB window (island6, over
-40 fresh Players with no such refusal), but a `push rbp` body or a body of an
-unrecognised first instruction whose fixed island is taken is still refused for
-the life of that Player with `apply_failed` and `fullRecompileRequired` (under
-0.03 % of methods in a running-Player sample; a recompile applies the edit). Of
+lie in a mapping of the Player. A `sub rsp, imm8` body is then reached through
+the gate to an island anywhere in a 16 MiB window: with the fixed island of one
+method forced taken, 38 of 40 fresh Players took its edit that way (the
+applier before the change refused all 40), and without forcing 79 of 80 did
+(2026-10-14). The rest, a `sub rsp, imm8` body whose whole window is taken
+(that method's window lay in a large mapping of the Player) and a `push rbp`
+body or a body of an unrecognised first instruction whose fixed island is
+taken (under 0.03 % of the methods of a running Player), is refused for the
+life of that Player with `apply_failed` and `fullRecompileRequired`; a
+recompile applies the edit. Of
 Netcode: another package version, a dedicated server and distributed
 authority. A stage 5 review ran host and two clients (Temp/e2e/nc5, 121
 checks): NetworkList, a NetworkBehaviour whose base class is in another game
@@ -214,8 +218,9 @@ ready 10.06 s; scene edit to patch applied 0.24 s; C# edit to recompiled Player
 ready 8.09 s; stop 1.27 s. `auto-prepare` from scratch took 414 s in a single
 run that shared the machine with another session. Unity, the Mono Player and
 Roslyn dominate these times; the tool's own share is small. These are the
-times of the watch loop before hot reload. On 2026-10-13 a C# body edit in a
-`run --watch` session reached the running Player in 3.4 s (median of eight,
-3.1 s at best), against 6.6 s for the restart of the same edit with
-`--no-hot-reload`; [docs/RUNNER.md](../docs/RUNNER.md#measured) says where
-the time goes.
+times of the watch loop before hot reload. On 2026-10-14 a C# body edit in a
+`run --watch` session reached the running Player in 0.33 s (median of 32),
+and `hot_reload(recompile)` restarted it in 4.3 to 4.8 s;
+[docs/HOT_RELOAD.md](../docs/HOT_RELOAD.md#measured) has these and the other
+timings, and [docs/RUNNER.md](../docs/RUNNER.md#measured) says where the time
+of an edit goes.
