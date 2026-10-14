@@ -67,7 +67,7 @@ Other ways to do it, and why they were not taken:
 1. **Compile.** The watcher waits 35 ms for more changes of a save, then the runner compiles the assemblies whose sources changed, as a session without hot reload does: the lifecycle rewrite, the SDK's Roslyn, and the Netcode post-processor for an assembly that uses Netcode. A compile error leaves the Player as it is.
 2. **Compare.** The patch builder (`tools/HotReloadPatcher`) compares each changed assembly with the one the Player **loaded at its start**, not with the previous patch. Methods are compared by what their tokens mean, and the members the compiler generates for lambdas, closures and state machines by their structure, so a comment, a moved member or a renumbered lambda is no change. Every difference is classified: patched, patched with a note, or refused. One refusal refuses the whole edit.
 3. **Patch assembly.** For each changed assembly the builder writes `<name>.HotReload.<generation>.dll` with its PDB: the new bodies (an instance method of a class becomes a static method with the instance as first parameter), added methods, accessors of added fields, and a security declaration that lets it reach private members. It reads the assembly back and verifies it before it is used.
-4. **Apply.** The runner writes a request beside the Player. The bridge in the Player picks it up between two frames, on the main thread, and hands it to the applier (`tools/HotReloadRuntime`, compiled for each session). The applier resolves every method, loads the patch, has the JIT compile every replacement and original, decides how each method is redirected, and only then writes. If anything fails before the write, nothing is written and the Player keeps the code it had. Then it runs the game's callbacks and answers. The runner checks the answer (Player process, generation, number of redirects) and prints `code-patched`.
+4. **Apply.** The runner writes a request file into the run directory of the Player. The bridge in the Player picks it up between two frames, on the main thread, and hands it to the applier (`tools/HotReloadRuntime`, compiled for each session). The applier resolves every method, loads the patch, has the JIT compile every replacement and original, decides how each method is redirected, and only then writes. If anything fails before the write, nothing is written and the Player keeps the code it had. Then it runs the game's callbacks and answers. The runner checks the answer (Player process, generation, number of redirects) and prints `code-patched`.
 
 The next edit is compared with the loaded assemblies again, and its patch replaces the one before it; a method the new patch no longer lists is restored. Reverting an edit therefore restores the loaded code.
 
@@ -271,7 +271,7 @@ Limits of a session itself, with or without hot reload (a generic MonoBehaviour 
 
 ## The agent flow through MCP
 
-The `mcp` server starts its runner with `--hot-reload-fallback report --commands-stdin`, so the agent decides when the game loses its state. The flow:
+By default the `mcp` server starts its runner with `--hot-reload-fallback report --commands-stdin`, so the agent decides when the game loses its state. The flow:
 
 1. Read `session_control(status).lastSequence` before the edits.
 2. Save with `script_edit` or `script_create` (or any editor). The watcher sees every save below `Assets`, `Packages` and `ProjectSettings`.
