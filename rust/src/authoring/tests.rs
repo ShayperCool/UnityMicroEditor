@@ -422,6 +422,120 @@ fn a_declared_field_is_found_in_the_source() {
         assert!(!declares(source, name), "{name}");
     }
 }
+/// The declarations Unity serializes as fields of the script's class, and
+/// those it does not, read from the class body: attributes on lines of
+/// their own, `[NonSerialized]`, properties, delegates, comments, several
+/// declarators, another class of the same file (session6-7).
+#[test]
+fn the_fields_unity_serializes_are_read_from_the_class_body() {
+    use super::edit::declares_serialized_field as declares;
+    let source = r#"using System;
+using UnityEngine;
+public class Hero : MonoBehaviour
+{
+    [NonSerialized] public int cachedScore;
+    [System.NonSerialized] public float lastHit;
+    public int Speed => speed;
+    [SerializeField]
+    private int speed = 3;
+    [SerializeField]
+    [Range(0, 10)] private float armor = 1f;
+    public int ammo, clips;
+    public Action onDeath;
+    public Stats stats;
+    public System.Collections.Generic.List<int> waves = new System.Collections.Generic.List<int> { 1, 2 };
+    /*
+    public int oldField;
+    */
+    // public int commented;
+    public string motto = "public int quoted;";
+    [field: SerializeField] public int Gold { get; private set; }
+    void Update() { int local = 2; }
+}
+[Serializable]
+public class Stats
+{
+    public int hp;
+}
+"#;
+    let mut wrong = Vec::new();
+    for name in ["cachedScore", "lastHit", "Speed", "onDeath", "hp", "oldField", "commented", "quoted", "Gold", "local"] {
+        if declares(source, name) {
+            wrong.push(format!("{name}: taken, Unity does not serialize it as a field of Hero"));
+        }
+    }
+    for name in ["speed", "armor", "ammo", "clips", "stats", "waves", "motto"] {
+        if !declares(source, name) {
+            wrong.push(format!("{name}: refused, Unity serializes it"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// A field of a base class in another file is a field of the component;
+/// a value of the wrong type for a new key is refused, as on a key the data
+/// holds, and one of the right type is written (session6-6, session6-7).
+#[test]
+fn set_property_types_a_new_key_and_finds_inherited_fields() {
+    let (temp, store, source) = fixture(SCENE);
+    store
+        .create_script(&script(
+            "Assets/Scripts/Unit.cs",
+            "create-unit",
+            "using UnityEngine;\npublic class Unit : MonoBehaviour\n{\n    public int boost = 1;\n}\n",
+            "cccccccccccccccccccccccccccccccc",
+        ))
+        .unwrap();
+    store
+        .create_script(&script(
+            "Assets/Scripts/Hero.cs",
+            "create-hero",
+            "using System.Collections.Generic;\nusing UnityEngine;\npublic class Hero : Unit\n{\n    public float dim = 0.5f;\n    public int count;\n    public bool alive;\n    public string title;\n    public Vector3 spawn;\n    public Color tint;\n    public Transform target;\n    public int[] waves;\n    public List<string> tags;\n}\n",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ))
+        .unwrap();
+    let attached = edit(&store, &source, "attach-hero", json!([{"action": "add_component", "fileId": "100", "key": "hero", "scriptPath": "Assets/Scripts/Hero.cs", "fields": {"dim": 0.5}}])).unwrap();
+    let hero = attached.mutation.created_ids["hero"].clone();
+    let set = |property: &str, value: Value| {
+        let latest = store.read(PATH).unwrap();
+        edit(
+            &store,
+            &latest,
+            &format!("set-{property}-{}", value.to_string().len()),
+            json!([{"action": "set_property", "fileId": hero, "property": property, "value": value}]),
+        )
+    };
+    for (property, value) in [
+        ("count", json!("12")),
+        ("alive", json!("true")),
+        ("title", json!(42)),
+        ("spawn", json!([1, 2, 3])),
+        ("tint", json!({"red": 1})),
+        ("waves", json!("1,2,3")),
+        ("tags", json!([1, 2])),
+        ("target", json!("101")),
+    ] {
+        code(set(property, value.clone()), "invalid_property_value");
+    }
+    for (property, value) in [
+        ("boost", json!(3)),
+        ("count", json!(12)),
+        ("alive", json!(true)),
+        ("title", json!("007")),
+        ("spawn", json!({"x": 1, "y": 2, "z": 3})),
+        ("tint", json!({"r": 1, "g": 0.5, "b": 0, "a": 1})),
+        ("target", json!({"fileID": "101"})),
+        ("waves", json!([1, 2, 3])),
+        ("tags", json!(["a", "b"])),
+    ] {
+        set(property, value.clone()).unwrap_or_else(|error| panic!("{property} = {value}: {} {}", error.code, error.message));
+    }
+    let text = fs::read_to_string(temp.path().join(PATH)).unwrap();
+    for line in ["  boost: 3\n", "  count: 12\n", "  alive: 1\n", "  title: \"007\"\n"] {
+        assert!(text.contains(line), "{line:?} in {text}");
+    }
+}
+
 #[test]
 fn external_references_prevent_deletion() {
     let (temp, store, source) = fixture(SCENE);
