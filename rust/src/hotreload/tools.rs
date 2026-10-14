@@ -6,7 +6,7 @@ use super::wire::RUNTIME_ASSEMBLY;
 use crate::{
     cancel::Context,
     compiler::{
-        NilMap, Service, ServiceError, compiler_cold, compiler_command, glob, glob_lossy,
+        NilMap, Service, compiler_cold, compiler_command, glob, glob_lossy,
         verify_cache_files,
     },
     sha256, sysutil,
@@ -27,6 +27,9 @@ use std::{
 /// and writes one in a fraction of a second; a run that does not end would
 /// stop the watch loop, which waits for it before it handles the next edit.
 pub const BUILD_TIMEOUT: Duration = Duration::from_secs(60);
+/// The longest a request waits for the builder a session keeps before it
+/// runs once in a process of its own.
+pub(crate) const SERVED_LIMIT: Duration = Duration::from_secs(15);
 
 /// The sources of the patch builder. The project file compiles every `.cs`
 /// beside it, so a source missing here would be left out of the build and
@@ -427,21 +430,24 @@ impl Tools {
     /// not answer, or answered with a failure, runs once in a process of its
     /// own, whose result counts.
     pub fn build_within(&self, ctx: &Context, request: &str, limit: Duration) -> Result<Vec<u8>> {
+        let started = std::time::Instant::now();
         if let Some(service) = &self.service.0
             && service.program() == self.patcher
         {
-            match service.call(ctx, &sysutil::dir(request), &[request], limit) {
+            // A kept builder answers in milliseconds. One that does not
+            // answer within a third of the limit is stopped (which takes up
+            // to a second more), and the request runs once in a process of
+            // its own within the rest, as a request of the lifecycle helper
+            // or the compiler server does (served6-2).
+            let served = (limit / 3).min(SERVED_LIMIT);
+            match service.call(ctx, &sysutil::dir(request), &[request], served) {
                 Ok(reply) if reply.exit == 0 => {
                     return Ok(format!("{}{}", reply.output, reply.error).into_bytes());
                 }
-                Err(ServiceError::TimedOut(_)) if ctx.error().is_none() => bail!(
-                    "the patch builder did not finish within {}s and was stopped",
-                    limit.as_secs()
-                ),
                 _ => ctx.err()?,
             }
         }
-        let limited = ctx.with_timeout(limit);
+        let limited = ctx.with_timeout(limit.saturating_sub(started.elapsed()));
         let output = compiler_command(
             &limited,
             &sysutil::dir(request),
