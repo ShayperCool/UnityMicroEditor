@@ -21,6 +21,14 @@ pub(super) const RECOMPILE_HISTORY: usize = 16;
 /// The answers of a Player process whose new notes are kept, the newest.
 /// The session keeps as many events.
 const BROUGHT_MAXIMUM: usize = 64;
+/// The notes the runner gives a scene update from what the saved data holds
+/// (a value of a field the patch added, a UnityEvent or an animation event
+/// that names a method it added). Neither the patch nor a compile lists
+/// them, so they do not end with a list that lacks them.
+const DATA_NOTES: [&str; 2] = [
+    "added_method_named_by_string",
+    "serialized_field_not_restored",
+];
 
 /// The notes one answer of the runner brought: what of the edit it applied
 /// is not in effect. A wait that covers several answers reports those of
@@ -462,12 +470,26 @@ impl HotReload {
             .chain(patch.into_iter().flat_map(|patch| patch.notes.iter()))
             .map(|note| (note.code.as_str(), note.member.as_str()))
             .collect();
+        // The runner's notes about the data of a scene update name a member
+        // the patch added, which the patch notes under a code of its own
+        // (an added method that no string names, for one). They stand for
+        // as long as the patch notes that member.
+        let patched: Vec<&str> = patch
+            .into_iter()
+            .flat_map(|patch| patch.notes.iter())
+            .map(|note| note.member.as_str())
+            .collect();
+        let of_data = |note: &Reason| {
+            DATA_NOTES.contains(&note.code.as_str()) && patched.contains(&note.member.as_str())
+        };
         // What happened once is no state that could end.
         let stated = |note: &Reason| note.code == "callback_failed";
         for answer in &mut self.brought {
             let before = answer.notes.len();
             answer.notes.retain(|note| {
-                stated(note) || standing.contains(&(note.code.as_str(), note.member.as_str()))
+                stated(note)
+                    || of_data(note)
+                    || standing.contains(&(note.code.as_str(), note.member.as_str()))
             });
             answer.count = answer
                 .count
@@ -539,6 +561,16 @@ impl HotReload {
             }
         };
         let mut notes: Vec<&Reason> = self.notes.iter().collect();
+        // What a scene update brought about the patch's members stands too.
+        for note in self.brought.iter().flat_map(|answer| answer.notes.iter()) {
+            if DATA_NOTES.contains(&note.code.as_str())
+                && !notes
+                    .iter()
+                    .any(|kept| kept.code == note.code && kept.member == note.member)
+            {
+                notes.push(note);
+            }
+        }
         if let Some(patch) = &self.last_patch {
             notes.extend(patch.notes.iter());
             return format!(

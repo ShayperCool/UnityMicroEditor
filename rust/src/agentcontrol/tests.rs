@@ -5087,3 +5087,111 @@ mod stage5_waits {
         assert_eq!(answered["pid"].as_i64(), Some(ready.pid), "{answered}");
     }
 }
+
+/// A UnityEvent saved after a patch that names a method the patch added
+/// calls nothing; the runner says so on the scene update, and the wait
+/// after the save leads with it although the patch listed the method under
+/// another code (stage 6, session6-1 and mcp6-1). The note stands as long
+/// as the patch does, also for a caller whose mark nothing followed.
+#[test]
+fn a_scene_naming_an_added_method_is_said_by_the_wait_after_the_save() {
+    use loop_lines::*;
+    let (_guard, root) = temp_dir();
+    let c = controller_fixture("");
+    let ready = start_ready(&c);
+    let (mut state, mut script) = (report_loop(), Script::new(&c, &ready));
+    // The patch adds Game.Lamp::OnPinged() to a MonoBehaviour; no string of
+    // the code names it (the builder's Minor note).
+    script.edit(patch(
+        1,
+        vec![Why::new(
+            "added_method_invisible_by_name",
+            "Game.Lamp::OnPinged()",
+            "The added method Game.Lamp::OnPinged() belongs to an engine object.",
+        )],
+    ));
+    let patched = run(
+        &c,
+        &mut state,
+        &mut script,
+        &window(&["/p/Assets/Lamp.cs"], None),
+    );
+    let first = c.wait(&seconds(1), ready.last_sequence, false).unwrap();
+    assert_eq!(first.attention, "", "{first:?}");
+    // A scene save whose button calls it by name.
+    let scene = format!("{root}/Menu.unity");
+    fs::write(
+        &scene,
+        "%YAML 1.1\n--- !u!114 &9\nMonoBehaviour:\n  m_OnClick:\n    m_PersistentCalls:\n      m_Calls:\n      - m_Target: {fileID: 7}\n        m_MethodName: OnPinged\n",
+    )
+    .unwrap();
+    script.reloads.push_back(Reload::Updated);
+    script.compiles.push_back(Compiled::Unaffected);
+    let saved = run(&c, &mut state, &mut script, &window(&[&scene], None));
+    let waited = c.wait(&seconds(1), patched.last_sequence, false).unwrap();
+    assert!(
+        waited
+            .attention
+            .contains("[added_method_named_by_string]"),
+        "{:?} {:?}",
+        waited.attention,
+        waited.hot_reload.new_notes
+    );
+    assert_eq!(
+        waited
+            .hot_reload
+            .new_notes
+            .iter()
+            .map(|note| (note.code.as_str(), note.member.as_str()))
+            .collect::<Vec<_>>(),
+        [("added_method_named_by_string", "Game.Lamp::OnPinged()")]
+    );
+    // A caller whose mark nothing followed is told what stands.
+    let standing = c.wait(&seconds(1), saved.last_sequence, false).unwrap();
+    assert!(
+        standing
+            .attention
+            .contains("[added_method_named_by_string]"),
+        "{}",
+        standing.attention
+    );
+    // Another body edit keeps the patch and the method: the note stands.
+    script.edit(patch(
+        2,
+        vec![Why::new(
+            "added_method_invisible_by_name",
+            "Game.Lamp::OnPinged()",
+            "The added method Game.Lamp::OnPinged() belongs to an engine object.",
+        )],
+    ));
+    run(
+        &c,
+        &mut state,
+        &mut script,
+        &window(&["/p/Assets/Lamp.cs"], None),
+    );
+    let again = c.wait(&seconds(1), patched.last_sequence, false).unwrap();
+    assert!(
+        again
+            .hot_reload
+            .new_notes
+            .iter()
+            .any(|note| note.code == "added_method_named_by_string"),
+        "{:?}",
+        again.hot_reload.new_notes
+    );
+    // A patch without the method ends it.
+    script.edit(patch(3, Vec::new()));
+    run(
+        &c,
+        &mut state,
+        &mut script,
+        &window(&["/p/Assets/Lamp.cs"], None),
+    );
+    let ended = c.wait(&seconds(1), patched.last_sequence, false).unwrap();
+    assert!(
+        ended.hot_reload.new_notes.is_empty(),
+        "{:?}",
+        ended.hot_reload.new_notes
+    );
+}
