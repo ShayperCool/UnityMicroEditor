@@ -2592,6 +2592,14 @@ fn a_scene_update_finds_overrides_and_named_methods_and_skips_other_scripts() {
             "%YAML 1.1\n--- !u!114 &7\nMonoBehaviour:\n  m_Script: {{fileID: 11500000, guid: {lamp}, type: 3}}\n  boost: 0.4\n"
         ),
     );
+    // The component in a prefab, with m_Script in block style as a hand edit
+    // or another tool may write it.
+    let prefab = file(
+        "Cube.prefab",
+        &format!(
+            "%YAML 1.1\n--- !u!114 &105\nMonoBehaviour:\n  m_GameObject:\n    fileID: 100\n  m_Script:\n    fileID: 11500000\n    guid: {lamp}\n    type: 3\n  dim: 0.35\n  boost: 2\n"
+        ),
+    );
     // Another script has a field of the same name, and the camera changed.
     let other = file(
         "Main.unity",
@@ -2680,6 +2688,10 @@ fn a_scene_update_finds_overrides_and_named_methods_and_skips_other_scripts() {
     );
     assert_eq!(
         noted(&updated(&mut state, &mut steps, &controller)),
+        [field("Game.Lamp::boost")]
+    );
+    assert_eq!(
+        noted(&updated(&mut state, &mut steps, &prefab)),
         [field("Game.Lamp::boost")]
     );
     let event = updated(&mut state, &mut steps, &other);

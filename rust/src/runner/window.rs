@@ -188,12 +188,22 @@ fn documents(text: &str) -> impl Iterator<Item = &str> {
         .collect();
     pieces.into_iter()
 }
-/// The GUID of the script a document's `m_Script` names.
+/// The GUID of the script a document's `m_Script` names, in flow style
+/// (`m_Script: {fileID: 11500000, guid: ..., type: 3}`) or in block style
+/// (`guid: ...` on a line of its own below `m_Script:`).
 fn document_script(document: &str) -> Option<&str> {
-    let line = document
-        .lines()
-        .find(|line| line.trim_start().starts_with("m_Script:"))?;
-    let rest = &line[line.find("guid:")? + 5..];
+    let mut lines = document.lines();
+    let line = lines.find(|line| line.trim_start().starts_with("m_Script:"))?;
+    let indent = line.len() - line.trim_start().len();
+    let rest = match line.find("guid:") {
+        Some(at) => &line[at + 5..],
+        None => {
+            let below = lines
+                .take_while(|line| line.len() - line.trim_start().len() > indent)
+                .find(|line| line.trim_start().starts_with("guid:"))?;
+            &below[below.find("guid:")? + 5..]
+        }
+    };
     let guid = rest.trim_start();
     Some(&guid[..guid.find([',', '}', ' ']).unwrap_or(guid.len())])
 }
