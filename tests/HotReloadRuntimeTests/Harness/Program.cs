@@ -69,10 +69,10 @@ internal static class Program
         string mode = arguments.Length >= 2 ? arguments[0] : string.Empty;
         if (mode == "tokens") return Tokens(arguments);
         bool detailed = mode == "run" || mode == "faulty" || mode == "chunk";
-        if (Array.IndexOf(new[] { "run", "faulty", "unwind", "relay", "fallback", "chunk", "undecided" }, mode) < 0 || (detailed && arguments.Length < 3))
+        if (Array.IndexOf(new[] { "run", "faulty", "unwind", "relay", "fallback", "window", "chunk", "undecided" }, mode) < 0 || (detailed && arguments.Length < 3))
         {
             Console.Error.WriteLine("usage: Harness.exe tokens <patch.dll>... | run <output> off|on [cycles] | faulty <output> entry|throw | unwind <output> [cycles]"
-                + " | relay <output> [cycles] | fallback <output> [cycles] | chunk <output> <methods> | undecided <output>");
+                + " | relay <output> [cycles] | fallback <output> [cycles] | window <output> [cycles] | chunk <output> <methods> | undecided <output>");
             return 2;
         }
         output = Path.GetFullPath(arguments[1]);
@@ -99,6 +99,7 @@ internal static class Program
         else if (mode == "unwind") Unwind(cycles);
         else if (mode == "relay") Relay(cycles);
         else if (mode == "fallback") Fallback(cycles);
+        else if (mode == "window") Window(cycles);
         else if (mode == "chunk") Chunk(int.Parse(detail, CultureInfo.InvariantCulture));
         else if (mode == "undecided") Undecided();
         else
@@ -555,20 +556,71 @@ internal static class Program
         expected = Words();
         Equal(Json.Integer(ack, "islandWrites") + "/" + Call(blocked, 2), "1/11", "nothing of the refusal was kept");
 
-        // The same for a body that starts with sub rsp, imm8 and goes on with something else than
-        // a constant: a whole jump would end in its second instruction.
+        // A body that starts with sub rsp, imm8 and goes on with something else than a constant,
+        // whose fixed island address is taken: its four-byte first instruction lets bytes 1 to 3
+        // be rewritten behind the gate, so the island may be any free address in the 16 MiB window
+        // whose top displacement byte is byte 4, instead of the one fixed address.
         MethodBase split = Method(typeof(Many), "M599");
         Entry(split);
         Watch(split);
+        long[] unsplit = Words();
         taken = Occupy(split);
-        Check(taken.Count != 0 && (Words(split)[0] & 0xFFFFFF) == 0xEC8348 && !LoadsConstant(Words(split)[0]), "the harness holds the island page of a body that starts with sub rsp, imm8 and a mov to the stack");
+        long fixedIsland = Island(split);
+        Check(taken.Count != 0 && (Words(split)[0] & 0xFFFFFF) == 0xEC8348 && !LoadsConstant(Words(split)[0]), "the harness holds the fixed island page of a body that starts with sub rsp, imm8 and a mov to the stack");
         ack = Send(++generation, new List<object> { Target("Game", patchBulk, Detour(split, patchBulk, "Patch.Bulk.Many::M599")) });
-        Refused(ack, "write", "would reach past the first instruction", "that body as well");
-        Vacate(taken);
-        ack = Send(++generation, new List<object> { Target("Game", patchBulk, Detour(split, patchBulk, "Patch.Bulk.Many::M599")) });
-        Applied(ack, generation, 1, 4, "redirected once the address is free");
+        Applied(ack, generation, 1, 4, "redirected behind the gate to an island in its window");
         expected = Words();
-        Equal(Json.Integer(ack, "islandWrites") + "/" + Many.M599(1, "s"), "1/s1y602", "through its island");
+        Equal(Json.Integer(ack, "islandWrites") + "/" + Json.Integer(ack, "gatedWrites") + "/" + Many.M599(1, "s"), "0/1/s1y602", "a gated island write: through an island, after the one drain");
+        long windowIsland = Island(split);
+        Check(ByGatedIsland(Words(split)[0], Pick(unsplit, split)[0]) && windowIsland != fixedIsland && Lead(Pair(split, patchBulk, "Patch.Bulk.Many::M599")),
+            "byte 0 is E9, bytes 1 to 3 changed, byte 4 is the body's own, and the jump leads to an island that is not the taken fixed address");
+        // A retarget stores the island slot and leaves the body alone; a restore puts bytes 0 to 3
+        // back and leaves byte 4; a later first redirect finds the same window island again.
+        ack = Send(++generation, new List<object> { Target("Game", patchBulk, Detour(split, patchBulk, "Patch.Bulk.Many::M599")) });
+        Applied(ack, generation, 1, 0, "a retarget of the gated island");
+        Check(Json.Integer(ack, "islandWrites") + Json.Integer(ack, "gatedWrites") == 0 && Same(Words(), expected) && Many.M599(1, "s") == "s1y602", "the body is unchanged and still leads to the replacement");
+        Applied(Send(++generation, new List<object>()), generation, 0, 1, "restored");
+        Check(Same(Words(split), Pick(unsplit, split)) && Many.M599(1, "s") == "s1x602", "all four bytes of the first instruction are back, byte 4 never moved, the original body runs");
+        expected = Words();
+        ack = Send(++generation, new List<object> { Target("Game", patchBulk, Detour(split, patchBulk, "Patch.Bulk.Many::M599")) });
+        Applied(ack, generation, 1, 0, "redirected again");
+        Equal(Json.Integer(ack, "islandWrites") + "/" + Json.Integer(ack, "gatedWrites"), "0/1", "behind the gate once more");
+        Check(Island(split) == windowIsland && Many.M599(1, "s") == "s1y602", "through the same window island it had");
+        expected = Words();
+
+        // When the whole 16 MiB window is taken, not only the fixed address, there is no island to
+        // reach and the first redirect is refused, honestly, for the life of the Player. Filling the
+        // window is not a single shot: the window of a game method overlaps the runtime's own JIT and
+        // heap areas, and compiling a request releases a small chunk there after the fence is read, so
+        // the applier can land in that fresh hole. Each such slip maps one more island that stays, so
+        // filling the window of one fresh sub rsp, imm8 body after another closes the holes until a
+        // redirect is refused. Methods that slipped stay redirected and are restored together below.
+        Applied(Send(++generation, new List<object>()), generation, 0, 1, "restored before the window is filled");
+        expected = Words();
+        var fences = new List<long[]>();
+        MethodBase walled = null;
+        var slipped = new List<Dictionary<string, object>>();
+        for (int m = 598; m >= 575 && walled == null; m--)
+        {
+            MethodBase candidate = Method(typeof(Many), "M" + m);
+            Entry(candidate);
+            if ((Words(candidate)[0] & 0xFFFFFF) != 0xEC8348 || LoadsConstant(Words(candidate)[0])) continue;
+            fences.AddRange(OccupyWindow(candidate));
+            ack = Send(++generation, new List<object> { Target("Game", patchBulk, Detour(candidate, patchBulk, "Patch.Bulk.Many::M" + m)) });
+            if (Flag(ack, "success")) { slipped.Add(new Dictionary<string, object> { ["m"] = m }); applied = generation; }
+            else walled = candidate;
+        }
+        Console.WriteLine("  OBS the window filled after " + slipped.Count + " slipped redirect(s)");
+        Check(walled != null, "a sub rsp, imm8 first redirect is refused once its whole 16 MiB window is full (" + slipped.Count + " slipped)");
+        Refused(ack, "write", "no address in the 16 MiB window", "the window is full: the first redirect is refused and the generation before stays applied");
+        Vacate(fences);
+        Vacate(taken);
+        // Restore every method that slipped and leave M599 redirected, the one live method the
+        // sections after this one expect; its window island is still mapped and used again.
+        Flag(Send(++generation, new List<object> { Target("Game", patchBulk, Detour(split, patchBulk, "Patch.Bulk.Many::M599")) }), "success");
+        applied = generation;
+        expected = Words();
+        Equal(Many.M599(1, "s"), "s1y602", "M599 is redirected again through an island");
 
         Console.WriteLine("first redirects: through the second instruction");
         // A body that first loads a constant: its island would lie below address zero.
@@ -802,6 +854,22 @@ internal static class Program
         Check(taken.Count != 0 && (Words(large)[0] & 0xFFFFFF) == 0xEC8148, "the harness holds the island page of Hot.Large, whose compiled body starts with sub rsp, imm32");
         Stress(large, "Large", new long[] { 22, 23, 24 }, cycles, true);
         Check(Same(Words(), Compiled()), "original bytes after the stress loop");
+    }
+
+    // And for a sub rsp, imm8 body whose fixed island address belongs to something else: its
+    // four-byte first instruction lets bytes 1 to 3 be rewritten behind the gate, so every first
+    // redirect reaches an island in the 16 MiB window of its fifth byte. Hot.Work is such a body
+    // (48 83 EC 08 48 89 3C 24), the stage 1 crash the gate avoids; here its fixed island is held.
+    private static void Window(int cycles)
+    {
+        MethodBase work = Method(typeof(Hot), "Work");
+        Hot.Work(7);
+        Watch(work);
+        List<long> taken = Occupy(work);
+        Check(taken.Count != 0 && (Words(work)[0] & 0xFFFFFF) == 0xEC8348 && !LoadsConstant(Words(work)[0]), "the harness holds the fixed island page of Hot.Work, a sub rsp, imm8 body with a mov to the stack");
+        Stress(work, "Work", new long[] { 22, 23, 24 }, cycles, true);
+        Check(Same(Words(), Compiled()), "original bytes after the stress loop");
+        Vacate(taken);
     }
 
     // ------------------------------------------------------------------ the process map
@@ -1179,6 +1247,9 @@ internal static class Program
     /// <summary>Whether the body kept its first instruction and has a jump for its second.</summary>
     private static bool BySecondInstruction(long now, long was) { return ((now ^ was) & 0xFFFFFFFFL) == 0 && ((now >> 32) & 0xFF) == 0xE9; }
 
+    /// <summary>Whether a sub rsp, imm8 body was redirected through the gate: E9 at byte 0, bytes 1 to 3 changed, byte 4 the body's own.</summary>
+    private static bool ByGatedIsland(long now, long was) { return (now & 0xFF) == 0xE9 && ((now ^ was) & 0xFFFFFF00L) != 0 && ((now ^ was) & ~0xFFFFFFFFL) == 0; }
+
     /// <summary>Whether the pointer slot of the method's island lies before its jump.</summary>
     private static bool SlotBefore(MethodBase method) { return Marshal.ReadInt32((IntPtr)(Island(method) + 2)) < 0; }
 
@@ -1235,6 +1306,54 @@ internal static class Program
     private static void Vacate(List<long> pages)
     {
         foreach (long page in pages) munmap((IntPtr)page, (UIntPtr)4096);
+    }
+
+    /// <summary>
+    /// Takes every free page of the 16 MiB island window of a sub rsp, imm8 body (the addresses
+    /// whose top displacement byte is the body's fifth byte), as other mappings of the process do,
+    /// so no window address is left for the applier. Fills each free gap of the window in one
+    /// mapping, read from /proc/self/maps, so it adds few mappings whatever the window holds.
+    /// Returns the regions this call mapped, each a {start, length}.
+    /// </summary>
+    private static List<long[]> OccupyWindow(MethodBase method)
+    {
+        var mapped = new List<long[]>();
+        long entry = Entry(method);
+        int topByte = Marshal.ReadByte((IntPtr)(entry + 4));
+        long windowStart = entry + 5 + ((long)(topByte << 24));   // low three displacement bytes zero
+        long lo = (windowStart + 4095) & ~4095L, hi = (windowStart + 0xFFFFFF + 1 + 4095) & ~4095L;
+        // The occupied intervals of the process, sorted; the gaps between them in [lo, hi) are free.
+        var occupied = new List<long[]>();
+        foreach (string line in File.ReadAllLines("/proc/self/maps"))
+        {
+            int dash = line.IndexOf('-'), space = line.IndexOf(' ');
+            ulong start = ulong.Parse(line.Substring(0, dash), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture);
+            ulong end = ulong.Parse(line.Substring(dash + 1, space - dash - 1), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture);
+            if (end > long.MaxValue) continue;
+            if ((long)end > lo && (long)start < hi) occupied.Add(new[] { (long)start, (long)end });
+        }
+        occupied.Sort((a, b) => a[0].CompareTo(b[0]));
+        long at = lo;
+        foreach (long[] interval in occupied)
+        {
+            if (interval[0] > at) Fill(at, interval[0] < hi ? interval[0] : hi, mapped);
+            if (interval[1] > at) at = interval[1];
+            if (at >= hi) break;
+        }
+        if (at < hi) Fill(at, hi, mapped);
+        return mapped;
+    }
+
+    private static void Fill(long start, long end, List<long[]> mapped)
+    {
+        long got = mmap((IntPtr)start, (UIntPtr)(ulong)(end - start), CanRead, PrivateAnonymousNoReplace, -1, IntPtr.Zero).ToInt64();
+        if (got == start) mapped.Add(new[] { start, end - start });
+        else if (got != -1) munmap((IntPtr)got, (UIntPtr)(ulong)(end - start));
+    }
+
+    private static void Vacate(List<long[]> regions)
+    {
+        foreach (long[] region in regions) munmap((IntPtr)region[0], (UIntPtr)(ulong)region[1]);
     }
 
     /// <summary>Whether every byte of the range lies in mappings of the process whose permissions start as given.</summary>

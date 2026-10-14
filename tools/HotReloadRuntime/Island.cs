@@ -73,6 +73,38 @@ namespace UnityMicroEditor.HotReload
         internal static Island Map(IntPtr entry, out string problem)
         {
             long code = entry.ToInt64() + 5 + *(int*)(entry.ToInt64() + 1);
+            return TryMapAt(code, out problem);
+        }
+
+        /// <summary>
+        /// Maps an island for a sub rsp, imm8 body whose fixed island address is taken, anywhere in
+        /// the 16 MiB window whose top displacement byte is the body's fifth byte. Every address in
+        /// the window keeps that top byte, so only bytes 1 to 3 of the jump change, which the gated
+        /// write can do; the island's <see cref="Code"/> is the chosen address. Null with the reason
+        /// when no address in the window is free; nothing stays mapped then.
+        /// </summary>
+        internal static Island MapInWindow(IntPtr entry, out string problem)
+        {
+            long from = entry.ToInt64();
+            int topByte = *(byte*)(from + 4);
+            // The displacement with its low three bytes zero: the lowest in the window.
+            long windowStart = from + 5 + (long)(int)((uint)topByte << 24);
+            long windowEnd = windowStart + 0xFFFFFF;
+            long first = (windowStart + PageSize - 1) & ~(PageSize - 1);
+            for (long page = first; page + CodeSize <= windowEnd + 1; page += PageSize)
+            {
+                if (page < Lowest + PageSize || page > Highest - 2 * PageSize) continue;
+                Island island = TryMapAt(page, out problem);
+                if (island != null) return island;
+            }
+            problem = "no address in the 16 MiB window of its first byte is free";
+            return null;
+        }
+
+        // Maps the island at exactly `code`: its six-byte jmp [rip+disp] and the eight-byte pointer
+        // slot beside it. Null with the reason when the address or a slot cannot be had.
+        private static Island TryMapAt(long code, out string problem)
+        {
             if (code < Lowest + PageSize || code > Highest - 2 * PageSize) { problem = "the address lies outside the address space"; return null; }
             if (!Free(code, CodeSize)) { problem = "it overlaps the island of another method"; return null; }
             var mapped = new List<long>();
