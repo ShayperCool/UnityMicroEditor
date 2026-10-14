@@ -6,7 +6,10 @@ use super::{Event, err_text};
 use crate::{
     cancel::Context,
     compiler::{self, CompileUpdate},
-    hotreload::{Failure, Fallback, Outcome, Patched, Reason, Refusal, Unchanged, bounded},
+    hotreload::{
+        CODE_FIELD_NOT_RESTORED, Failure, Fallback, Outcome, Patched, Reason, Refusal, Unchanged,
+        bounded,
+    },
 };
 use anyhow::Result;
 use std::{
@@ -129,6 +132,10 @@ pub(crate) struct Loop {
     /// needed none. A note of a later outcome that is not among them is
     /// about what that outcome changed.
     told: BTreeSet<(String, String, String)>,
+    /// The fields the applied patch added that Unity would serialize, as the
+    /// builder's notes. The Player does not fill them from a scene, so a
+    /// scene update that brings a value for one is not all in the Player.
+    unrestored: Vec<Reason>,
 }
 
 /// What a window says when its work is done.
@@ -350,7 +357,57 @@ impl Loop {
             refused: None,
             noted: None,
             told: BTreeSet::new(),
+            unrestored: Vec::new(),
         }
+    }
+
+    /// The notes for a scene update the Player took over: each field that
+    /// the applied patch added and that one of the changed scenes, prefabs
+    /// or assets holds a value for. The Player rebuilt its objects from that
+    /// file and the field has what its initializer gave it; a caller that
+    /// is told `updated` and nothing else takes the saved value for applied.
+    /// The files are text (Unity's YAML), a field is the key of a line.
+    fn unfilled(&self, paths: &[String]) -> Vec<Reason> {
+        if self.unrestored.is_empty() {
+            return Vec::new();
+        }
+        let mut files: Vec<&String> = paths
+            .iter()
+            .filter(|path| {
+                [".unity", ".prefab", ".asset"]
+                    .iter()
+                    .any(|extension| path.ends_with(extension))
+            })
+            .collect();
+        files.sort();
+        files.dedup();
+        let texts: Vec<(&String, String)> = files
+            .into_iter()
+            .filter_map(|path| Some((path, String::from_utf8(std::fs::read(path).ok()?).ok()?)))
+            .collect();
+        let mut notes = Vec::new();
+        for note in &self.unrestored {
+            let field = note.member.rsplit("::").next().unwrap_or_default();
+            let holder = texts.iter().find(|(_, text)| {
+                !field.is_empty()
+                    && text.lines().any(|line| {
+                        let key = line.trim_start().trim_start_matches("- ");
+                        key.strip_prefix(field)
+                            .is_some_and(|rest| rest.starts_with(':'))
+                    })
+            });
+            if let Some((path, _)) = holder {
+                notes.push(Reason::new(
+                    CODE_FIELD_NOT_RESTORED,
+                    &note.member,
+                    &format!(
+                        "{path} holds a value for the added field {}, which the Player does not read from scenes, prefabs or assets until a restart; its objects keep what the field's initializer gave them.",
+                        note.member
+                    ),
+                ));
+            }
+        }
+        notes
     }
 
     /// Takes the notes of an outcome that is in the Player now and returns
@@ -392,14 +449,13 @@ impl Loop {
         if !self.hot_reload {
             return event;
         }
-        let event = event.with("fullRecompileRequired", &self.refused.is_some());
-        let Some(noted) = &self.noted else {
-            return event;
-        };
-        let event = event
-            .with("notes", &listed(&noted.notes))
-            .with("notesCount", &noted.notes.len())
-            .with("hotReloadReport", &noted.report);
+        let mut event = event.with("fullRecompileRequired", &self.refused.is_some());
+        if let Some(noted) = &self.noted {
+            event = event
+                .with("notes", &listed(&noted.notes))
+                .with("notesCount", &noted.notes.len())
+                .with("hotReloadReport", &noted.report);
+        }
         match fresh.is_empty() {
             true => event,
             false => event
@@ -507,6 +563,12 @@ impl Loop {
                     Outcome::Patched(patch) => {
                         (self.refused, self.noted) = (None, None);
                         tail.patched = true;
+                        self.unrestored = patch
+                            .notes
+                            .iter()
+                            .filter(|note| note.code == CODE_FIELD_NOT_RESTORED)
+                            .cloned()
+                            .collect();
                         let fresh = self.fresh(&patch.notes);
                         let (pid, revision) = (steps.pid(), steps.revision());
                         tail.events.push(patched_event(
@@ -521,6 +583,8 @@ impl Loop {
                     }
                     Outcome::Unchanged(unchanged) => {
                         self.refused = None;
+                        // No redirect is live: the Player runs what it loaded.
+                        self.unrestored.clear();
                         tail.fresh = self.fresh(&unchanged.notes);
                         self.noted = (!unchanged.notes.is_empty()).then_some(unchanged);
                     }
@@ -593,6 +657,7 @@ impl Loop {
             let cause = self.restart.take();
             (self.refused, self.noted) = (None, None);
             self.told.clear();
+            self.unrestored.clear();
             tail.refusal = false;
             let merged = match request {
                 Some(_) => None,
@@ -608,8 +673,11 @@ impl Loop {
         match steps.scene(ctx, window, started)? {
             // The code event of this window already is its confirmation.
             Scene::Unchanged(_) if tail.patched || tail.refusal => {}
-            Scene::Unchanged(event) | Scene::Updated(event) => {
-                tail.events.push(self.stated(event, &tail.fresh));
+            Scene::Unchanged(event) => tail.events.push(self.stated(event, &tail.fresh)),
+            Scene::Updated(event) => {
+                let mut fresh = tail.fresh.clone();
+                fresh.extend(self.unfilled(paths));
+                tail.events.push(self.stated(event, &fresh));
             }
             Scene::Rejected { event, fatal } => {
                 tail.events.push(self.blocked(event, &tail.fresh));

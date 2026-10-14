@@ -13,8 +13,8 @@ mod tests;
 
 pub use attempt::{
     ACK_TIMEOUT, Answer, Assembly, Attempt, CODE_APPLY_FAILED, CODE_BUILDER_FAILED,
-    CODE_CALLBACK_FAILED, Failure, Outcome, Patched, PlayerCode, Refusal, Unchanged, bounded,
-    loaded_assemblies, newest_assemblies, wait_code_ack,
+    CODE_CALLBACK_FAILED, CODE_FIELD_NOT_RESTORED, Failure, Outcome, Patched, PlayerCode, Refusal,
+    Unchanged, bounded, loaded_assemblies, newest_assemblies, wait_code_ack,
 };
 pub use tools::{Applier, BUILD_TIMEOUT, Sdk, Setup, Tools, prepare_patcher, stage_applier};
 pub use wire::{

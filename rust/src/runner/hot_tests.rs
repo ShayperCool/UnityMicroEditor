@@ -2300,7 +2300,10 @@ fn the_loop_marks_an_answer_that_a_queued_save_follows() {
 #[test]
 fn a_flush_reads_every_change_that_was_made_before_it() {
     let inputs = Inputs::new();
-    assert_eq!((inputs.watcher.flush(), inputs.watcher.taken()), (0, 0));
+    assert_eq!(
+        (inputs.watcher.flush(), inputs.watcher.taken()),
+        (Some(0), 0)
+    );
     let mut expected = 0;
     for round in 0..40 {
         // No wait between the saves and the flush: nothing but the flush
@@ -2314,7 +2317,7 @@ fn a_flush_reads_every_change_that_was_made_before_it() {
             // A new file: its creation and the end of the write.
             expected += 2;
         }
-        assert_eq!(inputs.watcher.flush(), expected, "round {round}");
+        assert_eq!(inputs.watcher.flush(), Some(expected), "round {round}");
         assert_eq!(
             inputs.watcher.queued() as u64 + inputs.watcher.taken(),
             expected
@@ -2323,4 +2326,232 @@ fn a_flush_reads_every_change_that_was_made_before_it() {
         assert!(inputs.watcher.try_recv().is_some());
     }
     assert_eq!(inputs.watcher.taken(), 40);
+}
+
+/// The queue of the watcher holds 8192 changes, and the reader waits when
+/// it is full. A flush then has not read to the end: the count it could
+/// give leaves out changes that were complete as well, and a `synced` on
+/// that count would precede their window. It says so instead, and counts
+/// all of them once the loop has made room.
+#[test]
+fn a_flush_that_cannot_read_to_the_end_says_so() {
+    let inputs = Inputs::new();
+    const FILES: u64 = 4200;
+    for index in 0..FILES {
+        fs::write(
+            sysutil::join(&[&inputs.assets, &format!("Burst{index}.cs")]),
+            "changed",
+        )
+        .unwrap();
+    }
+    // 8400 changes, nobody takes one: the reader is held at the capacity.
+    let started = Instant::now();
+    assert_eq!(inputs.watcher.flush(), None);
+    // It does not wait for what only the caller can end.
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(inputs.watcher.queued(), 8192);
+    // The loop takes what is queued and asks again.
+    let limit = Instant::now() + Duration::from_secs(20);
+    let counted = loop {
+        while inputs.watcher.try_recv().is_some() {}
+        if let Some(count) = inputs.watcher.flush() {
+            break count;
+        }
+        assert!(Instant::now() < limit, "the flush never read to the end");
+    };
+    assert_eq!(counted, 2 * FILES);
+    while inputs.watcher.try_recv().is_some() {}
+    assert_eq!(inputs.watcher.taken(), 2 * FILES);
+}
+
+/// A save of an existing file is one change, the end of its write. A sync
+/// that counts one change too few is answered before the window of that
+/// save, which is the wait that reports the save before.
+#[test]
+fn a_sync_waits_for_the_window_of_one_queued_change() {
+    let mut session = Session::start(Duration::from_millis(250));
+    let existing = session.save("E.cs");
+    session.until("the first save of E", patched_of(&existing));
+    session.sync("settled");
+    let settled = session.until("the loop at rest", synced("settled"));
+    // While another save is compiled, E is saved again: one change in the
+    // queue, and then the command.
+    let began = session.compiles.load(std::sync::atomic::Ordering::SeqCst);
+    let other = session.save("A.cs");
+    session.compiling(began);
+    fs::write(&existing, "changed again").unwrap();
+    session.sync("after-e");
+    session.until("the answer to the sync", synced("after-e"));
+    let events = session.finish();
+    let barrier = events.iter().position(synced("after-e")).unwrap();
+    let first = events.iter().position(patched_of(&other)).unwrap();
+    let again = settled
+        + events[settled..]
+            .iter()
+            .position(patched_of(&existing))
+            .expect("the second save of E was answered");
+    assert!(first < again && again < barrier, "{events:?}");
+    // The window of the second save held that one change.
+    assert_eq!(events[again]["paths"], json!([existing]), "{events:?}");
+}
+
+/// More changes than the watcher's queue holds wait behind a compile when
+/// the command arrives, and a save after them. No flush can count them
+/// then; the command is numbered when the loop has made room, and its
+/// answer follows the window of the last save.
+#[test]
+fn a_sync_behind_a_full_queue_is_answered_after_all_of_it() {
+    let mut session = Session::start(Duration::from_millis(400));
+    let began = session.compiles.load(std::sync::atomic::Ordering::SeqCst);
+    session.save("A.cs");
+    session.compiling(began);
+    for index in 0..4200 {
+        fs::write(
+            sysutil::join(&[&session.assets, &format!("Burst{index}.cs")]),
+            "changed",
+        )
+        .unwrap();
+    }
+    let last = session.save("Last.cs");
+    session.sync("after-last");
+    session.until("the answer to the sync", synced("after-last"));
+    let events = session.finish();
+    let barrier = events.iter().position(synced("after-last")).unwrap();
+    let answered = events
+        .iter()
+        .position(patched_of(&last))
+        .expect("the last save was answered");
+    assert!(answered < barrier, "{:?}", &events[..barrier.min(4)]);
+    // Every change went through a window before the answer.
+    let taken: usize = events[..barrier]
+        .iter()
+        .filter_map(|event| event["paths"].as_array())
+        .map(Vec::len)
+        .sum();
+    assert_eq!(taken, 2 + 2 * 4200 + 2);
+}
+
+/// A tool that makes a temporary directory and removes it at once is
+/// faster than the reader: the directory is gone when the reader gets to
+/// its creation. That is no error of the watch, and the session goes on.
+#[test]
+fn a_directory_that_is_gone_again_does_not_end_the_watch() {
+    let inputs = Inputs::new();
+    for round in 0..400 {
+        let directory = sysutil::join(&[&inputs.assets, &format!("T{round}")]);
+        fs::create_dir(&directory).unwrap();
+        // A file inside makes the walk of the reader longer.
+        fs::write(sysutil::join(&[&directory, "x.cs"]), "x").unwrap();
+        fs::remove_dir_all(&directory).unwrap();
+    }
+    let saved = inputs.save("After.cs");
+    let count = inputs.watcher.flush().expect("the queue has room");
+    let mut paths = Vec::new();
+    while let Some(change) = inputs.watcher.try_recv() {
+        assert_eq!(change.error, None, "the watch ended");
+        paths.push(change.path);
+    }
+    assert_eq!(paths.len() as u64, count);
+    assert!(paths.contains(&saved));
+    // The directories themselves were reported, made and removed.
+    let first = sysutil::join(&[&inputs.assets, "T0"]);
+    assert!(paths.iter().filter(|path| **path == first).count() >= 2);
+}
+
+/// A patch adds a field that Unity would serialize; the Player does not
+/// fill it from scenes. A scene update that brings a value for that field
+/// is confirmed by the Player and is not all in it: its event says so, as
+/// a note the save brought. A scene that does not name the field, and any
+/// scene once the Player has restarted, is confirmed without one.
+#[test]
+fn a_scene_update_names_the_added_fields_it_holds_values_for() {
+    let (_guard, root) = crate::sysutil::testing::temp_dir();
+    let scene = sysutil::join(&[&root, "Lamp.unity"]);
+    let other = sysutil::join(&[&root, "Other.unity"]);
+    let asset = sysutil::join(&[&root, "Tuning.asset"]);
+    fs::write(
+        &scene,
+        "MonoBehaviour:\n  m_Script: {fileID: 11500000}\n  dimRate: 0.5\n  glowCut: 0.9\n",
+    )
+    .unwrap();
+    // The name inside another key or a value is no value for the field.
+    fs::write(
+        &other,
+        "MonoBehaviour:\n  glowCutoff: 1\n  note: glowCut: no\n  m_Name: glowCut\n",
+    )
+    .unwrap();
+    fs::write(&asset, "MonoBehaviour:\n  items:\n  - glowCut: 3\n").unwrap();
+    let mut added = patch(1);
+    added.added_fields = 2;
+    added.notes = vec![
+        Reason::new(
+            "existing_instances_keep_default",
+            "Game.Lamp::glowCut",
+            "Objects that already exist read the default value.",
+        ),
+        Reason::new(
+            "serialized_field_not_restored",
+            "Game.Lamp::glowCut",
+            "The added field Game.Lamp::glowCut is not restored from scenes.",
+        ),
+        Reason::new(
+            "serialized_field_not_restored",
+            "Game.Lamp::shield",
+            "The added field Game.Lamp::shield is not restored from scenes.",
+        ),
+    ];
+    let mut state = Loop::new(true, Fallback::Report);
+    let mut steps = Script::new()
+        .updated()
+        .patched(Outcome::Patched(added.clone()));
+    run(&mut state, &mut steps, &window(&["/p/Assets/Lamp.cs"]));
+    assert_eq!(steps.take().1, calls(&["code-patched"]));
+    steps.clear();
+
+    // The scene edit that sets the field.
+    let updated = |state: &mut Loop, steps: &mut Script, paths: &[&str]| {
+        steps.compiles.push_back(Ok(Compiled::Unaffected));
+        steps.reloads.push_back(Reload::Updated);
+        run(state, steps, &window(paths));
+        let mut events = steps.clear();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["event"], "updated");
+        assert_eq!(events[0]["fullRecompileRequired"], false);
+        events.remove(0)
+    };
+    let event = updated(&mut state, &mut steps, &[scene.as_str(), scene.as_str()]);
+    assert_eq!(event["newNotesCount"], 1, "{event}");
+    assert_eq!(
+        (
+            &event["newNotes"][0]["code"],
+            &event["newNotes"][0]["member"]
+        ),
+        (
+            &json!("serialized_field_not_restored"),
+            &json!("Game.Lamp::glowCut")
+        )
+    );
+    let message = event["newNotes"][0]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with(&format!(
+            "{scene} holds a value for the added field Game.Lamp::glowCut"
+        )) && message.contains("until a restart"),
+        "{message}"
+    );
+    // A list item of an asset names it too; a scene that only has the name
+    // elsewhere does not, nor does a file that is no scene, prefab or asset.
+    let event = updated(&mut state, &mut steps, &[asset.as_str()]);
+    assert_eq!(event["newNotesCount"], 1, "{event}");
+    for paths in [vec![other.as_str()], vec!["/p/Assets/Lamp.png"]] {
+        let event = updated(&mut state, &mut steps, &paths);
+        assert!(event.get("newNotes").is_none(), "{event}");
+    }
+    // A patch without the field ends it: the next patch is all there is.
+    added.notes.truncate(1);
+    steps.compiles.push_back(Ok(Compiled::Updated));
+    steps.patches.push_back(Ok(Outcome::Patched(added)));
+    run(&mut state, &mut steps, &window(&["/p/Assets/Lamp.cs"]));
+    steps.clear();
+    let event = updated(&mut state, &mut steps, &[scene.as_str()]);
+    assert!(event.get("newNotes").is_none(), "{event}");
 }
