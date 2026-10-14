@@ -7,7 +7,10 @@
 // pipeline's switches, and then checks
 //   - the classification of every supported and every refused kind of edit, through the real CLI;
 //   - the behaviour of a patch on Unity's standalone Mono: the loaded assemblies with the patch
-//     applied through real redirects must act like the new compilation.
+//     applied through real redirects must act like the new compilation;
+//   - the builder as a watched session runs it (--serve): every request goes to one process too,
+//     whose answer must be the one-shot result (but for the timings) with the same patch bytes,
+//     and at the end once more in the reverse order.
 // It prints one summary line and exits non-zero on any failure. Everything it writes is below its
 // own bin directory. UNITY_DATA defaults to the pinned Editor under $HOME.
 using System.Collections.Concurrent;
@@ -31,6 +34,89 @@ internal sealed class Expectation
 }
 
 internal sealed record AssemblyPair(string Name, string Loaded, string Current);
+
+/// <summary>One <c>--serve</c> process of the builder for the whole run.</summary>
+internal static class Served
+{
+    static readonly object gate = new();
+    static Process? process;
+    static long next;
+    /// Every request answered so far, with its one-shot result and the hashes of its inputs.
+    public static readonly List<(string Label, string Request, string Result, Dictionary<string, string> Inputs)> Seen = new();
+
+    public static (int Exit, string Output, string Error, string Kind) Call(string dotnet, string patcher, string request)
+    {
+        lock (gate)
+        {
+            if (process == null)
+            {
+                var start = new ProcessStartInfo(dotnet) { RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+                start.ArgumentList.Add(patcher);
+                start.ArgumentList.Add("--serve");
+                start.Environment["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1";
+                start.Environment["DOTNET_NOLOGO"] = "1";
+                process = Process.Start(start) ?? throw new InvalidOperationException("Cannot start the served builder");
+                process.ErrorDataReceived += (_, _) => { };
+                process.BeginErrorReadLine();
+                string ready = process.StandardOutput.ReadLine() ?? "";
+                if (ready != "{\"ready\":true,\"protocol\":1}") throw new InvalidOperationException("The served builder is not ready: " + ready);
+            }
+            long id = ++next;
+            process.StandardInput.WriteLine(JsonSerializer.Serialize(new Dictionary<string, object>
+            {
+                ["id"] = id, ["directory"] = Path.GetDirectoryName(request)!, ["arguments"] = new[] { request },
+            }));
+            process.StandardInput.Flush();
+            string line = process.StandardOutput.ReadLine() ?? throw new InvalidOperationException("The served builder ended");
+            var answer = JsonDocument.Parse(line).RootElement;
+            if (answer.GetProperty("id").GetInt64() != id) throw new InvalidOperationException("The served builder answered another request: " + line);
+            return (answer.GetProperty("exit").GetInt32(), answer.GetProperty("output").GetString()!, answer.GetProperty("error").GetString()!, answer.GetProperty("kind").GetString()!);
+        }
+    }
+
+    /// The end of standard input ends the process.
+    public static bool Stop()
+    {
+        lock (gate)
+        {
+            if (process == null) return true;
+            process.StandardInput.Close();
+            bool ended = process.WaitForExit(10000);
+            if (!ended) process.Kill(true);
+            int code = ended ? process.ExitCode : -1;
+            process.Dispose();
+            process = null;
+            return ended && code == 0;
+        }
+    }
+
+    /// A result document without the timings, which are the one thing a run may change.
+    public static string Comparable(string document)
+    {
+        var root = System.Text.Json.Nodes.JsonNode.Parse(document)!.AsObject();
+        root.Remove("timingsMs");
+        return root.ToJsonString();
+    }
+
+    public static Dictionary<string, string> Inputs(string request)
+    {
+        var inputs = new Dictionary<string, string>(StringComparer.Ordinal);
+        void Add(string? path)
+        {
+            if (string.IsNullOrEmpty(path)) return;
+            inputs[path] = File.Exists(path) ? Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))) : "absent";
+        }
+        Add(request);
+        var root = JsonDocument.Parse(File.ReadAllBytes(request)).RootElement;
+        if (root.TryGetProperty("previousResult", out var previous)) Add(previous.GetString());
+        foreach (var a in root.GetProperty("assemblies").EnumerateArray())
+        {
+            Add(a.GetProperty("loaded").GetString());
+            Add(a.GetProperty("current").GetString());
+        }
+        return inputs;
+    }
+}
 
 internal static class Program
 {
@@ -113,6 +199,57 @@ internal static class Program
         Check(!output.Contains("warning", StringComparison.Ordinal), "The patcher builds with warnings:\n" + output);
     }
 
+    /// The same request through the served builder: the same document but for the timings, the
+    /// same patch bytes, and an empty standard error.
+    static void CheckServed(string label, string request, string oneShotOutput, string document)
+    {
+        var inputs = Served.Inputs(request);
+        var (exit, output, error, kind) = Served.Call(dotnet, patcher, request);
+        Check(exit == 0 && error.Length == 0 && kind.Length == 0, $"{label}: served exit {exit} kind '{kind}': {error}");
+        Check(output.EndsWith('\n') && output.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 1, $"{label}: the served output is not one line as the one-shot output is.");
+        if (exit != 0) return;
+        string served = output.TrimEnd('\n');
+        Check(Served.Comparable(served) == Served.Comparable(document), $"{label}: the served result differs from the one-shot result:\n{served}\n{document}");
+        CheckPatchFiles(label + " (served)", served);
+        lock (Served.Seen) Served.Seen.Add((label, request, document, inputs));
+    }
+
+    static void CheckPatchFiles(string label, string document)
+    {
+        foreach (var a in JsonDocument.Parse(document).RootElement.GetProperty("assemblies").EnumerateArray())
+        {
+            var patch = a.GetProperty("patch");
+            string path = patch.GetProperty("path").GetString()!, hash = patch.GetProperty("sha256").GetString()!;
+            if (path.Length > 0)
+                Check(File.Exists(path) && Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant() == hash, $"{label}: the patch file {path} does not have the bytes of the result.");
+        }
+    }
+
+    /// Every request once more, newest first, through the same served process: a builder that
+    /// kept anything from one request to the next would answer one of them otherwise. A request
+    /// whose inputs a later case changed is left out.
+    static void ServedAgainInReverse()
+    {
+        int again = 0;
+        List<(string Label, string Request, string Result, Dictionary<string, string> Inputs)> seen;
+        lock (Served.Seen) seen = Served.Seen.ToList();
+        for (int index = seen.Count - 1; index >= 0; index--)
+        {
+            var (label, request, result, inputs) = seen[index];
+            if (!Served.Inputs(request).OrderBy(x => x.Key).SequenceEqual(inputs.OrderBy(x => x.Key))) continue;
+            var (exit, output, error, _) = Served.Call(dotnet, patcher, request);
+            Check(exit == 0 && Served.Comparable(output.TrimEnd('\n')) == Served.Comparable(result), $"{label}: served again in reverse order, the result differs (exit {exit}): {error}");
+            if (exit == 0) CheckPatchFiles(label + " (served again)", output.TrimEnd('\n'));
+            again++;
+        }
+        Check(again * 2 >= seen.Count && seen.Count > 100, $"Only {again} of {seen.Count} served requests could be sent again.");
+        // What is not served is refused, and the end of the input ends the process.
+        var (codesExit, _, codesError, codesKind) = Served.Call(dotnet, patcher, "--codes");
+        Check(codesExit == 64 && codesError.Contains("Not served", StringComparison.Ordinal), $"--codes was served (exit {codesExit}, kind '{codesKind}').");
+        Check(Served.Stop(), "The served builder did not end with its input.");
+        Console.WriteLine($"served: {seen.Count} requests, {again} again in reverse order");
+    }
+
     static string WriteRequest(string directory, int generation, IEnumerable<AssemblyPair> assemblies, bool forceAll = false, string? previous = null, string? fault = null, bool netcode = false)
     {
         Directory.CreateDirectory(directory);
@@ -158,6 +295,7 @@ internal static class Program
         JsonElement root;
         try { root = JsonDocument.Parse(documents[0]).RootElement; }
         catch (JsonException e) { Check(false, $"{label}: stdout is not JSON: {e.Message}"); return null; }
+        CheckServed(label, request, output, documents[0]);
         File.WriteAllText(Path.Combine(directory, "result.json"), documents[0]);
 
         string verdict = root.GetProperty("verdict").GetString()!;
@@ -1224,6 +1362,7 @@ internal static class Program
             Behaviour(unityStub);
             Generations();
             Interface();
+            ServedAgainInReverse();
         }
         catch (Exception e)
         {

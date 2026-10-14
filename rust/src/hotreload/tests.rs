@@ -1661,7 +1661,9 @@ fn hot_reload_patch_builder_sdk() {
         output: root.clone(),
         patcher,
         limit: None,
-    };
+        service: Default::default(),
+    }
+    .served();
     // The command line of the contract, on a request written by hand.
     let output = sysutil::join(&[&root, "direct"]);
     let request = sysutil::join(&[&root, "direct-request.json"]);
@@ -2215,7 +2217,9 @@ public static class RawPrefabTransforms {
         managed: managed.clone(),
         output: output.clone(),
         limit: None,
-    };
+        service: Default::default(),
+    }
+    .served();
     let run = sysutil::join(&[&output, "runs/r1"]);
     fs::create_dir_all(&run).unwrap();
     let applier = write(
@@ -2822,7 +2826,9 @@ fn hot_reload_netcode_sdk() {
         output: root.clone(),
         patcher,
         limit: None,
-    };
+        service: Default::default(),
+    }
+    .served();
     let compare = |label: &str, assembly: &str, loaded: &str, current: &str| -> BuilderResult {
         let request = sysutil::join(&[&root, "requests", &format!("{label}.json")]);
         fs::create_dir_all(sysutil::dir(&request)).unwrap();
@@ -3136,4 +3142,100 @@ fn hot_reload_runtime_harness_sdk() {
     );
     assert!(output.status.success(), "{text}");
     assert!(text.contains("all runs passed"), "{text}");
+}
+
+/// The builder a session keeps answers its requests; a request it answers
+/// with a failure or not at all runs once in a process of its own, and one
+/// it does not answer in time is the timeout of the attempt, as it is for a
+/// builder run once.
+#[test]
+fn the_builder_of_a_session_answers_or_the_attempt_runs_it_once() {
+    use crate::compiler::Service;
+    use std::os::unix::fs::PermissionsExt;
+    let (_guard, root) = temp();
+    let mode = sysutil::join(&[&root, "mode"]);
+    let ran_once = sysutil::join(&[&root, "ran-once"]);
+    let dotnet = write(
+        &sysutil::join(&[&root, "dotnet"]),
+        format!(
+            r#"#!/bin/sh
+if [ "$2" != "--serve" ]; then : > {ran_once}; printf '{{"verdict":"one-shot"}}'; exit 0; fi
+echo '{{"ready":true,"protocol":1}}'
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/^{{"id":\([0-9]*\),.*/\1/p')
+  case "$(cat {mode})" in
+    ok) printf '{{"id":%s,"exit":0,"output":"{{\\"verdict\\":\\"served\\"}}\\n","error":"","kind":""}}\n' "$id" ;;
+    fail) printf '{{"id":%s,"exit":1,"output":"","error":"a defect\\n","kind":""}}\n' "$id" ;;
+    hang) sleep 300 ;;
+  esac
+done
+"#
+        )
+        .as_bytes(),
+    );
+    fs::set_permissions(&dotnet, fs::Permissions::from_mode(0o700)).unwrap();
+    let patcher = write(&sysutil::join(&[&root, "HotReloadPatcher.dll"]), b"builder");
+    let tools = Tools {
+        sdk: Sdk {
+            dotnet: dotnet.clone(),
+            csc: String::new(),
+        },
+        patcher: patcher.clone(),
+        service: BuilderService(Some(std::sync::Arc::new(Service::new(
+            "patch builder",
+            &dotnet,
+            &patcher,
+        )))),
+        ..Tools::default()
+    };
+    let request = write(&sysutil::join(&[&root, "1/request.json"]), b"{}");
+    let ctx = Context::background();
+    fs::write(&mode, "ok").unwrap();
+    assert_eq!(
+        tools.build(&ctx, &request).unwrap(),
+        b"{\"verdict\":\"served\"}\n"
+    );
+    assert!(!fs::symlink_metadata(&ran_once).is_ok());
+    fs::write(&mode, "fail").unwrap();
+    assert_eq!(
+        tools.build(&ctx, &request).unwrap(),
+        b"{\"verdict\":\"one-shot\"}"
+    );
+    assert!(
+        fs::symlink_metadata(&ran_once).is_ok(),
+        "a failed served run was not run once"
+    );
+    fs::remove_file(&ran_once).unwrap();
+    fs::write(&mode, "hang").unwrap();
+    let started = Instant::now();
+    let error = tools
+        .build_within(&ctx, &request, Duration::from_secs(1))
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "the patch builder did not finish within 1s and was stopped"
+    );
+    assert!(started.elapsed() < Duration::from_secs(20));
+    assert!(
+        !fs::symlink_metadata(&ran_once).is_ok(),
+        "a builder that timed out ran again"
+    );
+    // The next attempt starts another process.
+    fs::write(&mode, "ok").unwrap();
+    assert_eq!(
+        tools.build(&ctx, &request).unwrap(),
+        b"{\"verdict\":\"served\"}\n"
+    );
+    // Tools compare by the builder their service runs.
+    assert_eq!(
+        tools.clone(),
+        Tools {
+            service: BuilderService(Some(std::sync::Arc::new(Service::new(
+                "patch builder",
+                &dotnet,
+                &patcher
+            )))),
+            ..tools.clone()
+        }
+    );
 }

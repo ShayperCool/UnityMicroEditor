@@ -5,7 +5,10 @@
 use super::wire::RUNTIME_ASSEMBLY;
 use crate::{
     cancel::Context,
-    compiler::{NilMap, compiler_command, glob, glob_lossy, verify_cache_files},
+    compiler::{
+        NilMap, Service, ServiceError, compiler_cold, compiler_command, glob, glob_lossy,
+        verify_cache_files,
+    },
     sha256, sysutil,
     util::{atomic_json, file_hash, marshal, micro_editor_root, read_json_file},
 };
@@ -15,6 +18,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
+    sync::Arc,
     thread::JoinHandle,
     time::Duration,
 };
@@ -325,6 +329,19 @@ pub fn stage_applier(
     })
 }
 
+/// The patch builder as a process of a watched session (`--serve`). Two
+/// handles are equal when they run the same builder; nothing it holds
+/// decides a result.
+#[derive(Debug, Clone, Default)]
+pub struct BuilderService(pub Option<Arc<Service>>);
+impl PartialEq for BuilderService {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.as_ref().map(|service| service.program())
+            == other.0.as_ref().map(|service| service.program())
+    }
+}
+impl Eq for BuilderService {}
+
 /// What a session needs to patch code: where its two programs are built
 /// and what the applier is compiled against.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -339,6 +356,9 @@ pub struct Tools {
     /// The time one run of the patch builder gets; `BUILD_TIMEOUT` when none
     /// is given.
     pub limit: Option<Duration>,
+    /// The builder of a watched session that stays alive between edits;
+    /// without it every attempt starts the builder.
+    pub service: BuilderService,
 }
 impl Tools {
     fn patcher_cache(output: &str) -> String {
@@ -364,9 +384,24 @@ impl Tools {
             output: output.into(),
             patcher,
             limit: None,
+            service: BuilderService::default(),
         };
         let applier = tools.applier(ctx)?;
         Ok((tools, applier))
+    }
+
+    /// The tools with the builder kept alive between edits, unless
+    /// `UME_COMPILER_COLD=1`. The process starts at the first edit, on the
+    /// thread of the watch loop, whose end ends it.
+    pub fn served(mut self) -> Self {
+        if !compiler_cold() {
+            self.service = BuilderService(Some(Arc::new(Service::new(
+                "patch builder",
+                &self.sdk.dotnet,
+                &self.patcher,
+            ))));
+        }
+        self
     }
 
     /// The applier a Player that starts now is patched with. One process
@@ -388,7 +423,24 @@ impl Tools {
 
     /// [`Tools::build`] with the time the builder gets. When it is over the
     /// builder is stopped and the run fails like any other failed build.
+    /// The builder of the session answers when it can; a request it could
+    /// not answer, or answered with a failure, runs once in a process of its
+    /// own, whose result counts.
     pub fn build_within(&self, ctx: &Context, request: &str, limit: Duration) -> Result<Vec<u8>> {
+        if let Some(service) = &self.service.0
+            && service.program() == self.patcher
+        {
+            match service.call(ctx, &sysutil::dir(request), &[request], limit) {
+                Ok(reply) if reply.exit == 0 => {
+                    return Ok(format!("{}{}", reply.output, reply.error).into_bytes());
+                }
+                Err(ServiceError::TimedOut(_)) if ctx.error().is_none() => bail!(
+                    "the patch builder did not finish within {}s and was stopped",
+                    limit.as_secs()
+                ),
+                _ => ctx.err()?,
+            }
+        }
         let limited = ctx.with_timeout(limit);
         let output = compiler_command(
             &limited,
