@@ -1932,6 +1932,29 @@ impl Inputs {
         self.until("the source change", || self.watcher.queued() >= held + 2);
         path
     }
+    /// A source file written outside the watched directories, for
+    /// [`Inputs::place`]: its close is no change whenever it comes.
+    fn written(&self) -> String {
+        let path = sysutil::join(&[&sysutil::dir(&self.assets), "Saved.cs"]);
+        fs::write(&path, "changed").unwrap();
+        path
+    }
+    /// Makes `name` in `Assets` as an atomic save ends, a link of `written`
+    /// and a rename into place, and returns the changes it made: the new
+    /// file, and both of its names. The kernel notes each of them inside
+    /// the call that makes it.
+    ///
+    /// The end of a write is noted at the last close of the file instead,
+    /// and a close in this process is not always the last: a child that
+    /// another test's thread forks holds a copy of every descriptor until
+    /// it execs. That write ends in the child, possibly after the flush
+    /// that follows, and is not complete when the flush is called.
+    fn place(&self, written: &str, name: &str) -> u64 {
+        let linked = sysutil::join(&[&self.assets, &format!("~{name}")]);
+        fs::hard_link(written, &linked).unwrap();
+        fs::rename(&linked, sysutil::join(&[&self.assets, name])).unwrap();
+        3
+    }
     /// Sends a `recompile` command; the reader thread takes it in its own time.
     fn command(&mut self, id: &str) {
         writeln!(
@@ -2306,6 +2329,7 @@ fn the_loop_marks_an_answer_that_a_queued_save_follows() {
 #[test]
 fn a_flush_reads_every_change_that_was_made_before_it() {
     let inputs = Inputs::new();
+    let written = inputs.written();
     assert_eq!(
         (inputs.watcher.flush(), inputs.watcher.taken()),
         (Some(0), 0)
@@ -2315,13 +2339,7 @@ fn a_flush_reads_every_change_that_was_made_before_it() {
         // No wait between the saves and the flush: nothing but the flush
         // itself gives the reader time.
         for index in 0..5 {
-            fs::write(
-                sysutil::join(&[&inputs.assets, &format!("F{round}_{index}.cs")]),
-                "changed",
-            )
-            .unwrap();
-            // A new file: its creation and the end of the write.
-            expected += 2;
+            expected += inputs.place(&written, &format!("F{round}_{index}.cs"));
         }
         assert_eq!(inputs.watcher.flush(), Some(expected), "round {round}");
         assert_eq!(
@@ -2342,13 +2360,10 @@ fn a_flush_reads_every_change_that_was_made_before_it() {
 #[test]
 fn a_flush_that_cannot_read_to_the_end_says_so() {
     let inputs = Inputs::new();
-    const FILES: u64 = 4200;
+    let written = inputs.written();
+    const FILES: u64 = 2800;
     for index in 0..FILES {
-        fs::write(
-            sysutil::join(&[&inputs.assets, &format!("Burst{index}.cs")]),
-            "changed",
-        )
-        .unwrap();
+        inputs.place(&written, &format!("Burst{index}.cs"));
     }
     // 8400 changes, nobody takes one: the reader is held at the capacity.
     let started = Instant::now();
@@ -2365,9 +2380,9 @@ fn a_flush_that_cannot_read_to_the_end_says_so() {
         }
         assert!(Instant::now() < limit, "the flush never read to the end");
     };
-    assert_eq!(counted, 2 * FILES);
+    assert_eq!(counted, 3 * FILES);
     while inputs.watcher.try_recv().is_some() {}
-    assert_eq!(inputs.watcher.taken(), 2 * FILES);
+    assert_eq!(inputs.watcher.taken(), 3 * FILES);
 }
 
 /// A save of an existing file is one change, the end of its write. A sync
