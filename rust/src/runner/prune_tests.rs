@@ -99,7 +99,19 @@ fn prune_keeps_a_directory_a_running_process_was_started_from() {
     // A process of this test, started from inside the directory.
     let executable = sysutil::join(&[&sysutil::dir(&player), "sleep"]);
     fs::copy("/bin/sleep", &executable).unwrap();
-    let mut child = Command::new(&executable).arg("30").spawn().unwrap();
+    // Another test forking meanwhile may hold the copy open for writing until its exec.
+    let started = std::time::Instant::now();
+    let mut child = loop {
+        match Command::new(&executable).arg("30").spawn() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && started.elapsed() < Duration::from_secs(5) =>
+            {
+                thread::sleep(Duration::from_millis(5))
+            }
+            spawned => break spawned.unwrap(),
+        }
+    };
     let started = std::time::Instant::now();
     while fs::read_link(format!("/proc/{}/exe", child.id()))
         .map(|path| path.to_string_lossy().into_owned())
