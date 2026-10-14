@@ -105,7 +105,8 @@ possible; the Player keeps its process and game state, and
 `session_control(wait_update)` succeeds with the same PID and an advanced
 `hotReload.codeGeneration`. An edit that cannot be applied live is refused,
 not approximated: both waits fail with `full_recompile_required` until the
-code is in the Player, and `hot_reload(recompile)` restarts the Player on the
+code is in the Player (a compile error saved after it is reported first, with
+`operation_failed`), and `hot_reload(recompile)` restarts the Player on the
 newest compiled code and resets game state. A change that is applied can
 leave something out until a restart; the reply of the wait then starts with
 `attention`, and `hotReload.newNotes` lists the notes. The session options
