@@ -194,8 +194,9 @@ routes or Addressables. Known: the fixed island address of a game method can
 lie in a mapping of the Player. A `sub rsp, imm8` body is then reached through
 the gate to an island anywhere in a 16 MiB window: with the fixed island of one
 method forced taken, 38 of 40 fresh Players took its edit that way (the
-applier before the change refused all 40), and without forcing 79 of 80 did
-(2026-10-14). The rest, a `sub rsp, imm8` body whose whole window is taken
+applier before the change refused all 40), and without forcing 79 of 80 took
+the edit (the fixed island was free in nearly all of them; one found its
+whole window taken) (2026-10-14). The rest, a `sub rsp, imm8` body whose whole window is taken
 (that method's window lay in a large mapping of the Player) and a `push rbp`
 body or a body of an unrecognised first instruction whose fixed island is
 taken (under 0.03 % of the methods of a running Player), is refused for the
