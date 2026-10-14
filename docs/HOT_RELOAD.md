@@ -392,7 +392,7 @@ Where the time of a body edit goes (Roslyn about 0.13 s, the copy of the Player 
 
 | Process | Resident memory |
 | --- | --- |
-| Compiler server | grew about 4 MB per compile in the sample and 12 MB in a Netcode game with the SDK's server collector; the session now runs it with the workstation collector, under which a private server fed a session's compiles grew 0.99 MB per compile. Replaced above 1 GiB. |
+| Compiler server | grew 4 to 10.5 MB per compile in the sample (two stage 6 sessions) and 12 MB in a Netcode game with the SDK's server collector; the session now runs it with the workstation collector, under which a private server fed a session's compiles grew 0.99 MB per compile. Replaced above 1 GiB. |
 | Lifecycle helper | 220 to 390 MB, flat |
 | Patch builder | 102 to 111 MB, flat |
 | Runner | 29 to 31 MB |
