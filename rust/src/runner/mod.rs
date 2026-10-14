@@ -1253,6 +1253,9 @@ fn run_session(
 /// once every source change that the watcher had been told of when the
 /// loop saw the command has gone through a window. Whoever reads `synced`
 /// has therefore read the events of everything saved before the command.
+/// The number of those changes comes from a flush that read the kernel's
+/// queue to its end. While the watcher's own queue is full no flush can,
+/// and the command waits without a number for the window that makes room.
 pub(crate) fn watch<S: Steps>(
     ctx: &Context,
     wake: &Wake,
@@ -1262,8 +1265,9 @@ pub(crate) fn watch<S: Steps>(
     steps: &mut S,
     mut exited: impl FnMut(&mut S) -> Option<Result<()>>,
 ) -> Result<()> {
-    // Request ids, each with the number of changes to hand out first.
-    let mut syncs: std::collections::VecDeque<(String, u64)> = Default::default();
+    // Request ids, each with the number of changes to hand out first; none
+    // until a flush has counted them.
+    let mut syncs: std::collections::VecDeque<(String, Option<u64>)> = Default::default();
     loop {
         let seen = wake.seen();
         if ctx.error().is_some() {
@@ -1273,11 +1277,20 @@ pub(crate) fn watch<S: Steps>(
             return result;
         }
         for id in commands.take_syncs() {
-            syncs.push_back((id, watcher.flush()));
+            syncs.push_back((id, None));
+        }
+        // One flush counts for every command that has no number yet: each
+        // of them arrived before it.
+        if syncs.iter().any(|(_, changes)| changes.is_none())
+            && let Some(count) = watcher.flush()
+        {
+            for (_, changes) in syncs.iter_mut().filter(|(_, changes)| changes.is_none()) {
+                *changes = Some(count);
+            }
         }
         while syncs
             .front()
-            .is_some_and(|(_, changes)| watcher.taken() >= *changes)
+            .is_some_and(|(_, changes)| changes.is_some_and(|count| watcher.taken() >= count))
         {
             let (id, _) = syncs.pop_front().expect("a waiting sync");
             steps.emit(Event::new("synced").with("requestId", &id));

@@ -111,20 +111,40 @@ pub struct ProjectWatcher {
     threads: Vec<JoinHandle<()>>,
 }
 
-fn add_watch(inotify: &File, path: &str) -> Result<i32> {
+/// `None`: no directory is at `path` any more.
+fn add_watch(inotify: &File, path: &str) -> Result<Option<i32>> {
     let name = CString::new(path).map_err(|_| anyhow!("invalid argument"))?;
     // SAFETY: `name` is a valid NUL-terminated path for the duration of the call.
     let descriptor = unsafe { libc::inotify_add_watch(inotify.as_raw_fd(), name.as_ptr(), MASK) };
     if descriptor < 0 {
-        bail!(sysutil::errno_text(&std::io::Error::last_os_error()));
+        let error = std::io::Error::last_os_error();
+        if gone(&error) {
+            return Ok(None);
+        }
+        bail!(sysutil::errno_text(&error));
     }
-    Ok(descriptor)
+    Ok(Some(descriptor))
+}
+
+/// A directory that was removed, renamed or replaced by a file since
+/// something named it.
+fn gone(error: &std::io::Error) -> bool {
+    matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory)
 }
 
 /// Watches a directory and everything below it, in walk order
 /// (names in byte order); symlinks are refused.
+///
+/// A directory that is gone again when the walk gets to it is left out: a
+/// temporary directory that a tool made and removed, or a tree that is
+/// being deleted. Nothing is lost by that. Its removal is a change of the
+/// directory above it, which is watched and reports it.
 fn add_tree(inotify: &File, directories: &mut BTreeMap<i32, String>, root: &str) -> Result<()> {
-    let info = sysutil::lstat(root).map_err(|e| os_error("lstat", root, &e))?;
+    let info = match sysutil::lstat(root) {
+        Ok(info) => info,
+        Err(error) if gone(&error) => return Ok(()),
+        Err(error) => return Err(os_error("lstat", root, &error)),
+    };
     let mut pending = vec![(root.to_string(), info.is_symlink(), info.is_dir())];
     while let Some((path, symlink, directory)) = pending.pop() {
         if symlink {
@@ -133,14 +153,30 @@ fn add_tree(inotify: &File, directories: &mut BTreeMap<i32, String>, root: &str)
         if !directory {
             continue;
         }
-        directories.insert(add_watch(inotify, &path)?, path.clone());
+        let Some(descriptor) = add_watch(inotify, &path)? else {
+            continue;
+        };
+        directories.insert(descriptor, path.clone());
         let mut entries = Vec::new();
-        for entry in std::fs::read_dir(&path).map_err(|e| os_error("open", &path, &e))? {
-            let entry = entry.map_err(|e| os_error("readdirent", &path, &e))?;
+        let listing = match std::fs::read_dir(&path) {
+            Ok(listing) => listing,
+            Err(error) if gone(&error) => continue,
+            Err(error) => return Err(os_error("open", &path, &error)),
+        };
+        for entry in listing {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) if gone(&error) => break,
+                Err(error) => return Err(os_error("readdirent", &path, &error)),
+            };
             let name = entry.file_name().to_string_lossy().into_owned();
-            let kind = entry
-                .file_type()
-                .map_err(|e| os_error("lstat", &sysutil::join(&[&path, &name]), &e))?;
+            let kind = match entry.file_type() {
+                Ok(kind) => kind,
+                Err(error) if gone(&error) => continue,
+                Err(error) => {
+                    return Err(os_error("lstat", &sysutil::join(&[&path, &name]), &error));
+                }
+            };
             entries.push((name, kind.is_symlink(), kind.is_dir()));
         }
         // The stack is popped from the end: push in reverse for lexical order.
@@ -243,11 +279,17 @@ impl ProjectWatcher {
     }
 
     /// Reads everything the kernel has noted about the watched directories
-    /// and returns how many changes were queued in all by then. A write, a
-    /// rename or a removal is noted inside its system call, so every change
-    /// that was complete when this is called is among them: once `taken`
-    /// has reached the returned number, each has been handed to the loop.
-    pub fn flush(&self) -> u64 {
+    /// and returns how many changes were queued in all by then. The end of
+    /// a write (the close of the file), a rename or a removal is noted
+    /// inside its system call, so every change that was complete when this
+    /// is called is among them: once `taken` has reached the returned
+    /// number, each has been handed to the loop.
+    ///
+    /// `None`: the queue is full, and the reader holds changes it cannot
+    /// queue before the caller has taken some. The count so far would
+    /// leave those out, although they were complete too. The caller takes
+    /// what is queued and asks again.
+    pub fn flush(&self) -> Option<u64> {
         let wanted = {
             let mut flushes = self.shared.flushes.lock().unwrap();
             flushes.requested += 1;
@@ -256,20 +298,19 @@ impl ProjectWatcher {
         let _ = (&self.shared.wakeup).write_all(&1u64.to_ne_bytes());
         let mut flushes = self.shared.flushes.lock().unwrap();
         while flushes.done < wanted && !flushes.ended && !self.shared.stopped() {
+            // The reader waits for room that only the caller makes.
+            if self.shared.queue.lock().unwrap().changes.len() >= CAPACITY {
+                return None;
+            }
             flushes = self
                 .shared
                 .flushed
                 .wait_timeout(flushes, Duration::from_millis(50))
                 .unwrap()
                 .0;
-            // The reader waits for room that only the caller makes: what
-            // it could not queue yet arrives with the windows that follow.
-            if self.shared.queue.lock().unwrap().changes.len() >= CAPACITY {
-                break;
-            }
         }
         drop(flushes);
-        self.shared.queue.lock().unwrap().queued
+        Some(self.shared.queue.lock().unwrap().queued)
     }
 
     /// Waits for the next change for at most `timeout`.

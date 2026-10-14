@@ -35,6 +35,9 @@ pub const CODE_BUILDER_FAILED: &str = "patch_builder_failed";
 pub const CODE_APPLY_FAILED: &str = "apply_failed";
 /// The note code of game callbacks that threw or could not be called.
 pub const CODE_CALLBACK_FAILED: &str = "callback_failed";
+/// The builder's note code of an added field that Unity would serialize:
+/// the Player does not fill it from scenes, prefabs or assets.
+pub const CODE_FIELD_NOT_RESTORED: &str = "serialized_field_not_restored";
 
 /// One game assembly, as a Player loaded it or as the newest compile has it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
