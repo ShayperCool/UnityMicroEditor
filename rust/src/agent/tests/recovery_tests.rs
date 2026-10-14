@@ -680,10 +680,13 @@ fn a_new_script_in_an_embedded_package_needs_a_new_preparation() {
         &join(&[&project, package, "Runtime/Tests/CoreTest.cs"]),
         "public class CoreTest {}\n",
     );
+    // A source graph records every definition of a package, the nested one too.
     let inputs = [
         format!("{package}/package.json"),
         format!("{package}/Runtime/R5Core.asmdef"),
         format!("{package}/Runtime/CoreMarker.cs"),
+        format!("{package}/Runtime/Tests/R5Tests.asmdef"),
+        format!("{package}/Runtime/Tests/CoreTest.cs"),
     ];
     let inputs: Vec<&str> = inputs.iter().map(String::as_str).collect();
     let (made, _, _) = preparation_of(&project, "before-the-probe", &inputs);
@@ -703,6 +706,69 @@ fn a_new_script_in_an_embedded_package_needs_a_new_preparation() {
         text.contains("Runtime/R5Probe.cs") && crate::compiler::requires_new_graph(&text),
         "{text}"
     );
+}
+
+/// A new assembly definition below the root of a package's assembly, and a
+/// new embedded package with one, are new Player code that a preparation
+/// made before them does not hold (session6-3). One for the Editor alone is
+/// no part of a Player.
+#[test]
+fn a_new_assembly_in_a_package_needs_a_new_preparation() {
+    for case in ["nested", "package", "editor"] {
+        let (_guard, project) = review_project();
+        let package = "Packages/com.r5.core";
+        write(
+            &join(&[&project, package, "package.json"]),
+            r#"{"name":"com.r5.core","version":"1.0.0"}"#,
+        );
+        write(
+            &join(&[&project, package, "Runtime/R5Core.asmdef"]),
+            r#"{"name":"R5Core"}"#,
+        );
+        write(
+            &join(&[&project, package, "Runtime/CoreMarker.cs"]),
+            "namespace R5Core { public static class CoreMarker {} }\n",
+        );
+        let inputs = [
+            format!("{package}/package.json"),
+            format!("{package}/Runtime/R5Core.asmdef"),
+            format!("{package}/Runtime/CoreMarker.cs"),
+        ];
+        let inputs: Vec<&str> = inputs.iter().map(String::as_str).collect();
+        let (made, _, _) = preparation_of(&project, &format!("before-{case}"), &inputs);
+        crate::compiler::Compiler::graph_accepts_sources(&project, &made.baseline).unwrap();
+        let folder = match case {
+            "nested" => format!("{package}/Runtime/Gameplay"),
+            "editor" => format!("{package}/Editor"),
+            _ => "Packages/com.r5.extra/Runtime".to_string(),
+        };
+        if case == "package" {
+            write(
+                &join(&[&project, "Packages/com.r5.extra/package.json"]),
+                r#"{"name":"com.r5.extra","version":"1.0.0"}"#,
+            );
+        }
+        let definition = match case {
+            "editor" => r#"{"name":"R5Tools","includePlatforms":["Editor"]}"#,
+            _ => r#"{"name":"R5Gameplay"}"#,
+        };
+        write(&join(&[&project, &folder, "R5Gameplay.asmdef"]), definition);
+        write(
+            &join(&[&project, &folder, "Boss.cs"]),
+            "namespace R5Gameplay { public class Boss : UnityEngine.MonoBehaviour {} }\n",
+        );
+        let result = crate::compiler::Compiler::graph_accepts_sources(&project, &made.baseline);
+        match case {
+            "editor" => assert!(result.is_ok(), "{case}: {result:?}"),
+            _ => {
+                let text = format!("{:#}", result.expect_err(case));
+                assert!(
+                    text.contains("R5Gameplay.asmdef") && crate::compiler::requires_new_graph(&text),
+                    "{case}: {text}"
+                );
+            }
+        }
+    }
 }
 
 /// A C# save or a scene save while the job of a recovery runs: the request

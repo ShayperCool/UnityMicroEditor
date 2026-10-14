@@ -37,6 +37,46 @@ impl Compiler {
                 && read_json_file::<Option<Platforms>>(filename)
                     .is_ok_and(|platforms| platforms.unwrap_or_default().include == ["Editor"])
         };
+        // A definition the plan does not hold anywhere in a package of the project is a new
+        // assembly: below the root of a known one (a folder of its own) or in a package that is
+        // new as a whole (session6-3). One for the Editor alone is no part of a Player.
+        let ignored = |filename: &str| {
+            let base = sysutil::base(filename);
+            base.starts_with('.') || base.ends_with('~')
+        };
+        let mut packages_found: Vec<String> = fs::read_dir(&packages)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                    .map(|entry| join(&[&packages, &entry.file_name().to_string_lossy()]))
+                    .filter(|directory| {
+                        !ignored(directory)
+                            && fs::metadata(join(&[directory, "package.json"]))
+                                .is_ok_and(|info| info.is_file())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        packages_found.sort();
+        for package in &packages_found {
+            sys::walk_dir(package, &mut |entry| {
+                let filename = entry.path;
+                if entry.is_dir() {
+                    return Ok(match filename != package.as_str() && ignored(filename) {
+                        true => Walk::SkipDir,
+                        false => Walk::Continue,
+                    });
+                }
+                if definition(filename)
+                    && self.manifest.compiler_inputs.at(filename).is_empty()
+                    && !editor_only(filename)
+                {
+                    bail!("new managed configuration requires a fresh managed graph: {filename}");
+                }
+                Ok(Walk::Continue)
+            })?;
+        }
         let mut roots: Vec<String> = self
             .manifest
             .compiler_inputs
