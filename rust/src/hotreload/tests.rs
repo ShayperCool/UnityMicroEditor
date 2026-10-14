@@ -3145,9 +3145,8 @@ fn hot_reload_runtime_harness_sdk() {
 }
 
 /// The builder a session keeps answers its requests; a request it answers
-/// with a failure or not at all runs once in a process of its own, and one
-/// it does not answer in time is the timeout of the attempt, as it is for a
-/// builder run once.
+/// with a failure, not at all, or not within its share of the limit runs
+/// once in a process of its own within the rest of the limit.
 #[test]
 fn the_builder_of_a_session_answers_or_the_attempt_runs_it_once() {
     use crate::compiler::Service;
@@ -3206,19 +3205,24 @@ done
         "a failed served run was not run once"
     );
     fs::remove_file(&ran_once).unwrap();
+    // A kept builder that does not answer within its share of the limit is
+    // stopped, and the request runs once within the rest (served6-2).
     fs::write(&mode, "hang").unwrap();
     let started = Instant::now();
-    let error = tools
-        .build_within(&ctx, &request, Duration::from_secs(1))
-        .unwrap_err();
     assert_eq!(
-        error.to_string(),
-        "the patch builder did not finish within 1s and was stopped"
+        tools
+            .build_within(&ctx, &request, Duration::from_secs(3))
+            .unwrap(),
+        b"{\"verdict\":\"one-shot\"}"
     );
-    assert!(started.elapsed() < Duration::from_secs(20));
+    let waited = started.elapsed();
     assert!(
-        !fs::symlink_metadata(&ran_once).is_ok(),
-        "a builder that timed out ran again"
+        (Duration::from_secs(1)..Duration::from_secs(20)).contains(&waited),
+        "{waited:?}"
+    );
+    assert!(
+        fs::symlink_metadata(&ran_once).is_ok(),
+        "the request of a builder that did not answer was not run once"
     );
     // The next attempt starts another process.
     fs::write(&mode, "ok").unwrap();
