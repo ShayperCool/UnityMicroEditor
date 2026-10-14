@@ -412,7 +412,21 @@ struct Shared {
     options: Options,
     lifetime: Context,
     inner: Mutex<Inner>,
+    /// Names the files of this server process: its event numbers start at
+    /// 1, and so do those of the next server on the same output.
+    server: String,
 }
+/// The mark of one wait: `after` is what its answer is about, `read` the
+/// number it was given or took from `told`, `foreign` whether that number
+/// is above the last one of this server.
+#[derive(Clone, Copy)]
+struct Mark {
+    after: u64,
+    given: Option<u64>,
+    read: u64,
+    foreign: bool,
+}
+
 /// Cheap to clone; all clones share one runner session and request journal.
 #[derive(Clone)]
 pub struct Controller(Arc<Shared>);
@@ -503,6 +517,7 @@ impl Controller {
             options,
             lifetime: lifetime.clone(),
             inner: Mutex::new(inner),
+            server: new_id()[..12].to_string(),
         }));
         let watcher = controller.clone();
         thread::spawn(move || {
@@ -1251,10 +1266,17 @@ impl Controller {
             end = line;
         }
         let directory = sysutil::join(&[&self.0.options.output, "rejections"]);
-        let path = sysutil::join(&[&directory, &format!("{sequence}.txt")]);
+        // A file a reply named keeps its text: the name holds this server's
+        // id, the file appears whole, and only the newest are kept.
+        let path = sysutil::join(&[&directory, &format!("{}-{sequence}.txt", self.0.server)]);
+        let partial = format!("{path}.partial");
         let written = std::fs::create_dir_all(&directory)
-            .and_then(|()| std::fs::write(&path, message.as_bytes()))
+            .and_then(|()| std::fs::write(&partial, message.as_bytes()))
+            .and_then(|()| std::fs::rename(&partial, &path))
             .is_ok();
+        if written {
+            prune_rejections(&directory, REJECTION_FILES);
+        }
         let rest = message.len() - end;
         match written {
             true => format!(
@@ -1301,23 +1323,49 @@ impl Controller {
         ready: bool,
         limit: Option<Duration>,
     ) -> std::result::Result<State, StateError> {
+        let mark = self.mark(after);
+        self.wait_marked(ctx, mark, ready, limit)
+    }
+
+    /// The mark of a wait, read once: the reply's events, its notes and its
+    /// sentence are all about the same one, also when another caller's wait
+    /// moves `told` meanwhile.
+    fn mark(&self, given: Option<u64>) -> Mark {
+        let inner = self.lock();
+        let mark = given.unwrap_or(inner.told);
+        // The event numbers of a server never start again: start, reset and
+        // a recovery continue them. A mark above the last one was read from
+        // an earlier server process or another project, and every event of
+        // this server is news to its caller.
+        let foreign = mark > inner.state.last_sequence;
+        Mark {
+            after: if foreign { 0 } else { mark },
+            given,
+            read: mark,
+            foreign,
+        }
+    }
+
+    fn wait_marked(
+        &self,
+        ctx: &Context,
+        mark: Mark,
+        ready: bool,
+        limit: Option<Duration>,
+    ) -> std::result::Result<State, StateError> {
         let limited = limit.map(|limit| ctx.with_timeout(limit));
-        let outcome = self.answer(limited.as_ref().unwrap_or(ctx), after, ready);
+        let outcome = self.answer(limited.as_ref().unwrap_or(ctx), mark, ready);
         if let Some(limited) = limited {
             limited.cancel();
         }
         outcome
     }
 
-    fn answer(
-        &self,
-        ctx: &Context,
-        mark: Option<u64>,
-        ready: bool,
-    ) -> std::result::Result<State, StateError> {
+    fn answer(&self, ctx: &Context, mark: Mark, ready: bool) -> std::result::Result<State, StateError> {
         let barrier = self.sync()?;
+        let after = mark.after;
         loop {
-            let (state, changed, synced, update, told) = {
+            let (state, changed, synced, update) = {
                 let inner = self.lock();
                 // Another runner has started since: it compiled what was saved
                 // before it, and its own events say how that ended.
@@ -1329,10 +1377,8 @@ impl Controller {
                     inner.changed.clone(),
                     synced,
                     inner.last_update_event.clone(),
-                    inner.told,
                 )
             };
-            let after = mark.unwrap_or(told);
             let ended = state.phase == "failed" || state.phase == "stopped";
             // A rejection that no update followed stands, and so does a
             // refusal: the Player does not run the newest saved sources. It
@@ -1373,31 +1419,38 @@ impl Controller {
                         || state.last_update_rejected_sequence > after
                         || ready && state.last_ready_sequence > after;
                     let mut attention = state.hot_reload.attention(after);
+                    let mut since = match mark.given {
+                        Some(given) => format!("afterSequence {given}"),
+                        None => format!(
+                            "sequence {}, the last one a wait or recompile of this server reported (to any of its callers)",
+                            mark.read
+                        ),
+                    };
+                    if mark.foreign && !followed {
+                        since = format!(
+                            "{since}, which is above lastSequence {} of this server (it was read from an earlier server process or another project, and the reply covers every event of this server)",
+                            state.last_sequence
+                        );
+                    }
                     if !followed {
                         // The call has nothing to report, and says so: a
                         // caller that takes a bare success for "my edit is
                         // applied" would be wrong about a save that the
-                        // runner never saw.
-                        let since = match mark {
-                            Some(mark) => format!("afterSequence {mark}"),
-                            None => format!(
-                                "sequence {after}, the last one a wait or recompile of this session reported"
-                            ),
-                        };
-                        attention = match after > state.last_sequence {
-                            // A mark of another session: the one that ran
-                            // before a restart, most often. Nothing of this
-                            // session can follow it, and the reply says which
-                            // numbers are this session's.
-                            true => format!(
-                                "Nothing was applied or rejected after {since}: that mark is above lastSequence {} of this session, so it was read from another one (a session that starts again counts its events anew). In this session the runner has answered for every source change saved before this call and nothing is rejected or refused (lastUpdateSequence {}).",
-                                state.last_sequence, state.last_update_sequence
-                            ),
-                            false => format!(
-                                "Nothing was applied or rejected after {since}: the runner has answered for every source change saved before this call (lastSequence {}, lastUpdateSequence {}). A save you expected here changed nothing the runner reads (a path outside Assets, Packages and ProjectSettings, a file kind it does not watch, a file that is still open), or it was answered at or before that sequence.",
-                                state.last_sequence, state.last_update_sequence
-                            ),
-                        };
+                        // runner never saw. What stands is named: another
+                        // caller of this server may have been told of the
+                        // caller's own edit before it asked.
+                        let standing = state.hot_reload.standing();
+                        attention = format!(
+                            "Nothing was applied or rejected after {since}: the runner has answered for every source change saved before this call (lastSequence {}, lastUpdateSequence {}). A save you expected here changed nothing the runner reads (a path outside Assets, Packages and ProjectSettings, a file kind it does not watch, a file that is still open), or it was answered at or before that sequence; callers that share this server should pass afterSequence. {standing}",
+                            state.last_sequence, state.last_update_sequence
+                        );
+                    } else if mark.foreign {
+                        attention = format!(
+                            "{since} is above lastSequence {} of this server, so it was read from an earlier server process or another project (a new server counts its events from 0; start, reset and a recovery continue the count): this reply covers every event of this server. {attention}",
+                            state.last_sequence
+                        )
+                        .trim_end()
+                        .to_string();
                     }
                     state.attention = attention;
                     state.hot_reload.since(after);
@@ -1587,12 +1640,10 @@ impl Controller {
                     })?;
                     Ok(Some(number))
                 };
-                let told = self.lock().told;
-                // A mark above the session's last sequence (of another
-                // session, or of a server that was restarted since) is taken
-                // like any other: what stands is reported whatever the mark
-                // is, and a reply that nothing followed names both numbers.
-                let mark = number("afterSequence")?;
+                // A mark above the session's last sequence (of a server that
+                // was restarted since, or of another project) stands for 0:
+                // everything of this server is news to its caller.
+                let given = number("afterSequence")?;
                 let limit = match number("timeoutSeconds")? {
                     Some(0) => {
                         return Err(Error::new(
@@ -1605,8 +1656,9 @@ impl Controller {
                 };
                 let ready = operation == "session_wait";
                 // The events of the reply are those the answer is about.
-                let after = Some(mark.unwrap_or(told));
-                return match self.wait_within(ctx, mark, ready, limit) {
+                let mark = self.mark(given);
+                let after = Some(mark.after);
+                return match self.wait_marked(ctx, mark, ready, limit) {
                     Ok(answered) => Ok(state(answered, after, WAIT_REPLY_EVENTS)),
                     Err(failure) => Err(failed(failure, after, WAIT_REPLY_EVENTS)),
                 };
@@ -1836,6 +1888,18 @@ fn shaped(mut state: State, after: Option<u64>, limit: usize) -> State {
         ] {
             event.data.remove(key);
         }
+        // A window lists a path for every change the watcher saw: a branch
+        // switch or an imported folder makes thousands. The first few say
+        // what it was, and the count says how much.
+        if let Some(Value::Array(paths)) = event.data.get_mut("paths") {
+            let mut seen = std::collections::HashSet::new();
+            paths.retain(|path| seen.insert(path.clone()));
+            let count = paths.len();
+            if count > EVENT_PATHS_MAXIMUM {
+                paths.truncate(EVENT_PATHS_MAXIMUM);
+                event.data.insert("pathsCount".into(), json!(count));
+            }
+        }
         if let Some(Value::String(error)) = event.data.get_mut("error")
             && error.len() > EVENT_ERROR_MAXIMUM
         {
@@ -1850,6 +1914,31 @@ fn shaped(mut state: State, after: Option<u64>, limit: usize) -> State {
     }
     state.events_omitted = (kept - state.events.len()) as u64;
     state
+}
+
+/// How many paths a listed event keeps; `pathsCount` counts all of them.
+const EVENT_PATHS_MAXIMUM: usize = 8;
+
+/// How many files of long rejections the output keeps.
+const REJECTION_FILES: usize = 64;
+
+/// Removes the oldest files of `directory` beyond the newest `keep`.
+fn prune_rejections(directory: &str, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".txt"))
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .collect();
+    if files.len() <= keep {
+        return;
+    }
+    files.sort();
+    for (_, path) in &files[..files.len() - keep] {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 fn unsupported(operation: &str) -> Error {

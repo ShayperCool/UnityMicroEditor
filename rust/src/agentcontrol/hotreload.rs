@@ -50,22 +50,26 @@ enum Weight {
 
 /// The note codes by how much a caller must know of them, the first the
 /// most. A code that is not listed (a newer builder) leads.
-const WEIGHTS: [(&str, Weight); 17] = [
+/// Every Held code stands before every Told one: the sentence is worded by
+/// the first, and "its code runs" must not hide a limit.
+const WEIGHTS: [(&str, Weight); 19] = [
+    ("runtime_initializer_changed", Weight::Held),
     ("added_method_named_by_string", Weight::Held),
     ("serialized_field_not_restored", Weight::Held),
     ("running_coroutines_keep_old_code", Weight::Held),
     ("started_objects_keep_state", Weight::Held),
     ("spawned_objects_keep_state", Weight::Held),
+    ("added_method_computed_name", Weight::Held),
     ("lambda_not_remapped", Weight::Held),
     ("earlier_patch_delegates_keep_old_code", Weight::Held),
     ("constructor_applies_to_new_objects", Weight::Held),
     ("existing_instances_keep_default", Weight::Held),
     ("runtime_initializer_added", Weight::Held),
+    ("runtime_initializer_removed", Weight::Held),
+    ("added_method_delegate_identity", Weight::Held),
     ("added_member_attributes_ignored", Weight::Held),
     ("callback_failed", Weight::Told),
     ("field_value_reset", Weight::Told),
-    ("runtime_initializer_removed", Weight::Held),
-    ("added_method_delegate_identity", Weight::Held),
     ("accessibility_changed", Weight::Minor),
     ("added_method_invisible_by_name", Weight::Minor),
 ];
@@ -229,6 +233,17 @@ pub(super) enum Refused<'a> {
     /// The `recompile` command with this id restarted the Player before the
     /// refused edit compiled. It is answered, so the next one needs another id.
     Recompiled(&'a str),
+}
+
+/// What a restart for a Netcode reason means for the other Players of the
+/// same network game: they still run the old code, reconnect to this one,
+/// and read what it sends out of step until they are restarted on the new
+/// code too. Empty for other reasons.
+fn peers(reasons: &[Reason]) -> &'static str {
+    match reasons.iter().any(|reason| reason.code.starts_with("netcode_")) {
+        true => " This Player leaves its network session and starts on the new code; other Players of the same network game that still run the old code (a client of another session, the host) must be restarted on the new code too, or they read what this Player sends out of step.",
+        false => "",
+    }
 }
 
 fn no_count(count: &u64) -> bool {
@@ -493,6 +508,53 @@ impl HotReload {
         self.new_notes_sequence = sequence;
     }
 
+    /// What stands in the Player, for a caller whose mark nothing followed:
+    /// how its code came to be, and the first limit of it that lasts until a
+    /// restart. Another caller of the same server may have been told of the
+    /// caller's own edit before it asked, and this is all it learns of it.
+    pub(super) fn standing(&self) -> String {
+        let held = |notes: &mut Vec<&Reason>| {
+            notes.retain(|note| weight(&note.code).1 != Weight::Minor);
+            notes.sort_by_key(|note| weight(&note.code).0);
+            match notes.first() {
+                None => String::new(),
+                Some(first) => {
+                    let more = match notes.len() - 1 {
+                        0 => String::new(),
+                        more => format!(" (and {more} more in hotReload.lastPatch.notes and hotReload.notes)"),
+                    };
+                    format!(
+                        "; this limit of it lasts until the Player restarts: {} [{}]{more}",
+                        first.message.trim_end_matches('.'),
+                        first.code
+                    )
+                }
+            }
+        };
+        let mut notes: Vec<&Reason> = self.notes.iter().collect();
+        if let Some(patch) = &self.last_patch {
+            notes.extend(patch.notes.iter());
+            return format!(
+                "What stands: the Player runs code generation {}, patched in at sequence {}{}.",
+                patch.code_generation,
+                patch.sequence,
+                held(&mut notes)
+            );
+        }
+        let started = match &self.last_restart {
+            Some(restart) if restart.reason == "requested" => format!(
+                "the Player was restarted on the saved code by a recompile at sequence {}",
+                restart.sequence
+            ),
+            Some(restart) => format!(
+                "the runner restarted the Player by itself at sequence {} ({}), and game state was reset",
+                restart.sequence, restart.reason
+            ),
+            None => "the Player runs the code it was started with".into(),
+        };
+        format!("What stands: {started}{}.", held(&mut notes))
+    }
+
     /// What a caller reads first when its wait or recompile succeeded:
     /// what the answers after `after` brought that a caller who is told
     /// "applied" would not expect. The edit is applied either way. Empty
@@ -519,12 +581,13 @@ impl HotReload {
                 "hot_reload_unsupported" => {
                     let first = restart.unsupported.first();
                     Some(format!(
-                        "The edit could not be applied to the running Player ({}), so the runner restarted it on the saved code, as onUnsupportedEdit restart asks; game state is reset.",
+                        "The edit could not be applied to the running Player ({}), so the runner restarted it on the saved code, as onUnsupportedEdit restart asks; game state is reset.{}",
                         first.map_or("the report lists the reasons".into(), |reason| format!(
                             "{} [{}]",
                             reason.message.trim_end_matches('.'),
                             reason.code
-                        ))
+                        )),
+                        peers(&restart.unsupported)
                     ))
                 }
                 _ => None,
@@ -551,10 +614,15 @@ impl HotReload {
                 more => format!(" (and {more} more in hotReload.newNotes)"),
             };
             let limit = format!("{} [{}]{more}", first.message.trim_end_matches('.'), first.code);
+            // A restart of a Player of a network game also leaves the network session.
+            let network = match first.code.as_str() {
+                "spawned_objects_keep_state" => " (in a network game it also leaves the network session, and its peers see it disconnect)",
+                _ => "",
+            };
             match weight(&first.code).1 {
                 Weight::Told => format!("The edit is applied and its code runs. Note: {limit}."),
                 _ => format!(
-                    "The edit is applied, with a limit that lasts until the Player restarts: {limit}. If what you are checking depends on it, hot_reload with action \"recompile\" restarts the Player on the saved code and resets game state; otherwise go on."
+                    "The edit is applied, with a limit that lasts until the Player restarts: {limit}. If what you are checking depends on it, hot_reload with action \"recompile\" restarts the Player on the saved code and resets game state{network}; otherwise go on."
                 ),
             }
         });
@@ -606,7 +674,10 @@ impl HotReload {
         let refused = format!(
             "The C# edit compiled but cannot be applied to the running Player: {reason}. The Player keeps the code it ran before this edit"
         );
-        const NEXT: &str = "Call hot_reload with action \"recompile\" to restart the Player on the new code; game state is reset.";
+        let next = format!(
+            "Call hot_reload with action \"recompile\" to restart the Player on the new code; game state is reset.{}",
+            peers(&self.unsupported)
+        );
         // The Player's own words for a scene it would not load. A scene that
         // only lacks the refused code is applied by the recompile; one that
         // is wrong by itself fails the recompile with this text again.
@@ -619,7 +690,7 @@ impl HotReload {
             None => String::new(),
         };
         let message = match told {
-            Refused::Edit => format!("{refused}.{rejected} {NEXT}"),
+            Refused::Edit => format!("{refused}.{rejected} {next}"),
             // What the caller's wait did bring, so that it is not taken for
             // nothing: of two edits one may be in the Player.
             Refused::After(update, sequence) => {
@@ -635,7 +706,7 @@ impl HotReload {
                     ),
                     _ => String::new(),
                 };
-                format!("{refused}{applied}.{rejected} {NEXT}")
+                format!("{refused}{applied}.{rejected} {next}")
             }
             Refused::Recompiled(id) => format!(
                 "Recompile {id} restarted the Player, and a C# edit compiled after it cannot be applied to the running Player: {reason}.{rejected} Call hot_reload with action \"recompile\" and a new requestId to restart the Player on the new code; game state is reset."

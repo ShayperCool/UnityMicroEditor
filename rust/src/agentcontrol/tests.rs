@@ -1354,8 +1354,9 @@ fn handle_routes_session_and_runtime_operations() {
             && state.attention.starts_with(NOTHING_FOLLOWED) && state.events.is_empty()),
         "{idle:?}"
     );
-    // A mark that no event of this session has reached is answered the
-    // same way, with the session's own numbers; a wait of no time is no wait.
+    // A mark that no event of this server has reached is of an earlier
+    // server process or another project: the reply covers every event of
+    // this server and says so; a wait of no time is no wait.
     let ahead = c.handle(
         &seconds(1),
         "session_control",
@@ -1363,7 +1364,7 @@ fn handle_routes_session_and_runtime_operations() {
     );
     assert!(
         matches!(&ahead, Ok(Reply::State(state)) if state.attention.starts_with(
-            "Nothing was applied or rejected after afterSequence 7: that mark is above lastSequence 1 of this session, so it was read from another one"
+            "Nothing was applied or rejected after afterSequence 7, which is above lastSequence 1 of this server (it was read from an earlier server process or another project"
         )),
         "{ahead:?}"
     );
@@ -4515,7 +4516,7 @@ fn a_long_compile_error_is_bounded_in_every_reply() {
     let file = sysutil::join(&[
         &c.0.options.output,
         "rejections",
-        &format!("{}.txt", last.last_sequence),
+        &format!("{}-{}.txt", c.0.server, last.last_sequence),
     ]);
     assert!(message.len() < 4400, "{}", message.len());
     assert!(
@@ -4687,4 +4688,250 @@ fn a_start_with_the_values_in_use_returns_the_running_session() {
         );
     }
     assert_eq!(c.status().pid, ready.pid);
+}
+
+// ---------------------------------------------------------------------
+// Stage 5: what a wait tells a caller whose mark another caller moved or
+// that comes from another server, and the shape of a reply.
+// ---------------------------------------------------------------------
+mod stage5_waits {
+    use super::*;
+
+    fn reply(reply: &std::result::Result<Reply, Failure>) -> Value {
+        match reply {
+            Ok(reply) => serde_json::to_value(reply).unwrap(),
+            Err(failure) => json!({"error": failure.error.message(), "typed": failure.typed.as_ref().map(|t| t.code)}),
+        }
+    }
+    fn coroutine_note() -> Value {
+        json!([{"code": "running_coroutines_keep_old_code", "member": "Game.A::Loop()",
+            "message": "Coroutines of Game.A::Loop() that are already running finish on the old code."}])
+    }
+    fn patched(c: &Controller, generation: u64) -> State {
+        let state = c.status();
+        let notes = coroutine_note();
+        accept(
+            c,
+            json!({"event": "code-patched", "pid": state.pid, "revision": state.revision, "codeGeneration": generation,
+                "patchedMethods": 1, "paths": ["/p/Assets/A.cs"], "notes": notes, "notesCount": 1, "newNotes": notes, "newNotesCount": 1}),
+        )
+    }
+    fn wait_update(c: &Controller, arguments: &str) -> Value {
+        reply(&c.handle(&seconds(1), "session_control", arguments.as_bytes()))
+    }
+
+    /// Two callers of one server wait without afterSequence: the one whose
+    /// edit it was may be the second, and its reply then names what stands,
+    /// the limit of its edit included.
+    #[test]
+    fn a_caller_whose_mark_another_moved_is_told_what_stands() {
+        let c = controller_fixture("");
+        start_ready(&c);
+        c.wait_within(&seconds(1), None, true, None).unwrap();
+        let patch = patched(&c, 1);
+        let other = wait_update(&c, r#"{"action":"wait_update"}"#);
+        assert!(other["attention"].as_str().unwrap().contains("[running_coroutines_keep_old_code]"));
+        let own = wait_update(&c, r#"{"action":"wait_update"}"#);
+        let attention = own["attention"].as_str().unwrap();
+        assert!(attention.starts_with(NOTHING_FOLLOWED), "{attention}");
+        assert!(
+            attention.contains(&format!(
+                "What stands: the Player runs code generation 1, patched in at sequence {}; this limit of it lasts until the Player restarts: Coroutines of Game.A::Loop() that are already running finish on the old code [running_coroutines_keep_old_code].",
+                patch.last_sequence
+            )) && attention.contains("callers that share this server should pass afterSequence"),
+            "{attention}"
+        );
+    }
+
+    /// The same for a restart the runner made by itself.
+    #[test]
+    fn a_caller_whose_mark_another_moved_is_told_of_the_restart() {
+        let c = controller_fixture("");
+        let ready = start_ready(&c);
+        c.wait_within(&seconds(1), None, true, None).unwrap();
+        let restart = accept(
+            &c,
+            restarted(
+                &c,
+                ready.pid,
+                json!({"reason": "hot_reload_unsupported", "unsupported": [{"code": "type_added", "member": "Game.Boss", "message": "A type was added."}], "unsupportedCount": 1}),
+            ),
+        );
+        let other = wait_update(&c, r#"{"action":"wait_update"}"#);
+        assert!(other["attention"].as_str().unwrap().contains("game state is reset"));
+        let own = wait_update(&c, r#"{"action":"wait_update"}"#);
+        let attention = own["attention"].as_str().unwrap();
+        assert!(
+            attention.contains(&format!(
+                "What stands: the runner restarted the Player by itself at sequence {} (hot_reload_unsupported), and game state was reset.",
+                restart.last_sequence
+            )),
+            "{attention}"
+        );
+    }
+
+    /// Two waits in flight at once read the mark once each: a reply never
+    /// lists events after its mark and says that nothing followed it.
+    #[test]
+    fn a_reply_never_lists_events_and_says_nothing_followed() {
+        for _ in 0..12 {
+            let c = controller_fixture("");
+            let ready = start_ready(&c);
+            c.wait_within(&seconds(1), None, true, None).unwrap();
+            let notes = coroutine_note();
+            accept(
+                &c,
+                json!({"event": "code-patched", "pid": ready.pid, "revision": ready.revision, "codeGeneration": 1,
+                    "patchedMethods": 1, "notes": notes, "notesCount": 1, "newNotes": notes, "newNotesCount": 1, "pending": true}),
+            );
+            let waiters: Vec<_> = (0..2)
+                .map(|_| {
+                    let c = c.clone();
+                    thread::spawn(move || wait_update(&c, r#"{"action":"wait_update"}"#))
+                })
+                .collect();
+            thread::sleep(Duration::from_millis(100));
+            accept(&c, json!({"event": "unchanged", "pid": ready.pid, "revision": ready.revision, "fullRecompileRequired": false}));
+            for answered in waiters.into_iter().map(|w| w.join().unwrap()) {
+                let nothing = answered["attention"].as_str().unwrap_or("").starts_with(NOTHING_FOLLOWED);
+                let listed = answered["events"].as_array().map_or(0, Vec::len);
+                assert!(!(nothing && listed > 0), "{answered}");
+            }
+        }
+    }
+
+    /// A mark above lastSequence comes from an earlier server or another
+    /// project: the reply covers every event of this server, notes and
+    /// restarts included, and says why.
+    #[test]
+    fn a_mark_of_another_server_reports_all_of_this_one() {
+        let c = controller_fixture("");
+        let ready = start_ready(&c);
+        let patch = patched(&c, 1);
+        let mark = 40;
+        assert!(mark > patch.last_sequence);
+        let answered = wait_update(&c, &format!(r#"{{"action":"wait_update","afterSequence":{mark}}}"#));
+        let attention = answered["attention"].as_str().unwrap();
+        assert!(
+            attention.starts_with(&format!("afterSequence {mark} is above lastSequence {} of this server", patch.last_sequence))
+                && attention.contains("[running_coroutines_keep_old_code]")
+                && !attention.contains("counts its events anew"),
+            "{attention}"
+        );
+        assert_eq!(answered["hotReload"]["newNotes"][0]["code"], "running_coroutines_keep_old_code");
+        assert!(!answered["events"].as_array().unwrap().is_empty());
+        accept(&c, restarted(&c, ready.pid, json!({"reason": "hot_reload_failed", "error": "the Player did not acknowledge the code patch within 20s."})));
+        let answered = wait_update(&c, &format!(r#"{{"action":"wait_update","afterSequence":{mark}}}"#));
+        assert!(answered["attention"].as_str().unwrap().contains("game state is reset"), "{answered}");
+    }
+
+    /// A held limit leads a value that was reset: the sentence offers the
+    /// recompile and does not say that all of the code runs.
+    #[test]
+    fn a_held_note_leads_a_told_one() {
+        let c = controller_fixture("");
+        let ready = start_ready(&c);
+        let notes = json!([
+            {"code": "field_value_reset", "member": "Game.Hud::score", "message": "Field Game.Hud::score changed its type; its previous value is lost."},
+            {"code": "added_method_delegate_identity", "member": "Game.Hud::OnHit(int)", "message": "Patched code makes a delegate of the added method Game.Hud::OnHit(int), which patch 1 also had; `-=` does not remove a handler subscribed while patch 1 was applied."}
+        ]);
+        accept(&c, json!({"event": "code-patched", "pid": ready.pid, "revision": ready.revision, "codeGeneration": 2,
+            "patchedMethods": 1, "notes": notes, "notesCount": 2, "newNotes": notes, "newNotesCount": 2}));
+        let waited = c.wait(&seconds(1), ready.last_sequence, false).unwrap();
+        assert!(
+            waited.attention.starts_with("The edit is applied, with a limit that lasts until the Player restarts: Patched code makes a delegate"),
+            "{}",
+            waited.attention
+        );
+    }
+
+    /// A restart for a Netcode reason, and a refusal for one, say that the
+    /// other Players of the network game must take the new code as well.
+    #[test]
+    fn a_netcode_restart_and_refusal_name_the_peers() {
+        let c = controller_fixture("");
+        let ready = start_ready(&c);
+        accept(
+            &c,
+            restarted(
+                &c,
+                ready.pid,
+                json!({"reason": "hot_reload_unsupported", "unsupported": [{"code": "netcode_variable_changed", "member": "NetBall::Level", "message": "The network variable NetBall::Level was added."}], "unsupportedCount": 1}),
+            ),
+        );
+        let waited = c.wait(&seconds(1), ready.last_sequence, false).unwrap();
+        assert!(waited.attention.contains("must be restarted on the new code too"), "{}", waited.attention);
+        let mark = c.status().last_sequence;
+        let mut event = refusal("/owned/report.json");
+        event["unsupported"] = json!([{"code": "netcode_rpc_changed", "member": "NetBall::PingRpc(System.Int32)", "message": "The RPC was added."}]);
+        event["unsupportedCount"] = json!(1);
+        accept(&c, event);
+        let failure = c.wait(&seconds(1), mark, false).expect_err("the refusal stands");
+        assert!(failure.error.message().contains("must be restarted on the new code too"), "{}", failure.error.message());
+        // Not for other reasons.
+        accept(&c, refusal("/owned/report.json"));
+        let failure = c.wait(&seconds(1), mark, false).expect_err("the refusal stands");
+        assert!(!failure.error.message().contains("network"), "{}", failure.error.message());
+    }
+
+    /// A window with thousands of paths: a listed event keeps the first few
+    /// and counts the rest.
+    #[test]
+    fn listed_events_keep_a_few_paths() {
+        let c = controller_fixture("");
+        let ready = start_ready(&c);
+        let paths: Vec<String> = (0..2000)
+            .map(|index| format!("/home/user/projects/MyGame/Assets/Art/Environment/Props/Rocks/rock_{index:04}.png"))
+            .collect();
+        accept(&c, json!({"event": "unchanged", "pid": ready.pid, "revision": ready.revision, "paths": paths, "fullRecompileRequired": false, "pending": true}));
+        accept(&c, json!({"event": "unchanged", "pid": ready.pid, "revision": ready.revision, "paths": paths, "fullRecompileRequired": false}));
+        let status = jsondoc::marshal(&c.handle(&seconds(1), "session_control", br#"{"action":"status"}"#).unwrap()).unwrap();
+        let waited = c
+            .handle(&seconds(1), "session_control", format!(r#"{{"action":"wait_update","afterSequence":{}}}"#, ready.last_sequence).as_bytes())
+            .unwrap();
+        let waited = serde_json::to_value(&waited).unwrap();
+        assert!(status.len() < 30_000, "{}", status.len());
+        let event = waited["events"].as_array().unwrap().last().unwrap().clone();
+        let data = if event.get("data").is_some() { event["data"].clone() } else { event.clone() };
+        assert_eq!(data["pathsCount"], 2000, "{event}");
+        assert_eq!(data["paths"].as_array().unwrap().len(), 8, "{event}");
+    }
+
+    /// The file a reply named for a long rejection keeps its text when the
+    /// next server process on the same output numbers its events anew.
+    #[test]
+    fn a_rejection_file_outlives_the_server_that_named_it() {
+        let c = controller_fixture("");
+        start_ready(&c);
+        let long = |tag: &str| format!("{tag}\n{}", "x".repeat(6000));
+        let first = accept(&c, json!({"event": "update-rejected", "error": long("FIRST SERVER ERROR")}));
+        let named = first.update_error.rsplit_once("whole text is in ").unwrap().1.trim_end_matches(']').to_string();
+        let (output, project, runner) = (c.0.options.output.clone(), c.0.options.project.clone(), c.0.options.runner.clone());
+        c.close().unwrap();
+        let _ = fs::remove_file(sysutil::join(&[&output, "helper-event.json"]));
+        let second = Controller::new(&Context::background(), Options { project, runner, output: output.clone(), ..Options::default() }).unwrap();
+        shorten_grace(&second);
+        start_ready(&second);
+        let state = accept(&second, json!({"event": "update-rejected", "error": long("SECOND SERVER ERROR")}));
+        assert_eq!(state.last_sequence, first.last_sequence);
+        assert!(fs::read_to_string(&named).unwrap().starts_with("FIRST SERVER ERROR\n"));
+        let files: Vec<_> = fs::read_dir(sysutil::join(&[&output, "rejections"])).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(files.len(), 2, "{files:?}");
+        second.close().unwrap();
+    }
+
+    /// Only the newest files are kept.
+    #[test]
+    fn old_rejection_files_are_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().to_str().unwrap();
+        for index in 0..5 {
+            fs::write(sysutil::join(&[path, &format!("s-{index}.txt")]), "x").unwrap();
+            thread::sleep(Duration::from_millis(15));
+        }
+        prune_rejections(path, 3);
+        let mut left: Vec<String> = fs::read_dir(path).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        left.sort();
+        assert_eq!(left, ["s-2.txt", "s-3.txt", "s-4.txt"]);
+    }
 }
