@@ -4195,6 +4195,26 @@ fn code_revision_identity_tracks_changes_with_the_hash_cache() {
     }
 }
 
+/// `UME_COMPILER_COLD=1` leaves the hash cache off, and with it the maps of
+/// Player directories: each use reads the directory in full, as before a
+/// session kept anything (caches6-4). With the cache on, the baseline is
+/// read once.
+#[test]
+fn player_maps_are_kept_only_with_the_hash_cache() {
+    let (_guard, mut compiler, _) = code_revision_fixture();
+    let staged = sysutil::dir(&compiler.player);
+    assert!(!compiler.hashes.is_on());
+    let first = compiler.baseline_player_map(&staged).unwrap();
+    let second = compiler.baseline_player_map(&staged).unwrap();
+    assert!(!Arc::ptr_eq(&first, &second), "a cold compiler kept the map");
+    assert!(compiler.known_player_map(&staged).is_none());
+    compiler.hashes = HashCache::on();
+    let first = compiler.baseline_player_map(&staged).unwrap();
+    let second = compiler.baseline_player_map(&staged).unwrap();
+    assert!(Arc::ptr_eq(&first, &second), "the warm compiler read the baseline again");
+    assert!(compiler.known_player_map(&staged).is_some());
+}
+
 /// A runner that was killed leaves the socket of its server; the next
 /// server of the same output removes it, and nothing of a runner that runs.
 #[test]
