@@ -269,12 +269,18 @@ fn resize(old: &mut Value, raw: &Value) -> Result<()> {
 }
 
 /// The typed override semantics of the runtime expander. Nothing is written
-/// to the final property when the override is refused.
+/// to the final property when the override is refused. `script`: the target
+/// is a script's object (a MonoBehaviour or ScriptableObject document), whose
+/// data lacks the key of a field added to the script after the prefab was
+/// saved; Unity takes the override's value for it, and the absent parents of
+/// the path are made (mcp6-2). A key the script does not have is left to the
+/// Player, which skips it as Unity does.
 pub(crate) fn apply_override(
     data: &mut Map,
     path: &str,
     raw: &Value,
     reference: &Map,
+    script: bool,
 ) -> Result<()> {
     let is_resize = path.ends_with(".Array.size");
     let path = path.strip_suffix(".Array.size").unwrap_or(path);
@@ -282,7 +288,7 @@ pub(crate) fn apply_override(
     let Some((last, parents)) = tokens.split_last() else {
         bail!("empty property path");
     };
-    let has_index = tokens.iter().any(|t| matches!(t, Token::Index(_)));
+    let has_index = script || tokens.iter().any(|t| matches!(t, Token::Index(_)));
     enum Cursor<'a> {
         Fields(&'a mut Map),
         Item(&'a mut Value),
@@ -366,7 +372,7 @@ pub fn apply_authored_override(
     value: &Value,
     reference: &Map,
 ) -> Result<()> {
-    apply_override(data, path, value, reference)
+    apply_override(data, path, value, reference, false)
 }
 
 fn reference_id<'a>(item: &'a Value, key: &str) -> std::borrow::Cow<'a, str> {
@@ -809,11 +815,13 @@ impl Inner {
                     bail!("unresolved prefab override {target_guid}/{target_id} in {logical}");
                 };
                 let rewritten = rewrite_references(get(change, "objectReference"), &guid, &mapping);
+                let script = arena[target].class_id == 114;
                 if let Err(error) = apply_override(
                     &mut arena[target].data,
                     &property,
                     get(change, "value"),
                     object(&rewritten),
+                    script,
                 ) {
                     if self.ignored_overrides.contains(&override_key(
                         logical,

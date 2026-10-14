@@ -1005,6 +1005,7 @@ fn native_model_editor_euler_hint_does_not_change_runtime_rotation_or_fingerprin
         "m_LocalEulerAnglesHint.x",
         &Value::String("180".into()),
         &value::map([("fileID", Value::Int(0))]),
+        false,
     )
     .unwrap();
     assert!(
