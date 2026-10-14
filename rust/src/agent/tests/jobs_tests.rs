@@ -645,7 +645,11 @@ fn start_does_not_ignore_preparation_inputs_or_unknown_keys() {
         ..Default::default()
     });
     for action in ["start", "reset"] {
-        for arguments in [json!({"rebuildHost": true}), json!({"hostPlayer": "/elsewhere/Player"}), json!({"engineProfile": "/p.json", "nativeCatalog": "/c"})] {
+        for arguments in [
+            json!({"rebuildHost": true}),
+            json!({"hostPlayer": "/elsewhere/Player"}),
+            json!({"engineProfile": "/p.json", "nativeCatalog": "/c"}),
+        ] {
             let raw = bytes(&json!({"action": action, "arguments": arguments}));
             let outcome = service.runtime_with_action_jobs(&ctx(), "session_control", &raw);
             let detail = outcome.error.as_ref().and_then(typed);
@@ -655,7 +659,12 @@ fn start_does_not_ignore_preparation_inputs_or_unknown_keys() {
                 "{action} {arguments} was taken for a launch with it"
             );
             assert!(
-                outcome.error.as_ref().unwrap().to_string().contains("call project_prepare with this scene"),
+                outcome
+                    .error
+                    .as_ref()
+                    .unwrap()
+                    .to_string()
+                    .contains("call project_prepare with this scene"),
                 "{:?}",
                 outcome.error
             );
@@ -663,7 +672,10 @@ fn start_does_not_ignore_preparation_inputs_or_unknown_keys() {
         let raw = bytes(&json!({"action": action, "arguments": {"hotreload": false}}));
         let outcome = service.runtime_with_action_jobs(&ctx(), "session_control", &raw);
         let text = format!("{:#}", outcome.error.expect("a misspelled key is refused"));
-        assert!(text.contains("unknown start/reset argument \"hotreload\""), "{text}");
+        assert!(
+            text.contains("unknown start/reset argument \"hotreload\""),
+            "{text}"
+        );
     }
 }
 

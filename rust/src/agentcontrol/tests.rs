@@ -4700,7 +4700,9 @@ mod stage5_waits {
     fn reply(reply: &std::result::Result<Reply, Failure>) -> Value {
         match reply {
             Ok(reply) => serde_json::to_value(reply).unwrap(),
-            Err(failure) => json!({"error": failure.error.message(), "typed": failure.typed.as_ref().map(|t| t.code)}),
+            Err(failure) => {
+                json!({"error": failure.error.message(), "typed": failure.typed.as_ref().map(|t| t.code)})
+            }
         }
     }
     fn coroutine_note() -> Value {
@@ -4730,7 +4732,12 @@ mod stage5_waits {
         c.wait_within(&seconds(1), None, true, None).unwrap();
         let patch = patched(&c, 1);
         let other = wait_update(&c, r#"{"action":"wait_update"}"#);
-        assert!(other["attention"].as_str().unwrap().contains("[running_coroutines_keep_old_code]"));
+        assert!(
+            other["attention"]
+                .as_str()
+                .unwrap()
+                .contains("[running_coroutines_keep_old_code]")
+        );
         let own = wait_update(&c, r#"{"action":"wait_update"}"#);
         let attention = own["attention"].as_str().unwrap();
         assert!(attention.starts_with(NOTHING_FOLLOWED), "{attention}");
@@ -4758,7 +4765,12 @@ mod stage5_waits {
             ),
         );
         let other = wait_update(&c, r#"{"action":"wait_update"}"#);
-        assert!(other["attention"].as_str().unwrap().contains("game state is reset"));
+        assert!(
+            other["attention"]
+                .as_str()
+                .unwrap()
+                .contains("game state is reset")
+        );
         let own = wait_update(&c, r#"{"action":"wait_update"}"#);
         let attention = own["attention"].as_str().unwrap();
         assert!(
@@ -4791,9 +4803,15 @@ mod stage5_waits {
                 })
                 .collect();
             thread::sleep(Duration::from_millis(100));
-            accept(&c, json!({"event": "unchanged", "pid": ready.pid, "revision": ready.revision, "fullRecompileRequired": false}));
+            accept(
+                &c,
+                json!({"event": "unchanged", "pid": ready.pid, "revision": ready.revision, "fullRecompileRequired": false}),
+            );
             for answered in waiters.into_iter().map(|w| w.join().unwrap()) {
-                let nothing = answered["attention"].as_str().unwrap_or("").starts_with(NOTHING_FOLLOWED);
+                let nothing = answered["attention"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with(NOTHING_FOLLOWED);
                 let listed = answered["events"].as_array().map_or(0, Vec::len);
                 assert!(!(nothing && listed > 0), "{answered}");
             }
@@ -4810,19 +4828,43 @@ mod stage5_waits {
         let patch = patched(&c, 1);
         let mark = 40;
         assert!(mark > patch.last_sequence);
-        let answered = wait_update(&c, &format!(r#"{{"action":"wait_update","afterSequence":{mark}}}"#));
+        let answered = wait_update(
+            &c,
+            &format!(r#"{{"action":"wait_update","afterSequence":{mark}}}"#),
+        );
         let attention = answered["attention"].as_str().unwrap();
         assert!(
-            attention.starts_with(&format!("afterSequence {mark} is above lastSequence {} of this server", patch.last_sequence))
-                && attention.contains("[running_coroutines_keep_old_code]")
+            attention.starts_with(&format!(
+                "afterSequence {mark} is above lastSequence {} of this server",
+                patch.last_sequence
+            )) && attention.contains("[running_coroutines_keep_old_code]")
                 && !attention.contains("counts its events anew"),
             "{attention}"
         );
-        assert_eq!(answered["hotReload"]["newNotes"][0]["code"], "running_coroutines_keep_old_code");
+        assert_eq!(
+            answered["hotReload"]["newNotes"][0]["code"],
+            "running_coroutines_keep_old_code"
+        );
         assert!(!answered["events"].as_array().unwrap().is_empty());
-        accept(&c, restarted(&c, ready.pid, json!({"reason": "hot_reload_failed", "error": "the Player did not acknowledge the code patch within 20s."})));
-        let answered = wait_update(&c, &format!(r#"{{"action":"wait_update","afterSequence":{mark}}}"#));
-        assert!(answered["attention"].as_str().unwrap().contains("game state is reset"), "{answered}");
+        accept(
+            &c,
+            restarted(
+                &c,
+                ready.pid,
+                json!({"reason": "hot_reload_failed", "error": "the Player did not acknowledge the code patch within 20s."}),
+            ),
+        );
+        let answered = wait_update(
+            &c,
+            &format!(r#"{{"action":"wait_update","afterSequence":{mark}}}"#),
+        );
+        assert!(
+            answered["attention"]
+                .as_str()
+                .unwrap()
+                .contains("game state is reset"),
+            "{answered}"
+        );
     }
 
     /// A held limit leads a value that was reset: the sentence offers the
@@ -4835,8 +4877,11 @@ mod stage5_waits {
             {"code": "field_value_reset", "member": "Game.Hud::score", "message": "Field Game.Hud::score changed its type; its previous value is lost."},
             {"code": "added_method_delegate_identity", "member": "Game.Hud::OnHit(int)", "message": "Patched code makes a delegate of the added method Game.Hud::OnHit(int), which patch 1 also had; `-=` does not remove a handler subscribed while patch 1 was applied."}
         ]);
-        accept(&c, json!({"event": "code-patched", "pid": ready.pid, "revision": ready.revision, "codeGeneration": 2,
-            "patchedMethods": 1, "notes": notes, "notesCount": 2, "newNotes": notes, "newNotesCount": 2}));
+        accept(
+            &c,
+            json!({"event": "code-patched", "pid": ready.pid, "revision": ready.revision, "codeGeneration": 2,
+            "patchedMethods": 1, "notes": notes, "notesCount": 2, "newNotes": notes, "newNotesCount": 2}),
+        );
         let waited = c.wait(&seconds(1), ready.last_sequence, false).unwrap();
         assert!(
             waited.attention.starts_with("The edit is applied, with a limit that lasts until the Player restarts: Patched code makes a delegate"),
@@ -4860,18 +4905,39 @@ mod stage5_waits {
             ),
         );
         let waited = c.wait(&seconds(1), ready.last_sequence, false).unwrap();
-        assert!(waited.attention.contains("must be restarted on the new code too"), "{}", waited.attention);
+        assert!(
+            waited
+                .attention
+                .contains("must be restarted on the new code too"),
+            "{}",
+            waited.attention
+        );
         let mark = c.status().last_sequence;
         let mut event = refusal("/owned/report.json");
         event["unsupported"] = json!([{"code": "netcode_rpc_changed", "member": "NetBall::PingRpc(System.Int32)", "message": "The RPC was added."}]);
         event["unsupportedCount"] = json!(1);
         accept(&c, event);
-        let failure = c.wait(&seconds(1), mark, false).expect_err("the refusal stands");
-        assert!(failure.error.message().contains("must be restarted on the new code too"), "{}", failure.error.message());
+        let failure = c
+            .wait(&seconds(1), mark, false)
+            .expect_err("the refusal stands");
+        assert!(
+            failure
+                .error
+                .message()
+                .contains("must be restarted on the new code too"),
+            "{}",
+            failure.error.message()
+        );
         // Not for other reasons.
         accept(&c, refusal("/owned/report.json"));
-        let failure = c.wait(&seconds(1), mark, false).expect_err("the refusal stands");
-        assert!(!failure.error.message().contains("network"), "{}", failure.error.message());
+        let failure = c
+            .wait(&seconds(1), mark, false)
+            .expect_err("the refusal stands");
+        assert!(
+            !failure.error.message().contains("network"),
+            "{}",
+            failure.error.message()
+        );
     }
 
     /// A window with thousands of paths: a listed event keeps the first few
@@ -4883,16 +4949,38 @@ mod stage5_waits {
         let paths: Vec<String> = (0..2000)
             .map(|index| format!("/home/user/projects/MyGame/Assets/Art/Environment/Props/Rocks/rock_{index:04}.png"))
             .collect();
-        accept(&c, json!({"event": "unchanged", "pid": ready.pid, "revision": ready.revision, "paths": paths, "fullRecompileRequired": false, "pending": true}));
-        accept(&c, json!({"event": "unchanged", "pid": ready.pid, "revision": ready.revision, "paths": paths, "fullRecompileRequired": false}));
-        let status = jsondoc::marshal(&c.handle(&seconds(1), "session_control", br#"{"action":"status"}"#).unwrap()).unwrap();
+        accept(
+            &c,
+            json!({"event": "unchanged", "pid": ready.pid, "revision": ready.revision, "paths": paths, "fullRecompileRequired": false, "pending": true}),
+        );
+        accept(
+            &c,
+            json!({"event": "unchanged", "pid": ready.pid, "revision": ready.revision, "paths": paths, "fullRecompileRequired": false}),
+        );
+        let status = jsondoc::marshal(
+            &c.handle(&seconds(1), "session_control", br#"{"action":"status"}"#)
+                .unwrap(),
+        )
+        .unwrap();
         let waited = c
-            .handle(&seconds(1), "session_control", format!(r#"{{"action":"wait_update","afterSequence":{}}}"#, ready.last_sequence).as_bytes())
+            .handle(
+                &seconds(1),
+                "session_control",
+                format!(
+                    r#"{{"action":"wait_update","afterSequence":{}}}"#,
+                    ready.last_sequence
+                )
+                .as_bytes(),
+            )
             .unwrap();
         let waited = serde_json::to_value(&waited).unwrap();
         assert!(status.len() < 30_000, "{}", status.len());
         let event = waited["events"].as_array().unwrap().last().unwrap().clone();
-        let data = if event.get("data").is_some() { event["data"].clone() } else { event.clone() };
+        let data = if event.get("data").is_some() {
+            event["data"].clone()
+        } else {
+            event.clone()
+        };
         assert_eq!(data["pathsCount"], 2000, "{event}");
         assert_eq!(data["paths"].as_array().unwrap().len(), 8, "{event}");
     }
@@ -4904,18 +4992,50 @@ mod stage5_waits {
         let c = controller_fixture("");
         start_ready(&c);
         let long = |tag: &str| format!("{tag}\n{}", "x".repeat(6000));
-        let first = accept(&c, json!({"event": "update-rejected", "error": long("FIRST SERVER ERROR")}));
-        let named = first.update_error.rsplit_once("whole text is in ").unwrap().1.trim_end_matches(']').to_string();
-        let (output, project, runner) = (c.0.options.output.clone(), c.0.options.project.clone(), c.0.options.runner.clone());
+        let first = accept(
+            &c,
+            json!({"event": "update-rejected", "error": long("FIRST SERVER ERROR")}),
+        );
+        let named = first
+            .update_error
+            .rsplit_once("whole text is in ")
+            .unwrap()
+            .1
+            .trim_end_matches(']')
+            .to_string();
+        let (output, project, runner) = (
+            c.0.options.output.clone(),
+            c.0.options.project.clone(),
+            c.0.options.runner.clone(),
+        );
         c.close().unwrap();
         let _ = fs::remove_file(sysutil::join(&[&output, "helper-event.json"]));
-        let second = Controller::new(&Context::background(), Options { project, runner, output: output.clone(), ..Options::default() }).unwrap();
+        let second = Controller::new(
+            &Context::background(),
+            Options {
+                project,
+                runner,
+                output: output.clone(),
+                ..Options::default()
+            },
+        )
+        .unwrap();
         shorten_grace(&second);
         start_ready(&second);
-        let state = accept(&second, json!({"event": "update-rejected", "error": long("SECOND SERVER ERROR")}));
+        let state = accept(
+            &second,
+            json!({"event": "update-rejected", "error": long("SECOND SERVER ERROR")}),
+        );
         assert_eq!(state.last_sequence, first.last_sequence);
-        assert!(fs::read_to_string(&named).unwrap().starts_with("FIRST SERVER ERROR\n"));
-        let files: Vec<_> = fs::read_dir(sysutil::join(&[&output, "rejections"])).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert!(
+            fs::read_to_string(&named)
+                .unwrap()
+                .starts_with("FIRST SERVER ERROR\n")
+        );
+        let files: Vec<_> = fs::read_dir(sysutil::join(&[&output, "rejections"]))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
         assert_eq!(files.len(), 2, "{files:?}");
         second.close().unwrap();
     }
@@ -4930,7 +5050,10 @@ mod stage5_waits {
             thread::sleep(Duration::from_millis(15));
         }
         prune_rejections(path, 3);
-        let mut left: Vec<String> = fs::read_dir(path).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        let mut left: Vec<String> = fs::read_dir(path)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
         left.sort();
         assert_eq!(left, ["s-2.txt", "s-3.txt", "s-4.txt"]);
     }
@@ -4941,11 +5064,26 @@ mod stage5_waits {
     fn an_unknown_launch_argument_is_refused() {
         let c = controller_fixture("");
         let ready = start_ready(&c);
-        for arguments in [r#"{"hotreload":false}"#, r#"{"onUnsupportedEdits":"restart"}"#] {
-            let answered = wait_update(&c, &format!(r#"{{"action":"start","arguments":{arguments}}}"#));
-            assert!(answered["error"].as_str().unwrap().starts_with("unknown start/reset argument"), "{answered}");
+        for arguments in [
+            r#"{"hotreload":false}"#,
+            r#"{"onUnsupportedEdits":"restart"}"#,
+        ] {
+            let answered = wait_update(
+                &c,
+                &format!(r#"{{"action":"start","arguments":{arguments}}}"#),
+            );
+            assert!(
+                answered["error"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("unknown start/reset argument"),
+                "{answered}"
+            );
         }
-        let answered = wait_update(&c, r#"{"action":"start","arguments":{"rebuildHost":true,"scene":"Assets/Main.unity"}}"#);
+        let answered = wait_update(
+            &c,
+            r#"{"action":"start","arguments":{"rebuildHost":true,"scene":"Assets/Main.unity"}}"#,
+        );
         assert_eq!(answered["pid"].as_i64(), Some(ready.pid), "{answered}");
     }
 }

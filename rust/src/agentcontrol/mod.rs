@@ -41,7 +41,13 @@ const STDERR_LOG: &str = "agent-runner-stderr.log";
 
 /// The `arguments` of a start or reset that the project service takes for a
 /// preparation: the scene, and the inputs of the first one.
-pub const PREPARATION_ARGUMENTS: [&str; 5] = ["scene", "rebuildHost", "hostPlayer", "nativeCatalog", "engineProfile"];
+pub const PREPARATION_ARGUMENTS: [&str; 5] = [
+    "scene",
+    "rebuildHost",
+    "hostPlayer",
+    "nativeCatalog",
+    "engineProfile",
+];
 /// Every key of the `arguments` of a start or reset.
 pub const LAUNCH_ARGUMENTS: [&str; 11] = [
     "scene",
@@ -1389,7 +1395,12 @@ impl Controller {
         outcome
     }
 
-    fn answer(&self, ctx: &Context, mark: Mark, ready: bool) -> std::result::Result<State, StateError> {
+    fn answer(
+        &self,
+        ctx: &Context,
+        mark: Mark,
+        ready: bool,
+    ) -> std::result::Result<State, StateError> {
         let barrier = self.sync()?;
         let after = mark.after;
         loop {
