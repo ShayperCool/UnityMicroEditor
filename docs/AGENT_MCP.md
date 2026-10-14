@@ -665,8 +665,13 @@ Only a recompile applies what a note names:
   asset edit that sets such a field is applied to the Player without the
   value: the object is rebuilt and has what the initializer gives. The reply
   to that edit says so in `attention` (`serialized_field_not_restored`, with
-  the file). The files are searched as text, for a line whose key is the
-  field's name.
+  the file). A value is a key in a component of the declaring script, or a
+  prefab instance's override (`propertyPath`) in a scene or prefab variant.
+  A UnityEvent (`m_MethodName`) or animation event (`functionName`) saved
+  after the patch that names an added method says so too
+  (`added_method_named_by_string`): it does nothing until a recompile.
+  The session's loader does not apply `[FormerlySerializedAs]`, also not
+  after a recompile: a renamed field loses the scene value of its old name.
 - An added method that a string of the game names is not found by that name
   (`added_method_named_by_string`): `Invoke("Blast", 1f)`, `SendMessage` and
   `StartCoroutine("Blast")` look in the loaded class and do nothing. The

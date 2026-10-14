@@ -487,6 +487,8 @@ struct Script {
     bound_newest: bool,
     pid: i32,
     revision: u32,
+    /// The script GUID of each type, as the session's script types have it.
+    scripts: std::collections::BTreeMap<String, String>,
 }
 impl Script {
     fn new() -> Self {
@@ -508,6 +510,7 @@ impl Script {
             bound_newest: false,
             pid: 100,
             revision: 1,
+            scripts: Default::default(),
         }
     }
     fn compiled(mut self, compiled: Compiled) -> Self {
@@ -640,6 +643,9 @@ impl Steps for Script {
     }
     fn merged_recompile(&mut self) -> Option<String> {
         self.merged.take()
+    }
+    fn script_guid(&self, type_name: &str) -> Option<String> {
+        self.scripts.get(type_name).cloned()
     }
     fn scene(&mut self, _: &Context, window: &Window, _: Instant) -> Result<Scene> {
         self.calls.push("scene".into());
@@ -2554,4 +2560,141 @@ fn a_scene_update_names_the_added_fields_it_holds_values_for() {
     steps.clear();
     let event = updated(&mut state, &mut steps, &[scene.as_str()]);
     assert!(event.get("newNotes").is_none(), "{event}");
+}
+
+/// The forms in which a scene, a prefab variant or a controller holds a value
+/// for a field the applied patch added, and data that names a method it
+/// added; a field of the same name of another script is none of them
+/// (stage 5 runner5-1, waits5-5, waits5-3).
+#[test]
+fn a_scene_update_finds_overrides_and_named_methods_and_skips_other_scripts() {
+    let (_guard, root) = crate::sysutil::testing::temp_dir();
+    let lamp = "a01ac09a24c8493b862564ce94c80306";
+    let file = |name: &str, text: &str| {
+        let path = sysutil::join(&[&root, name]);
+        fs::write(&path, text).unwrap();
+        path
+    };
+    // A scene sets the field of a prefab instance, as Unity writes it.
+    let override_scene = file(
+        "Override.unity",
+        "%YAML 1.1\n--- !u!1001 &500\nPrefabInstance:\n  m_Modification:\n    m_Modifications:\n    - target: {fileID: 105, guid: 9f0c, type: 3}\n      propertyPath: boost\n      value: 3\n      objectReference: {fileID: 0}\n",
+    );
+    // A field of a [Serializable] class the component holds.
+    let nested = file(
+        "Nested.prefab",
+        "%YAML 1.1\n--- !u!1001 &501\nPrefabInstance:\n  m_Modification:\n    m_Modifications:\n    - target: {fileID: 105, guid: 9f0c, type: 3}\n      propertyPath: tuning.armor\n      value: 7\n",
+    );
+    // A StateMachineBehaviour of the controller.
+    let controller = file(
+        "Lamp.controller",
+        &format!(
+            "%YAML 1.1\n--- !u!114 &7\nMonoBehaviour:\n  m_Script: {{fileID: 11500000, guid: {lamp}, type: 3}}\n  boost: 0.4\n"
+        ),
+    );
+    // Another script has a field of the same name, and the camera changed.
+    let other = file(
+        "Main.unity",
+        "%YAML 1.1\n--- !u!114 &500\nMonoBehaviour:\n  m_Script: {fileID: 11500000, guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, type: 3}\n  boost: 5\n--- !u!20 &600\nCamera:\n  m_BackGroundColor: {r: 0.1, g: 0.2, b: 0.3, a: 1}\n",
+    );
+    // A button's UnityEvent and an animation event name the added methods.
+    let button = file(
+        "Menu.unity",
+        "%YAML 1.1\n--- !u!114 &9\nMonoBehaviour:\n  m_OnClick:\n    m_PersistentCalls:\n      m_Calls:\n      - m_Target: {fileID: 7}\n        m_MethodName: OnPinged\n",
+    );
+    let clip = file(
+        "Blink.anim",
+        "%YAML 1.1\n--- !u!74 &1\nAnimationClip:\n  m_Events:\n  - time: 0.5\n    functionName: Flash\n",
+    );
+    let mut added = patch(1);
+    added.notes = vec![
+        Reason::new(
+            "serialized_field_not_restored",
+            "Game.Lamp::boost",
+            "The added field Game.Lamp::boost is not restored.",
+        ),
+        Reason::new(
+            "serialized_field_not_restored",
+            "Game.Tuning::armor",
+            "The added field Game.Tuning::armor is not restored.",
+        ),
+        Reason::new(
+            "added_method_invisible_by_name",
+            "Game.Lamp::OnPinged()",
+            "The added method Game.Lamp::OnPinged() belongs to an engine object.",
+        ),
+        Reason::new(
+            "added_method_computed_name",
+            "Game.Lamp::Flash()",
+            "The game calls methods of its objects by a name it computes.",
+        ),
+    ];
+    let mut state = Loop::new(true, Fallback::Report);
+    let mut steps = Script::new().updated().patched(Outcome::Patched(added));
+    steps.scripts.insert("Game.Lamp".into(), lamp.into());
+    run(&mut state, &mut steps, &window(&["/p/Assets/Lamp.cs"]));
+    steps.clear();
+    let updated = |state: &mut Loop, steps: &mut Script, path: &str| -> Json {
+        steps.compiles.push_back(Ok(Compiled::Unaffected));
+        steps.reloads.push_back(Reload::Updated);
+        run(state, steps, &window(&[path]));
+        let mut events = steps.clear();
+        assert_eq!(events.len(), 1, "{events:?}");
+        events.remove(0)
+    };
+    let noted = |event: &Json| -> Vec<(String, String)> {
+        event["newNotes"]
+            .as_array()
+            .map(|notes| {
+                notes
+                    .iter()
+                    .map(|note| {
+                        (
+                            note["code"].as_str().unwrap().to_string(),
+                            note["member"].as_str().unwrap().to_string(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let field = |member: &str| {
+        (
+            "serialized_field_not_restored".to_string(),
+            member.to_string(),
+        )
+    };
+    let method = |member: &str| {
+        (
+            "added_method_named_by_string".to_string(),
+            member.to_string(),
+        )
+    };
+    assert_eq!(
+        noted(&updated(&mut state, &mut steps, &override_scene)),
+        [field("Game.Lamp::boost")]
+    );
+    assert_eq!(
+        noted(&updated(&mut state, &mut steps, &nested)),
+        [field("Game.Tuning::armor")]
+    );
+    assert_eq!(
+        noted(&updated(&mut state, &mut steps, &controller)),
+        [field("Game.Lamp::boost")]
+    );
+    let event = updated(&mut state, &mut steps, &other);
+    assert!(noted(&event).is_empty(), "{event}");
+    let event = updated(&mut state, &mut steps, &button);
+    assert_eq!(noted(&event), [method("Game.Lamp::OnPinged()")]);
+    assert!(
+        event["newNotes"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("(m_MethodName)"),
+        "{event}"
+    );
+    assert_eq!(
+        noted(&updated(&mut state, &mut steps, &clip)),
+        [method("Game.Lamp::Flash()")]
+    );
 }

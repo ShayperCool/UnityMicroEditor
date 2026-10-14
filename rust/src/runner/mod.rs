@@ -799,6 +799,13 @@ impl Steps for Live<'_> {
         self.owned.0.as_ref().expect("owned Player").pid()
     }
 
+    fn script_guid(&self, type_name: &str) -> Option<String> {
+        self.script_types
+            .iter()
+            .find(|(_, name)| name.as_str() == type_name)
+            .map(|(guid, _)| guid.clone())
+    }
+
     fn revision(&self) -> String {
         self.prepared.revision.clone()
     }
