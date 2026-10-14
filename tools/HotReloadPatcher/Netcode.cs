@@ -469,8 +469,12 @@ internal sealed partial class Differ
     /// and a reader reads it only when its copy says so. The objects that exist keep the old
     /// permission, every Player started on the new code builds them with the new one, and the two
     /// read each other's payload out of step (EnsureNetworkVariableLengthSafety is off by
-    /// default). The initial value and the write permission are not on the wire that way and
-    /// are patched as constructor code.
+    /// default). Only the argument written at the construction in a method of the class is
+    /// compared; a permission a helper, a property or a base constructor supplies is constructor
+    /// code (README, limits). The initial value is not on the wire that way, and the write
+    /// permission decides on each peer who may send and whose deltas are taken: both are patched
+    /// as constructor code, whose note says that objects that exist keep what they were built
+    /// with, and two processes whose copies of an object were built by different code disagree.
     void DiffReadPermissions(TypeDefinitionHandle ot, TypeDefinitionHandle nt, string type)
     {
         var olds = ReadPermissions(o, co, ot);
