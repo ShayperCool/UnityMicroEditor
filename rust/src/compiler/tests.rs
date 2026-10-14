@@ -4194,3 +4194,39 @@ fn code_revision_identity_tracks_changes_with_the_hash_cache() {
         );
     }
 }
+
+/// A runner that was killed leaves the socket of its server; the next
+/// server of the same output removes it, and nothing of a runner that runs.
+#[test]
+fn compiler_server_removes_sockets_of_dead_runners() {
+    let (_guard, root) = temp();
+    let output = join(&[&root, "output"]);
+    let prefix = format!("ume-{}", &sha256(output.as_bytes())[..16]);
+    // A process id that runs nothing: the largest one not in /proc.
+    let dead = (1..4_000_000u32)
+        .rev()
+        .find(|pid| fs::symlink_metadata(format!("/proc/{pid}")).is_err())
+        .unwrap();
+    let left = format!("/tmp/{prefix}-{dead}-3");
+    let running = format!("/tmp/{prefix}-1-2");
+    let other = format!("/tmp/ume-0000000000000000-{dead}-1");
+    for path in [&left, &running, &other] {
+        let _ = fs::remove_file(path);
+        drop(std::os::unix::net::UnixListener::bind(path).unwrap());
+    }
+    let (dotnet, csc) = stand_in_server(&root);
+    let server = CompilerServer::new(&dotnet, &csc, &output);
+    assert!(sys::absent(&left), "the socket of a dead runner stayed");
+    assert!(
+        !sys::absent(&running),
+        "the socket of a running process was removed"
+    );
+    assert!(
+        !sys::absent(&other),
+        "the socket of another output was removed"
+    );
+    drop(server);
+    for path in [&running, &other] {
+        fs::remove_file(path).unwrap();
+    }
+}

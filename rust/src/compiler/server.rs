@@ -78,6 +78,7 @@ impl CompilerServer {
     /// nothing starts before the first compile.
     pub fn new(dotnet: &str, csc: &str, output: &str) -> Self {
         let digest = sha256(output.as_bytes());
+        remove_stale_sockets(&format!("ume-{}", &digest[..16]));
         Self {
             dotnet: dotnet.into(),
             csc: csc.into(),
@@ -215,6 +216,36 @@ impl CompilerServer {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+}
+
+/// Removes the sockets that the servers of earlier runners on the same
+/// output left in `/tmp`: a runner that was killed could not. A socket
+/// whose runner still runs, or whose name is not one of ours, stays.
+fn remove_stale_sockets(prefix: &str) {
+    use std::os::unix::fs::FileTypeExt;
+    let Ok(items) = fs::read_dir("/tmp") else {
+        return;
+    };
+    for item in items.flatten() {
+        let name = item.file_name().to_string_lossy().into_owned();
+        let Some((runner, count)) = name
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_prefix('-'))
+            .and_then(|rest| rest.split_once('-'))
+        else {
+            continue;
+        };
+        let (Ok(runner), Ok(_)) = (runner.parse::<u32>(), count.parse::<u32>()) else {
+            continue;
+        };
+        if runner == std::process::id()
+            || fs::symlink_metadata(format!("/proc/{runner}")).is_ok()
+            || !item.file_type().is_ok_and(|kind| kind.is_socket())
+        {
+            continue;
+        }
+        let _ = fs::remove_file(socket(&name));
     }
 }
 
