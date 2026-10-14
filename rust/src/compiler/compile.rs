@@ -1699,6 +1699,9 @@ impl Compiler {
         let config = self.configs.value(&assembly.name);
         let mut lap = Instant::now();
         let mut identity: BTreeMap<String, String> = BTreeMap::new();
+        // What the compiler server is handed, by path: it must not keep
+        // older bytes of any of them.
+        let mut served: BTreeMap<String, String> = BTreeMap::new();
         identity.insert(
             "configuration".into(),
             self.configuration_hashes.at(&assembly.name).to_string(),
@@ -1712,17 +1715,22 @@ impl Compiler {
             }
         }
         for reference in refs {
+            let hash = file_hash(reference)?;
             identity.insert(
                 format!("reference:{}", sysutil::base(reference)),
-                file_hash(reference)?,
+                hash.clone(),
             );
+            served.insert(reference.clone(), hash);
         }
         for executable in [helper.to_string(), self.csc.clone()]
             .into_iter()
             .chain(self.generators.iter().cloned())
         {
             let hash = file_hash(&executable)?;
-            identity.insert(executable, hash);
+            identity.insert(executable.clone(), hash.clone());
+            if self.generators.contains(&executable) {
+                served.insert(executable, hash);
+            }
         }
         let network = needs_netcode(assembly);
         let mut netcode_key = String::new();
@@ -1870,21 +1878,25 @@ impl Compiler {
             text.push_str("\"\n");
         }
         sys::write(&response, text.as_bytes())?;
-        let (output, error) = match compiler_command(
+        let outputs = [
+            dll.clone(),
+            format!("{}.pdb", dll.strip_suffix(".dll").unwrap_or(&dll)),
+        ];
+        let (output, error) = match super::csc_command(
             ctx,
+            self.compiler_server.as_deref(),
+            self.verify_compiles,
             &self.project,
             &self.dotnet,
             &[&self.csc, &format!("@{response}")],
+            &served,
+            &outputs,
         ) {
             Ok(output) => (output, None),
             Err(error) => (error.output, Some(error.message)),
         };
         let listing = String::from_utf8_lossy(&output);
-        if error.is_some()
-            || listing.contains("CS8032")
-            || listing.contains("CS8784")
-            || listing.contains("CS8785")
-        {
+        if error.is_some() || super::analyzer_failure(&listing) {
             bail!(
                 "compile {} failed: {}\n{listing}",
                 assembly.name,

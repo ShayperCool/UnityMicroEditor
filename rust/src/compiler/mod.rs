@@ -12,6 +12,7 @@ mod phases;
 mod prepare;
 mod revision;
 mod script_types;
+mod server;
 mod source_graph;
 mod stamp;
 mod sys;
@@ -37,6 +38,7 @@ pub use prepare::{
     prepare_compiler_graph_with, publish_baseline, register_compiler_assembly_slots,
 };
 pub use revision::{CodeRevision, player_files};
+pub use server::{Client as CompilerClient, CompilerServer, analyzer_failure, csc_command};
 pub use source_graph::{managed_plugin, remove_source_native_initializers};
 pub use stamp::{PlayerMap, Stamp};
 pub use sys::{BUILD_WITHOUT_SERVERS, CommandError, compiler_command, glob, path_match};
@@ -527,6 +529,37 @@ pub struct Compiler {
     /// The file map of the directory of `player`, when this process made
     /// or read it.
     pub player_map: Option<Arc<PlayerMap>>,
+    /// The compiler server of a watched session; `None` compiles every
+    /// assembly in a process of its own.
+    pub compiler_server: Option<Arc<CompilerServer>>,
+    /// `UME_COMPILER_VERIFY=1`: every served compile is compared with a
+    /// compile in a process of its own.
+    pub verify_compiles: bool,
+}
+
+/// `UME_COMPILER_COLD=1`: a session starts no process that outlives one
+/// request and keeps no hash between two compiles.
+pub fn compiler_cold() -> bool {
+    std::env::var_os("UME_COMPILER_COLD").is_some_and(|value| value == "1")
+}
+
+impl Compiler {
+    /// Gives a compiler the processes and caches that a watched session
+    /// keeps between two compiles, unless `UME_COMPILER_COLD=1`. Nothing
+    /// starts here: each starts at its first use, on the calling thread,
+    /// whose end ends it.
+    pub fn serve(&mut self, output: &str) {
+        self.verify_compiles =
+            std::env::var_os("UME_COMPILER_VERIFY").is_some_and(|value| value == "1");
+        if compiler_cold() {
+            return;
+        }
+        self.compiler_server = Some(Arc::new(CompilerServer::new(
+            &self.dotnet,
+            &self.csc,
+            output,
+        )));
+    }
 }
 
 /// `<player dir>/<player stem>_Data`.
