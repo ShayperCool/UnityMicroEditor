@@ -370,6 +370,124 @@ internal sealed partial class Differ
                 ? $"{id} is code that the Netcode post-processor generates, and it {(inOld && inNew ? "changed" : inNew ? "is new" : "is gone")}; the Player took what it says when the objects of {type} were initialized."
                 : $"{id} {(inOld && inNew ? "changed" : inNew ? "is new" : "is gone")}; in a NetworkBehaviour a method whose name starts with two underscores is taken for code of the Netcode post-processor that runs when the Player starts or an object is initialized, and the patch builder does not know this one.");
         }
+        DiffReadPermissions(ot, nt, type);
+    }
+
+    const string ReadPermission = "Unity.Netcode.NetworkVariableReadPermission";
+
+    /// The read permission each network variable of a type is constructed with, by the field
+    /// that stores it: the code of that argument of every `newobj` of a constructor that takes a
+    /// NetworkVariableReadPermission (NetworkVariable<T>, NetworkList<T>), in the methods of the
+    /// type. A construction whose argument cannot be cut out of the code around it is kept whole.
+    static Dictionary<string, List<string>> ReadPermissions(Asm a, Canon canon, TypeDefinitionHandle type)
+    {
+        var found = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var m in a.MD.GetTypeDefinition(type).GetMethods())
+        {
+            var d = a.MD.GetMethodDefinition(m);
+            if (d.RelativeVirtualAddress == 0 || Netcode.Generated(a.MD.GetString(d.Name))) continue;
+            var code = canon.Instructions(m);
+            for (int i = 0; i < code.Count; i++)
+            {
+                if (code[i].OpCode != IL.Newobj) continue;
+                var parameters = ConstructorParameters(code[i].Text);
+                // A type of another assembly is written with its scope: `[Unity.Netcode.Runtime]Unity...`.
+                int position = parameters.FindIndex(p => p == ReadPermission || p.EndsWith("]" + ReadPermission, StringComparison.Ordinal));
+                if (position < 0) continue;
+                string field = i + 1 < code.Count && code[i + 1].OpCode == IL.Stfld ? FieldName(code[i + 1].Text) : "?" + a.MethodKey(m);
+                // Without a part of its own, the argument is compared with all that comes before it.
+                string text = Argument(code, i, parameters.Count, position) ?? "whole:" + string.Join("\n", code.Take(i + 1).Select(x => x.Text));
+                if (!found.TryGetValue(field, out var list)) found[field] = list = new List<string>();
+                list.Add(text);
+            }
+        }
+        foreach (var list in found.Values) list.Sort(StringComparer.Ordinal);
+        return found;
+    }
+
+    /// The parameter types of the constructor a `newobj` text names: `Type::.ctor(A,B):System.Void`.
+    static List<string> ConstructorParameters(string text)
+    {
+        int open = text.IndexOf("::.ctor(", StringComparison.Ordinal);
+        if (open < 0) return new List<string>();
+        open += "::.ctor(".Length;
+        // The signature ends at the parenthesis that closes it; type arguments hold commas.
+        var list = new List<string>();
+        int depth = 0, start = open;
+        for (int i = open; i < text.Length; i++)
+        {
+            char c = text[i];
+            if (c is '<' or '[' or '(') depth++;
+            else if (c is '>' or ']') depth--;
+            else if (c == ')' && depth-- == 0)
+            {
+                if (i > start) list.Add(text[start..i].Trim());
+                break;
+            }
+            else if (c == ',' && depth == 0) { list.Add(text[start..i].Trim()); start = i + 1; }
+        }
+        return list;
+    }
+
+    /// The name of the field a `stfld` text stores into: `Type::name:FieldType`.
+    static string FieldName(string text)
+    {
+        string field = text.LastIndexOf(" = ", StringComparison.Ordinal) is >= 0 and var at ? text[(at + 3)..] : text[(text.IndexOf(' ') + 1)..];
+        int colons = field.IndexOf("::", StringComparison.Ordinal);
+        if (colons < 0) return field;
+        string rest = field[(colons + 2)..];
+        return rest.IndexOf(':') is >= 0 and var end ? rest[..end] : rest;
+    }
+
+    /// The code of argument `position` of the call at `call` that takes `count` arguments: walked
+    /// back from the call while every instruction says what it takes and leaves and none branches.
+    /// Null when the argument cannot be cut out that way.
+    static string? Argument(List<Canon.Instruction> code, int call, int count, int position)
+    {
+        // Where the code of the arguments from `first` to the last begins.
+        int? Start(int first)
+        {
+            int need = count - first, i = call;
+            while (need > 0)
+            {
+                if (--i < 0) return null;
+                var x = code[i];
+                if (x.Branches || x.Pops < 0 || x.Pushes < 0) return null;
+                need += x.Pops - x.Pushes;
+                if (need < 0) return null;
+            }
+            return i;
+        }
+        if (Start(position) is not { } begin) return null;
+        int end = position + 1 < count ? Start(position + 1) ?? -1 : call;
+        if (end < begin) return null;
+        return string.Join("\n", code.Skip(begin).Take(end - begin).Select(x => x.Text));
+    }
+
+    /// A network variable whose read permission changed: NGO writes a variable into the spawn
+    /// and synchronization payload of an object only for a client its own copy says may read it,
+    /// and a reader reads it only when its copy says so. The objects that exist keep the old
+    /// permission, every Player started on the new code builds them with the new one, and the two
+    /// read each other's payload out of step (EnsureNetworkVariableLengthSafety is off by
+    /// default). The initial value and the write permission are not on the wire that way and
+    /// are patched as constructor code.
+    void DiffReadPermissions(TypeDefinitionHandle ot, TypeDefinitionHandle nt, string type)
+    {
+        var olds = ReadPermissions(o, co, ot);
+        var news = ReadPermissions(n, cn, nt);
+        var fields = new SortedSet<string>(olds.Keys, StringComparer.Ordinal);
+        fields.UnionWith(news.Keys);
+        foreach (string field in fields)
+        {
+            var before = olds.GetValueOrDefault(field) ?? new List<string>();
+            var after = news.GetValueOrDefault(field) ?? new List<string>();
+            if (before.SequenceEqual(after)) continue;
+            string member = field.StartsWith('?') ? type : type + "::" + field;
+            // An added, removed or renamed variable has its reason already.
+            if (Changes.Any(c => c.Code == Codes.NetcodeVariableChanged && c.Member == member)) continue;
+            Refuse("netcode_variable", member, Codes.NetcodeVariableChanged,
+                $"The read permission with which the network variable {member} is constructed changed; each end of a connection decides from its own copy whether the variable is in an object's spawn and synchronization data, the objects that exist keep the old permission and a Player started on the new code uses the new one, so the two would read that data out of step.");
+        }
     }
 
     void DiffVariables(TypeDefinitionHandle ot, TypeDefinitionHandle nt, string type, string id, MethodDefinitionHandle before, MethodDefinitionHandle after)
