@@ -111,8 +111,14 @@ internal static class Served
         if (root.TryGetProperty("previousResult", out var previous)) Add(previous.GetString());
         foreach (var a in root.GetProperty("assemblies").EnumerateArray())
         {
-            Add(a.GetProperty("loaded").GetString());
+            string loaded = a.GetProperty("loaded").GetString() ?? "";
+            Add(loaded);
             Add(a.GetProperty("current").GetString());
+            // The builder also reads the assemblies next to a loaded one: for base types, and for
+            // code that may name an added method by a string. One written there later is a change.
+            string directory = Path.GetDirectoryName(loaded) ?? "";
+            if (directory.Length > 0 && Directory.Exists(directory))
+                foreach (string file in Directory.GetFiles(directory, "*.dll")) Add(file);
         }
         return inputs;
     }
