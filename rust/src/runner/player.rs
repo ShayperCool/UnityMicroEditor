@@ -188,6 +188,35 @@ struct Ready {
     graphics_device_type: String,
     scene_loaded: bool,
 }
+/// The first message of a development Player's log that has the stack
+/// trace of an error, an exception or an assertion below it, cut to 300
+/// bytes. Development Players write every message with its trace.
+pub(crate) fn first_logged_error(log: &str) -> Option<String> {
+    use std::io::{BufRead, BufReader, Read};
+    const MARKS: [&str; 5] = [
+        "UnityEngine.Debug:LogError",
+        "UnityEngine.Debug:LogException",
+        "UnityEngine.Debug:LogAssertion",
+        "UnityEngine.Debug:ExtractStackTraceNoAlloc",
+        "UnityEngine.Debug:LogErrorFormat",
+    ];
+    let file = std::fs::File::open(log).ok()?;
+    let mut previous = String::new();
+    for line in BufReader::new(file.take(64 << 20)).lines().take(200_000) {
+        let line = line.ok()?;
+        if MARKS.iter().any(|mark| line.starts_with(mark)) && !previous.trim().is_empty() {
+            let message = previous.trim();
+            let mut end = message.len().min(300);
+            while !message.is_char_boundary(end) {
+                end -= 1;
+            }
+            return Some(message[..end].to_string());
+        }
+        previous = line;
+    }
+    None
+}
+
 fn read_ready(path: &str) -> Result<Ready> {
     let document = read_document(path)?;
     let mut ready = Ready::default();
@@ -311,8 +340,20 @@ impl Player {
                 || ready.errors != 0
                 || ready.exceptions != 0
             {
+                // The counts alone leave the caller to find the log; the
+                // first error it shows is what the caller acts on (mcp6-5).
+                let log = sysutil::join(&[&sysutil::dir(&self.report), "player.log"]);
+                let logged = match (ready.errors + ready.exceptions > 0, first_logged_error(&log)) {
+                    (true, Some(first)) => format!(
+                        "; the Player logged errors or exceptions before it was ready, which a session does not take as started; the first: \"{first}\"; see {log}"
+                    ),
+                    (true, None) => format!(
+                        "; the Player logged errors or exceptions before it was ready, which a session does not take as started; see {log}"
+                    ),
+                    (false, _) => format!("; see {log}"),
+                };
                 bail!(
-                    "invalid Player ready report: pid={} errors={} exceptions={} loaded={}",
+                    "invalid Player ready report: pid={} errors={} exceptions={} loaded={}{logged}",
                     ready.pid,
                     ready.errors,
                     ready.exceptions,
