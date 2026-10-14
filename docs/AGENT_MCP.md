@@ -672,6 +672,11 @@ Only a recompile applies what a note names:
   (`added_method_named_by_string`): it does nothing until a recompile.
   The session's loader does not apply `[FormerlySerializedAs]`, also not
   after a recompile: a renamed field loses the scene value of its old name.
+  `scene_edit` `set_property` writes a field the scene does not hold yet when
+  the component's script declares it as one Unity serializes (public or
+  `[SerializeField]`, not static, const or readonly), so the value of a field
+  a patch added can be given in the scene; the reply then says that the
+  Player does not read it before a recompile.
 - An added method that a string of the game names is not found by that name
   (`added_method_named_by_string`): `Invoke("Blast", 1f)`, `SendMessage` and
   `StartCoroutine("Blast")` look in the loaded class and do nothing. The

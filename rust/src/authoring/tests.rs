@@ -338,6 +338,90 @@ fn script_creation_attachment_editing_and_guid_preservation() {
     create.operation_id = "duplicate-script".into();
     code(store.create_script(&create), "duplicate_guid");
 }
+/// A field added to a script after the scene was saved (by a hot reload
+/// patch, for example) has no key in the component yet: set_property writes
+/// it when the script declares it as a field Unity serializes, and refuses
+/// a name the script does not declare so (stage 5 mcp5-2).
+#[test]
+fn set_property_adds_a_field_the_script_declares() {
+    let (_temp, store, source) = fixture(SCENE);
+    let create = script(
+        "Assets/Scripts/Lamp.cs",
+        "create-lamp",
+        "using UnityEngine;\npublic class Lamp : MonoBehaviour\n{\n    public float dim = 0.5f;\n}\n",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    store.create_script(&create).unwrap();
+    let attached = edit(&store, &source, "attach-lamp", json!([{"action": "add_component", "fileId": "100", "key": "lamp", "scriptPath": "Assets/Scripts/Lamp.cs", "fields": {"dim": 0.5}}])).unwrap();
+    let lamp = attached.mutation.created_ids["lamp"].clone();
+    // The script gains fields; the scene does not have them.
+    let authored = store.read_script("Assets/Scripts/Lamp.cs").unwrap();
+    store
+        .edit_script(&ScriptRequest {
+            path: authored.path.clone(),
+            expected_revision: authored.revision.clone(),
+            operation_id: "grow-lamp".into(),
+            content: authored.content.replacen(
+                "    public float dim = 0.5f;\n",
+                "    public float dim = 0.5f;\n    [SerializeField] private float glowCut = 0.9f;\n    public static int count;\n    private int hidden;\n",
+                1,
+            ),
+            guid: String::new(),
+        })
+        .unwrap();
+    let latest = store.read(PATH).unwrap();
+    edit(
+        &store,
+        &latest,
+        "set-glow",
+        json!([{"action": "set_property", "fileId": lamp, "property": "glowCut", "value": 0.25}]),
+    )
+    .unwrap();
+    let text = fs::read_to_string(_temp.path().join(PATH)).unwrap();
+    assert!(text.contains("\n  glowCut: 0.25\n"), "{text}");
+    // Set again: now it is an ordinary key.
+    let latest = store.read(PATH).unwrap();
+    edit(
+        &store,
+        &latest,
+        "set-glow-again",
+        json!([{"action": "set_property", "fileId": lamp, "property": "glowCut", "value": 0.5}]),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(_temp.path().join(PATH))
+            .unwrap()
+            .matches("glowCut:")
+            .count(),
+        1
+    );
+    // Not serialized, or not declared at all: the path stays absent.
+    for property in ["count", "hidden", "glowCutt"] {
+        let latest = store.read(PATH).unwrap();
+        code(
+            edit(
+                &store,
+                &latest,
+                &format!("set-{property}"),
+                json!([{"action": "set_property", "fileId": lamp, "property": property, "value": 1}]),
+            ),
+            "unsupported_property",
+        );
+    }
+}
+#[test]
+fn a_declared_field_is_found_in_the_source() {
+    use super::edit::declares_serialized_field as declares;
+    let source = "public class A : MonoBehaviour {\n  public float speed = 1f;\n  [SerializeField] private int armor;\n  [SerializeField, Range(0, 1)] float tint = 0.5f;\n  public static int count;\n  public const int Max = 3;\n  public readonly int fixedOne = 1;\n  private int hidden;\n  public void Jump() { }\n  public int Health { get; set; }\n  void Update() { int local = 2; return; }\n}\n";
+    for name in ["speed", "armor", "tint"] {
+        assert!(declares(source, name), "{name}");
+    }
+    for name in [
+        "count", "Max", "fixedOne", "hidden", "Jump", "Health", "local", "missing",
+    ] {
+        assert!(!declares(source, name), "{name}");
+    }
+}
 #[test]
 fn external_references_prevent_deletion() {
     let (temp, store, source) = fixture(SCENE);
