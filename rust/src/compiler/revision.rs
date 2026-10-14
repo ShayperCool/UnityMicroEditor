@@ -138,6 +138,11 @@ impl Compiler {
     /// The map of the baseline Player directory: hashed once, then checked
     /// by `stat` at every use and hashed again when anything moved.
     pub fn baseline_player_map(&self, directory: &str) -> Result<Arc<PlayerMap>> {
+        // `UME_COMPILER_COLD=1` (the hash cache off) reads it in full every
+        // time, as before the session kept anything (caches6-4).
+        if !self.hashes.is_on() {
+            return Ok(Arc::new(PlayerMap::read(directory)?));
+        }
         let mut kept = self.baseline_map.lock().unwrap();
         if let Some(map) = kept.as_ref()
             && map.directory == directory
@@ -153,6 +158,9 @@ impl Compiler {
     /// The map of `directory` this process holds and can still vouch for
     /// by `stat`: that of the current Player directory or of the baseline.
     pub fn known_player_map(&self, directory: &str) -> Option<Arc<PlayerMap>> {
+        if !self.hashes.is_on() {
+            return None;
+        }
         if let Some(map) = &self.player_map
             && map.directory == directory
         {
