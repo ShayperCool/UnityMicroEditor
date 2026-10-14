@@ -181,6 +181,71 @@ internal sealed class Canon
         return list;
     }
 
+    /// One instruction of a body: its opcode, what its token means (or the hex of its other
+    /// operand), and how many values it takes from the stack and leaves on it. -1 for a count
+    /// that the instruction alone does not tell (`ret`, a branch, `leave`).
+    public readonly record struct Instruction(ushort OpCode, string Text, int Pops, int Pushes, bool Branches);
+
+    /// The instructions of a body in order; empty without one.
+    public List<Instruction> Instructions(MethodDefinitionHandle method)
+    {
+        var list = new List<Instruction>();
+        var d = md.GetMethodDefinition(method);
+        if (d.RelativeVirtualAddress == 0) return list;
+        Reset(false);
+        var body = a.PE.GetMethodBody(d.RelativeVirtualAddress);
+        byte[] il = body.GetILBytes() ?? Array.Empty<byte>();
+        var targets = new HashSet<int>();
+        foreach (var region in body.ExceptionRegions) { targets.Add(region.TryOffset); targets.Add(region.HandlerOffset); }
+        var r = new IL.Reader(il);
+        while (r.Read())
+        {
+            string text;
+            int pops, pushes;
+            if (IL.IsToken(r.Operand))
+            {
+                int token = BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(r.OperandOffset));
+                if (r.Operand == OperandType.InlineString)
+                {
+                    text = "S:" + md.GetUserString(MetadataTokens.UserStringHandle(token & 0xFFFFFF));
+                    (pops, pushes) = IL.Stack(r.OpCode);
+                }
+                else
+                {
+                    var h = MetadataTokens.EntityHandle(token);
+                    text = Tok(h);
+                    (pops, pushes) = r.Operand == OperandType.InlineMethod ? CallStack(r.OpCode, h) : IL.Stack(r.OpCode);
+                }
+            }
+            else
+            {
+                text = Convert.ToHexString(il, r.OperandOffset, r.Next - r.OperandOffset);
+                (pops, pushes) = IL.Stack(r.OpCode);
+            }
+            bool branches = r.Operand is OperandType.ShortInlineBrTarget or OperandType.InlineBrTarget or OperandType.InlineSwitch || targets.Contains(r.Offset);
+            list.Add(new Instruction(r.OpCode, r.OpCode.ToString("X") + " " + text, pops, pushes, branches));
+        }
+        return list;
+    }
+
+    /// What a call, `newobj` or `jmp` takes and leaves, from the signature of its method.
+    (int Pops, int Pushes) CallStack(ushort opcode, EntityHandle h)
+    {
+        if (h.Kind == HandleKind.MethodSpecification) h = md.GetMethodSpecification((MethodSpecificationHandle)h).Method;
+        MethodSignature<string> signature;
+        if (h.Kind == HandleKind.MethodDefinition) signature = md.GetMethodDefinition((MethodDefinitionHandle)h).DecodeSignature(a.Plain, null);
+        else if (h.Kind == HandleKind.MemberReference) signature = md.GetMemberReference((MemberReferenceHandle)h).DecodeMethodSignature(a.Plain, null);
+        else return (-1, -1);
+        int parameters = signature.ParameterTypes.Length;
+        bool returns = signature.ReturnType != "System.Void";
+        return opcode switch
+        {
+            0x73 => (parameters, 1), // newobj
+            IL.Ldftn or IL.Ldvirtftn => (opcode == IL.Ldvirtftn ? 1 : 0, 1),
+            _ => (parameters + (signature.Header.IsInstance ? 1 : 0), returns ? 1 : 0),
+        };
+    }
+
     /// The start of a body, up to and including its first store into a field whose text contains
     /// `endField`; null when the body has no such store, or when that part is not a block of its
     /// own (a branch leaves it, or a protected region begins in it). A local variable is written

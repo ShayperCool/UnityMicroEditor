@@ -344,9 +344,37 @@ internal static class IL
         }
     }
 
-    public const ushort Call = 0x28, Callvirt = 0x6F, Ldfld = 0x7B, Ldflda = 0x7C, Stfld = 0x7D,
-        Ldsfld = 0x7E, Ldsflda = 0x7F, Stsfld = 0x80, Ldftn = 0xFE06,
+    public const ushort Call = 0x28, Callvirt = 0x6F, Newobj = 0x73, Ldfld = 0x7B, Ldflda = 0x7C, Stfld = 0x7D,
+        Ldsfld = 0x7E, Ldsflda = 0x7F, Stsfld = 0x80, Ldftn = 0xFE06, Ldvirtftn = 0xFE07,
         Localloc = 0xFE0F, Unaligned = 0xFE12, Volatile = 0xFE13, Constrained = 0xFE16;
+
+    static readonly Dictionary<ushort, OpCode> codes = typeof(OpCodes).GetFields(BindingFlags.Public | BindingFlags.Static)
+        .Select(f => f.GetValue(null)).OfType<OpCode>().ToDictionary(op => unchecked((ushort)op.Value));
+
+    /// How many values an instruction takes from the stack and leaves on it, as far as its opcode
+    /// tells; -1 where the operand decides (a call) or nothing is left to count (`ret`, `throw`).
+    public static (int Pops, int Pushes) Stack(ushort opcode)
+    {
+        if (!codes.TryGetValue(opcode, out var op)) return (-1, -1);
+        int pops = op.StackBehaviourPop switch
+        {
+            StackBehaviour.Pop0 => 0,
+            StackBehaviour.Pop1 or StackBehaviour.Popi or StackBehaviour.Popref => 1,
+            StackBehaviour.Pop1_pop1 or StackBehaviour.Popi_pop1 or StackBehaviour.Popi_popi or StackBehaviour.Popi_popi8 or StackBehaviour.Popi_popr4
+                or StackBehaviour.Popi_popr8 or StackBehaviour.Popref_pop1 or StackBehaviour.Popref_popi => 2,
+            StackBehaviour.Popi_popi_popi or StackBehaviour.Popref_popi_popi or StackBehaviour.Popref_popi_popi8 or StackBehaviour.Popref_popi_popr4
+                or StackBehaviour.Popref_popi_popr8 or StackBehaviour.Popref_popi_popref or StackBehaviour.Popref_popi_pop1 => 3,
+            _ => -1,
+        };
+        int pushes = op.StackBehaviourPush switch
+        {
+            StackBehaviour.Push0 => 0,
+            StackBehaviour.Push1 or StackBehaviour.Pushi or StackBehaviour.Pushi8 or StackBehaviour.Pushr4 or StackBehaviour.Pushr8 or StackBehaviour.Pushref => 1,
+            StackBehaviour.Push1_push1 => 2,
+            _ => -1,
+        };
+        return (pops, pushes);
+    }
 
     public static bool IsToken(OperandType t) => t is OperandType.InlineField or OperandType.InlineMethod or OperandType.InlineSig
         or OperandType.InlineString or OperandType.InlineTok or OperandType.InlineType;

@@ -720,7 +720,8 @@ still runs the old body. What Netcode registers once when the Player starts or
 an object is initialized needs a recompile, with a reason code of its own: an
 RPC added, removed or renamed, or its parameters, its attribute or the code
 that sends or receives it changed (`netcode_rpc_changed`); a network variable
-added, removed, renamed, retyped or reordered (`netcode_variable_changed`); a
+added, removed, renamed, retyped or reordered, or its read permission changed
+(`netcode_variable_changed`); a
 serializer Netcode registers for a new value type
 (`netcode_serialization_changed`); any other change of the generated start-up
 code (`netcode_generated_code_changed`). An assembly whose post-processed image

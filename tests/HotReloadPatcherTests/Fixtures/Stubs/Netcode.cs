@@ -63,9 +63,20 @@ namespace Unity.Netcode
         public void Initialize(NetworkBehaviour behaviour) { }
     }
 
+    public enum NetworkVariableReadPermission { Everyone, Owner }
+    public enum NetworkVariableWritePermission { Server, Owner }
+
     public class NetworkVariable<T> : NetworkVariableBase
     {
         public T Value;
+        public NetworkVariable(T value = default, NetworkVariableReadPermission readPerm = NetworkVariableReadPermission.Everyone,
+            NetworkVariableWritePermission writePerm = NetworkVariableWritePermission.Server) { Value = value; }
+    }
+
+    public class NetworkList<T> : NetworkVariableBase
+    {
+        public NetworkList(IEnumerable<T> values = default, NetworkVariableReadPermission readPerm = NetworkVariableReadPermission.Everyone,
+            NetworkVariableWritePermission writePerm = NetworkVariableWritePermission.Server) { }
     }
 
     public static class NetworkVariableSerializationTypes

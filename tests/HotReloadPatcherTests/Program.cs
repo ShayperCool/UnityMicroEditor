@@ -665,6 +665,12 @@ internal static class Program
         // A method only OnNetworkSpawn calls, and the authority NetworkTransform takes at spawn.
         ["SPAWN_HOOK"] = Patch().Redirects("changed " + Thing + "::Arm()").Noted("spawned_objects_keep_state " + Thing + "::Arm()"),
         ["AUTHORITY"] = Patch().Redirects("changed Net.ClientMover::OnIsServerAuthoritative()").Noted("spawned_objects_keep_state Net.ClientMover::OnIsServerAuthoritative()"),
+        // The initial value and the write permission of a network variable are constructor code;
+        // its read permission decides the spawn data both ends read.
+        ["VARIABLE_INITIAL"] = Patch().Redirects("changed Net.NetPerm::.ctor()").Noted("constructor_applies_to_new_objects Net.NetPerm::.ctor()"),
+        ["VARIABLE_WRITE"] = Patch().Redirects("changed Net.NetPerm::.ctor()").Noted("constructor_applies_to_new_objects Net.NetPerm::.ctor()"),
+        ["VARIABLE_READ"] = Refused("netcode_variable_changed Net.NetPerm::Secret"),
+        ["LIST_READ"] = Refused("netcode_variable_changed Net.NetPerm::Items"),
         ["METHOD_ADDED"] = Patch().Methods(Thing + "::Helper()").Noted("added_method_invisible_by_name " + Thing + "::Helper()"),
         ["FIELD_ADDED"] = Patch().Redirects("changed " + Thing + "::Value()").Fields(Thing + "::plain").Noted("serialized_field_not_restored " + Thing + "::plain"),
         // Patched: the body of an RPC, while the code in front of it that sends it is as it was.

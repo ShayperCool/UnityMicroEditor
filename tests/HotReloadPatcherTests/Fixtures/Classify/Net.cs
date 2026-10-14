@@ -306,6 +306,46 @@ namespace Net
 #endif
     }
 
+    // Network variables constructed with a read permission: in a field initializer, and a list
+    // in Awake. The read permission decides what is in an object's spawn data.
+    public class NetPerm : NetworkBehaviour
+    {
+#if CASE_NET_VARIABLE_READ
+        public NetworkVariable<int> Secret = new NetworkVariable<int>(11, NetworkVariableReadPermission.Owner);
+#elif CASE_NET_VARIABLE_INITIAL
+        public NetworkVariable<int> Secret = new NetworkVariable<int>(12);
+#elif CASE_NET_VARIABLE_WRITE
+        public NetworkVariable<int> Secret = new NetworkVariable<int>(11, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Owner);
+#else
+        public NetworkVariable<int> Secret = new NetworkVariable<int>(11);
+#endif
+        public NetworkList<int> Items;
+        // A string the constructor loads: the reading of its code must take it.
+        public string label = "perm";
+
+        private void Awake()
+        {
+#if CASE_NET_LIST_READ
+            Items = new NetworkList<int>(null, NetworkVariableReadPermission.Owner);
+#else
+            Items = new NetworkList<int>();
+#endif
+        }
+
+        protected override void __initializeRpcs() { base.__initializeRpcs(); }
+        protected override void __initializeVariables()
+        {
+            Secret.Initialize(this);
+            __nameNetworkVariable(Secret, "Secret");
+            NetworkVariableFields.Add(Secret);
+            Items.Initialize(this);
+            __nameNetworkVariable(Items, "Items");
+            NetworkVariableFields.Add(Items);
+            base.__initializeVariables();
+        }
+        protected override string __getTypeName() => "NetPerm";
+    }
+
 #if CASE_NET_BECAME
     public class Late : NetworkBehaviour
     {
