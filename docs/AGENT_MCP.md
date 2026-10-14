@@ -290,71 +290,136 @@ GUIDs remain intact. An external edit or unsupported deletion is rejected before
 publication. Keep external source writers
 out of the target during transactions; they do not join our lock.
 
-Before an edit, retain `session_control(status).lastSequence`. After a changed
-commit, call `wait_update` with `afterSequence`. A scene `updated` ACK, a
+After a changed commit, call `wait_update`. A scene `updated` ACK, a
 `code-patched` confirmation, or confirmed `code-updated`/`content-updated`
 readiness, proves application rather than behavior.
 Read the current PID/revision, inspect values, check logs, and run an assertion.
 
-Several edits may precede one `wait_update`: take `lastSequence` before the
-first of them and wait once after the last. Every `wait_update` and `wait`
-first asks the runner to say when it has answered every source change that was
-saved before the call, and returns only after that. The reply is therefore the
+Every `wait_update` and `wait` first asks the runner to say when it has
+answered every source change that was saved before the call, and returns only
+after that: several edits may precede one call. The reply is therefore the
 outcome of the last save, whether the saves were milliseconds or minutes
 apart, and a compile error of the first of two files that the second file
-repairs is not reported. Two things are left to the caller. A save must have
-returned before the wait is called: an edit made while the call runs, for
-example a `script_edit` sent in parallel with it, may not be covered. And
-`afterSequence` matters: without it any earlier update or rejection of the
-session counts as the answer when the saves changed nothing the runner reads.
-`status` does not ask the runner; right after a save it shows the state from
-before it.
+repairs is not reported. A save must have returned before the wait is called:
+an edit made while the call runs, for example a `script_edit` sent in parallel
+with it, may not be covered. `status` does not ask the runner; right after a
+save it shows the state from before it.
 
-`wait` reports an edit exactly as `wait_update` does and in addition needs a
-ready Player: it also returns when a Player becomes ready after a start or a
-restart. A wait has no time limit of its own. `timeoutSeconds` gives it one;
-when it is over the call fails with the error code `wait_timeout`, whose
-message and `details` (`phase`, `lastSequence`, `lastUpdateSequence`,
+Once the runner has answered, works on nothing and a Player is ready, the wait
+reports what stands, whatever the caller has read before:
+
+| What stands | The reply |
+| --- | --- |
+| The Player runs the saved sources | Success, with the session state. |
+| A compile error | Failure with the compiler's text. The Player keeps the code it had. |
+| A scene or asset the Player or the importer would not take | Failure: `The scene or asset part of the save was rejected: ...`, and, when the C# part of the same save was patched in, that it is applied. |
+| An edit that compiled and cannot be patched | Failure with the error code `full_recompile_required` (see [Hot reload](#hot-reload)). |
+
+A rejection stands until an update follows it, so a caller that has read a
+compile error and waits again with its sequence is told the same error again,
+not sent to a recompile that could not succeed. Nothing but a new save changes
+the answer, and no wait is held for one.
+
+`afterSequence` says what is news to the caller: the reply lists the events
+after it and reports the notes they brought. Take
+`session_control(status).lastSequence` before the first of the edits. Without
+the argument the mark is the last sequence that a `wait`, a `wait_update` or a
+`hot_reload(recompile)` of this session reported, which is right for a caller
+that waits after each of its edits. When nothing was applied or rejected after
+the mark, the reply is a success that starts with `attention`:
+`Nothing was applied or rejected after afterSequence N: ...`. That is the
+answer for a save that changed nothing the runner reads (a path outside
+`Assets`, `Packages` and `ProjectSettings`, a file kind it does not watch, a
+file that is still open) and for a mark that was read after the answer. A
+failed call returns no session state; the `details` of
+`full_recompile_required` and of `wait_timeout` carry `lastSequence`. An
+`afterSequence` above `lastSequence` (a mark read before the session started
+again, which counts its events anew) is answered like any other mark: what
+stands is reported, and otherwise `attention` says that the mark is of another
+session and names this session's `lastSequence`.
+
+`wait` reports an edit exactly as `wait_update` does; it is the call after a
+start or a restart, where the Player becoming ready is the news. Both are held
+while the session starts, while the runner compiles or marks its answer as not
+its last (`updatePending`), and while a recompile is under way. A wait has no
+time limit of its own. `timeoutSeconds` (1 to 86400) gives it one; when it is
+over the call fails with the error code `wait_timeout`, whose message and
+`details` (`phase`, `lastSequence`, `lastUpdateSequence`,
 `lastUpdateRejectedSequence`, `updatePending`, `runnerAnswered`,
 `afterSequence`) say what the session was doing. Nothing was decided, and the
-same call can be made again.
+same call can be made again. A client that gives up on a call cancels it, and
+that reply is `cancelled`.
 
 A C# edit is applied to the running Player when possible and keeps game state.
 An edit that cannot be applied live fails `wait_update` and `wait` with
 `full_recompile_required`; `hot_reload(recompile)` then restarts the Player and
 resets game state (see [Hot reload](#hot-reload)). Ordinary compile failures
 retain the last confirmed Player and fail both waits with the compiler's text.
+The state keeps the first 4 KiB of a rejection, cut at a line; a longer one
+ends with the number of bytes left out and the file under the session output
+(`rejections/<sequence>.txt`) that holds all of it.
+
 A graph/configuration rejection cannot be applied to the running Player at
 all: an added or removed `.asmdef`, a deleted script file, a new `.cs` in an
 assembly the prepared graph does not hold, a changed package. The session
 state then has `preparationRequired: true` next to `updateError`, and `status`,
-`wait_update` and `wait` queue a fresh source preparation automatically.
-`status` keeps its normal shape and adds `preparationReason` and `preparation`;
-the waits answer `result_pending` with the phase `preparing_configuration`.
-The old Player remains available while it compiles, and replacement occurs
-only after successful preparation. A session that could not start because the
-sources have left the prepared graph (a `reset` after such an edit ends with
-the phase `failed` and the runner's text about a fresh managed graph) is
-recovered the same way by the next `status` or wait. Sources the project was
-prepared for before (an edit that was undone and made again, a branch switched
-back) need no new preparation: the call that finds theirs restarts the session
-on it at once. `status` then returns the session as it starts, without
-`preparationRequired`, and a wait answers `result_pending` once more, with a
-`message` that says so. When the preparation cannot be queued,
+`wait_update` and `wait` recover from it automatically. Nothing is done on an
+answer the runner marked as not its last (`updatePending`): the rejection may
+be taken back by the next one.
+
+- A preparation the project already has for the saved sources is used: the one
+  a session started on when an edit that left its graph is undone, the one of
+  the edit when it is made again, a branch switched back. What counts is what
+  a preparation was made from, not what it is called: its compiler plan must
+  accept the sources on disk, which is the check a start of the runner makes
+  (every assembly definition, package and project setting as the preparation
+  recorded it, and no managed configuration in `Assets` outside its graph;
+  C# sources may differ and are compiled at the start). The newest eight
+  preparations of the scene are looked at. The call that finds one restarts
+  the session on it at once: `status` returns the session as it starts,
+  without `preparationRequired`, and a wait answers `result_pending` with a
+  `message` that says so. The restart is finished also when its caller gives
+  up meanwhile.
+- Otherwise a fresh source preparation is queued. `status` keeps its normal
+  shape and adds `preparationReason` and `preparation`; the waits answer
+  `result_pending` with the phase `preparing_configuration` and a `message`.
+  The old Player remains available while it compiles, and replacement occurs
+  only after successful preparation. A wait that is held while the Player is
+  replaced answers `result_pending` too, and so does a `start` or `reset`
+  that is sent while a preparation runs: it returns the stage at once instead
+  of waiting for the preparation to end. When the sources were changed again
+  while they were prepared (the edit was taken back), the preparation
+  replaces no Player.
+
+The request id of such a preparation is `config-` and a hash of the scene and
+the sources. A receipt is durable, and its name can be wrong about it: the
+job reads the sources after the id was computed, so an edit that is taken
+back in between is prepared under the name of the edit. A confirmed receipt is
+therefore used only when its preparation fits the sources, and one that does
+not is passed over for the next id of the same sources. A receipt whose job
+failed is the answer to its request (`preparationError` on `status`, the
+failure on a wait), since the same sources would fail the same way; a repair
+changes the sources and with them the id.
+
+A session that could not start because the sources have left the prepared
+graph (a `reset` after such an edit ends with the phase `failed` and the
+runner's text about a fresh managed graph) is recovered the same way by the
+next `status` or wait. When the sources cannot be read for the recovery,
 `status` still returns the session state, with `preparationError`, and the
 waits fail with the rejection and the calls that are left: `project_prepare`
 with the scene and `activate: true`, or `session_control(reset)`.
 
 A reply with the session state lists the newest 8 of the session's events in
-`events`, a wait those after its `afterSequence` (at most 16) and
-`hot_reload(recompile)` those of its restart. `eventsOmitted` counts the kept
-events that are not listed, and the argument `events` (0 to 64) asks for
-another number. Two members of the runner's events are left out of a reply:
-the hashes of every source that a `code-updated` event carries, and `notes`,
-the list of everything that stands since the Player started, which every
-event of a patch repeats. That list is in the state, as `hotReload.notes` and
-`hotReload.lastPatch.notes`; an event keeps `notesCount`, the `newNotes` it
-brought itself and the report.
+`events`, a wait those after its mark (at most 16) and `hot_reload(recompile)`
+those of its restart. `eventsOmitted` counts the kept events that are not
+listed, and the argument `events` (0 to 64) asks for another number. An event
+in a reply says what happened; what stands since is in the state, and the
+lists that repeat it are left out of a listed event: the hashes of every
+source that a `code-updated` carries, `notes`, `newNotes`, `members` and
+`unsupported` (`hotReload.notes`, `hotReload.lastPatch`, `hotReload.newNotes`
+and `hotReload.unsupported` have them; the event keeps the counts and the
+report), and all but the first 512 bytes of an `error`. The session keeps its
+events as the runner printed them.
 
 All source mutations require a stable `operationId`. Exact retry returns its
 original durable result; changed arguments with that ID conflict. Stale source or
@@ -414,23 +479,28 @@ game loses its state.
 | The C# edit | `session_control(wait_update)` | Session state |
 | --- | --- | --- |
 | Applied live | Success; same `pid` and `revision`; the last event is `code-patched` | `hotReload.codeGeneration` is the patch generation, `hotReload.lastPatch` describes the patch |
-| Applied live, and a part of it is not in effect yet (a running coroutine, a value of an existing object) | Success; the reply starts with `attention` | `hotReload.newNotes` lists the parts, with `newNotesCount` and `newNotesSequence` |
+| Applied live, with a limit that lasts until a restart (a coroutine that was running, a value of an existing object, a call by name of an added method) | Success; the reply starts with `attention` | `hotReload.newNotes` lists every note since the mark, with `newNotesCount` and `newNotesSequence` |
+| Applied live, and the runner had to restart the Player for it by itself | Success; the reply starts with `attention`; a new `pid` | `hotReload.lastRestart` |
 | No difference in the compiled code, no patch applied | Success | Unchanged |
 | No difference in the compiled code while a patch is applied (a comment, a blank line) | Success; the last event is `code-patched` | `hotReload.codeGeneration` advances; the game's reload callbacks do not run |
-| Nothing to patch, but not all of the change is in the Player (a method made `public`, a removed `[RuntimeInitializeOnLoadMethod]`) | Success; the reply starts with `attention` | `hotReload.notes` lists it, with `notesCount` and `notesReport`, until the next compile or restart |
+| Nothing to patch, but not all of the change is in the Player (a method made `public`, a removed `[RuntimeInitializeOnLoadMethod]`) | Success; `attention` for a note that matters (see below) | `hotReload.notes` lists it, with `notesCount` and `notesReport`, until the next compile or restart |
+| A scene, prefab or asset that holds a value for a field a patch added | Success; the reply starts with `attention` (`serialized_field_not_restored`) | `hotReload.newNotes` |
 | Cannot be applied live | Error `full_recompile_required` | `hotReload.fullRecompileRequired: true` with `unsupported`, `unsupportedCount` and `report`; `updateError` |
 | Does not compile | Error `operation_failed` with the compiler's text, as before | `updateError` |
 | Needs a new source graph (an `.asmdef` added or removed, a script file deleted) | Pending preparation, as before | `preparationRequired: true` |
 
 `wait_update` and `wait` report success only for a Player that runs the newest
 compiled code. While `hotReload.fullRecompileRequired` is true both fail with
-`full_recompile_required` at once, whatever `afterSequence` is: also for a
-caller that has read the refusal and passes its sequence, and also when a
-scene edit was applied since. The message then adds that a scene or asset
-change confirmed after `afterSequence` is applied, and `status` shows it as
-`lastUpdateSequence` and `revision`. Only a compile error that nothing
-followed is reported first: no recompile can succeed until the sources
-compile.
+`full_recompile_required`, whatever `afterSequence` is: also for a caller
+that has read the refusal and passes its sequence, and also when something
+was applied since. The message then says what the wait did bring, by what it
+was: `an earlier C# edit was applied at sequence N and is in the Player`
+(the first of two edits, of which the second was refused), `a scene or asset
+change confirmed at sequence N is applied`, or that the Player was restarted
+before this edit compiled; `status` shows it as `lastUpdateSequence` and
+`revision`. A confirmation that applied nothing is not mentioned. Only a
+compile error that nothing followed is reported first, for every mark: no
+recompile can succeed until the sources compile.
 
 The `full_recompile_required` reply names the first reason and the call to
 make:
@@ -440,7 +510,7 @@ make:
   "success": false,
   "error": {
     "code": "full_recompile_required",
-    "message": "The C# edit compiled but cannot be applied to the running Player: Game.Boss: a type was added [type_added] (and 2 more). The Player still runs the previous code. Call hot_reload with action \"recompile\" to restart the Player on the new code; game state is reset.",
+    "message": "The C# edit compiled but cannot be applied to the running Player: Game.Boss: a type was added [type_added] (and 2 more). The Player keeps the code it ran before this edit. Call hot_reload with action \"recompile\" to restart the Player on the new code; game state is reset.",
     "details": {
       "unsupported": [
         {"code": "type_added", "member": "Game.Boss", "message": "a type was added"},
@@ -448,7 +518,8 @@ make:
       ],
       "unsupportedCount": 3,
       "report": "ABSOLUTE_PATH_OF_THE_COMPLETE_RESULT",
-      "next": {"tool": "hot_reload", "arguments": {"action": "recompile"}}
+      "next": {"tool": "hot_reload", "arguments": {"action": "recompile"}},
+      "lastSequence": 12
     }
   }
 }
@@ -460,7 +531,8 @@ asset change saved since was rejected by the running Player: ...`) and
 `details.rejected` holds `{"error", "sequence"}` of that rejection. A scene
 that only lacks the refused code is applied by the recompile. A scene that is
 wrong by itself fails the recompile with the same text, and the Player is
-kept.
+kept. `details.lastSequence` is the session's last sequence, the mark for the
+caller's next wait: a failed call returns no session state.
 
 `unsupported` holds at most 16 entries; `unsupportedCount` counts all of them
 and `report` names the file with the complete result. Each entry has a
@@ -530,14 +602,31 @@ its last 16 commands, and a new session starts without any.
 Player and an edit that compiled after that restart was refused: the message
 says so, and the next `recompile` needs a new `requestId`.
 
-An edit that is applied can leave a part of the saved code out of effect.
-The builder says so in notes, each with `code`, `member` and `message`, and
-the session shows them in three places:
+An edit that is applied can have a limit: something the running Player does
+not take over until it restarts. The builder says so in notes, each with
+`code`, `member` and `message`, and the session shows them in three places:
 
-- `hotReload.newNotes`: the notes that the last change of the Player's code
-  brought. A wait or a recompile whose answer brought them puts a sentence
-  about the first of them in `attention`, the first member of its reply.
-  This is what to read after an edit.
+- `hotReload.newNotes`: in a `status`, the notes that the last change of the
+  Player's code brought. In the reply of a wait or a recompile, the notes of
+  every answer after the caller's mark, each once, the most important first:
+  one wait after two saves reports what the first of them brought as well,
+  whether the runner handled them together or one after the other. A note
+  that a later answer shows to be gone (the edit was taken back) is dropped.
+  `newNotesSequence` is the newest event that brought one. This is what to
+  read after an edit.
+- `attention`, the first member of that reply, is a sentence about the note
+  that matters most, with the number of the others. It claims no more than is
+  known: a note names a limit, and whether it matters depends on the game (a
+  coroutine that was not running lost nothing). For a limit a restart lifts
+  it offers `hot_reload(recompile)` and says when to go on without it. For a
+  value that is lost (`field_value_reset`) or a callback of the game that
+  threw (`callback_failed`) it offers nothing, since a restart undoes
+  neither. Notes about lookups by name or reflection alone
+  (`added_method_invisible_by_name`, `accessibility_changed`) are listed and
+  make no sentence. With more new notes than a list holds (16) it names the
+  report that has all. `attention` also says when the runner restarted the
+  Player by itself (`hot_reload_failed`, or `hot_reload_unsupported` under
+  `onUnsupportedEdit: restart`), and when nothing followed the mark.
 - `hotReload.lastPatch.notes`: all notes of the applied patch. A patch holds
   every edit since the Player started, so these and
   `hotReload.lastPatch.members` describe all of them, not the last edit. The
@@ -550,19 +639,32 @@ the session shows them in three places:
 Only a recompile applies what a note names:
 
 - A method whose accessibility changed keeps the loaded one for reflection
-  (`accessibility_changed`). A field that is made `public` or private so that
-  Unity starts or stops serializing it is not a note but a refusal
-  (`serialization_changed`), like `[SerializeField]` added to it: nothing of
-  such an edit is in the Player before a restart.
+  (`accessibility_changed`). A field that is made `public` or private, or
+  given or relieved of `readonly`, so that Unity starts or stops serializing
+  it is not a note but a refusal (`serialization_changed`), like
+  `[SerializeField]` added to it: nothing of such an edit is in the Player
+  before a restart. A field of a type Unity never serializes (a delegate, a
+  dictionary, an interface, a class without `[Serializable]`) is the note.
 - An added field has its default value in objects that existed before the
   patch, also when the source gives it an initializer; an added serialized
-  field is not filled from the scene until a restart. A field whose type
+  field is not filled from the scene until a restart. A later scene, prefab or
+  asset edit that sets such a field is applied to the Player without the
+  value: the object is rebuilt and has what the initializer gives. The reply
+  to that edit says so in `attention` (`serialized_field_not_restored`, with
+  the file). The files are searched as text, for a line whose key is the
+  field's name.
+- An added method that a string of the game names is not found by that name
+  (`added_method_named_by_string`): `Invoke("Blast", 1f)`, `SendMessage` and
+  `StartCoroutine("Blast")` look in the loaded class and do nothing. The note
+  comes with the edit that adds the method when a string names it then, and
+  again with a later edit that starts to. A field whose type
   changed is stored anew and loses its value (`field_value_reset`); a renamed
   field, and the field behind an auto-property that became a full property,
   are a removed and an added field.
 - A changed field initializer or constructor affects objects created later.
-- A changed `Awake` or `Start` of an engine object is not run again for the
-  objects that exist (`started_objects_keep_state`).
+- A changed parameterless `Start` of a MonoBehaviour, or `Awake` of a
+  MonoBehaviour or ScriptableObject, does not run again for the objects that
+  already ran it (`started_objects_keep_state`).
 - A coroutine or `async` method that is already running finishes on the old
   code; new calls run the new code. A coroutine that never ends keeps its old
   loop until a recompile.
@@ -639,11 +741,22 @@ Limits:
   the runner has not answered at all. Only a wait asks the runner.
 - While saves by anyone keep arriving, every answer is marked and a wait is
   held; give it `timeoutSeconds` and repeat it on `wait_timeout`.
-- A runner that takes no commands cannot say whether it has seen the last
-  save, so both waits fail with a message that names `session_control(reset)`.
+- A runner whose command input is closed or full cannot be asked whether it
+  has seen the last save, so both waits fail with a message that names
+  `session_control(reset)`. One that leaves its commands unread holds the
+  waits instead, each until its `timeoutSeconds`.
 - When a patch leaves the Player unusable, the runner restarts it by itself on
   the newest code. `hotReload.lastRestart` then has `reason:
-  "hot_reload_failed"` and the `error`, and game state is lost.
+  "hot_reload_failed"` and the `error`, game state is lost, and the reply of
+  the wait says so in `attention`.
+- A wait speaks for saves the runner's watcher sees: files written and closed
+  below `Assets`, `Packages` and `ProjectSettings`. A save elsewhere (a local
+  package outside the project) is not waited for; the reply then says that
+  nothing followed the mark.
+- A `start` whose arguments spell out the values the Player already runs with
+  (`hotReload: true` on a default launch) returns the running session, like a
+  start without arguments. Other values are refused with the call that
+  applies them, `session_control(reset)`.
 - `recompile` has no time limit of its own; the call ends when the client
   cancels it, and the command stays pending in the runner. A pending command
   ends with the runner's answer or with the session: `session_control(reset)`
