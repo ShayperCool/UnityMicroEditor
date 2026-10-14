@@ -639,6 +639,14 @@ pub fn prepare_compiler_graph_with(
             }
             bail!("absent compiler input appeared during preparation: {filename}");
         }
+        // A C# source that was saved again while it was prepared is compiled
+        // at the start of a session like any source edited after a
+        // preparation: the session compares its content with the digest the
+        // baseline records. Its presence, and every other input, is the graph.
+        let source = rune_lower(sysutil::ext(filename)) == ".cs";
+        if source && !sys::absent(filename) {
+            continue;
+        }
         if !file_hash(filename).is_ok_and(|actual| actual == *expected) {
             bail!("compiler input changed during preparation; baseline not published: {filename}");
         }

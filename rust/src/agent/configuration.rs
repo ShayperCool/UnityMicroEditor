@@ -10,7 +10,7 @@ use crate::{
     cancel::Context,
     compiler::{CompileManifest, CompilerGraphExport, NilMap, Walk, WalkEntry, walk_dir},
     jsondoc::{self, Json},
-    project::{is_owned_cache_path, value},
+    project::{is_owned_cache_path, lexpath::rune_lower, value},
     sha256, sysutil,
     util::{agent_canonical, file_hash, within_directory},
 };
@@ -67,27 +67,46 @@ pub(crate) fn managed_configuration_path(path: &str) -> bool {
 }
 
 struct Tracker {
+    /// The graph: what a preparation is made from.
     hashes: BTreeMap<String, String>,
+    /// The content of every tracked file, the scene and the sources too.
+    contents: BTreeMap<String, String>,
     file_hashes: BTreeMap<String, String>,
+}
+/// Whether only the presence of a file names the graph, not its content: a
+/// C# source (its `.meta` holds its identity and stays tracked whole), and the
+/// selected scene. A session compiles the content of the sources it starts
+/// on, and the runner loads the scene it has; a preparation made from other
+/// content of them serves as well. A save of such a file while the
+/// preparation of a recovery runs must not void that preparation and ask for
+/// another one.
+fn presence_only(path: &str) -> bool {
+    rune_lower(sysutil::ext(path)) == ".cs"
 }
 impl Tracker {
     fn track(&mut self, path: &str, key: String, optional: bool) -> Result<()> {
-        if let Some(hash) = self.file_hashes.get(path).filter(|hash| !hash.is_empty()) {
-            self.hashes.insert(key, hash.clone());
-            return Ok(());
-        }
-        agent_canonical(path)?;
-        if let Err(error) = lstat(path) {
-            if not_exist(&error) && optional {
-                self.hashes.insert(key, "absent".into());
-                self.file_hashes.insert(path.into(), "absent".into());
-                return Ok(());
+        self.track_as(path, key, optional, presence_only(path))
+    }
+    fn track_as(&mut self, path: &str, key: String, optional: bool, presence: bool) -> Result<()> {
+        let hash = match self.file_hashes.get(path).filter(|hash| !hash.is_empty()) {
+            Some(hash) => hash.clone(),
+            None => {
+                agent_canonical(path)?;
+                let hash = match lstat(path) {
+                    Err(error) if not_exist(&error) && optional => "absent".to_string(),
+                    Err(error) => return Err(error),
+                    Ok(_) => file_hash(path)?,
+                };
+                self.file_hashes.insert(path.into(), hash.clone());
+                hash
             }
-            return Err(error);
-        }
-        let hash = file_hash(path)?;
-        self.hashes.insert(key, hash.clone());
-        self.file_hashes.insert(path.into(), hash);
+        };
+        let graph = match presence && hash != "absent" {
+            true => "present".to_string(),
+            false => hash.clone(),
+        };
+        self.hashes.insert(key.clone(), graph);
+        self.contents.insert(key, hash);
         Ok(())
     }
 }
@@ -96,13 +115,26 @@ impl Tracker {
 /// authored roots, the selected scene, and registered package sources from the
 /// active preparation's verified graph. Missing declared inputs have an
 /// identity too, so repairing a failed preparation cannot remain stuck on a
-/// prior durable job after a source is added or removed.
+/// prior durable job after a source is added or removed. A C# source and the
+/// selected scene count by their presence (see `presence_only`).
 pub fn configuration_revision(
     project: &str,
     selections: &[ConfigurationSelection],
 ) -> Result<String> {
+    revisions(project, selections).map(|(graph, _)| graph)
+}
+
+/// The same inputs by their content, the sources and the scene too: a
+/// failed preparation is not the answer for sources that were edited since.
+#[cfg(test)]
+pub fn sources_revision(project: &str, selections: &[ConfigurationSelection]) -> Result<String> {
+    revisions(project, selections).map(|(_, content)| content)
+}
+
+fn revisions(project: &str, selections: &[ConfigurationSelection]) -> Result<(String, String)> {
     let mut tracker = Tracker {
         hashes: BTreeMap::new(),
+        contents: BTreeMap::new(),
         file_hashes: BTreeMap::new(),
     };
     for folder in ["Assets", "Packages", "ProjectSettings"] {
@@ -138,7 +170,7 @@ pub fn configuration_revision(
                 ));
             }
             let path = join(&[project, &selection.scene]);
-            tracker.track(&path, selection.scene.clone(), false)?;
+            tracker.track_as(&path, selection.scene.clone(), false, true)?;
             tracker.track(
                 &format!("{path}.meta"),
                 format!("{}.meta", selection.scene),
@@ -306,7 +338,10 @@ pub fn configuration_revision(
             tracker.track(path, format!("compiler-input:{path}"), true)?;
         }
     }
-    Ok(sha256(&marshal(&tracker.hashes)?))
+    Ok((
+        sha256(&marshal(&tracker.hashes)?),
+        sha256(&marshal(&tracker.contents)?),
+    ))
 }
 
 impl Service {
@@ -366,14 +401,14 @@ impl Service {
         if scene.is_empty() {
             return outcome;
         }
-        let revision = match configuration_revision(
+        let revision = match revisions(
             &self.0.project,
             &[ConfigurationSelection {
                 scene: scene.clone(),
                 baseline,
             }],
         ) {
-            Ok(revision) => revision,
+            Ok(revisions) => revisions,
             // The recovery cannot begin. A status still is the state of the
             // session, with what stands in its way; a wait fails with the
             // reason of the rejection and the calls that are left.
@@ -403,7 +438,8 @@ impl Service {
         };
         // The preparation that answers this rejection: one the project
         // already has, or the request that makes it.
-        let plan = self.plan_recovery(&scene, &revision);
+        let (revision, sources) = revision;
+        let plan = self.plan_recovery(&scene, &revision, &sources);
         let reply = || -> Result<_> {
             let (preparation, continued) = match &plan {
                 Plan::Continue(known) => match self.continue_on(known, &revision) {
@@ -416,7 +452,20 @@ impl Service {
                         ("requestId", identity.clone().into()),
                         ("activate", true.into()),
                     ])))?;
-                    (self.handle(ctx, "project_prepare", &arguments), None)
+                    // The receipt of a failed job answers these sources for
+                    // as long as they stay as they are. The failure may not be
+                    // theirs (an Editor that did not exit in time, a full
+                    // disk), so the reply names the call that tries again.
+                    let prepared = self.handle(ctx, "project_prepare", &arguments).map_err(|error| {
+                        match context_error(&error) {
+                            true => error,
+                            false => anyhow!(
+                                "{}; the preparation of these sources ({identity}) failed and is not tried again while they stay as they are: call project_prepare with this scene, a new requestId and activate true to prepare them again",
+                                super::error_text(&error)
+                            ),
+                        }
+                    });
+                    (prepared, None)
                 }
             };
             if action == "status" {
@@ -500,6 +549,30 @@ impl Service {
                 .any(|attempt| Self::recovery_identity(scene, &revision, attempt) == id),
             Err(_) => true,
         }
+    }
+
+    /// The file that holds the content revision of the sources a request
+    /// of the recovery was made for.
+    fn recovery_sources_path(&self, id: &str) -> String {
+        join(&[
+            &self.0.project,
+            "Library/UnityMicroEditor/action-jobs",
+            &sha256(id.as_bytes()),
+            "sources.txt",
+        ])
+    }
+    pub(crate) fn recovery_sources(&self, id: &str) -> Option<String> {
+        std::fs::read_to_string(self.recovery_sources_path(id)).ok()
+    }
+    /// Records the content of the sources a request of the recovery is made
+    /// for, once.
+    pub(crate) fn note_recovery_sources(&self, id: &str, sources: &str) {
+        let path = self.recovery_sources_path(id);
+        if std::fs::metadata(&path).is_ok() {
+            return;
+        }
+        let _ = std::fs::create_dir_all(sysutil::dir(&path))
+            .and_then(|()| std::fs::write(&path, sources));
     }
 
     /// What the service knows of the preparation job `id`.
@@ -586,7 +659,7 @@ impl Service {
     /// When no request of these sources has a preparation that fits, another
     /// preparation of the project may: the one a session started on, after
     /// an edit that left its graph was undone. The newest are looked at.
-    fn plan_recovery(&self, scene: &str, revision: &str) -> Plan {
+    fn plan_recovery(&self, scene: &str, revision: &str, sources: &str) -> Plan {
         // What the recovery continued on for these very sources and the
         // runner rejected again is not tried a second time: the check here
         // and the runner's own would otherwise pass the session back and
@@ -607,8 +680,15 @@ impl Service {
                 }
                 Known::Confirmed(_) => {}
                 Known::Failed(code) if code == SUPERSEDED => {}
+                // A failure answers the sources it was made from; an edit of
+                // them since (the fix of a compile error) is tried anew.
+                Known::Failed(_)
+                    if self
+                        .recovery_sources(&id)
+                        .is_some_and(|made| made != sources) => {}
                 Known::Failed(_) => return Plan::Request(id),
                 Known::Nothing => {
+                    self.note_recovery_sources(&id, sources);
                     request = Some(id);
                     break;
                 }
@@ -629,7 +709,12 @@ impl Service {
                 })
                 .collect();
         known.sort_by_key(|known| std::cmp::Reverse(known.0));
-        for (_, preparation) in known.into_iter().take(KNOWN_PREPARATIONS) {
+        // The newest of this scene: those of other scenes do not fit anyway.
+        for (_, preparation) in known
+            .into_iter()
+            .filter(|(_, preparation)| preparation.scene == scene)
+            .take(KNOWN_PREPARATIONS)
+        {
             if self.fits(&preparation, scene) {
                 return Plan::Continue(Box::new(preparation));
             }

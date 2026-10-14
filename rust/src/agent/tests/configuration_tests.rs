@@ -19,6 +19,9 @@ const WAIT: &[u8] = br#"{"action":"wait_update"}"#;
 fn revision(project: &str, selections: &[ConfigurationSelection]) -> Result<String> {
     configuration_revision(project, selections)
 }
+fn sources(project: &str, selections: &[ConfigurationSelection]) -> Result<String> {
+    configuration::sources_revision(project, selections)
+}
 fn rejected(state: &State, error: anyhow::Error) -> RuntimeOutcome {
     RuntimeOutcome {
         value: RuntimeValue::Controller(Reply::State(Box::new(state.clone()))),
@@ -41,8 +44,28 @@ fn revision_tracks_compiler_inputs() {
         original,
         "scene changes unexpectedly changed the managed configuration identity"
     );
+    // The content of a C# source is compiled at a session's start: only
+    // its presence names the graph, and its content the sources.
+    let (before, content) = (
+        revision(&project, &[]).unwrap(),
+        sources(&project, &[]).unwrap(),
+    );
+    write(
+        &join(&[&project, "Assets/Sample.cs"]),
+        "changed compiler input",
+    );
+    assert_eq!(
+        revision(&project, &[]).unwrap(),
+        before,
+        "a C# content edit changed the graph"
+    );
+    assert_ne!(
+        sources(&project, &[]).unwrap(),
+        content,
+        "the sources ignored a C# edit"
+    );
     for path in [
-        "Assets/Sample.cs",
+        "Assets/Added.cs",
         "Assets/Sample.cs.meta",
         "Assets/Gameplay.asmdef",
         "Packages/manifest.json",
@@ -231,10 +254,17 @@ fn revision_binds_scene_and_registered_public_inputs() {
         "unrelated scene or private cache changed recovery identity"
     );
     let scene = join(&[project, &fixture.selection.scene]);
+    // The scene and a source that exists count by their content for the
+    // sources only.
+    let sources_now = || sources(project, std::slice::from_ref(&fixture.selection)).unwrap();
+    for path in [scene.clone(), join(&[package_root, "External.cs"])] {
+        let (before, content) = (current(), sources_now());
+        write(&path, format!("changed content of {path}"));
+        assert_eq!(current(), before, "the content of {path} changed the graph");
+        assert_ne!(sources_now(), content, "the sources ignored {path}");
+    }
     for path in [
-        scene.clone(),
         format!("{scene}.meta"),
-        join(&[package_root, "External.cs"]),
         join(&[package_root, "External.asmdef"]),
         join(&[package_root, "External.asmdef.meta"]),
         join(&[package_root, "new.rsp.meta"]),
@@ -292,16 +322,20 @@ fn revision_reads_packages_of_the_tools_own_content_store() {
     write(&graph_path, bytes(&graph));
     let current = || revision(&fixture.project, std::slice::from_ref(&fixture.selection));
     let original = current().expect("a package of the tool's content store was refused");
+    let content = || sources(&fixture.project, std::slice::from_ref(&fixture.selection)).unwrap();
     for root in [&stored, &cached] {
-        let before = current().unwrap();
+        let before = content();
         write(
             &join(&[root, "Runtime/Code.cs"]),
             "public class Code { int changed; }",
         );
+        assert_ne!(content(), before, "{root}: a package source is not tracked");
+        let before = current().unwrap();
+        write(&join(&[root, "Runtime/Added.cs"]), "public class Added {}");
         assert_ne!(
             current().unwrap(),
             before,
-            "{root}: a package source is not tracked"
+            "{root}: a new package source is not tracked"
         );
     }
     assert_ne!(current().unwrap(), original);
@@ -511,6 +545,11 @@ fn recovery_leaves_failed_job_when_scene_or_external_package_changes() {
         service
             .enqueue_action(&ctx(), "project_prepare", &raw, run.clone())
             .unwrap();
+        // As the recovery records it when it requests the preparation.
+        service.note_recovery_sources(
+            &id,
+            &sources(project, std::slice::from_ref(selection)).unwrap(),
+        );
         let deadline = Instant::now() + Duration::from_secs(1);
         while service
             .enqueue_action(&ctx(), "project_prepare", &raw, run.clone())

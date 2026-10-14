@@ -382,8 +382,12 @@ be taken back by the next one.
   a preparation was made from, not what it is called: its compiler plan must
   accept the sources on disk, which is the check a start of the runner makes
   (every assembly definition, package and project setting as the preparation
-  recorded it, and no managed configuration in `Assets` outside its graph;
-  C# sources may differ and are compiled at the start). The newest eight
+  recorded it, no managed configuration in `Assets` outside its graph, and no
+  C# source or assembly definition in a package of the project
+  (`Packages/<name>`, the folders of its Player assemblies) that the
+  preparation does not hold: such a script needs a new preparation; a new
+  script under `Assets` goes into an assembly the preparation has, and C#
+  sources may differ: they are compiled at the start). The newest eight
   preparations of the scene are looked at. The call that finds one restarts
   the session on it at once: `status` returns the session as it starts,
   without `preparationRequired`, and a wait answers `result_pending` with a
@@ -396,19 +400,31 @@ be taken back by the next one.
   only after successful preparation. A wait that is held while the Player is
   replaced answers `result_pending` too, and so does a `start` or `reset`
   that is sent while a preparation runs: it returns the stage at once instead
-  of waiting for the preparation to end. When the sources were changed again
-  while they were prepared (the edit was taken back), the preparation
-  replaces no Player.
+  of waiting for the preparation to end. A preparation starts a session that
+  ran when it replaces it; a session that was stopped stays stopped, and the
+  replies then name `session_control(start)`. When the sources were changed
+  again while they were prepared (the edit was taken back), the preparation
+  replaces no Player. A save that leaves the graph as it is (C# content, the
+  scene) does not: the session starts on the preparation and compiles the
+  current sources.
 
 The request id of such a preparation is `config-` and a hash of the scene and
-the sources. A receipt is durable, and its name can be wrong about it: the
-job reads the sources after the id was computed, so an edit that is taken
-back in between is prepared under the name of the edit. A confirmed receipt is
-therefore used only when its preparation fits the sources, and one that does
-not is passed over for the next id of the same sources. A receipt whose job
-failed is the answer to its request (`preparationError` on `status`, the
-failure on a wait), since the same sources would fail the same way; a repair
-changes the sources and with them the id.
+the graph: every managed configuration file, package and setting by its
+content, and C# sources and the selected scene by their presence. A receipt is
+durable, and its name can be wrong about it: the job reads the sources after
+the id was computed, so an edit that is taken back in between is prepared
+under the name of the edit. A confirmed receipt is therefore used only when
+its preparation fits the sources, and one that does not is passed over for
+the next id of the same sources. A receipt whose job failed answers the
+sources it was made for, which the recovery records by their content
+(`action-jobs/<hash of the id>/sources.txt`): `preparationError` on `status`
+and the failure on a wait name `project_prepare` with this scene, a new
+`requestId` and `activate: true` to try again, and an edit of the sources
+since (the fix of a compile error, also of C# content) is prepared again
+under the next id by itself. Preparations are not removed: each is a copy of
+the Player (about 250 MB for the sample project) under
+`Library/UnityMicroEditor/preparations`, and one that no session uses can be
+deleted while no server of the project runs.
 
 A session that could not start because the sources have left the prepared
 graph (a `reset` after such an edit ends with the phase `failed` and the
