@@ -190,10 +190,14 @@ Verified with Unity `6000.6.3f1`, one machine, one project:
 Not verified: a project with native models, audio or UI through the whole
 cycle; `build-project` against a real Editor; `project_tools`; attaching to an
 interactive Editor; the GitHub Actions workflow itself. Of hot reload: content
-routes or Addressables. Known: the island address of a game method can lie in
-a mapping of the Player (the first edit of one method of the sample was refused
-with `apply_failed` in 5 of about 45 fresh Players in the stage 6 review), and
-that method is then refused for the life of that Player. Of Netcode: another package version, a dedicated server and distributed
+routes or Addressables. Known: the fixed island address of a game method can
+lie in a mapping of the Player; a `sub rsp, imm8` body (89 % of methods) is now
+reached through the gate to an island anywhere in a 16 MiB window (island6, over
+40 fresh Players with no such refusal), but a `push rbp` body or a body of an
+unrecognised first instruction whose fixed island is taken is still refused for
+the life of that Player with `apply_failed` and `fullRecompileRequired` (under
+0.03 % of methods in a running-Player sample; a recompile applies the edit). Of
+Netcode: another package version, a dedicated server and distributed
 authority. A stage 5 review ran host and two clients (Temp/e2e/nc5, 121
 checks): NetworkList, a NetworkBehaviour whose base class is in another game
 assembly, every universal RPC target and a first use of Netcode in a body
