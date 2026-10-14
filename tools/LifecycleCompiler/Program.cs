@@ -17,7 +17,53 @@ using Reflection = System.Reflection;
 internal sealed record SourceInput(string Path, string OriginalPath, string OutputPath);
 internal sealed record Request(string AssemblyName, string[] References, string[] Defines,
     SourceInput[] Sources, string MarkerPath, bool AllowUnsafe = false,
-    Dictionary<string, int>? ExecutionOrders = null, string[]? NativeBaseAssemblies = null);
+    Dictionary<string, int>? ExecutionOrders = null, string[]? NativeBaseAssemblies = null,
+    Dictionary<string, string>? ReferenceHashes = null);
+
+/// <summary>The errors of the sources themselves: the one failure of a served request that is
+/// reported as it stands (see <see cref="Program.Serve"/>).</summary>
+internal sealed class CompilationErrors : InvalidOperationException
+{
+    public CompilationErrors(string message) : base(message) { }
+}
+
+/// <summary>
+/// The references of the requests a served helper ran, by path and by the SHA-256 the driver checked
+/// before it sent the request. A reference read for the first time is hashed here and must have that
+/// content; one that a later request names with other content is read again. Entries no request of the
+/// last four used are dropped. Nothing else outlives a request.
+/// </summary>
+internal sealed class References
+{
+    readonly Dictionary<(string Path, string Hash), (MetadataReference Reference, long Used)> entries = new();
+    long request;
+
+    public void Begin() => request++;
+
+    public MetadataReference Get(string path, IReadOnlyDictionary<string, string>? hashes)
+    {
+        if (hashes is null || !hashes.TryGetValue(path, out var hash) || hash.Length != 64)
+            return MetadataReference.CreateFromFile(path);
+        if (entries.TryGetValue((path, hash), out var entry))
+        {
+            entries[(path, hash)] = (entry.Reference, request);
+            return entry.Reference;
+        }
+        var bytes = File.ReadAllBytes(path);
+        var actual = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        if (actual != hash)
+            throw new InvalidOperationException($"The reference {path} does not have the content the request names.");
+        var reference = MetadataReference.CreateFromImage(bytes, filePath: path);
+        entries[(path, hash)] = (reference, request);
+        return reference;
+    }
+
+    public void Trim()
+    {
+        foreach (var key in entries.Where(entry => entry.Value.Used < request - 3).Select(entry => entry.Key).ToList())
+            entries.Remove(key);
+    }
+}
 internal sealed record CallbackInfo(string Type, string Phase, string Source, int Order, bool Synthetic = false);
 internal sealed record RuntimeInitializerInfo(string Assembly, string TypeName, string MethodName, int Phase);
 internal sealed record SourceDeclarationRequest(string AssemblyName, string[] Defines, string[] EditorDefines, SourceInput[] Sources);
@@ -1191,31 +1237,110 @@ internal static class Program
 
     public static int Main(string[] args)
     {
+        if (args.Length == 1 && args[0] == "--serve") return Serve();
+        return Run(args, Console.Out, Console.Error, null, out _);
+    }
+
+    /// <summary>
+    /// The helper for the life of a watched session: one JSON request per line on standard input, one
+    /// answer per line on standard output, each what the one-shot run of its arguments would exit with
+    /// and print. Only the rewrite of an assembly, <c>--type-definitions</c> and
+    /// <c>--declaration-hashes</c> are served; everything else is answered with exit 64 and never run
+    /// (<c>--behaviour-objects</c> runs game code, which a process that lives on must not). The answer's
+    /// <c>kind</c> is <c>diagnostics</c> for errors of the sources, the one failure the driver reports as
+    /// it stands. The end of standard input ends the process.
+    /// </summary>
+    internal static int Serve()
+    {
+        using var frames = Console.OpenStandardOutput();
+        using var input = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false));
+        TextWriter console = Console.Out, consoleError = Console.Error;
+        var references = new References();
+        void Frame(object value)
+        {
+            frames.Write(JsonSerializer.SerializeToUtf8Bytes(value));
+            frames.WriteByte((byte)'\n');
+            frames.Flush();
+        }
+        Frame(new Dictionary<string, object> { ["ready"] = true, ["protocol"] = 1 });
+        string? line;
+        while ((line = input.ReadLine()) != null)
+        {
+            if (line.Length == 0) continue;
+            ServeRequest? request = null;
+            try { request = JsonSerializer.Deserialize<ServeRequest>(line); } catch (JsonException) { }
+            var output = new StringWriter();
+            var error = new StringWriter();
+            int exit;
+            string kind = "";
+            string[] arguments = request?.arguments ?? Array.Empty<string>();
+            bool served = arguments.Length == 1 && !arguments[0].StartsWith("--", StringComparison.Ordinal)
+                || arguments.Length >= 2 && (arguments[0] == "--type-definitions" || arguments[0] == "--declaration-hashes");
+            if (request is null || !served)
+            {
+                exit = 64;
+                kind = "refused";
+                error.WriteLine(request is null ? "Unreadable request" : "Not served: " + string.Join(" ", arguments));
+            }
+            else
+            {
+                // A stray write of any code goes into the answer, never between two frames.
+                Console.SetOut(output);
+                Console.SetError(error);
+                try
+                {
+                    if (!string.IsNullOrEmpty(request.directory)) Directory.SetCurrentDirectory(request.directory);
+                    references.Begin();
+                    exit = Run(arguments, output, error, references, out kind);
+                    references.Trim();
+                }
+                finally
+                {
+                    Console.SetOut(console);
+                    Console.SetError(consoleError);
+                }
+            }
+            Frame(new Dictionary<string, object>
+            {
+                ["id"] = request?.id ?? 0, ["exit"] = exit, ["output"] = output.ToString(),
+                ["error"] = error.ToString(), ["kind"] = kind,
+            });
+        }
+        return 0;
+    }
+
+    internal sealed record ServeRequest(long id, string? directory, string[]? arguments);
+
+    /// <summary>One run of the helper. <paramref name="references"/> keeps reference metadata between
+    /// the requests of a served helper; a one-shot run has none and reads every reference.</summary>
+    internal static int Run(string[] args, TextWriter stdout, TextWriter stderr, References? references, out string failure)
+    {
+        failure = "";
         try
         {
             if (args.Length >= 2 && args[0] == "--declaration-hashes")
             {
-                Console.WriteLine(JsonSerializer.Serialize(DeclarationHash.Read(args.Skip(1).ToArray())));
+                stdout.WriteLine(JsonSerializer.Serialize(DeclarationHash.Read(args.Skip(1).ToArray())));
                 return 0;
             }
             if (args.Length >= 2 && (args[0] == "--type-definitions" || args[0] == "--public-type-definitions"))
             {
-                Console.WriteLine(JsonSerializer.Serialize(DeclarationHash.TypeDefinitions(args.Skip(1).ToArray(), args[0] == "--public-type-definitions")));
+                stdout.WriteLine(JsonSerializer.Serialize(DeclarationHash.TypeDefinitions(args.Skip(1).ToArray(), args[0] == "--public-type-definitions")));
                 return 0;
             }
             if (args.Length == 2 && args[0] == "--behaviour-layouts")
             {
-                Console.WriteLine(JsonSerializer.Serialize(BehaviourLayouts.Read(args[1])));
+                stdout.WriteLine(JsonSerializer.Serialize(BehaviourLayouts.Read(args[1])));
                 return 0;
             }
             if (args.Length == 2 && args[0] == "--behaviour-objects")
             {
-                Console.WriteLine(JsonSerializer.Serialize(BehaviourObjects.Run(args[1])));
+                stdout.WriteLine(JsonSerializer.Serialize(BehaviourObjects.Run(args[1])));
                 return 0;
             }
             if (args.Length == 2 && args[0] == "--source-type-declarations")
             {
-                Console.WriteLine(JsonSerializer.Serialize(ReadSourceDeclarations(args[1])));
+                stdout.WriteLine(JsonSerializer.Serialize(ReadSourceDeclarations(args[1])));
                 return 0;
             }
             if (args.Length != 1) throw new InvalidOperationException("Expected one request JSON path");
@@ -1225,11 +1350,12 @@ internal static class Program
             var trees = request.Sources.Select(source => CSharpSyntaxTree.ParseText(
                 File.ReadAllText(source.Path), options, source.OriginalPath)).ToArray();
             var compilation = CSharpCompilation.Create(request.AssemblyName, trees,
-                request.References.Distinct().Select(path => MetadataReference.CreateFromFile(path)),
+                request.References.Distinct().Select(path => references is null
+                    ? MetadataReference.CreateFromFile(path) : references.Get(path, request.ReferenceHashes)),
                 new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, allowUnsafe: request.AllowUnsafe)
                     .WithMetadataImportOptions(MetadataImportOptions.All));
             var errors = compilation.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error).ToArray();
-            if (errors.Length != 0) throw new InvalidOperationException(string.Join("\n", errors.Select(d => d.ToString())));
+            if (errors.Length != 0) throw new CompilationErrors(string.Join("\n", errors.Select(d => d.ToString())));
             var mono = compilation.GetTypeByMetadataName("UnityEngine.MonoBehaviour");
             var callbacks = new List<CallbackInfo>();
             var runtimeInitializers = new List<RuntimeInitializerInfo>();
@@ -1322,7 +1448,7 @@ internal static class Program
                 Directory.CreateDirectory(System.IO.Path.GetDirectoryName(output.Source.OutputPath)!);
                 File.WriteAllText(output.Source.OutputPath, output.Text);
             }
-            Console.WriteLine(JsonSerializer.Serialize(new { SchemaVersion = 1, Verified = true,
+            stdout.WriteLine(JsonSerializer.Serialize(new { SchemaVersion = 1, Verified = true,
                 Callbacks = callbacks, Phases, ScriptableObjectBarrier = scriptableObjectBarrier, RuntimeInitializers = runtimeInitializers,
                 ScriptTypes = scriptTypes,
                 ActiveAndEnabledReads = activeAndEnabledReads, SetActiveCalls = setActiveCalls,
@@ -1331,7 +1457,8 @@ internal static class Program
         }
         catch (Exception error)
         {
-            Console.Error.WriteLine(error.Message);
+            failure = error is CompilationErrors ? "diagnostics" : "error";
+            stderr.WriteLine(error.Message);
             return 1;
         }
     }

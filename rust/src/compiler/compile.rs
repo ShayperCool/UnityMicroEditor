@@ -27,6 +27,9 @@ use std::{
     time::Instant,
 };
 
+/// How long one served request of the lifecycle helper may take.
+const HELPER_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
+
 fn raw<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Box<RawValue>>, D::Error> {
     Box::<RawValue>::deserialize(deserializer).map(Some)
 }
@@ -413,6 +416,12 @@ struct LifecycleRequest<'a> {
     marker_path: &'a str,
     #[serde(rename = "NativeBaseAssemblies")]
     native_base_assemblies: &'a NilVec<String>,
+    /// The content of every reference as the driver checked it: a served
+    /// helper keeps reference metadata under it and reads a reference it
+    /// does not hold, which must have this content. A one-shot run reads
+    /// every reference and ignores it.
+    #[serde(rename = "ReferenceHashes")]
+    reference_hashes: &'a BTreeMap<String, String>,
     #[serde(rename = "References")]
     references: &'a NilVec<String>,
     #[serde(rename = "Sources")]
@@ -1414,6 +1423,64 @@ impl Compiler {
         false
     }
 
+    /// Runs the lifecycle helper (`arguments[0]`) on the rest of
+    /// `arguments` in `directory`: through the session's service when this
+    /// compiler has one, else in a process of its own, as it always runs
+    /// for a preparation. What the caller gets is what the one-shot run
+    /// gives. A served answer counts when it succeeded or names errors of
+    /// the sources; any other failure, and a service that could not
+    /// answer, runs the request once more in a process of its own.
+    pub fn helper_command(
+        &self,
+        ctx: &Context,
+        directory: &str,
+        arguments: &[&str],
+    ) -> std::result::Result<Vec<u8>, super::CommandError> {
+        if let Some(service) = self.helper_service(arguments[0]) {
+            match service.call(ctx, directory, &arguments[1..], HELPER_LIMIT) {
+                Ok(reply) if reply.exit == 0 => {
+                    return Ok(format!("{}{}", reply.output, reply.error).into_bytes());
+                }
+                Ok(reply) if reply.kind == "diagnostics" => {
+                    let output = format!("{}{}", reply.output, reply.error).into_bytes();
+                    return Err(super::CommandError {
+                        message: format!(
+                            "{}: exit status {}\n{}",
+                            sysutil::base(&self.dotnet),
+                            reply.exit,
+                            String::from_utf8_lossy(&output)
+                        ),
+                        output,
+                    });
+                }
+                _ => {}
+            }
+        }
+        compiler_command(ctx, directory, &self.dotnet, arguments)
+    }
+
+    /// The service of `helper`, started at its first request; `None` when
+    /// this compiler runs the helper once per request.
+    fn helper_service(&self, helper: &str) -> Option<std::sync::Arc<super::Service>> {
+        if !self.serve_helper || helper.is_empty() {
+            return None;
+        }
+        let mut kept = self.helper_service.lock().unwrap();
+        if let Some(service) = kept.as_ref()
+            && service.program() == helper
+        {
+            return Some(service.clone());
+        }
+        // Another build of the helper: the old process ends with its handle.
+        let service = std::sync::Arc::new(super::Service::new(
+            "lifecycle helper",
+            &self.dotnet,
+            helper,
+        ));
+        *kept = Some(service.clone());
+        Some(service)
+    }
+
     /// Compares the declaration fingerprints of two DLLs.
     pub fn declarations_changed(
         &self,
@@ -1422,10 +1489,9 @@ impl Compiler {
         previous_dll: &str,
         next_dll: &str,
     ) -> Result<bool> {
-        let output = compiler_command(
+        let output = self.helper_command(
             ctx,
             &self.cache,
-            &self.dotnet,
             &[helper, "--declaration-hashes", previous_dll, next_dll],
         )?;
         let hashes = unmarshal::<NilMap<String>>(&output).unwrap_or_default();
@@ -1515,12 +1581,8 @@ impl Compiler {
                 .cloned()
         };
         if previous_dll.is_empty() {
-            let output = compiler_command(
-                ctx,
-                &self.cache,
-                &self.dotnet,
-                &[helper, "--type-definitions", next_dll],
-            )?;
+            let output =
+                self.helper_command(ctx, &self.cache, &[helper, "--type-definitions", next_dll])?;
             let definitions = unmarshal::<NilMap<NilVec<String>>>(&output).unwrap_or_default();
             return match listed(&definitions, next_dll) {
                 Some(next) if definitions.len() == 1 => {
@@ -1529,13 +1591,13 @@ impl Compiler {
                 _ => bail!("SDK source output lacks exact type definition proof: {assembly}"),
             };
         }
-        let output = compiler_command(
-            ctx,
-            &self.cache,
-            &self.dotnet,
-            &[helper, "--type-definitions", previous_dll, next_dll],
-        )
-        .map_err(|error| anyhow!("validate baseline script types in {assembly}: {error}"))?;
+        let output = self
+            .helper_command(
+                ctx,
+                &self.cache,
+                &[helper, "--type-definitions", previous_dll, next_dll],
+            )
+            .map_err(|error| anyhow!("validate baseline script types in {assembly}: {error}"))?;
         let definitions = unmarshal::<NilMap<NilVec<String>>>(&output).unwrap_or_default();
         match (
             listed(&definitions, previous_dll),
@@ -1702,6 +1764,7 @@ impl Compiler {
         // What the compiler server is handed, by path: it must not keep
         // older bytes of any of them.
         let mut served: BTreeMap<String, String> = BTreeMap::new();
+        let mut reference_hashes: BTreeMap<String, String> = BTreeMap::new();
         identity.insert(
             "configuration".into(),
             self.configuration_hashes.at(&assembly.name).to_string(),
@@ -1720,6 +1783,7 @@ impl Compiler {
                 format!("reference:{}", sysutil::base(reference)),
                 hash.clone(),
             );
+            reference_hashes.insert(reference.clone(), hash.clone());
             served.insert(reference.clone(), hash);
         }
         for executable in [helper.to_string(), self.csc.clone()]
@@ -1798,12 +1862,14 @@ impl Compiler {
                 execution_orders: &execution_orders,
                 marker_path: &marker,
                 native_base_assemblies: &config.native_base,
+                reference_hashes: &reference_hashes,
                 references: refs,
                 sources: &sources,
             },
         )?;
         lap = self.last_phases.lap("assembly_cache", lap);
-        let output = compiler_command(ctx, staging, &self.dotnet, &[helper, &request])
+        let output = self
+            .helper_command(ctx, staging, &[helper, &request])
             .map_err(|error| anyhow!("verify lifecycle {}: {error}", assembly.name))?;
         lap = self.last_phases.lap("lifecycle_rewrite", lap);
         let wire: WireProof = unmarshal(&output)?;
