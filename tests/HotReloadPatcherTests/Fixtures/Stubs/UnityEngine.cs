@@ -8,7 +8,10 @@ namespace UnityEngine
     public class Object { }
     public class Component : Object { }
     public class Behaviour : Component { }
-    public class MonoBehaviour : Behaviour { }
+    public class MonoBehaviour : Behaviour
+    {
+        public void Invoke(string methodName, float time) { }
+    }
     public class ScriptableObject : Object { }
 
     [AttributeUsage(AttributeTargets.Field)]

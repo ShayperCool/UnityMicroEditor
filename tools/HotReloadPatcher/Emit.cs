@@ -554,6 +554,20 @@ internal sealed class Emitter
         return blob.ReadTypeHandle();
     }
 
+    /// The type of its own module that a type reference names; nil for a reference into another
+    /// assembly. The compiler names its own types by definition. A post-processor that imports a
+    /// type of the assembly it rewrites writes a reference scoped to the module instead: the
+    /// Netcode post-processor does so for a struct of the game that an RPC sends
+    /// (`FastBufferWriter::WriteValueSafe<BallStats>`). Such a reference means the definition.
+    static TypeDefinitionHandle OwnType(Asm a, TypeReferenceHandle h)
+    {
+        var scope = a.MD.GetTypeReference(h).ResolutionScope;
+        if (scope.Kind == HandleKind.TypeReference ? OwnType(a, (TypeReferenceHandle)scope).IsNil : scope.Kind != HandleKind.ModuleDefinition) return default;
+        string name = a.TypeRefName(h, bare: true);
+        return a.Types.TryGetValue(name, out var type) ? type
+            : throw new Unsupported(Codes.EmitNotSupported, $"a type reference scoped to the module names {name}, which the module does not define");
+    }
+
     /// A type or member of another game assembly of the same change must exist in what the Player
     /// loaded of it: an addition there lives in that assembly's patch, which this patch cannot name.
     void CheckForeign(EntityHandle h)
@@ -613,7 +627,10 @@ internal sealed class Emitter
         switch (h.Kind)
         {
             case HandleKind.TypeDefinition: NeedType((TypeDefinitionHandle)h); break;
-            case HandleKind.TypeReference: CheckForeign(h); break;
+            case HandleKind.TypeReference:
+                if (OwnType(n, (TypeReferenceHandle)h) is { IsNil: false } own) NeedType(own);
+                else CheckForeign(h);
+                break;
             case HandleKind.TypeSpecification: scanner.TypeSpec(md.GetBlobReader(md.GetTypeSpecification((TypeSpecificationHandle)h).Signature)); break;
             case HandleKind.MethodDefinition: NeedMethod((MethodDefinitionHandle)h); break;
             case HandleKind.FieldDefinition: NeedField((FieldDefinitionHandle)h); break;
@@ -922,6 +939,7 @@ internal sealed class Emitter
                 break;
             case HandleKind.TypeReference:
             {
+                if (OwnType(n, (TypeReferenceHandle)h) is { IsNil: false } own) { result = MapType(own); break; }
                 var tr = md.GetTypeReference((TypeReferenceHandle)h);
                 string ns = tr.Namespace.IsNil ? "" : md.GetString(tr.Namespace), name = md.GetString(tr.Name);
                 var scope = tr.ResolutionScope;
@@ -985,6 +1003,7 @@ internal sealed class Emitter
                 break;
             case HandleKind.TypeReference:
             {
+                if (OwnType(o, (TypeReferenceHandle)h) is { IsNil: false } own) { result = LoadedType(own); break; }
                 var tr = o.MD.GetTypeReference((TypeReferenceHandle)h);
                 string ns = tr.Namespace.IsNil ? "" : o.MD.GetString(tr.Namespace), name = o.MD.GetString(tr.Name);
                 var scope = tr.ResolutionScope;

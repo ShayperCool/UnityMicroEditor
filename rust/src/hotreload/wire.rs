@@ -49,7 +49,6 @@ pub struct BuilderAssembly {
     pub loaded: String,
     /// The DLL of the newest compile.
     pub current: String,
-    pub netcode: bool,
 }
 
 /// `dotnet HotReloadPatcher.dll <request.json>`.

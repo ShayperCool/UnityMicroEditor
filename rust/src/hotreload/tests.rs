@@ -95,13 +95,12 @@ fn builder_request_encoding() {
             name: "Assembly-CSharp".into(),
             loaded: "/abs/loaded/Assembly-CSharp.dll".into(),
             current: "/abs/new/Assembly-CSharp.dll".into(),
-            netcode: false,
         }],
     };
     // The request of the design contract, 5.1.
     let contract = json!({"schemaVersion":1,"generation":3,"output":"/abs/dir/for/this/generation",
         "runtimeAssembly":"UnityMicroEditor.HotReload",
-        "assemblies":[{"name":"Assembly-CSharp","loaded":"/abs/loaded/Assembly-CSharp.dll","current":"/abs/new/Assembly-CSharp.dll","netcode":false}]});
+        "assemblies":[{"name":"Assembly-CSharp","loaded":"/abs/loaded/Assembly-CSharp.dll","current":"/abs/new/Assembly-CSharp.dll"}]});
     assert_eq!(encoded(&request), contract);
     // A2: the result of the generation the Player runs.
     request.previous_result = "/abs/2/result.json".into();
@@ -625,7 +624,6 @@ impl Rig {
                     name: name.to_string(),
                     sha256: file_hash(&path).unwrap(),
                     path,
-                    netcode: false,
                 }
             })
             .collect();
@@ -843,7 +841,7 @@ fn a_patch_is_applied_recorded_and_followed_by_the_next_generation() {
         request,
         json!({"schemaVersion":1,"generation":1,"output":sysutil::join(&[&rig.run, "hot-reload/1"]),
             "runtimeAssembly":"UnityMicroEditor.HotReload",
-            "assemblies":[{"name":"Assembly-CSharp","loaded":rig.code.loaded()[0].path,"current":rig.current[0].path,"netcode":false}]})
+            "assemblies":[{"name":"Assembly-CSharp","loaded":rig.code.loaded()[0].path,"current":rig.current[0].path}]})
     );
     assert_eq!(read_json(&rig.file(1, "request.json")), request);
     // What the Player was sent.
@@ -998,7 +996,7 @@ fn a_reverted_edit_restores_the_loaded_code_with_an_empty_descriptor() {
     let loaded = &rig.code.loaded()[0].path;
     assert_eq!(
         request["assemblies"],
-        json!([{"name":"Assembly-CSharp","loaded":loaded,"current":loaded,"netcode":false}])
+        json!([{"name":"Assembly-CSharp","loaded":loaded,"current":loaded}])
     );
     assert_eq!(request["previousResult"], rig.file(1, "result.json"));
     assert_eq!(player.seen()[1].1["assemblies"], json!([]));
@@ -1392,7 +1390,6 @@ fn an_assembly_the_player_did_not_load_is_refused() {
         name: "Game.New".into(),
         path: "/x/Game.New.dll".into(),
         sha256: "00".into(),
-        netcode: false,
     });
     match rig.attempt(&player) {
         Outcome::Unsupported(refusal) => {
@@ -1404,17 +1401,18 @@ fn an_assembly_the_player_did_not_load_is_refused() {
     assert!(rig.code.refused() && rig.requests.borrow().is_empty());
 }
 
+/// Whether the Netcode post-processor rewrote an assembly is read by the
+/// builder from the image; the request says nothing about it.
 #[test]
-fn netcode_assemblies_are_named_to_the_builder() {
+fn a_request_names_an_assembly_by_its_two_images_only() {
     let mut rig = Rig::new();
     let player = FakePlayer::start(&rig.run, Vec::new());
     rig.compile("Game.Core", 1);
-    rig.current[1].netcode = true;
     rig.builds(vec![Build::Unchanged]);
     assert_eq!(rig.attempt(&player), rig.unchanged(1, Vec::new()));
     assert_eq!(
         rig.requests.borrow()[0]["assemblies"],
-        json!([{"name":"Game.Core","loaded":rig.code.loaded()[1].path,"current":rig.current[1].path,"netcode":true}])
+        json!([{"name":"Game.Core","loaded":rig.code.loaded()[1].path,"current":rig.current[1].path}])
     );
 }
 
@@ -1679,7 +1677,6 @@ fn hot_reload_patch_builder_sdk() {
                 name: "Assembly-CSharp".into(),
                 loaded: v1.clone(),
                 current: v2.clone(),
-                netcode: false,
             }],
         },
     )
@@ -1722,7 +1719,6 @@ fn hot_reload_patch_builder_sdk() {
         name: "Assembly-CSharp".into(),
         path: path.into(),
         sha256: file_hash(path).unwrap(),
-        netcode: false,
     };
     let mut code = PlayerCode::new(
         &run,
@@ -2520,7 +2516,8 @@ fn hot_reload_patcher_harness_sdk() {
     ]);
     let started = Instant::now();
     let output = std::process::Command::new(sysutil::join(&[&data, "DotNetSdk/dotnet"]))
-        .args(["run", "--project", &project])
+        // Without build servers: one would outlive the test.
+        .args(["run", "--disable-build-servers", "--project", &project])
         .env("UNITY_DATA", &data)
         .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
         .env("DOTNET_NOLOGO", "1")

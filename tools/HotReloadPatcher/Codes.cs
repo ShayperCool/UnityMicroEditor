@@ -54,6 +54,7 @@ internal static class Codes
     public const string AddedMethodDelegateIdentity = "added_method_delegate_identity";
     public const string AddedMemberAttributesIgnored = "added_member_attributes_ignored";
     public const string AddedMethodInvisibleByName = "added_method_invisible_by_name";
+    public const string AddedMethodNamedByString = "added_method_named_by_string";
     public const string AccessibilityChanged = "accessibility_changed";
     public const string RuntimeInitializerAdded = "runtime_initializer_added";
     public const string RuntimeInitializerRemoved = "runtime_initializer_removed";
@@ -87,11 +88,11 @@ internal static class Codes
         (FieldFlagsChanged, "Flags of an existing field changed (not-serialized, marshalling, special name, ...)."),
         (StaticReadonlyRemoved, "`readonly` was removed from a static field; the runtime may have compiled its value into loaded and patched code as a constant, so an assignment would not be seen."),
         (SpecialFieldAdded, "The added field cannot live in the side table (thread-static, volatile, pointer or by-ref type, marshalled, mapped data)."),
-        (SerializationChanged, "The accessibility of an existing field changed so that Unity starts or stops serializing it; the Player reads scenes, prefabs and assets with the loaded fields until a restart."),
+        (SerializationChanged, "The accessibility or `readonly` of an existing field changed so that Unity starts or stops serializing it; the Player reads scenes, prefabs and assets with the loaded fields until a restart. A field of a type Unity never serializes (a delegate, a dictionary, an interface or a class without [Serializable]) is not refused."),
         (CrossAssemblyAddition, "Patched code uses a type or member that this same change added to another game assembly."),
         (GeneratedTypeNotLoaded, "Patched code needs an anonymous type or a generic compiler-generated type that the loaded assembly does not contain."),
         (GenericGeneratedMember, "Patched code contains a generic lambda or local function."),
-        (UnownedGeneratedCode, "Compiler-generated code (a lambda, a local function or a state machine) differs between the two compilations and no method is known to own it, so the edit cannot be compared."),
+        (UnownedGeneratedCode, "Compiler-generated code (a lambda, a local function or a state machine) that some body of the assembly names differs between the two compilations and no method is known to own it, so the edit cannot be compared. Generated code that nothing names (behind a `return`, in a branch a constant switches off, a local function without a call) cannot run and is left out."),
         (UnsupportedInstruction, "Patched code uses an added member in a way the patch cannot express (reflection handle, delegate over an added struct method, volatile access, ...)."),
         (EmitNotSupported, "The patch builder cannot prove a correct patch for this member (a synchronized added method, a variable argument list or a call of one, ...)."),
         (EmitVerificationFailed, "The emitted patch assembly did not pass its verification; nothing was published."),
@@ -100,17 +101,18 @@ internal static class Codes
 
     public static readonly (string Code, string Meaning)[] Notes =
     {
-        (ExistingInstancesKeepDefault, "Objects that already exist read the default value of an added field; its initializer runs only in objects constructed after the patch."),
+        (ExistingInstancesKeepDefault, "Objects that already exist read the default value of an added field that a constructor or an initializer sets; that runs only in objects constructed after the patch. An added field without one has its default everywhere and gets no note, unless a field of the same type was removed with it: a renamed field does not take over the value of the old name."),
         (SerializedFieldNotRestored, "An added field that Unity would serialize is not restored from scenes, prefabs or assets until a restart."),
         (FieldValueReset, "A field whose type or static modifier changed is stored anew; its previous value is lost."),
         (ConstructorAppliesToNewObjects, "A changed constructor or instance field initializer affects only objects constructed after the patch."),
-        (StartedObjectsKeepState, "A changed Awake or Start of an engine object is not run again for the objects that exist; it runs for objects created after the patch."),
+        (StartedObjectsKeepState, "A changed parameterless Start of a MonoBehaviour, or Awake of a MonoBehaviour or ScriptableObject, does not run again for the objects that already ran it; it runs for objects that start after the patch."),
         (RunningCoroutinesKeepOldCode, "Coroutines, iterators and async methods that are already running finish on the old code; new calls run the new code."),
         (LambdaNotRemapped, "A lambda or local function was edited, moved or removed and its old version is not redirected: which lambda it became is only known while the code that creates it is unchanged, and a redirect needs the same captures, none of them taken by reference. Delegates and calls made by code from before the patch keep the old body."),
         (EarlierPatchDelegatesKeepOldCode, "An added method, lambda, local function or state machine that an earlier patch brought was changed or dropped; delegates, coroutines and async calls created while that patch was applied keep running its code."),
         (AddedMethodDelegateIdentity, "Patched code makes a delegate of an added method that the earlier patch also had; each patch has its own copy, so `-=` does not remove a handler subscribed while the earlier patch was applied, until a full recompile."),
         (AddedMemberAttributesIgnored, "Attributes on an added member are invisible to reflection until a full recompile."),
-        (AddedMethodInvisibleByName, "An added method that a string literal names, or an added instance method of an engine object, cannot be found by name until a full recompile: SendMessage, Invoke, StartCoroutine(string), UnityEvent, animation events, input messages and reflection look in the loaded class."),
+        (AddedMethodInvisibleByName, "An added instance method of an engine object cannot be found by name until a full recompile: SendMessage, Invoke, StartCoroutine(string), UnityEvent, animation events, input messages and reflection look in the loaded class. Calls in code reach it."),
+        (AddedMethodNamedByString, "A string of the game equals the name of an added method: Invoke, SendMessage, StartCoroutine(string) and reflection look in the loaded class and do not find it until a full recompile, so a call by that name does nothing. The note names the types whose code holds the string and is new again when another place names the method."),
         (AccessibilityChanged, "The accessibility of an existing member changed; reflection keeps the loaded accessibility until a full recompile. A field that Unity would serialize differently is refused instead (serialization_changed)."),
         (RuntimeInitializerAdded, "A [RuntimeInitializeOnLoadMethod] method was added; it runs at the next start."),
         (RuntimeInitializerRemoved, "A [RuntimeInitializeOnLoadMethod] method was removed or renamed; the change is effective at the next start."),

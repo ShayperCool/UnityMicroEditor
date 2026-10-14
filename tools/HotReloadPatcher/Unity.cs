@@ -21,7 +21,16 @@ internal readonly struct UnityType
     /// Instance method names declared by the bases between the type and the engine's classes.
     public readonly HashSet<string> BaseMethods;
 
-    public UnityType(UnityKind kind, bool chainRead, HashSet<string> baseMethods) { Kind = kind; ChainRead = chainRead; BaseMethods = baseMethods; }
+    /// The engine class the chain ends at, as `UnityEngine.MonoBehaviour`; empty unless `Kind` is `Yes`.
+    public readonly string Root;
+
+    public UnityType(UnityKind kind, bool chainRead, HashSet<string> baseMethods, string root = "") { Kind = kind; ChainRead = chainRead; BaseMethods = baseMethods; Root = root; }
+
+    /// Whether the engine calls a parameterless `Start` of the type once per object: a
+    /// MonoBehaviour, or a type whose chain cannot be read to its end.
+    public bool Starts => Kind == UnityKind.Unknown || Root == "UnityEngine.MonoBehaviour";
+    /// The same for `Awake`, which a ScriptableObject has as well.
+    public bool Awakes => Kind == UnityKind.Unknown || Root is "UnityEngine.MonoBehaviour" or "UnityEngine.ScriptableObject" or "UnityEngine.StateMachineBehaviour";
 }
 
 internal static class UnityTypes
@@ -63,8 +72,23 @@ internal static class UnityTypes
     };
 
     // Class libraries cannot derive from the engine: a chain that enters one of them ends at System.Object.
-    static bool IsClassLibrary(string assembly) =>
+    public static bool IsClassLibrary(string assembly) =>
         assembly is "mscorlib" or "netstandard" or "System" || assembly.StartsWith("System.", StringComparison.Ordinal) || assembly.StartsWith("Mono.", StringComparison.Ordinal);
+
+    /// The engine's own assemblies. It serializes its types by rules of its own, whatever their flags.
+    public static bool IsEngine(string assembly) =>
+        assembly is "UnityEngine" or "UnityEditor" || assembly.StartsWith("UnityEngine.", StringComparison.Ordinal) || assembly.StartsWith("Unity.", StringComparison.Ordinal);
+
+    /// Value types of the class library that are no enum, for when the library cannot be read:
+    /// Unity serializes an enum of any assembly and none of these.
+    public static readonly HashSet<string> LibraryStructs = new(StringComparer.Ordinal)
+    {
+        "System.DateTime", "System.DateTimeOffset", "System.TimeSpan", "System.Guid", "System.Decimal", "System.IntPtr", "System.UIntPtr",
+        "System.Threading.CancellationToken", "System.Numerics.BigInteger", "System.Numerics.Complex", "System.Numerics.Vector2",
+        "System.Numerics.Vector3", "System.Numerics.Vector4", "System.Numerics.Quaternion", "System.Numerics.Matrix4x4",
+        "System.Runtime.InteropServices.GCHandle", "System.RuntimeTypeHandle", "System.RuntimeFieldHandle", "System.RuntimeMethodHandle",
+        "System.Collections.DictionaryEntry", "System.Threading.Tasks.ValueTask", "System.Range", "System.Index", "System.Half",
+    };
 
     /// Walks the base chain of a type through every assembly that can be read.
     public static UnityType Classify(Workspace workspace, Asm assembly, TypeDefinitionHandle type)
@@ -88,7 +112,7 @@ internal static class UnityTypes
             {
                 var reference = (TypeReferenceHandle)parent;
                 string name = a.TypeRefName(reference, bare: true), home = a.TypeRefAssembly(reference);
-                if (Roots.Contains(name)) return new UnityType(UnityKind.Yes, true, names);
+                if (Roots.Contains(name)) return new UnityType(UnityKind.Yes, true, names, name);
                 if (IsClassLibrary(home)) return new UnityType(UnityKind.No, true, names);
                 if (home.Length == 0 || workspace.Resolve(home) is not { } next || !next.Types.TryGetValue(name, out var found))
                     return new UnityType(UnityKind.Unknown, false, names);
@@ -98,7 +122,7 @@ internal static class UnityTypes
             else if (parent.Kind == HandleKind.TypeDefinition)
             {
                 t = (TypeDefinitionHandle)parent;
-                if (Roots.Contains(a.TypeName(t))) return new UnityType(UnityKind.Yes, true, names);
+                if (Roots.Contains(a.TypeName(t))) return new UnityType(UnityKind.Yes, true, names, a.TypeName(t));
             }
             else return new UnityType(UnityKind.Unknown, false, names);
             foreach (var m in a.MD.GetTypeDefinition(t).GetMethods())
