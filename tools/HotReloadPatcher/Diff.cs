@@ -311,6 +311,21 @@ internal sealed partial class Differ
         return list;
     }
 
+    /// The names a field was serialized under before, from its [FormerlySerializedAs] attributes.
+    static List<string> FormerNames(Asm a, CustomAttributeHandleCollection handles)
+    {
+        var names = new List<string>();
+        foreach (var h in handles)
+        {
+            var ca = a.MD.GetCustomAttribute(h);
+            if (a.AttributeTypeName(ca) != "UnityEngine.Serialization.FormerlySerializedAsAttribute") continue;
+            var blob = a.MD.GetBlobReader(ca.Value);
+            if (blob.Length < 3 || blob.ReadUInt16() != 1) continue;
+            if (blob.ReadSerializedString() is { Length: > 0 } name) names.Add(name);
+        }
+        return names;
+    }
+
     static string ShortAttribute(string text)
     {
         int paren = text.IndexOf('(');
@@ -621,7 +636,12 @@ internal sealed partial class Differ
         var attributes = AuthoredAttributes(n, d.GetCustomAttributes());
         if (Serialized(d, d.Attributes, type, attributes))
         {
-            change.Notes.Add((Codes.SerializedFieldNotRestored, $"The added field {id} is not restored from scenes, prefabs or assets until a restart."));
+            // The session's scene loader matches saved keys to fields by name and does not apply
+            // [FormerlySerializedAs]: a value saved under a former name is not read after a
+            // restart either (stage 5 runner5-2).
+            var former = FormerNames(n, d.GetCustomAttributes());
+            string formerly = former.Count == 0 ? "" : $" It carries [FormerlySerializedAs(\"{string.Join("\"), FormerlySerializedAs(\"", former)}\")], which the session's scene loader does not apply, also not after a restart: a value saved under {(former.Count == 1 ? "that name" : "those names")} stays unread until the data is saved again with the field's new name.";
+            change.Notes.Add((Codes.SerializedFieldNotRestored, $"The added field {id} is not restored from scenes, prefabs or assets until a restart.{formerly}"));
             change.Holders = DocumentHolders(type);
         }
         if (attributes.Count > 0)

@@ -519,6 +519,10 @@ internal static class Program
         ["ADD_SERIALIZED_FIELD"] = Patch().Fields("Edits.Serialized::exposed", "Edits.Serialized::hidden", "Edits.Serialized::plain").Redirects("changed Edits.Serialized::Sum()")
             .Noted("serialized_field_not_restored Edits.Serialized::exposed", "serialized_field_not_restored Edits.Serialized::hidden", "added_member_attributes_ignored Edits.Serialized::hidden"),
         ["FIELD_RENAME"] = Patch().Fields("Edits.Fields::renamed").Redirects("changed Edits.Fields::Use()").Noted("existing_instances_keep_default Edits.Fields::renamed"),
+        // The session's loader does not apply [FormerlySerializedAs], not after a restart either.
+        ["FIELD_FORMERLY"] = Patch().Fields("Edits.Dimmer::dimLevel").Redirects("changed Edits.Dimmer::.ctor()")
+            .Noted("existing_instances_keep_default Edits.Dimmer::dimLevel", "serialized_field_not_restored Edits.Dimmer::dimLevel",
+                "added_member_attributes_ignored Edits.Dimmer::dimLevel", "constructor_applies_to_new_objects Edits.Dimmer::.ctor()"),
         ["FIELD_TYPE_CHANGE"] = Patch().Fields("Edits.Fields::speed").Redirects("changed Edits.Fields::.ctor()", "changed Edits.Fields::Use()")
             .Noted("field_value_reset Edits.Fields::speed", "constructor_applies_to_new_objects Edits.Fields::.ctor()"),
         ["REMOVE_FIELD"] = Unchanged(),
@@ -644,12 +648,17 @@ internal static class Program
             catch (Exception e) { Check(false, $"{label}: {e.Message}"); }
         });
 
-        // What the note of a public method says (stage 6).
+        // What the notes of stage 6 say: a field kept by [FormerlySerializedAs] is not restored by a
+        // restart either; the classes that hold a field's value; the hedge of a public method.
         JsonElement? Result(string name)
         {
             string path = Path.Combine(root, name, "result.json");
             return File.Exists(path) ? JsonDocument.Parse(File.ReadAllText(path)).RootElement : null;
         }
+        string formerly = Message(Result("FIELD_FORMERLY"), "serialized_field_not_restored", "Edits.Dimmer::dimLevel");
+        Check(formerly.Contains("FormerlySerializedAs(\"dim\")", StringComparison.Ordinal) && formerly.Contains("also not after a restart", StringComparison.Ordinal),
+            "FIELD_FORMERLY: the note does not say that a restart does not bring the value saved under the former name: " + formerly);
+        Check(HoldersOf(Result("FIELD_FORMERLY"), "Edits.Dimmer::dimLevel") == "Edits.Dimmer", "FIELD_FORMERLY: holders [" + HoldersOf(Result("FIELD_FORMERLY"), "Edits.Dimmer::dimLevel") + "], expected [Edits.Dimmer].");
         string exposed = Message(Result("ONCE_PUBLIC_INIT"), "started_objects_keep_state", "Edits.Brute::Init()");
         Check(exposed.Contains("in the game's code only from Edits.Brute::Awake()", StringComparison.Ordinal) && exposed.Contains("UnityEvent", StringComparison.Ordinal),
             "ONCE_PUBLIC_INIT: the note of a public method does not say that it reads the game's code only: " + exposed);

@@ -1643,4 +1643,14 @@ namespace Edits
 #endif
     }
 
+    // ---- a renamed field that keeps its data with [FormerlySerializedAs] (stage 5 runner5-2) --
+
+    public class Dimmer : MonoBehaviour
+    {
+#if CASE_FIELD_FORMERLY
+        [UnityEngine.Serialization.FormerlySerializedAs("dim")] public float dimLevel = 0.5f;
+#else
+        public float dim = 0.5f;
+#endif
+    }
 }
