@@ -472,7 +472,9 @@ internal static class Program
         ["RENAME_METHOD"] = Patch().Methods("Edits.Signatures::Mend(System.Int32)").Redirects("changed Edits.Signatures::Turn()"),
         ["STATIC_TOGGLE"] = Patch().Methods("Edits.Signatures::Heal(System.Int32)").Redirects("changed Edits.Signatures::Turn()"),
         ["REMOVE_METHOD"] = Unchanged(),
-        ["ADD_ATTRIBUTED_METHOD"] = Patch().Methods("Edits.Tools::Launch()").Noted("added_member_attributes_ignored Edits.Tools::Launch()", "added_method_named_by_string Edits.Tools::Launch()"),
+        // A string that only equals the name ("Launch" returned by Name()) calls nothing (builder6-9).
+        ["ADD_ATTRIBUTED_METHOD"] = Patch().Methods("Edits.Tools::Launch()").Noted("added_member_attributes_ignored Edits.Tools::Launch()"),
+        ["ADD_METHOD_STRING_ONLY"] = Patch().Methods("Edits.Hopper::Hop()").Noted("added_method_invisible_by_name Edits.Hopper::Hop()"),
         ["ADD_UPDATE_PLAIN"] = Patch().Methods("Edits.PlainTicker::Update()"),
         // The engine finds a method of its objects by name; a static one it does not look for.
         ["ADD_ENGINE_METHOD"] = Patch().Methods("Edits.Behaviour1::OnJump()", "Edits.Behaviour1::set_Level(System.Int32)", "Edits.Behaviour1::Helper()")
@@ -495,6 +497,16 @@ internal static class Program
         // by: they run again, and get no note.
         ["ONCE_HOOK"] = Patch().Redirects("changed Edits.Enemy::OnSetup()", "changed Edits.Actor::Prepare()", "changed Edits.Actor::Bonus()", "changed Edits.Actor::Rebuild()")
             .Noted("started_objects_keep_state Edits.Enemy::OnSetup()", "started_objects_keep_state Edits.Actor::Prepare()"),
+        // A static field initializer's helper, field initializers' helpers of another class (a
+        // property among them), a public method only Awake calls, a method Start calls by the name
+        // it writes (builder6-2, builder6-3, netcode6-1).
+        ["ONCE_CCTOR_HELPER"] = Patch().Redirects("changed Edits.Tables::BuildDamage()").Noted("runtime_initializer_changed Edits.Tables::BuildDamage()"),
+        ["ONCE_CTOR_HELPER"] = Patch().Redirects("changed Edits.Rules::get_Level()", "changed Edits.Rules::Weights()")
+            .Noted("constructor_applies_to_new_objects Edits.Rules::get_Level()", "constructor_applies_to_new_objects Edits.Rules::Weights()"),
+        ["ONCE_PUBLIC_INIT"] = Patch().Redirects("changed Edits.Brute::Init()").Noted("started_objects_keep_state Edits.Brute::Init()"),
+        ["ONCE_INVOKE_NAMEOF"] = Patch().Redirects("changed Edits.Delayed::LateInit()").Noted("started_objects_keep_state Edits.Delayed::LateInit()"),
+        // Only the lambda OnEnable subscribes changed, and it is redirected: live, no note (builder6-8).
+        ["ONCE_LAMBDA_ONLY"] = Patch().Redirects("changed Edits.Jumper::OnEnable()", "lambda Edits.Jumper::OnEnable() [lambda 0]"),
         // The instances of a renamed coroutine that run keep the removed code.
         ["COROUTINE_REMOVED"] = Patch().Methods("Edits.Blinker::Pulse()").Redirects("changed Edits.Blinker::Update()")
             .Noted("running_coroutines_keep_old_code Edits.Blinker::Blink()", "added_method_invisible_by_name Edits.Blinker::Pulse()"),
@@ -631,6 +643,16 @@ internal static class Program
             }
             catch (Exception e) { Check(false, $"{label}: {e.Message}"); }
         });
+
+        // What the note of a public method says (stage 6).
+        JsonElement? Result(string name)
+        {
+            string path = Path.Combine(root, name, "result.json");
+            return File.Exists(path) ? JsonDocument.Parse(File.ReadAllText(path)).RootElement : null;
+        }
+        string exposed = Message(Result("ONCE_PUBLIC_INIT"), "started_objects_keep_state", "Edits.Brute::Init()");
+        Check(exposed.Contains("in the game's code only from Edits.Brute::Awake()", StringComparison.Ordinal) && exposed.Contains("UnityEvent", StringComparison.Ordinal),
+            "ONCE_PUBLIC_INIT: the note of a public method does not say that it reads the game's code only: " + exposed);
 
         // Every symbol of the fixture has an expectation.
         var declared = new SortedSet<string>(StringComparer.Ordinal);
@@ -817,6 +839,12 @@ internal static class Program
         // A method only OnNetworkSpawn calls, and the authority NetworkTransform takes at spawn.
         ["SPAWN_HOOK"] = Patch().Redirects("changed " + Thing + "::Arm()").Noted("spawned_objects_keep_state " + Thing + "::Arm()"),
         ["AUTHORITY"] = Patch().Redirects("changed Net.ClientMover::OnIsServerAuthoritative()").Noted("spawned_objects_keep_state Net.ClientMover::OnIsServerAuthoritative()"),
+        // OnNetworkPreSpawn takes the NetworkManager by reference (builder6-1).
+        ["PRESPAWN"] = Patch().Redirects("changed " + Thing + "::OnNetworkPreSpawn(Unity.Netcode.NetworkManager&)")
+            .Noted("spawned_objects_keep_state " + Thing + "::OnNetworkPreSpawn(Unity.Netcode.NetworkManager&)"),
+        // A read permission a property of another class supplies is constructor code: not compared
+        // as the written argument is (a documented limit), and told (netcode6-1).
+        ["VARIABLE_READ_HELPER"] = Patch().Redirects("changed Net.NetRules::get_HiddenRead()").Noted("constructor_applies_to_new_objects Net.NetRules::get_HiddenRead()"),
         // The initial value and the write permission of a network variable are constructor code;
         // its read permission decides the spawn data both ends read.
         ["VARIABLE_INITIAL"] = Patch().Redirects("changed Net.NetPerm::.ctor()").Noted("constructor_applies_to_new_objects Net.NetPerm::.ctor()"),
@@ -1008,8 +1036,9 @@ internal static class Program
         string Game(string directory, string lib, string? define = null) => Compile(Path.Combine(root, directory, "Game.dll"), new[] { game }, new[] { unityStub, lib }, define);
         string libLoaded = Lib("loaded"), libCurrent = Lib("current", "NAMED_ADD");
         string gameLoaded = Game("loaded", libLoaded), gameCurrent = Game("current", libCurrent, "NAMED_CALL");
-        var named = Patch().Methods("Lib.Target::TakeDamage()", "Lib.Commands::Reset()")
-            .Noted("added_method_named_by_string Lib.Target::TakeDamage()", "added_method_named_by_string Lib.Commands::Reset()");
+        const string Hurt = "Lib.Target::Hurt(System.Int32,System.Int32)";
+        var named = Patch().Methods("Lib.Target::TakeDamage()", "Lib.Commands::Reset()", Hurt)
+            .Noted("added_method_named_by_string Lib.Target::TakeDamage()", "added_method_named_by_string Lib.Commands::Reset()", "added_method_invisible_by_name " + Hurt);
         // Both assemblies change in one request.
         var both = Patcher("named by another entry", Path.Combine(root, "both"), 1, new[] { new AssemblyPair("Lib", libLoaded, libCurrent), new AssemblyPair("Game", gameLoaded, gameCurrent) });
         Expect("named by another entry", both, "Lib", named);
@@ -1021,11 +1050,48 @@ internal static class Program
         // The sibling calls by a name it computes: any added method of an engine object may be meant.
         string computing = Lib("sibling-computed");
         Game("sibling-computed", computing, "NAMED_COMPUTED");
+        // A method with two parameters is no target of such a call (builder6-9).
         Expect("computed name", Patcher("computed name", Path.Combine(root, "sibling-computed-out"), 1, new[] { new AssemblyPair("Lib", computing, libCurrent) }), "Lib",
-            Patch().Methods("Lib.Target::TakeDamage()", "Lib.Commands::Reset()").Noted("added_method_computed_name Lib.Target::TakeDamage()"));
+            Patch().Methods("Lib.Target::TakeDamage()", "Lib.Commands::Reset()", Hurt).Noted("added_method_computed_name Lib.Target::TakeDamage()", "added_method_invisible_by_name " + Hurt));
         // Neither: the note of every added method of an engine object.
         Expect("not named", Patcher("not named", Path.Combine(root, "plain-out"), 1, new[] { new AssemblyPair("Lib", libLoaded, libCurrent) }), "Lib",
-            Patch().Methods("Lib.Target::TakeDamage()", "Lib.Commands::Reset()").Noted("added_method_invisible_by_name Lib.Target::TakeDamage()"));
+            Patch().Methods("Lib.Target::TakeDamage()", "Lib.Commands::Reset()", Hurt).Noted("added_method_invisible_by_name Lib.Target::TakeDamage()", "added_method_invisible_by_name " + Hurt));
+
+        // A sibling that references nothing of Lib calls the added method by SendMessage (builder6-5).
+        string striking = Lib("sibling-remote");
+        Compile(Path.Combine(root, "sibling-remote", "Remote.dll"), new[] { Fixture("Named", "Remote.cs") }, new[] { unityStub });
+        Expect("named by a sibling without a reference", Patcher("named by a sibling without a reference", Path.Combine(root, "sibling-remote-out"), 1,
+            new[] { new AssemblyPair("Lib", striking, Lib("current-strike", "NAMED_STRIKE")) }), "Lib",
+            Patch().Methods("Lib.Target::Strike()").Noted("added_method_named_by_string Lib.Target::Strike()"));
+
+        // A package next to the game sends messages by a name it makes: an added method named like
+        // a message may be meant, another is not (builder6-7).
+        string messaged = Lib("package");
+        Compile(Path.Combine(root, "package", "Unity.Messages.dll"), new[] { Fixture("Named", "Package.cs") }, new[] { unityStub });
+        var package = Patcher("package message", Path.Combine(root, "package-out"), 1, new[] { new AssemblyPair("Lib", messaged, Lib("current-message", "NAMED_MESSAGE")) });
+        Expect("package message", package, "Lib", Patch().Methods("Lib.Target::OnJump()", "Lib.Target::Jump()")
+            .Noted("added_method_computed_name Lib.Target::OnJump()", "added_method_invisible_by_name Lib.Target::Jump()"));
+        Check(Message(package, "added_method_computed_name", "Lib.Target::OnJump()").Contains("Unity.Messages.Sender (Unity.Messages)", StringComparison.Ordinal),
+            "package message: the note does not name the package's call: " + Message(package, "added_method_computed_name", "Lib.Target::OnJump()"));
+
+        // An override of a hook that a base class of another assembly calls only from Start (builder6-3).
+        string hookLib = Lib("hook");
+        string orcLoaded = Game("hook", hookLib), orcCurrent = Game("hook-current", hookLib, "NAMED_ORC");
+        var hook = Patcher("hook", Path.Combine(root, "hook-out"), 1, new[] { new AssemblyPair("Game", orcLoaded, orcCurrent) });
+        Expect("hook", hook, "Game", Patch().Redirects("changed Game.Orc::OnSpawned()").Noted("started_objects_keep_state Game.Orc::OnSpawned()"));
+        Check(Message(hook, "started_objects_keep_state", "Game.Orc::OnSpawned()").Contains("Lib.Unit::Start() (Lib)", StringComparison.Ordinal),
+            "hook: the note does not name the base class's Start: " + Message(hook, "started_objects_keep_state", "Game.Orc::OnSpawned()"));
+    }
+
+    /// The message of a note of the first assembly of a result; "?" when it has none.
+    static string Message(JsonElement? result, string code, string member)
+    {
+        if (result is { } root)
+            foreach (var assembly in root.GetProperty("assemblies").EnumerateArray())
+                foreach (var note in assembly.GetProperty("notes").EnumerateArray())
+                    if (note.GetProperty("code").GetString() == code && note.GetProperty("member").GetString() == member)
+                        return note.GetProperty("message").GetString()!;
+        return "?";
     }
 
     static void Interface()

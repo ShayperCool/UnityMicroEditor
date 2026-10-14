@@ -101,6 +101,7 @@ namespace Unity.Netcode
         protected virtual void __initializeVariables() { }
         protected internal virtual string __getTypeName() => "NetworkBehaviour";
         public virtual void OnNetworkSpawn() { }
+        protected virtual void OnNetworkPreSpawn(ref NetworkManager networkManager) { }
     }
 }
 
