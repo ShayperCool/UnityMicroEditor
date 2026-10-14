@@ -770,9 +770,27 @@ is not of the form the builder knows (another package version than 2.13.2)
 gets no patch at all (`netcode_assembly`). A patch reaches the Player of this
 session only: a second Player of the same network game, a client in another
 session, takes the edit from its own session, and until then the two run
-different bodies. A `recompile` restarts this Player, which leaves the network
+different bodies. That is safe for what Netcode generates, but not for code
+of the game that writes or reads data both ends exchange (a struct's
+`NetworkSerialize`, a named message, a custom serializer): a peer still on the
+old code reads what the patched one sends wrongly, without an error, until it
+takes the edit too. A `recompile` restarts this Player, which leaves the network
 session: the other Players see it disconnect, and its network state starts
-over.
+over. A Player restarted for a `netcode_*` reason runs the new registrations;
+the other Players of the game that still run the old code reconnect and read
+what it sends out of step until they are restarted on the new code too, which
+the reply says.
+
+Limits of a session for a Netcode game, found in Players with
+`com.unity.netcode.gameobjects` 2.13.2, independent of hot reload: a generic
+NetworkBehaviour (or any generic MonoBehaviour) cannot be prepared (the
+lifecycle rewrite refuses it: "Synthetic Awake on nested/generic MonoBehaviour
+classes is unsupported", or "Lifecycle callbacks on generic engine object
+classes are unsupported"); with scene management on, which is NGO's default,
+the host's connection approval fails because the session's scene has no
+build-settings path, so clients never synchronize; without it, clients do not
+find in-scene placed NetworkObjects. Spawn network objects from prefabs, and
+turn scene management off, for a session.
 
 Launch options, in `arguments` of `session_control(start)` or `reset`:
 
