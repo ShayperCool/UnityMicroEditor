@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     cancel::{Context, Source, select},
-    compiler::Compiler,
+    compiler::{Compiler, Phases},
     sha256, sysutil,
     util::{atomic_json, file_hash, marshal, random_id},
 };
@@ -209,6 +209,8 @@ pub struct PlayerCode {
     applied_result: String,
     /// The newest compile cannot be patched into this process.
     refused: bool,
+    /// Where the time of the last attempt went.
+    last_phases: Phases,
 }
 
 #[derive(Serialize)]
@@ -312,6 +314,7 @@ impl PlayerCode {
             patched: Vec::new(),
             applied_result: String::new(),
             refused: false,
+            last_phases: Phases::default(),
         }
     }
 
@@ -337,6 +340,10 @@ impl PlayerCode {
     /// runs the code it loaded.
     pub fn applied_result(&self) -> &str {
         &self.applied_result
+    }
+    /// Where the time of the last attempt went; empty when it did not reach the builder.
+    pub fn last_phases(&self) -> &Phases {
+        &self.last_phases
     }
     fn directory(&self, generation: u64) -> String {
         sysutil::join(&[&self.run_directory, "hot-reload", &generation.to_string()])
@@ -379,6 +386,8 @@ impl PlayerCode {
     /// error is the end of `ctx`.
     pub fn attempt(&mut self, ctx: &Context, attempt: &Attempt) -> Result<Outcome> {
         ctx.err()?;
+        self.last_phases.clear();
+        let started = Instant::now();
         if (attempt.exited)() {
             return Ok(Outcome::PlayerExited(Failure {
                 error: "the Player exited before the code patch".into(),
@@ -402,7 +411,8 @@ impl PlayerCode {
         let generation = self.next_generation;
         self.next_generation += 1;
         let mut files = Files::new(self.directory(generation), generation);
-        let outcome = self.attempt_generation(ctx, attempt, assemblies, &mut files);
+        let outcome = self.attempt_generation(ctx, attempt, assemblies, &mut files, started);
+        let started = Instant::now();
         // The context ended: nothing is known and the caller stops.
         ctx.err()?;
         // A builder that failed, or files that could not be written, leave
@@ -422,6 +432,7 @@ impl PlayerCode {
             Outcome::TimedOut(failure) => ("timed_out", failure.error.as_str()),
         };
         files.report(name, error);
+        self.last_phases.lap("report", started);
         self.refused = matches!(outcome, Outcome::Unsupported(_) | Outcome::ApplyFailed(_));
         Ok(outcome)
     }
@@ -432,6 +443,7 @@ impl PlayerCode {
         attempt: &Attempt,
         assemblies: Vec<BuilderAssembly>,
         files: &mut Files,
+        started: Instant,
     ) -> Result<Outcome> {
         let generation = files.generation;
         fs::DirBuilder::new()
@@ -451,7 +463,9 @@ impl PlayerCode {
                 assemblies,
             },
         )?;
+        let lap = self.last_phases.lap("builder_request", started);
         let output = (attempt.build)(ctx, &request)?;
+        let lap = self.last_phases.lap("builder", lap);
         write(&files.path("result.json"), &output)?;
         let result = BuilderResult::decode(&output, generation)?;
         files.result = raw(&output);
@@ -502,6 +516,7 @@ impl PlayerCode {
         data.push(b'\n');
         let descriptor_path = files.path("apply.json");
         write(&descriptor_path, &data)?;
+        let lap = self.last_phases.lap("descriptor", lap);
         let id = random_id();
         let path = Self::request_path(&self.run_directory);
         atomic_json(
@@ -525,6 +540,7 @@ impl PlayerCode {
             attempt.timeout,
             attempt.exited,
         )?;
+        self.last_phases.lap("player_ack", lap);
         let (ack, data) = match answer {
             Answer::Ack(ack, data) => (ack, data),
             Answer::Unreadable(error, data) => {

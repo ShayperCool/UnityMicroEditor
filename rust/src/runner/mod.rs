@@ -731,6 +731,9 @@ struct Live<'a> {
     /// The compile the running Player was started with.
     active_compile: Option<CompileUpdate>,
     hot: Option<Hot>,
+    /// Whether a line of timings is printed per window (`UME_TIMINGS=1`).
+    timings: bool,
+    times: WindowTimes,
 }
 impl Live<'_> {
     fn player(&mut self) -> &mut Player {
@@ -743,13 +746,17 @@ impl Steps for Live<'_> {
     }
 
     fn invalidate(&mut self, paths: &[String]) -> Result<()> {
+        self.times.start = Some(Instant::now());
         self.session.invalidate(paths);
         apply_builtin_shaders(&self.session, &self.opts.builtin_shaders)
     }
 
     fn compile(&mut self, ctx: &Context, paths: Option<&[String]>) -> Result<Compiled> {
         let affected = paths.is_none_or(|paths| self.compiler.compiler_changes(paths));
-        Ok(match self.compiler.compile(ctx, paths)? {
+        let started = Instant::now();
+        let compiled = self.compiler.compile(ctx, paths);
+        self.times.compile = Some(started.elapsed());
+        Ok(match compiled? {
             Some(update) => {
                 self.pending_compile = Some(update);
                 Compiled::Updated
@@ -782,7 +789,8 @@ impl Steps for Live<'_> {
         };
         let player = self.owned.0.as_ref().expect("owned Player");
         let exited = player.exit_probe();
-        code.attempt(
+        let started = Instant::now();
+        let outcome = code.attempt(
             ctx,
             &hotreload::Attempt {
                 current: &current,
@@ -792,7 +800,9 @@ impl Steps for Live<'_> {
                 source_changed: window.changed_wall,
                 timeout: hotreload::ACK_TIMEOUT,
             },
-        )
+        );
+        self.times.patch = Some(started.elapsed());
+        outcome
     }
 
     fn pid(&self) -> i32 {
@@ -1016,6 +1026,74 @@ impl Steps for Live<'_> {
         self.prepared = next;
         Ok(Scene::Updated(event))
     }
+
+    fn window_done(&mut self, window: &Window) {
+        let times = std::mem::take(&mut self.times);
+        let empty = compiler::Phases::default();
+        let compile = match times.compile {
+            Some(_) => &self.compiler.last_phases,
+            None => &empty,
+        };
+        let patch = match (&self.hot, times.patch) {
+            (Some(hot), Some(_)) => hot.code.last_phases(),
+            _ => &empty,
+        };
+        if let Some(line) = timings_report(self.timings, window, &times, compile, patch) {
+            eprintln!("{line}");
+        }
+    }
+}
+
+/// Whether the runner prints a line of timings per window.
+pub(crate) fn timings_enabled() -> bool {
+    std::env::var_os("UME_TIMINGS").is_some_and(|value| value == "1")
+}
+
+/// What the steps of one window took, as the window waited for them.
+#[derive(Debug, Default)]
+pub(crate) struct WindowTimes {
+    /// The first step of the window.
+    pub start: Option<Instant>,
+    pub compile: Option<Duration>,
+    pub patch: Option<Duration>,
+}
+
+/// The line of timings of a window, when they are asked for: one JSON object
+/// with the time from the first change to the printed events, the steps, and
+/// every phase of the compile and of the patch attempt (0 for a phase that
+/// did not run). Standard error is a log; nothing parses it.
+pub(crate) fn timings_report(
+    enabled: bool,
+    window: &Window,
+    times: &WindowTimes,
+    compile: &compiler::Phases,
+    patch: &compiler::Phases,
+) -> Option<String> {
+    if !enabled {
+        return None;
+    }
+    let seconds = |phases: &compiler::Phases, names: &[&'static str]| {
+        let mut map = serde_json::Map::new();
+        for (name, value) in phases.listed(names) {
+            map.insert(name.into(), serde_json::json!(value));
+        }
+        serde_json::Value::Object(map)
+    };
+    let optional = |time: Option<Duration>| time.map_or(0.0, |time| time.as_secs_f64());
+    let line = serde_json::json!({
+        "timings": "window",
+        "paths": window.paths.len(),
+        "recompile": window.recompile.is_some(),
+        "totalSeconds": window.changed_at.elapsed().as_secs_f64(),
+        "waitSeconds": times
+            .start
+            .map_or(0.0, |start| start.saturating_duration_since(window.changed_at).as_secs_f64()),
+        "compileSeconds": optional(times.compile),
+        "patchSeconds": optional(times.patch),
+        "compile": seconds(compile, &compiler::COMPILE_PHASES),
+        "patch": seconds(patch, &compiler::PATCH_PHASES),
+    });
+    Some(line.to_string())
 }
 
 fn run_session(
@@ -1232,6 +1310,8 @@ fn run_session(
         pending_compile: None,
         active_compile: initial_compile,
         hot,
+        timings: timings_enabled(),
+        times: WindowTimes::default(),
     };
     watch(
         ctx,
@@ -1309,7 +1389,9 @@ pub(crate) fn watch<S: Steps>(
         if !fill_window(ctx, wake, watcher, commands, &mut window)? {
             return Ok(());
         }
-        state.window(ctx, steps, &window, &|| watcher.pending())?;
+        let result = state.window(ctx, steps, &window, &|| watcher.pending());
+        steps.window_done(&window);
+        result?;
     }
 }
 

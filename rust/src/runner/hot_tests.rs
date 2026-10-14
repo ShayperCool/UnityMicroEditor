@@ -2710,3 +2710,48 @@ fn a_scene_update_finds_overrides_and_named_methods_and_skips_other_scripts() {
         [method("Game.Lamp::Flash()")]
     );
 }
+
+#[test]
+fn timings_line_names_every_phase_and_only_when_asked() {
+    let window = window(&["/project/Assets/Scripts/A.cs"]);
+    let mut compile = compiler::Phases::default();
+    compile.add("csc", Duration::from_millis(250));
+    compile.add("csc", Duration::from_millis(250));
+    compile.add("an_extra_phase", Duration::from_millis(1));
+    let mut patch = compiler::Phases::default();
+    patch.add("builder", Duration::from_millis(30));
+    let times = WindowTimes {
+        start: Some(Instant::now()),
+        compile: Some(Duration::from_millis(900)),
+        patch: Some(Duration::from_millis(40)),
+    };
+    assert_eq!(
+        timings_report(false, &window, &times, &compile, &patch),
+        None,
+        "a line of timings was made without UME_TIMINGS=1"
+    );
+    let line = timings_report(true, &window, &times, &compile, &patch).unwrap();
+    assert!(!line.contains('\n'), "one line per window: {line}");
+    let value: Json = serde_json::from_str(&line).unwrap();
+    assert_eq!(value["timings"], "window");
+    assert_eq!(value["paths"], 1);
+    for key in [
+        "totalSeconds",
+        "waitSeconds",
+        "compileSeconds",
+        "patchSeconds",
+    ] {
+        assert!(value[key].is_f64(), "{key} is missing: {line}");
+    }
+    assert_eq!(value["compileSeconds"].as_f64(), Some(0.9));
+    for name in compiler::COMPILE_PHASES {
+        assert!(value["compile"][name].is_f64(), "{name} is missing: {line}");
+    }
+    for name in compiler::PATCH_PHASES {
+        assert!(value["patch"][name].is_f64(), "{name} is missing: {line}");
+    }
+    assert_eq!(value["compile"]["csc"].as_f64(), Some(0.5));
+    assert_eq!(value["compile"]["an_extra_phase"].as_f64(), Some(0.001));
+    assert_eq!(value["compile"]["lifecycle_rewrite"].as_f64(), Some(0.0));
+    assert_eq!(value["patch"]["builder"].as_f64(), Some(0.03));
+}
