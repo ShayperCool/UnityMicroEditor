@@ -649,12 +649,17 @@ not take over until it restarts. The builder says so in notes, each with
   it offers `hot_reload(recompile)` and says when to go on without it. For a
   value that is lost (`field_value_reset`) or a callback of the game that
   threw (`callback_failed`) it offers nothing, since a restart undoes
-  neither. Notes about lookups by name or reflection alone
-  (`added_method_invisible_by_name`, `accessibility_changed`) are listed and
-  make no sentence. With more new notes than a list holds (16) it names the
-  report that has all. `attention` also says when the runner restarted the
-  Player by itself (`hot_reload_failed`, or `hot_reload_unsupported` under
-  `onUnsupportedEdit: restart`), and when nothing followed the mark.
+  neither. A limit always leads such a note. Notes about lookups by name or
+  reflection alone (`added_method_invisible_by_name`, `accessibility_changed`)
+  are listed and make no sentence; an added method that a string of the game
+  names (`added_method_named_by_string`) or that the game may call by a name it
+  computes (`added_method_computed_name`) does. With more new notes than a list
+  holds (16) it names the report that has all. `attention` also says when the
+  runner restarted the Player by itself (`hot_reload_failed`, or
+  `hot_reload_unsupported` under `onUnsupportedEdit: restart`; for a
+  `netcode_*` reason it adds that the other Players of the network game must
+  be restarted on the new code too), and when nothing followed the mark, with
+  what stands.
 - `hotReload.lastPatch.notes`: all notes of the applied patch. A patch holds
   every edit since the Player started, so these and
   `hotReload.lastPatch.members` describe all of them, not the last edit. The
