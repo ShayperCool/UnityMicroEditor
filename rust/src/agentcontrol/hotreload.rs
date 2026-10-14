@@ -50,11 +50,12 @@ enum Weight {
 
 /// The note codes by how much a caller must know of them, the first the
 /// most. A code that is not listed (a newer builder) leads.
-const WEIGHTS: [(&str, Weight); 16] = [
+const WEIGHTS: [(&str, Weight); 17] = [
     ("added_method_named_by_string", Weight::Held),
     ("serialized_field_not_restored", Weight::Held),
     ("running_coroutines_keep_old_code", Weight::Held),
     ("started_objects_keep_state", Weight::Held),
+    ("spawned_objects_keep_state", Weight::Held),
     ("lambda_not_remapped", Weight::Held),
     ("earlier_patch_delegates_keep_old_code", Weight::Held),
     ("constructor_applies_to_new_objects", Weight::Held),
@@ -917,6 +918,47 @@ impl Controller {
                     None,
                 ));
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod weight_tests {
+    use super::*;
+
+    /// Every note code of the patch builder has a weight here, so that a new
+    /// one is ranked and worded by what it means instead of leading as an
+    /// unknown code.
+    #[test]
+    fn every_note_of_the_patch_builder_is_weighed() {
+        let codes = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tools/HotReloadPatcher/Codes.cs"
+        ))
+        .unwrap();
+        let constants: std::collections::BTreeMap<&str, &str> = codes
+            .lines()
+            .filter_map(|line| {
+                let rest = line.trim().strip_prefix("public const string ")?;
+                let (name, value) = rest.split_once(" = \"")?;
+                Some((name, value.strip_suffix("\";")?))
+            })
+            .collect();
+        let notes = codes.split("Notes =").nth(1).unwrap();
+        let notes = notes.split("};").next().unwrap();
+        let listed: Vec<&str> = notes
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix('(')?.split(',').next())
+            .collect();
+        assert!(listed.len() > 10, "{listed:?}");
+        for name in listed {
+            let code = constants
+                .get(name)
+                .unwrap_or_else(|| panic!("Codes.cs has no constant {name}"));
+            assert!(
+                WEIGHTS.iter().any(|(known, _)| known == code),
+                "the note {code} of the patch builder has no weight"
+            );
         }
     }
 }
