@@ -90,6 +90,32 @@ internal static class UnityTypes
         "System.Collections.DictionaryEntry", "System.Threading.Tasks.ValueTask", "System.Range", "System.Index", "System.Half",
     };
 
+    /// Types of the engine that native code stores in a form of its own, whatever their flags
+    /// (the list of tools/LifecycleCompiler, `EngineStructs`).
+    public static readonly HashSet<string> EngineNative = new(StringComparer.Ordinal)
+    {
+        "UnityEngine.Vector2", "UnityEngine.Vector3", "UnityEngine.Vector4", "UnityEngine.Quaternion", "UnityEngine.Color", "UnityEngine.Color32",
+        "UnityEngine.Rect", "UnityEngine.Bounds", "UnityEngine.LayerMask", "UnityEngine.AnimationCurve", "UnityEngine.Gradient",
+        "UnityEngine.Vector2Int", "UnityEngine.Vector3Int", "UnityEngine.RectInt", "UnityEngine.BoundsInt", "UnityEngine.Matrix4x4",
+        "UnityEngine.Hash128", "UnityEngine.RectOffset", "UnityEngine.RenderingLayerMask", "UnityEngine.Rendering.SphericalHarmonicsL2",
+        "UnityEngine.LazyLoadReference`1", "UnityEngine.GUID", "UnityEngine.PropertyName", "UnityEngine.GUIStyle",
+    };
+
+    /// Types of the engine that Unity 6000.6.3f1 does not serialize as the type of a field (its
+    /// analyzer warns UAC1001, and SerializedObject has no property for them). The first five a
+    /// build was seen to leave out although some carry [Serializable] (tools/LifecycleCompiler,
+    /// `EngineStructsNotSerialized`); the rest have no flag and are named for when the engine's
+    /// assembly cannot be read.
+    public static readonly HashSet<string> EngineSkipped = new(StringComparer.Ordinal)
+    {
+        "UnityEngine.RangeInt", "UnityEngine.Ray", "UnityEngine.Plane", "UnityEngine.Keyframe", "UnityEngine.GradientColorKey",
+        "UnityEngine.Ray2D", "UnityEngine.RaycastHit", "UnityEngine.RaycastHit2D", "UnityEngine.Touch", "UnityEngine.ContactPoint",
+        "UnityEngine.ContactPoint2D", "Unity.Collections.NativeArray`1", "Unity.Collections.NativeSlice`1", "UnityEngine.Coroutine",
+        "UnityEngine.YieldInstruction", "UnityEngine.WaitForSeconds", "UnityEngine.WaitForSecondsRealtime", "UnityEngine.WaitForEndOfFrame",
+        "UnityEngine.WaitForFixedUpdate", "UnityEngine.WaitUntil", "UnityEngine.WaitWhile", "UnityEngine.CustomYieldInstruction",
+        "UnityEngine.AsyncOperation", "UnityEngine.Pool.ObjectPool`1", "UnityEngine.Pool.LinkedPool`1",
+    };
+
     /// Walks the base chain of a type through every assembly that can be read.
     public static UnityType Classify(Workspace workspace, Asm assembly, TypeDefinitionHandle type)
     {

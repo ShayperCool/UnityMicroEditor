@@ -97,7 +97,7 @@ internal static class Codes
         (FieldFlagsChanged, "Flags of an existing field changed (not-serialized, marshalling, special name, ...)."),
         (StaticReadonlyRemoved, "`readonly` was removed from a static field; the runtime may have compiled its value into loaded and patched code as a constant, so an assignment would not be seen."),
         (SpecialFieldAdded, "The added field cannot live in the side table (thread-static, volatile, pointer or by-ref type, marshalled, mapped data)."),
-        (SerializationChanged, "The accessibility or `readonly` of an existing field changed so that Unity starts or stops serializing it; the Player reads scenes, prefabs and assets with the loaded fields until a restart. A field of a type Unity never serializes (a delegate, a dictionary, an interface or a class without [Serializable]) is not refused."),
+        (SerializationChanged, "The accessibility or `readonly` of an existing field changed so that Unity starts or stops serializing it; the Player reads scenes, prefabs and assets with the loaded fields until a restart. A field of a type Unity never serializes (a delegate, a dictionary without [SerializeField], an interface or a class without [Serializable], a 64-bit enum, an engine type such as Coroutine, Ray or NativeArray) is not refused."),
         (CrossAssemblyAddition, "Patched code uses a type or member that this same change added to another game assembly."),
         (GeneratedTypeNotLoaded, "Patched code needs an anonymous type or a generic compiler-generated type that the loaded assembly does not contain."),
         (GenericGeneratedMember, "Patched code contains a generic lambda or local function."),

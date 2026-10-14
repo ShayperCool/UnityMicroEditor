@@ -665,16 +665,22 @@ internal sealed partial class Differ
         bool marked = reference || attributes.Contains("SerializeField");
         if (!marked && (flags & FieldAttributes.FieldAccessMask) != FieldAttributes.Public) return false;
         if (Unity(type).Kind == UnityKind.No && (n.MD.GetTypeDefinition(type).Attributes & SerializableType) == 0) return false;
-        return CanSerialize(field.DecodeSignature(Shapes.Instance, null), reference, element: false);
+        // Unity 6 serializes a Dictionary that carries [SerializeField] (a public one without
+        // it is skipped, analyzer UAC1015), at the top of the field only.
+        return CanSerialize(field.DecodeSignature(Shapes.Instance, null), reference, element: false, dictionary: attributes.Contains("SerializeField"));
     }
 
-    /// Unity's rules for the type of a serialized field: a primitive, a string, an enum, a
-    /// reference to an engine object, a [Serializable] class or struct, a type of the engine,
-    /// and an array or a List<T> of one of these. Not serialized: a delegate; an interface,
-    /// `object` or a class without [Serializable], unless the field is a [SerializeReference];
-    /// an array or list of arrays or lists; a multi-dimensional array; Nullable<T>, tuples,
-    /// dictionaries and the other types of the class library.
-    bool CanSerialize(Shape shape, bool reference, bool element)
+    /// Unity's rules for the type of a serialized field: a primitive, a string, an enum of at
+    /// most 32 bits, a reference to an engine object, a [Serializable] class or struct, a fixed
+    /// buffer, a type of the engine that it serializes, and an array or a List<T> of one of these;
+    /// with [SerializeField], a Dictionary<K,V> of them as well. Not serialized: a delegate; an
+    /// interface, `object` or a class without [Serializable], unless the field is a
+    /// [SerializeReference]; an array or list of arrays or lists; a multi-dimensional array; an
+    /// enum of 64 bits (analyzer UAC1011); Nullable<T>, tuples, the other dictionaries and the
+    /// other types of the class library; the engine's types that it skips (analyzer UAC1001,
+    /// `UnityTypes.EngineSkipped`). Read from Unity 6000.6.3f1: SerializedObject of components
+    /// with every such field, and the analyzer's warnings.
+    bool CanSerialize(Shape shape, bool reference, bool element, bool dictionary = false)
     {
         switch (shape.Kind)
         {
@@ -694,9 +700,13 @@ internal sealed partial class Differ
                 var generic = shape.Element!;
                 if (generic.Kind == ShapeKind.Reference && UnityTypes.IsClassLibrary(n.TypeRefAssembly(generic.Reference)))
                 {
-                    if (n.TypeRefName(generic.Reference, bare: true) == "System.Collections.Generic.List`1")
+                    string name = n.TypeRefName(generic.Reference, bare: true);
+                    if (name == "System.Collections.Generic.List`1")
                         return !element && shape.Arguments.Length == 1 && CanSerialize(shape.Arguments[0], reference, element: true);
-                    // Dictionary, HashSet, Nullable, a tuple, Action<T>: no enum is among them.
+                    if (name == "System.Collections.Generic.Dictionary`2" && dictionary && !element && shape.Arguments.Length == 2
+                        && CanSerialize(shape.Arguments[0], false, element: false) && CanSerialize(shape.Arguments[1], false, element: false))
+                        return true;
+                    // HashSet, Nullable, a tuple, Action<T>, any other dictionary: no enum is among them.
                     return reference && !generic.ValueType;
                 }
                 return CanSerialize(generic, reference, element);
@@ -710,10 +720,10 @@ internal sealed partial class Differ
                 // A type that cannot be read: a class of the class library is plain data to
                 // nobody, a value type of it may be an enum, and anything else may be the engine's.
                 if (home.Length == 0 || workspace.Resolve(home) is not { } assembly || !assembly.Types.TryGetValue(name, out var found))
-                    return library ? (shape.ValueType ? !UnityTypes.LibraryStructs.Contains(name) : reference) : true;
-                if (library) return assembly.IsEnum(found) || (reference && !assembly.IsValueType(found));
-                // The engine serializes its own types by rules of its own (Vector3 has no flag).
-                if (UnityTypes.IsEngine(home)) return !IsDelegate(assembly, found) && (reference || !assembly.IsInterface(found));
+                    return library ? (shape.ValueType ? !UnityTypes.LibraryStructs.Contains(name) : reference)
+                        : !(UnityTypes.IsEngine(home) && UnityTypes.EngineSkipped.Contains(name));
+                if (library) return (assembly.IsEnum(found) && !WideEnum(assembly, found)) || (reference && !assembly.IsValueType(found));
+                if (UnityTypes.IsEngine(home)) return EngineSerializes(assembly, found, name, reference);
                 return SerializableNamed(assembly, found, reference);
             }
             // A type parameter is whatever the instantiation makes of it.
@@ -730,10 +740,46 @@ internal sealed partial class Differ
         return parent.Kind == HandleKind.TypeReference && a.TypeRefName((TypeReferenceHandle)parent, bare: true) is "System.MulticastDelegate" or "System.Delegate";
     }
 
+    /// A type of the engine as the type of a serialized field: an engine object, one of the types
+    /// native code stores in a form of its own (`UnityTypes.EngineNative`, AnimationCurve and
+    /// PropertyName among them, which have no flag), and otherwise what a type of the project
+    /// would be: a class or struct with [Serializable] that is not abstract. The rules of the
+    /// layout helper of tools/LifecycleCompiler, measured on a build of every public type the
+    /// engine exports to scripts.
+    bool EngineSerializes(Asm assembly, TypeDefinitionHandle type, string name, bool reference)
+    {
+        if (IsDelegate(assembly, type)) return false;
+        if (assembly.IsInterface(type)) return reference;
+        if (assembly.IsEnum(type)) return !WideEnum(assembly, type);
+        if (UnityTypes.EngineNative.Contains(name)) return true;
+        if (UnityTypes.EngineSkipped.Contains(name)) return false;
+        if (reference && !assembly.IsValueType(type)) return true;
+        if (UnityTypes.Classify(workspace, assembly, type).Kind != UnityKind.No) return true;
+        var flags = assembly.MD.GetTypeDefinition(type).Attributes;
+        return (flags & TypeAttributes.Abstract) == 0 && (flags & SerializableType) != 0;
+    }
+
+    /// An enum whose underlying type has 64 bits: Unity does not serialize it.
+    static bool WideEnum(Asm a, TypeDefinitionHandle type)
+    {
+        foreach (var f in a.MD.GetTypeDefinition(type).GetFields())
+        {
+            var d = a.MD.GetFieldDefinition(f);
+            if ((d.Attributes & FieldAttributes.Static) != 0) continue;
+            var blob = a.MD.GetBlobReader(d.Signature);
+            blob.ReadByte();
+            return blob.ReadByte() is 0x0A or 0x0B; // ELEMENT_TYPE_I8, ELEMENT_TYPE_U8
+        }
+        return false;
+    }
+
     /// A type of a game assembly as the type of a serialized field.
     bool SerializableNamed(Asm a, TypeDefinitionHandle type, bool reference)
     {
-        if (a.IsEnum(type)) return true;
+        if (a.IsEnum(type)) return !WideEnum(a, type);
+        // `fixed int buffer[4]` is a field of the compiler's struct <buffer>e__FixedBuffer, which
+        // has no flag; Unity serializes it as an array of its size.
+        if (a.SimpleName(type).EndsWith(">e__FixedBuffer", StringComparison.Ordinal)) return true;
         if (IsDelegate(a, type)) return false;
         if (a.IsInterface(type)) return reference;
         if (!a.IsValueType(type) && UnityTypes.Classify(workspace, a, type).Kind != UnityKind.No) return true;
