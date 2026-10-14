@@ -259,3 +259,32 @@ fn prune_keeps_the_player_the_importers_read() {
     assert!(!exists(&start) && exists(&host) && exists(&running), "{pruned:?}");
 }
 
+/// `run --prepare-only` records the Player it prepared; a later session on
+/// the same output keeps it for a `--prepared` launch, and the newest
+/// records stay (caches6-2).
+#[test]
+fn prune_keeps_what_a_prepare_only_run_recorded() {
+    let output = output();
+    let prepared = staged(&output, "prepared");
+    let other = staged(&output, "other");
+    crate::runner::prune::record_prepared(
+        &output.output,
+        &serde_json::json!({"schemaVersion": 1, "player": prepared}),
+    )
+    .unwrap();
+    let pruned = Pruner::new(&output.project, &output.output).prune(&[]);
+    assert!(exists(&prepared), "the prepared Player was removed: {pruned:?}");
+    assert!(!exists(&other), "{pruned:?}");
+    for _ in 0..super::prune::KEPT_PREPARED {
+        thread::sleep(Duration::from_millis(15));
+        crate::runner::prune::record_prepared(&output.output, &serde_json::json!({"schemaVersion": 1}))
+            .unwrap();
+    }
+    let records = fs::read_dir(sysutil::join(&[&output.output, super::prune::PREPARED]))
+        .unwrap()
+        .count();
+    assert_eq!(records, super::prune::KEPT_PREPARED);
+    Pruner::new(&output.project, &output.output).prune(&[]);
+    assert!(!exists(&prepared), "a Player of a record that is gone stayed");
+}
+

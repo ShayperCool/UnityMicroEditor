@@ -22,6 +22,36 @@ pub(crate) const KEPT_UNPUBLISHED: usize = 2;
 /// Recorded preparations larger than this are not read; whatever lies in a
 /// directory they could name then stays.
 const PREPARATION_LIMIT: u64 = 256 << 20;
+/// Where `run --prepare-only` records the Player and manifest it prepared
+/// in the output, one file per run; a later session on the output keeps
+/// what they name. The newest `KEPT_PREPARED` stay.
+pub(crate) const PREPARED: &str = "prepared";
+pub(crate) const KEPT_PREPARED: usize = 4;
+
+/// Records what `run --prepare-only` prepared, so that a later session on
+/// the same output keeps it for a `--prepared` launch, and removes all but
+/// the newest records.
+pub(crate) fn record_prepared(output: &str, record: &serde_json::Value) -> Result<()> {
+    let directory = sysutil::join(&[output, PREPARED]);
+    sysutil::mkdir_all(&directory)?;
+    let path = sysutil::join(&[&directory, &format!("{}.json", crate::util::random_id())]);
+    crate::util::atomic_json(&path, record)?;
+    let mut records: Vec<(SystemTime, String)> = fs::read_dir(&directory)
+        .map(|items| {
+            items
+                .flatten()
+                .map(|item| sysutil::join(&[&directory, &item.file_name().to_string_lossy()]))
+                .filter(|path| path.ends_with(".json"))
+                .map(|path| (modified(&path), path))
+                .collect()
+        })
+        .unwrap_or_default();
+    records.sort_by(|a, b| b.cmp(a));
+    for (_, old) in records.into_iter().skip(KEPT_PREPARED) {
+        let _ = fs::remove_file(old);
+    }
+    Ok(())
+}
 
 /// What a prune removed and why the rest stayed.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -112,7 +142,11 @@ impl Pruner {
         let mut named = BTreeSet::new();
         let mut seen = BTreeSet::new();
         let prefix = format!("{}/", self.output);
-        for preparation in directories(&self.preparations, |_| true) {
+        // The records of the preparations of the project, and those of
+        // `run --prepare-only` on this output (caches6-2).
+        let mut records = directories(&self.preparations, |_| true);
+        records.push(sysutil::join(&[&self.output, PREPARED]));
+        for preparation in records {
             let Ok(items) = fs::read_dir(&preparation) else {
                 continue;
             };
