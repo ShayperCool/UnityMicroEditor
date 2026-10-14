@@ -288,3 +288,44 @@ fn prune_keeps_what_a_prepare_only_run_recorded() {
     assert!(!exists(&prepared), "a Player of a record that is gone stayed");
 }
 
+/// Scene revisions and entries of the assembly cache grow by one per scene
+/// save and per source state; the newest stay, with what the session uses
+/// and what a record names (caches6-3).
+#[test]
+fn prune_bounds_scene_revisions_and_compiled_assemblies() {
+    use super::prune::{KEPT_ASSEMBLIES, KEPT_SCENE_REVISIONS};
+    let output = output();
+    let make = |parent: &str, count: usize| -> Vec<String> {
+        (0..count)
+            .map(|index| {
+                let directory = sysutil::join(&[&output.output, parent, &format!("{index:03}")]);
+                fs::create_dir_all(&directory).unwrap();
+                let file = sysutil::join(&[&directory, "scene.json"]);
+                fs::write(&file, "{}").unwrap();
+                // Ordered by their modification time, the first the oldest.
+                let time = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000 + index as u64);
+                fs::File::open(&directory).unwrap().set_modified(time).unwrap();
+                file
+            })
+            .collect()
+    };
+    let scenes = make("revisions", KEPT_SCENE_REVISIONS + 3);
+    let assemblies = make("compiler/assemblies", KEPT_ASSEMBLIES + 2);
+    let runs = make("runs", super::prune::KEPT_RUNS + 2);
+    crate::runner::prune::record_prepared(
+        &output.output,
+        &serde_json::json!({"schemaVersion": 1, "manifest": scenes[1]}),
+    )
+    .unwrap();
+    let keep = vec![scenes[0].clone(), assemblies[0].clone(), sysutil::dir(&runs[0])];
+    let pruned = Pruner::new(&output.project, &output.output).prune(&keep);
+    let left = |files: &[String]| files.iter().filter(|file| exists(file)).count();
+    assert_eq!(left(&scenes), KEPT_SCENE_REVISIONS + 2, "{pruned:?}");
+    assert_eq!(left(&assemblies), KEPT_ASSEMBLIES + 1, "{pruned:?}");
+    assert!(exists(&scenes[0]) && exists(&scenes[1]) && !exists(&scenes[2]));
+    assert!(exists(&assemblies[0]) && !exists(&assemblies[1]));
+    assert!(exists(scenes.last().unwrap()) && exists(assemblies.last().unwrap()));
+    assert!(exists(&runs[0]) && !exists(&runs[1]) && left(&runs) == super::prune::KEPT_RUNS + 1);
+    assert_eq!(pruned.files, 1 + 1 + 1);
+}
+

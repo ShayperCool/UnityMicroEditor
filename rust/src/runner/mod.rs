@@ -755,7 +755,7 @@ impl Live<'_> {
                     .map(|content| content.importer.opts.player.as_str()),
             )
             .collect();
-        in_use(
+        let mut keep = in_use(
             &self.baselines,
             self.owned.0.as_ref().map(|player| player.path.as_str()),
             &self.compiler.player,
@@ -764,7 +764,13 @@ impl Live<'_> {
                 .flatten()
                 .map(|compile| compile.player.as_str()),
             &readers,
-        )
+        );
+        // The scene the running Player loaded, and the assemblies the
+        // compiler reads as the current ones.
+        keep.push(self.prepared.manifest.clone());
+        keep.push(self.run_directory.clone());
+        keep.extend(self.compiler.current_dlls.values().cloned());
+        keep
     }
 }
 
