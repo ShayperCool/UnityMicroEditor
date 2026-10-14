@@ -38,6 +38,24 @@ use hotreload::Refused;
 pub use hotreload::{HotReload, LastPatch, LastRestart, Reason};
 
 const STDERR_LOG: &str = "agent-runner-stderr.log";
+
+/// The `arguments` of a start or reset that the project service takes for a
+/// preparation: the scene, and the inputs of the first one.
+pub const PREPARATION_ARGUMENTS: [&str; 5] = ["scene", "rebuildHost", "hostPlayer", "nativeCatalog", "engineProfile"];
+/// Every key of the `arguments` of a start or reset.
+pub const LAUNCH_ARGUMENTS: [&str; 11] = [
+    "scene",
+    "gameArguments",
+    "contentScenes",
+    "contentPrefabs",
+    "addressables",
+    "hotReload",
+    "onUnsupportedEdit",
+    "rebuildHost",
+    "hostPlayer",
+    "nativeCatalog",
+    "engineProfile",
+];
 /// The request ids of the `sync` commands of a runner, followed by their number.
 const SYNC_PREFIX: &str = "sync-";
 /// How many of the newest events a session reply lists, and a wait reply of
@@ -225,7 +243,17 @@ impl Launch {
                 "gameArguments" => &mut launch.game_arguments,
                 "contentScenes" => &mut launch.content_scenes,
                 "contentPrefabs" => &mut launch.content_prefabs,
-                _ => continue,
+                // What the project service reads for a preparation.
+                key if PREPARATION_ARGUMENTS.contains(&key) => continue,
+                // A misspelled key would leave the caller believing in a
+                // launch it does not get (`hotreload: false`).
+                key => {
+                    return Err(Error::new(format!(
+                        "unknown start/reset argument {}; the arguments are {}",
+                        jsondoc::quoted_text(key),
+                        LAUNCH_ARGUMENTS.join(", ")
+                    )));
+                }
             };
             let invalid = || Error::new(format!("{} must be an array of strings", member.key));
             let items = match &member.value {

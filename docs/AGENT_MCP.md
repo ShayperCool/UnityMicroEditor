@@ -177,7 +177,7 @@ An attached interactive Editor is not owned or terminated by the tool.
 | `project_build` | **Real Editor build proxy**, with explicit scenes and a fresh owned Linux Mono output. |
 | `prefab_edit` | Source instantiate/create/variant/override/apply/revert/unpack, with revision-checked multi-file publication. |
 | `component_schema`, `component_add` | Cached native defaults and required companions; attachment uses our source writer and starts no Editor. |
-| `session_control` | Start/stop/status/reset/wait/wait_update. `start`/`reset` accept `arguments`: `scene`, `gameArguments`, `contentScenes`, `contentPrefabs`, `rebuildHost`, `hotReload`, `onUnsupportedEdit`. `wait` and `wait_update` fail with `full_recompile_required` while a C# edit that cannot be applied to the running Player is not in it. |
+| `session_control` | Start/stop/status/reset/wait/wait_update. `start`/`reset` accept `arguments`: `scene`, `gameArguments`, `contentScenes`, `contentPrefabs`, `addressables`, `hotReload`, `onUnsupportedEdit`, and the inputs of the first preparation `rebuildHost`, `hostPlayer`, `nativeCatalog`, `engineProfile`. Another key is refused. With a prepared session the preparation inputs are refused with `preparation_input_ignored`, which names `project_prepare` with the input, a new `requestId` and `activate: true`. `wait` and `wait_update` fail with `full_recompile_required` while a C# edit that cannot be applied to the running Player is not in it. |
 | `hot_reload` | `status` of C# hot reload, and `recompile`: restart the Player on the newest compiled code. See [Hot reload](#hot-reload). |
 | `runtime_query` | Public status, hierarchy, inspection, logs, raycast and tool catalog. |
 | `runtime_command` | Simulation, input, screenshots and public project tool calls. |
@@ -885,7 +885,9 @@ Limits:
   `addressables-changed` event and takes effect in the next session.
 - The bridge is compiled with this support when the host contains
   `Unity.Addressables`. A host built before this support existed has to be
-  rebuilt (`rebuildHost: true`).
+  rebuilt (`project_prepare` with `rebuildHost: true`, a new `requestId` and
+  `activate: true`; for the first start of a server, `rebuildHost: true` in the
+  `arguments` of `session_control(start)`).
 
 ## Simulation, input and observations
 
