@@ -1557,4 +1557,90 @@ namespace Edits
 #endif
         }
     }
+
+    // ---- methods that run once through a constructor, a static constructor, a public method or
+    // a call by a name the code writes (stage 6: builder6-2, builder6-3, netcode6-1) -------------
+
+    // A table a static field initializer builds once, when the type is first used.
+    public class Tables
+    {
+        static readonly int[] Damage = BuildDamage();
+#if CASE_ONCE_CCTOR_HELPER
+        static int[] BuildDamage() { return new[] { 10, 20, 30 }; }
+#else
+        static int[] BuildDamage() { return new[] { 1, 2, 3 }; }
+#endif
+        public int Get(int i) => Damage[i];
+    }
+
+    // Values the field initializers of another class take once per object: a public property and
+    // a public helper of a class of their own.
+    public static class Rules
+    {
+#if CASE_ONCE_CTOR_HELPER
+        public static int Level => 2;
+        public static List<float> Weights() => new List<float> { 0.25f, 0.75f };
+#else
+        public static int Level => 1;
+        public static List<float> Weights() => new List<float> { 0.5f, 0.5f };
+#endif
+    }
+    public class Spawner
+    {
+        readonly int level = Rules.Level;
+        readonly List<float> weights = Rules.Weights();
+        public float First() => weights[0] + level;
+    }
+
+    // A public method that only Awake calls in the game's code.
+    public class Brute : MonoBehaviour
+    {
+        public int health;
+        private void Awake() { Init(); }
+#if CASE_ONCE_PUBLIC_INIT
+        public void Init() { health = 250; }
+#else
+        public void Init() { health = 100; }
+#endif
+    }
+
+    // A method Start calls by the name it writes.
+    public class Delayed : MonoBehaviour
+    {
+        private int ready;
+        private void Start() { Invoke(nameof(LateInit), 0.5f); }
+#if CASE_ONCE_INVOKE_NAMEOF
+        private void LateInit() { ready = 2; }
+#else
+        private void LateInit() { ready = 1; }
+#endif
+    }
+
+    // An edit only inside the lambda OnEnable subscribes: the delegate is redirected, and the edit
+    // is live for the objects that exist (builder6-8).
+    public class Jumper : MonoBehaviour
+    {
+        public event Action Jumped;
+        private readonly List<string> log = new List<string>();
+        private void OnEnable()
+        {
+#if CASE_ONCE_LAMBDA_ONLY
+            Jumped += () => log.Add("jump B");
+#else
+            Jumped += () => log.Add("jump A");
+#endif
+        }
+        public void Jump() => Jumped?.Invoke();
+    }
+
+    // ---- an added method that a string only equals (builder6-9) ----------------------------
+
+    public class Hopper : MonoBehaviour
+    {
+        public string button = "Hop";
+#if CASE_ADD_METHOD_STRING_ONLY
+        private void Hop() { }
+#endif
+    }
+
 }

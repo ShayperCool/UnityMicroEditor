@@ -21,4 +21,17 @@ namespace Game
 #endif
         }
     }
+
+    // Unity writes the fields Target declares into the documents of this class too.
+    public class Boss : Lib.Target { }
+
+    // The hook Lib.Unit's Start calls, once per object.
+    public class Orc : Lib.Unit
+    {
+#if NAMED_ORC
+        protected override void OnSpawned() { hp = 40; }
+#else
+        protected override void OnSpawned() { hp = 10; }
+#endif
+    }
 }

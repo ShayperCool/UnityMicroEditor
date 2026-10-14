@@ -34,8 +34,6 @@ internal sealed partial class Differ
     readonly Workspace workspace;
     readonly Asm o, n;
     readonly Canon co, cn;
-    readonly Lazy<HashSet<string>> userStrings;
-    readonly Lazy<Dictionary<string, SortedDictionary<string, int>>> namedByString;
     /// What runs once in the new compilation (see `Callers`); shared by the workers.
     readonly Lazy<Callers> onceCallers;
     readonly Dictionary<int, UnityType> unity = new();
@@ -46,20 +44,18 @@ internal sealed partial class Differ
     /// Diagnostic: report every comparable body as changed, so the emitter must carry all of them.
     public bool ForceAll;
 
-    public Differ(Workspace workspace, Entry entry, bool blind = false) : this(workspace, entry.Loaded, entry.Current, null, null, blind) { }
+    public Differ(Workspace workspace, Entry entry, bool blind = false) : this(workspace, entry.Loaded, entry.Current, blind) { }
 
     /// `blind`: diagnostic, see `Canon.Blind`.
-    Differ(Workspace workspace, Asm loaded, Asm current, Lazy<HashSet<string>>? strings, Lazy<Dictionary<string, SortedDictionary<string, int>>>? named, bool blind, Lazy<Callers>? once = null)
+    Differ(Workspace workspace, Asm loaded, Asm current, bool blind, Lazy<Callers>? once = null)
     {
         this.workspace = workspace;
         this.blind = blind;
         o = loaded; n = current;
         co = new Canon(o) { Blind = blind }; cn = new Canon(n) { Blind = blind };
-        userStrings = strings ?? new Lazy<HashSet<string>>(() => UserStrings(n));
-        namedByString = named ?? new Lazy<Dictionary<string, SortedDictionary<string, int>>>(() => NamedByString(n));
         netcode = Netcode.Uses(o) || Netcode.Uses(n);
         // `netcode` may still be switched off by the form check before anything reads this.
-        onceCallers = once ?? new Lazy<Callers>(() => BuildCallers(workspace, n, netcode, userStrings.Value, new Lazy<HashSet<MethodDefinitionHandle>>(() => Initialized(n))));
+        onceCallers = once ?? new Lazy<Callers>(() => BuildCallers(workspace, n, netcode, new Lazy<HashSet<MethodDefinitionHandle>>(() => Initialized(n))));
     }
 
     /// The closure of a user method of the loaded assembly, remembered as walked.
@@ -100,7 +96,7 @@ internal sealed partial class Differ
         var workers = new Differ[threads];
         Parallel.For(0, threads, new ParallelOptions { MaxDegreeOfParallelism = threads }, worker =>
         {
-            var d = workers[worker] = new Differ(workspace, o, n, userStrings, namedByString, blind, onceCallers) { ForceAll = ForceAll, netcode = netcode };
+            var d = workers[worker] = new Differ(workspace, o, n, blind, onceCallers) { ForceAll = ForceAll, netcode = netcode };
             for (int i = worker; i < names.Length; i += threads)
             {
                 int before = d.Changes.Count;
@@ -263,15 +259,6 @@ internal sealed partial class Differ
             Add("assembly_reference", r, Actions.None, message: "The assembly reference is no longer used.");
         CompareAttributes("assembly", n.Name, od.GetCustomAttributes(), nd.GetCustomAttributes());
         CompareAttributes("assembly", n.Name, o.MD.GetModuleDefinition().GetCustomAttributes(), n.MD.GetModuleDefinition().GetCustomAttributes());
-    }
-
-    static HashSet<string> UserStrings(Asm a)
-    {
-        var set = new HashSet<string>(StringComparer.Ordinal);
-        if (a.MD.GetHeapSize(HeapIndex.UserString) == 0) return set;
-        for (var h = a.MD.GetNextHandle(MetadataTokens.UserStringHandle(0)); !h.IsNil; h = a.MD.GetNextHandle(h))
-            set.Add(a.MD.GetUserString(h));
-        return set;
     }
 
     // ---- attributes --------------------------------------------------------------------------
@@ -930,8 +917,9 @@ internal sealed partial class Differ
         // no reference to the class that has the method.
         var holders = !special ? Holders(name) : null;
         bool engine = instance && (!special || name.StartsWith("set_", StringComparison.Ordinal)) && Unity(type).Kind != UnityKind.No;
-        // A call by a name the game computes may mean any method of its objects.
-        var computed = holders == null && engine ? Computed() : null;
+        // A call by a name the game computes may mean a method of its objects that such a call can
+        // reach.
+        var computed = holders == null && engine ? Computed(name, d.DecodeSignature(n.Plain, null).ParameterTypes.Length) : null;
         if (holders != null || computed != null)
         {
             var named = Add("method_named", id, Actions.Note);
@@ -951,53 +939,48 @@ internal sealed partial class Differ
             change.Notes.Add((Codes.AddedMethodInvisibleByName, $"The added method {id} belongs to an engine object; SendMessage, Invoke, StartCoroutine(string), a UnityEvent, an animation event or an input message cannot find it by name until a full recompile."));
     }
 
-    /// The types whose code holds the string `name`, with how often: in this assembly by type, in
-    /// another assembly of the game as `type (assembly)`. Null when no code holds it.
+    /// The types whose code passes `name` to a call by name (see `NameCalls`), with how often: in
+    /// this assembly by type, in another assembly of the game as `type (assembly)`. A string that
+    /// only equals the name (an input axis "Jump", an animator trigger "Attack") calls nothing
+    /// (builder6-9). Null when no such call names it.
     SortedDictionary<string, int>? Holders(string name)
     {
         var holders = new SortedDictionary<string, int>(StringComparer.Ordinal);
-        if (userStrings.Value.Contains(name) && namedByString.Value.TryGetValue(name, out var own))
-            foreach (var (holder, count) in own) holders[holder] = count;
+        foreach (var call in workspace.NameCalls(n))
+            if (call.Name == name) holders[call.Holder] = holders.GetValueOrDefault(call.Holder) + 1;
         if (workspace.Find(n.Name) is { } self)
             foreach (var other in workspace.Others(self))
-            {
-                if (!workspace.Strings(other).Contains(name)) continue;
-                foreach (var (holder, count) in StringHolders(other, name)) holders[holder + " (" + other.Name + ")"] = count;
-            }
+                foreach (var call in workspace.NameCalls(other))
+                {
+                    if (call.Name != name) continue;
+                    string holder = call.Holder + " (" + other.Name + ")";
+                    holders[holder] = holders.GetValueOrDefault(holder) + 1;
+                }
         return holders.Count > 0 ? holders : null;
     }
 
-    /// The user types whose code loads the string, with how often.
-    static SortedDictionary<string, int> StringHolders(Asm a, string text)
+    /// Where the game calls a method of its objects by a name it computes, for an added instance
+    /// method that such a call can reach: one with at most one parameter (SendMessage passes one
+    /// value, Invoke none). The game's code is this assembly and the others of the game. A package
+    /// next to them counts with its SendMessage and BroadcastMessage for a method named as Unity
+    /// names messages, `On` and a capital letter: the messages a package sends by a name it makes
+    /// (an input component's `On<Action>`, for one) are named that way. Null when nowhere.
+    List<string>? Computed(string name, int parameters)
     {
-        var found = new SortedDictionary<string, int>(StringComparer.Ordinal);
-        foreach (var m in a.MD.MethodDefinitions)
+        if (parameters > 1) return null;
+        var sites = new SortedSet<string>(StringComparer.Ordinal);
+        void Add(Asm a, string suffix, bool messages)
         {
-            var d = a.MD.GetMethodDefinition(m);
-            if (d.RelativeVirtualAddress == 0) continue;
-            byte[] il = a.PE.GetMethodBody(d.RelativeVirtualAddress).GetILBytes() ?? Array.Empty<byte>();
-            var r = new IL.Reader(il);
-            while (r.Read())
-            {
-                if (r.Operand != System.Reflection.Emit.OperandType.InlineString) continue;
-                int token = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(r.OperandOffset));
-                if (a.MD.GetUserString(MetadataTokens.UserStringHandle(token & 0xFFFFFF)) != text) continue;
-                var user = d.GetDeclaringType();
-                while (a.Kind(user) != GenKind.User && !a.MD.GetTypeDefinition(user).GetDeclaringType().IsNil) user = a.MD.GetTypeDefinition(user).GetDeclaringType();
-                string holder = a.TypeName(user);
-                found[holder] = found.GetValueOrDefault(holder) + 1;
-            }
+            foreach (var call in workspace.NameCalls(a))
+                if (call.Name == null && ByName.Contains(call.Api) && (!messages || Messaging.Contains(call.Api))) sites.Add(call.Holder + suffix);
         }
-        return found;
-    }
-
-    /// Where the game calls a method of its objects by a name it computes, in this assembly and
-    /// the others of the game; null when nowhere.
-    List<string>? Computed()
-    {
-        var sites = new SortedSet<string>(workspace.DynamicByName(n), StringComparer.Ordinal);
+        Add(n, "", false);
         if (workspace.Find(n.Name) is { } self)
-            foreach (var other in workspace.Others(self)) sites.UnionWith(workspace.DynamicByName(other));
+        {
+            foreach (var other in workspace.Others(self)) Add(other, "", false);
+            if (name.Length > 2 && name.StartsWith("On", StringComparison.Ordinal) && char.IsUpper(name[2]))
+                foreach (var package in workspace.Packages(self)) Add(package, " (" + package.Name + ")", true);
+        }
         return sites.Count > 0 ? sites.ToList() : null;
     }
 
@@ -1005,83 +988,66 @@ internal sealed partial class Differ
     {
         "SendMessage", "SendMessageUpwards", "BroadcastMessage", "Invoke", "InvokeRepeating", "CancelInvoke", "IsInvoking", "StartCoroutine", "StopCoroutine",
     };
+    /// The calls by name that reach a method of any component of an object.
+    static readonly HashSet<string> Messaging = new(StringComparer.Ordinal) { "SendMessage", "SendMessageUpwards", "BroadcastMessage" };
+    /// Reflection on a type by a member's name.
+    static readonly HashSet<string> Reflection = new(StringComparer.Ordinal) { "GetMethod", "GetProperty", "GetField", "GetMember", "InvokeMember" };
 
-    /// See `Workspace.DynamicByName`.
-    internal static List<string> DynamicByName(Asm a)
+    /// A call by name: the method that makes it, the user type whose code that is, the API, and
+    /// the name when the call has it written as a string (null when the code computes it).
+    internal readonly record struct NameCall(MethodDefinitionHandle Caller, string Holder, string Api, string? Name);
+
+    /// The API of a call whose first parameter is the name of a method it looks up: one of the
+    /// engine's (`ByName`) on a component, a game object or a MonoBehaviour, or reflection on
+    /// System.Type. Null for any other call.
+    static string? NameApi(Asm a, EntityHandle h)
     {
-        var sites = new SortedSet<string>(StringComparer.Ordinal);
+        if (h.Kind == HandleKind.MethodSpecification) h = a.MD.GetMethodSpecification((MethodSpecificationHandle)h).Method;
+        if (h.Kind != HandleKind.MemberReference) return null;
+        var mr = a.MD.GetMemberReference((MemberReferenceHandle)h);
+        if (mr.GetKind() != MemberReferenceKind.Method) return null;
+        string name = a.MD.GetString(mr.Name);
+        if (!ByName.Contains(name) && !Reflection.Contains(name)) return null;
+        string parent = a.HandleText(mr.Parent, bare: true);
+        bool engine = ByName.Contains(name) && parent is "UnityEngine.Component" or "UnityEngine.GameObject" or "UnityEngine.MonoBehaviour";
+        bool reflection = Reflection.Contains(name) && parent == "System.Type";
+        if (!engine && !reflection) return null;
+        var signature = mr.DecodeMethodSignature(a.Bare, null);
+        return signature.ParameterTypes.Length > 0 && signature.ParameterTypes[0] == "System.String" ? name : null;
+    }
+
+    /// See `Workspace.NameCalls`.
+    internal static List<NameCall> NameCalls(Asm a)
+    {
+        var calls = new List<NameCall>();
         Canon? canon = null;
         foreach (var m in a.MD.MethodDefinitions)
         {
             var d = a.MD.GetMethodDefinition(m);
             if (d.RelativeVirtualAddress == 0) continue;
             byte[] il = a.PE.GetMethodBody(d.RelativeVirtualAddress).GetILBytes() ?? Array.Empty<byte>();
-            var r = new IL.Reader(il);
-            bool calls = false;
-            while (r.Read() && !calls)
-                calls = r.OpCode is IL.Call or IL.Callvirt && MetadataTokens.EntityHandle(System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(r.OperandOffset))) is { Kind: HandleKind.MemberReference } h
-                    && ByNameCall(a, (MemberReferenceHandle)h);
-            if (!calls) continue;
+            string? Api(IL.Reader r) => r.OpCode is IL.Call or IL.Callvirt
+                ? NameApi(a, MetadataTokens.EntityHandle(System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(r.OperandOffset)))) : null;
+            var scan = new IL.Reader(il);
+            bool any = false;
+            while (!any && scan.Read()) any = Api(scan) != null;
+            if (!any) continue;
             canon ??= new Canon(a);
             var code = canon.Instructions(m);
-            for (int i = 0; i < code.Count; i++)
-            {
-                var x = code[i];
-                if (x.OpCode is not (IL.Call or IL.Callvirt) || x.Pops < 1 || !ByName.Any(name => x.Text.Contains("::" + name + "(System.String", StringComparison.Ordinal))) continue;
-                if (!x.Text.Contains("UnityEngine.", StringComparison.Ordinal)) continue;
-                // The name is the first argument after the object.
-                string? argument = Argument(code, i, x.Pops, 1);
-                if (argument != null && argument.Split('\n').Length == 1 && argument.StartsWith("72 S:", StringComparison.Ordinal)) continue;
-                var user = d.GetDeclaringType();
-                while (a.Kind(user) != GenKind.User && !a.MD.GetTypeDefinition(user).GetDeclaringType().IsNil) user = a.MD.GetTypeDefinition(user).GetDeclaringType();
-                sites.Add(a.TypeName(user));
-            }
-        }
-        return sites.ToList();
-    }
-
-    /// A call of one of the engine's by-name methods whose first parameter is the name.
-    static bool ByNameCall(Asm a, MemberReferenceHandle handle)
-    {
-        var mr = a.MD.GetMemberReference(handle);
-        if (mr.GetKind() != MemberReferenceKind.Method || !ByName.Contains(a.MD.GetString(mr.Name))) return false;
-        string parent = a.HandleText(mr.Parent, bare: true);
-        if (parent is not ("UnityEngine.Component" or "UnityEngine.GameObject" or "UnityEngine.MonoBehaviour")) return false;
-        var signature = mr.DecodeMethodSignature(a.Bare, null);
-        return signature.ParameterTypes.Length > 0 && signature.ParameterTypes[0] == "System.String";
-    }
-
-    /// The strings that method bodies of the assembly load and that equal the name of one of its
-    /// methods, each with the user types whose code loads it and how often.
-    static Dictionary<string, SortedDictionary<string, int>> NamedByString(Asm a)
-    {
-        var names = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var m in a.MD.MethodDefinitions) names.Add(a.MD.GetString(a.MD.GetMethodDefinition(m).Name));
-        var found = new Dictionary<string, SortedDictionary<string, int>>(StringComparer.Ordinal);
-        foreach (var m in a.MD.MethodDefinitions)
-        {
-            var d = a.MD.GetMethodDefinition(m);
-            if (d.RelativeVirtualAddress == 0) continue;
-            byte[] il = a.PE.GetMethodBody(d.RelativeVirtualAddress).GetILBytes() ?? Array.Empty<byte>();
+            var user = d.GetDeclaringType();
+            while (a.Kind(user) != GenKind.User && !a.MD.GetTypeDefinition(user).GetDeclaringType().IsNil) user = a.MD.GetTypeDefinition(user).GetDeclaringType();
+            string holder = a.TypeName(user);
             var r = new IL.Reader(il);
-            string? holder = null;
-            while (r.Read())
+            for (int index = 0; r.Read() && index < code.Count; index++)
             {
-                if (r.Operand != System.Reflection.Emit.OperandType.InlineString) continue;
-                int token = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(r.OperandOffset));
-                string text = a.MD.GetUserString(MetadataTokens.UserStringHandle(token & 0xFFFFFF));
-                if (!names.Contains(text)) continue;
-                if (holder == null)
-                {
-                    var user = d.GetDeclaringType();
-                    while (a.Kind(user) != GenKind.User && !a.MD.GetTypeDefinition(user).GetDeclaringType().IsNil) user = a.MD.GetTypeDefinition(user).GetDeclaringType();
-                    holder = a.TypeName(user);
-                }
-                if (!found.TryGetValue(text, out var holders)) found[text] = holders = new SortedDictionary<string, int>(StringComparer.Ordinal);
-                holders[holder] = holders.GetValueOrDefault(holder) + 1;
+                if (Api(r) is not { } api || code[index].Pops < 1) continue;
+                // The name is the first argument after the object.
+                string? argument = Argument(code, index, code[index].Pops, 1);
+                string? literal = argument != null && argument.Split('\n').Length == 1 && argument.StartsWith("72 S:", StringComparison.Ordinal) ? argument["72 S:".Length..] : null;
+                calls.Add(new NameCall(m, holder, api, literal));
             }
         }
-        return found;
+        return calls;
     }
 
     void MethodRemoved(MethodDefinitionHandle method, TypeDefinitionHandle newType)
@@ -1246,12 +1212,14 @@ internal sealed partial class Differ
             change.Revision = Short(nc.Hash);
             if (name == ".ctor")
                 change.Notes.Add((Codes.ConstructorAppliesToNewObjects, $"{id} and the instance field initializers apply to objects constructed after the patch; existing objects keep their values."));
-            // The engine, the start-up and Netcode call some methods once for what exists, and a
-            // method only they call runs no more often.
-            if (OnceNote(nh, Authored(id)) is { } once) change.Notes.Add(once);
             if (StaleStateMachines(oc, nc))
                 change.Notes.Add((Codes.RunningCoroutinesKeepOldCode, $"Calls of {Authored(id)} made after the patch run the new code; a coroutine, iterator or async call that is already running finishes on the old code."));
-            MapLambdas(change, id, oh, nh, oc, nc);
+            bool lambdasOnly = MapLambdas(change, id, oh, nh, oc, nc);
+            // The engine, the start-up and Netcode call some methods once for what exists, and a
+            // method only they call runs no more often. An edit that lies only in lambdas the
+            // method made, each redirected, reaches the delegates it subscribed: it is live
+            // (builder6-8).
+            if (!lambdasOnly && OnceNote(nh, Authored(id)) is { } once) change.Notes.Insert(0, once);
         }
     }
 
@@ -1272,18 +1240,29 @@ internal sealed partial class Differ
         return message is "Awake" or "OnEnable" or "OnDisable" or "OnDestroy" ? id[..(at + 2)] + message + id[paren..] : id;
     }
 
-    internal enum Once { None, Initializer, Started, Enabled, Loaded, Deserialized, Spawned, Authority }
+    /// `TypeInitialized`: a static constructor, which runs when its type is first used.
+    /// `Constructed`: a constructor, which runs the field initializers too, once per object.
+    /// `Inherited`: an override of a method another assembly of the game declares and calls only
+    /// from methods that run once (`Callers.Inherited`).
+    internal enum Once { None, Initializer, Started, Enabled, Loaded, Deserialized, Spawned, Authority, TypeInitialized, Constructed, Inherited }
 
-    /// Whether the engine, the start-up or Netcode calls the method once for what exists, and how.
-    /// `unity` classifies a type of the new compilation.
+    /// Whether the engine, the start-up, the runtime or Netcode calls the method once for what
+    /// exists, and how. `unity` classifies a type of the new compilation.
     static Once RootOf(Workspace workspace, Asm a, bool netcode, Func<TypeDefinitionHandle, UnityType> unity, Lazy<HashSet<MethodDefinitionHandle>> initialized, MethodDefinitionHandle m)
     {
         var d = a.MD.GetMethodDefinition(m);
         var t = d.GetDeclaringType();
         if (a.Kind(t) != GenKind.User) return Once.None;
         string name = a.MD.GetString(d.Name);
+        // The runtime runs a static constructor when the type is first used, and a constructor
+        // with the field initializers once per object (builder6-2).
+        if (name == ".cctor") return Once.TypeInitialized;
+        if (name == ".ctor") return Once.Constructed;
         if ((d.Attributes & MethodAttributes.Static) != 0)
             return !IsBridge(name) && initialized.Value.Contains(m) ? Once.Initializer : Once.None;
+        // Netcode runs a spawn callback once per spawn; OnNetworkPreSpawn takes the
+        // NetworkManager by reference (builder6-1).
+        if (netcode && Netcode.SpawnCallback(name) && Netcode.Networked(a, t)) return Once.Spawned;
         if (d.DecodeSignature(a.Plain, null).ParameterTypes.Length != 0) return Once.None;
         string message = name.StartsWith("__UnityPlay_", StringComparison.Ordinal) ? name["__UnityPlay_".Length..].TrimEnd('_') : name;
         // Start of a MonoBehaviour, Awake of a MonoBehaviour or a ScriptableObject: once per object.
@@ -1296,7 +1275,6 @@ internal sealed partial class Differ
         if ((name == "OnAfterDeserialize" || name.EndsWith(".ISerializationCallbackReceiver.OnAfterDeserialize", StringComparison.Ordinal))
             && Implements(workspace, a, t, "UnityEngine.ISerializationCallbackReceiver"))
             return Once.Deserialized;
-        if (netcode && Netcode.SpawnCallback(name) && Netcode.Networked(a, t)) return Once.Spawned;
         // NetworkTransform reads the authority of an object when it is spawned and keeps it.
         if (netcode && name == "OnIsServerAuthoritative" && DerivesFrom(workspace, a, t, "Unity.Netcode.Components.NetworkTransform")) return Once.Authority;
         return Once.None;
@@ -1304,7 +1282,7 @@ internal sealed partial class Differ
 
     /// The static methods the start-up runs once: those with [RuntimeInitializeOnLoadMethod], and
     /// those a start-up bridge of the lifecycle rewrite calls.
-    static HashSet<MethodDefinitionHandle> Initialized(Asm a)
+    internal static HashSet<MethodDefinitionHandle> Initialized(Asm a)
     {
         var set = new HashSet<MethodDefinitionHandle>();
         foreach (var m in a.MD.MethodDefinitions)
@@ -1329,6 +1307,8 @@ internal sealed partial class Differ
         for (int depth = 0; depth < 64; depth++)
         {
             EntityHandle parent = a.MD.GetTypeDefinition(t).BaseType;
+            // An interface and <Module> have none.
+            if (parent.IsNil) yield break;
             if (parent.Kind == HandleKind.TypeSpecification)
             {
                 var blob = a.MD.GetBlobReader(a.MD.GetTypeSpecification((TypeSpecificationHandle)parent).Signature);
@@ -1363,18 +1343,23 @@ internal sealed partial class Differ
     }
 
     /// Which methods of the new compilation run only when methods that run once run: every
-    /// caller in the assembly is such a method or one of these. A public method, a method a
-    /// delegate or a string of the assembly can reach, a method with an attribute, an override
-    /// of a method declared outside the assembly and a message of the engine can be called from
-    /// where the assembly does not show, and are none of them.
+    /// caller in the game's code is such a method or one of these. A method a delegate can reach,
+    /// a method with an attribute, a virtual public method, a message of the engine, a method of
+    /// that name another assembly of the game calls by name and a public method another assembly
+    /// calls can be called from where the assembly does not show, and are none of them. A call by
+    /// a name written in the code (`Invoke(nameof(LateInit))`) is a call of the methods of that
+    /// name (builder6-3).
     internal sealed class Callers
     {
         public readonly Dictionary<MethodDefinitionHandle, HashSet<MethodDefinitionHandle>> Of = new();
         public readonly Dictionary<MethodDefinitionHandle, Once> Roots = new();
         public readonly HashSet<MethodDefinitionHandle> OnlyOnce = new();
+        /// Overrides of a method that another assembly of the game declares and calls only from
+        /// methods that run once there: that assembly, its analysis and the declaration.
+        public readonly Dictionary<MethodDefinitionHandle, (Asm Assembly, Callers Theirs, MethodDefinitionHandle Slot)> Inherited = new();
     }
 
-    static Callers BuildCallers(Workspace workspace, Asm a, bool netcode, HashSet<string> strings, Lazy<HashSet<MethodDefinitionHandle>> initialized)
+    internal static Callers BuildCallers(Workspace workspace, Asm a, bool netcode, Lazy<HashSet<MethodDefinitionHandle>> initialized)
     {
         var result = new Callers();
         var types = new Dictionary<int, UnityType>();
@@ -1386,9 +1371,17 @@ internal sealed partial class Differ
         }
         // Virtual methods by name and signature: a call of one may land in any of them.
         var virtuals = new Dictionary<string, List<MethodDefinitionHandle>>(StringComparer.Ordinal);
+        // User methods by name, for calls by a name the code writes.
+        var named = new Dictionary<string, List<MethodDefinitionHandle>>(StringComparer.Ordinal);
         foreach (var m in a.MD.MethodDefinitions)
         {
             var d = a.MD.GetMethodDefinition(m);
+            if (a.Kind(d.GetDeclaringType()) == GenKind.User)
+            {
+                string name = a.MD.GetString(d.Name);
+                if (!named.TryGetValue(name, out var same)) named[name] = same = new List<MethodDefinitionHandle>();
+                same.Add(m);
+            }
             if ((d.Attributes & MethodAttributes.Virtual) == 0) continue;
             string key = a.BareMethodKey(m);
             if (!virtuals.TryGetValue(key, out var list)) virtuals[key] = list = new List<MethodDefinitionHandle>();
@@ -1431,10 +1424,62 @@ internal sealed partial class Differ
                 }
             }
         }
+        // A call by a name the code writes reaches the methods of that name.
+        foreach (var call in workspace.NameCalls(a))
+            if (call.Name != null && named.TryGetValue(call.Name, out var targets))
+                foreach (var target in targets) Edge(call.Caller, target);
+        // What the other assemblies of the game call by name or by reference.
+        var byName = new HashSet<string>(StringComparer.Ordinal);
+        var external = new HashSet<string>(StringComparer.Ordinal);
+        if (workspace.Find(a.Name) is { } self)
+            foreach (var other in workspace.Others(self))
+            {
+                foreach (var call in workspace.NameCalls(other)) if (call.Name != null) byName.Add(call.Name);
+                foreach (var h in other.MD.MemberReferences)
+                {
+                    var mr = other.MD.GetMemberReference(h);
+                    if (mr.GetKind() != MemberReferenceKind.Method || mr.Parent.Kind != HandleKind.TypeReference) continue;
+                    var parent = (TypeReferenceHandle)mr.Parent;
+                    if (other.TypeRefAssembly(parent) == a.Name) external.Add(other.TypeRefName(parent, bare: true) + "::" + other.MD.GetString(mr.Name));
+                }
+            }
         foreach (var m in a.MD.MethodDefinitions)
         {
             var root = RootOf(workspace, a, netcode, Classify, initialized, m);
             if (root != Once.None) result.Roots[m] = root;
+        }
+        // The declaration of an override whose slot a type outside the assembly declares.
+        (Asm, MethodDefinitionHandle)? Slot(MethodDefinitionHandle m, MethodDefinition d)
+        {
+            if ((d.Attributes & MethodAttributes.Virtual) == 0 || (d.Attributes & MethodAttributes.NewSlot) != 0) return null;
+            string key = a.BareMethodKey(m);
+            foreach (var (assembly, type, _) in Bases(workspace, a, d.GetDeclaringType()))
+            {
+                if (type.IsNil) return null;
+                foreach (var other in assembly.MD.GetTypeDefinition(type).GetMethods())
+                {
+                    if (assembly.BareMethodKey(other) != key) continue;
+                    if ((assembly.MD.GetMethodDefinition(other).Attributes & MethodAttributes.NewSlot) == 0) break;
+                    return assembly == a ? null : (assembly, other);
+                }
+            }
+            return null;
+        }
+        // An override that only methods running once in another assembly of the game call (an
+        // abstract hook a base class's Start calls) runs once too.
+        foreach (var m in a.MD.MethodDefinitions)
+        {
+            var d = a.MD.GetMethodDefinition(m);
+            if (result.Roots.ContainsKey(m) || a.Kind(d.GetDeclaringType()) != GenKind.User) continue;
+            if (Slot(m, d) is not { } found) continue;
+            var (assembly, slot) = found;
+            if (UnityTypes.IsEngine(assembly.Name) || UnityTypes.IsClassLibrary(assembly.Name)) continue;
+            // Its code is read, so the whole image; a handle names the same row in either.
+            assembly = workspace.Code(assembly);
+            var theirs = workspace.Callers(assembly);
+            if (!theirs.OnlyOnce.Contains(slot)) continue;
+            result.Roots[m] = Once.Inherited;
+            result.Inherited[m] = (assembly, theirs, slot);
         }
         // Declared outside the assembly: the override chain of a virtual method starts in a type
         // this assembly does not have.
@@ -1458,7 +1503,10 @@ internal sealed partial class Differ
             var t = d.GetDeclaringType();
             string name = a.MD.GetString(d.Name);
             if (result.Roots.ContainsKey(m) || a.Kind(t) != GenKind.User || Canon.Owned(name, d.Attributes) || escaped.Contains(m)) continue;
-            if ((d.Attributes & MethodAttributes.MemberAccessMask) == MethodAttributes.Public || name is ".ctor" or ".cctor" || strings.Contains(name)) continue;
+            bool exposed = (d.Attributes & MethodAttributes.MemberAccessMask) == MethodAttributes.Public;
+            // A public slot is called through an interface or a base class from anywhere.
+            if (exposed && (d.Attributes & MethodAttributes.Virtual) != 0) continue;
+            if (byName.Contains(name) || exposed && external.Contains(a.TypeName(t) + "::" + name)) continue;
             if (UnityTypes.Messages.Contains(name) && Classify(t).Kind != UnityKind.No) continue;
             // An attribute is how a framework finds a method to call: the bridge runs an
             // [InvokeOnHotReloadLocal] method again after a patch, for one.
@@ -1478,48 +1526,74 @@ internal sealed partial class Differ
         return result;
     }
 
-    /// The note for a changed method that runs once for what exists, or that only such methods
-    /// call; null for any other method.
-    (string Code, string Message)? OnceNote(MethodDefinitionHandle m, string shown)
+    /// The methods that run once and lead to `m` through methods only they call, by how they run
+    /// and as the member a user wrote (an override's leads through its declaration in the other
+    /// assembly, named with that assembly).
+    static void Reached(Asm a, Callers callers, MethodDefinitionHandle m, HashSet<Once> kinds, SortedSet<string> from, string suffix)
     {
-        var callers = onceCallers.Value;
-        if (callers.Roots.TryGetValue(m, out var root))
-            return root switch
-            {
-                Once.Initializer => (Codes.RuntimeInitializerChanged, $"{shown} is a [RuntimeInitializeOnLoadMethod] method: it ran when the Player started and does not run again, so its new body is not in effect before the next start; what the old body registered or set stays."),
-                Once.Started => (Codes.StartedObjectsKeepState, $"{shown} does not run again for the objects that already ran it; its new body runs for objects that start after the patch."),
-                Once.Enabled => (Codes.StartedObjectsKeepState, $"{shown} does not run again for the objects that are enabled; its new body runs when an object is enabled after the patch. What the old body subscribed or registered stays, and a changed OnDisable does not undo it."),
-                Once.Loaded => (Codes.StartedObjectsKeepState, $"{shown} ran when the asset was loaded and does not run again for the assets that are loaded; its new body runs for assets loaded or created after the patch."),
-                Once.Deserialized => (Codes.StartedObjectsKeepState, $"{shown} ran when the objects that exist were deserialized and does not run again for them; its new body runs for objects loaded or instantiated after the patch."),
-                Once.Spawned => (Codes.SpawnedObjectsKeepState, $"{shown} does not run again for the objects that are spawned; its new body runs for objects spawned after the patch."),
-                Once.Authority => (Codes.SpawnedObjectsKeepState, $"{shown} is read by NetworkTransform when an object is spawned, which keeps that authority, and again on later calls: the objects that are spawned mix the old and the new answer; objects spawned after the patch take the new one."),
-                _ => null,
-            };
-        if (!callers.OnlyOnce.Contains(m)) return null;
-        // The methods that run once and lead to this one.
-        var reached = new SortedSet<string>(StringComparer.Ordinal);
-        var kinds = new HashSet<Once>();
         var seen = new HashSet<MethodDefinitionHandle> { m };
         var queue = new Queue<MethodDefinitionHandle>();
         queue.Enqueue(m);
         while (queue.Count > 0)
-            foreach (var caller in callers.Of[queue.Dequeue()])
+            foreach (var caller in callers.Of.GetValueOrDefault(queue.Dequeue()) ?? new HashSet<MethodDefinitionHandle>())
             {
                 if (!seen.Add(caller)) continue;
-                if (callers.Roots.TryGetValue(caller, out var kind))
+                if (!callers.Roots.TryGetValue(caller, out var kind)) { queue.Enqueue(caller); continue; }
+                if (kind == Once.Inherited && callers.Inherited.TryGetValue(caller, out var inherited))
+                    Reached(inherited.Assembly, inherited.Theirs, inherited.Slot, kinds, from, " (" + inherited.Assembly.Name + ")");
+                else
                 {
                     kinds.Add(kind);
-                    if (!IsBridge(n.MD.GetString(n.MD.GetMethodDefinition(caller).Name))) reached.Add(Authored(n.MemberId(caller)));
+                    if (!IsBridge(a.MD.GetString(a.MD.GetMethodDefinition(caller).Name))) from.Add(Authored(a.MemberId(caller)) + suffix);
                 }
-                else queue.Enqueue(caller);
             }
+    }
+
+    /// The note for a changed method that runs once for what exists, or that only such methods
+    /// call; null for any other method, and for a constructor or a static constructor, whose own
+    /// change has a note or a refusal of its own.
+    (string Code, string Message)? OnceNote(MethodDefinitionHandle m, string shown)
+    {
+        var callers = onceCallers.Value;
+        var kinds = new HashSet<Once>();
+        var reached = new SortedSet<string>(StringComparer.Ordinal);
+        if (callers.Roots.TryGetValue(m, out var root))
+        {
+            switch (root)
+            {
+                case Once.Initializer: return (Codes.RuntimeInitializerChanged, $"{shown} is a [RuntimeInitializeOnLoadMethod] method: it ran when the Player started and does not run again, so its new body is not in effect before the next start; what the old body registered or set stays.");
+                case Once.Started: return (Codes.StartedObjectsKeepState, $"{shown} does not run again for the objects that already ran it; its new body runs for objects that start after the patch.");
+                case Once.Enabled: return (Codes.StartedObjectsKeepState, $"{shown} does not run again for the objects that are enabled; its new body runs when an object is enabled after the patch. What the old body subscribed or registered stays, and a changed OnDisable does not undo it.");
+                case Once.Loaded: return (Codes.StartedObjectsKeepState, $"{shown} ran when the asset was loaded and does not run again for the assets that are loaded; its new body runs for assets loaded or created after the patch.");
+                case Once.Deserialized: return (Codes.StartedObjectsKeepState, $"{shown} ran when the objects that exist were deserialized and does not run again for them; its new body runs for objects loaded or instantiated after the patch.");
+                case Once.Spawned: return (Codes.SpawnedObjectsKeepState, $"{shown} does not run again for the objects that are spawned; its new body runs for objects spawned after the patch.");
+                case Once.Authority: return (Codes.SpawnedObjectsKeepState, $"{shown} is read by NetworkTransform when an object is spawned, which keeps that authority, and again on later calls: the objects that are spawned mix the old and the new answer; objects spawned after the patch take the new one.");
+                case Once.Inherited when callers.Inherited.TryGetValue(m, out var inherited):
+                    Reached(inherited.Assembly, inherited.Theirs, inherited.Slot, kinds, reached, " (" + inherited.Assembly.Name + ")");
+                    break;
+                default: return null;
+            }
+        }
+        else if (callers.OnlyOnce.Contains(m)) Reached(n, callers, m, kinds, reached, "");
+        else return null;
+        if (kinds.Count == 0) return null;
         string from = string.Join(", ", reached.Take(3)) + (reached.Count > 3 ? $" and {reached.Count - 3} more" : "");
         bool one = reached.Count == 1;
-        if (kinds.Contains(Once.Initializer))
-            return (Codes.RuntimeInitializerChanged, $"{shown} is called only from {from}, which ran when the Player started and {(one ? "does" : "do")} not run again; its new body is not in effect before the next start.");
+        // A public method may also be called by saved data (a UnityEvent), which the code does not show.
+        var d = n.MD.GetMethodDefinition(m);
+        string only = (d.Attributes & MethodAttributes.MemberAccessMask) == MethodAttributes.Public ? "in the game's code only" : "only";
+        string data = only == "only" ? "" : " A call that saved data makes (a UnityEvent of a scene) runs the new body.";
+        if (kinds.Contains(Once.Initializer) || kinds.Contains(Once.TypeInitialized))
+        {
+            string when = kinds.Contains(Once.Initializer) && kinds.Contains(Once.TypeInitialized) ? "when the Player started or when a type was first used"
+                : kinds.Contains(Once.Initializer) ? "when the Player started" : "when its type was first used";
+            return (Codes.RuntimeInitializerChanged, $"{shown} is called {only} from {from}, which ran {when} and {(one ? "does" : "do")} not run again; what it set stays, and its new body is not in effect before the next start.{data}");
+        }
         if (kinds.Count == 1 && kinds.Contains(Once.Spawned))
-            return (Codes.SpawnedObjectsKeepState, $"{shown} is called only from {from}, which Netcode does not run again for the objects that are spawned; its new body runs for objects spawned after the patch.");
-        return (Codes.StartedObjectsKeepState, $"{shown} is called only from {from}, which {(one ? "does" : "do")} not run again for the objects that already ran {(one ? "it" : "them")}; its new body runs for objects that start after the patch.");
+            return (Codes.SpawnedObjectsKeepState, $"{shown} is called {only} from {from}, which Netcode does not run again for the objects that are spawned; its new body runs for objects spawned after the patch.{data}");
+        if (kinds.Count == 1 && kinds.Contains(Once.Constructed))
+            return (Codes.ConstructorAppliesToNewObjects, $"{shown} is called {only} from {from}, which ran when the objects that exist were constructed (a constructor runs the field initializers too); they keep what it gave them, and its new body runs for objects constructed after the patch.{data}");
+        return (Codes.StartedObjectsKeepState, $"{shown} is called {only} from {from}, which {(one ? "does" : "do")} not run again for the objects that already ran {(one ? "it" : "them")}; its new body runs for objects that start after the patch.{data}");
     }
 
     // ---- lambdas and state machines --------------------------------------------------------
@@ -1557,6 +1631,9 @@ internal sealed partial class Differ
         public readonly List<(MethodDefinitionHandle Old, MethodDefinitionHandle New)> Edited = new();
         public readonly HashSet<MethodDefinitionHandle> Walked = new();
         public bool Conflict;
+        /// The method itself, or a member it names that is never redirected on its own (a state
+        /// machine), differs: the edit is not only in its lambdas.
+        public bool Own;
     }
 
     /// Follows the code from a method into everything it creates, as long as both compilations
@@ -1574,7 +1651,7 @@ internal sealed partial class Differ
         else if (!p.Walked.Add(xo)) return;
         Closure so = co.Shallow(xo), sn = cn.Shallow(xn);
         // Its own code differs: it must be replaced, and what it creates has no proven partner.
-        if (!so.Hash.AsSpan().SequenceEqual(sn.Hash)) { if (lambda) p.Edited.Add((xo, xn)); return; }
+        if (!so.Hash.AsSpan().SequenceEqual(sn.Hash)) { if (lambda) p.Edited.Add((xo, xn)); else p.Own = true; return; }
         if (so.Methods.Count != sn.Methods.Count || so.Locals.Count != sn.Locals.Count || so.Types.Count != sn.Types.Count) { p.Conflict = true; return; }
 
         // A member that is never redirected on its own (a state machine, a base call helper) makes
@@ -1610,6 +1687,7 @@ internal sealed partial class Differ
                 if (!Canon.Generated(Name(n, m)) && named.Remove(n.MethodKey(m), out var old)) Pair(p, old, m, lambda: false);
         }
         if (stale && lambda) p.Edited.Add((xo, xn));
+        else if (stale) p.Own = true;
     }
 
     /// What a redirect of a lambda needs both sides to agree on: the signature and what `this` points at.
@@ -1638,10 +1716,11 @@ internal sealed partial class Differ
     /// to its new version only when the pairing is proven (see Pair) and both agree on signature
     /// and closure layout. Any other old lambda must be the same code at the same position among
     /// the lambdas of the new method, or the caller is told that old delegates keep old code.
-    void MapLambdas(Change change, string id, MethodDefinitionHandle oh, MethodDefinitionHandle nh, Closure oc, Closure nc)
+    /// Returns whether the edit lies only in lambdas that are redirected to their new versions.
+    bool MapLambdas(Change change, string id, MethodDefinitionHandle oh, MethodDefinitionHandle nh, Closure oc, Closure nc)
     {
         var olds = Lambdas(o, oc);
-        if (olds.Count == 0) return;
+        if (olds.Count == 0) return false;
         var pairing = new Pairing();
         Pair(pairing, oh, nh, lambda: false);
         if (pairing.Conflict) { pairing.Proven.Clear(); pairing.Edited.Clear(); }
@@ -1673,6 +1752,7 @@ internal sealed partial class Differ
             change.Notes.Add((Codes.LambdaNotRemapped, $"Lambdas or local functions of {Authored(id)} were edited, added or removed and an old one cannot be redirected to its new version (the code that creates it changed too, or what it captures changed); delegates created before the patch keep the old body."));
         else if (byReference)
             change.Notes.Add((Codes.LambdaNotRemapped, $"A local function of {Authored(id)} takes its captured variables by reference; code of {Authored(id)} that is already running keeps calling the old version."));
+        return !pairing.Conflict && !pairing.Own && !unmatched && !byReference && pairs.Count > 0;
     }
 
     /// Canonical text of one method in both assemblies, for `--explain`.

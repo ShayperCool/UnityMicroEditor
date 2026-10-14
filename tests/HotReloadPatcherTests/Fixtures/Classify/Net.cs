@@ -62,6 +62,16 @@ namespace Net
             Arm();
         }
 
+        // NGO declares it with the NetworkManager by reference; it runs once per spawn (builder6-1).
+        protected override void OnNetworkPreSpawn(ref NetworkManager networkManager)
+        {
+#if CASE_NET_PRESPAWN
+            seen = 4;
+#else
+            seen = 3;
+#endif
+        }
+
         // Only OnNetworkSpawn calls it.
         private void Arm()
         {
@@ -320,6 +330,9 @@ namespace Net
         public NetworkVariable<int> Secret = new NetworkVariable<int>(11);
 #endif
         public NetworkList<int> Items;
+        // A read permission a property of another class supplies: constructor code, not compared
+        // as the written argument is (netcode6-1, a documented limit); its note says so.
+        public NetworkVariable<int> Hidden = new NetworkVariable<int>(33, NetRules.HiddenRead);
         // A string the constructor loads: the reading of its code must take it.
         public string label = "perm";
 
@@ -341,9 +354,21 @@ namespace Net
             Items.Initialize(this);
             __nameNetworkVariable(Items, "Items");
             NetworkVariableFields.Add(Items);
+            Hidden.Initialize(this);
+            __nameNetworkVariable(Hidden, "Hidden");
+            NetworkVariableFields.Add(Hidden);
             base.__initializeVariables();
         }
         protected override string __getTypeName() => "NetPerm";
+    }
+
+    public static class NetRules
+    {
+#if CASE_NET_VARIABLE_READ_HELPER
+        public static NetworkVariableReadPermission HiddenRead => NetworkVariableReadPermission.Owner;
+#else
+        public static NetworkVariableReadPermission HiddenRead => NetworkVariableReadPermission.Everyone;
+#endif
     }
 
 #if CASE_NET_BECAME

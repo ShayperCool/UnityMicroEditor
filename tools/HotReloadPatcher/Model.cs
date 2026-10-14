@@ -465,30 +465,49 @@ internal sealed class Workspace : IDisposable
 
     readonly ConcurrentDictionary<string, Lazy<List<Asm>>> others = new(StringComparer.Ordinal);
 
-    /// The other code of the game that may name a method of `self` by a string: the new
-    /// compilation of every other entry of the request, and the assemblies next to the loaded one
-    /// that reference it, that it references, or that are an Assembly-CSharp; not the class
-    /// library, the engine and its packages (`UnityEngine.*`, `Unity.*`) or the bridge.
+    /// The other code of the game that may call a method of `self` by its name: the new
+    /// compilation of every other entry of the request, and every assembly next to the loaded one
+    /// but the class library, the engine and its packages (`UnityEngine.*`, `Unity.*`) and the
+    /// bridge. A call by name needs no reference between the two (SendMessage between sibling
+    /// assemblies, builder6-5).
     public List<Asm> Others(Entry self) => others.GetOrAdd(self.Name, _ => new Lazy<List<Asm>>(() =>
     {
         var list = new List<Asm>();
         foreach (var e in Entries) if (e != self) list.Add(e.Current);
-        var referenced = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var h in self.Current.MD.AssemblyReferences) referenced.Add(self.Current.MD.GetString(self.Current.MD.GetAssemblyReference(h).Name));
-        string directory = System.IO.Path.GetDirectoryName(self.Loaded.Path) ?? "";
-        if (!Directory.Exists(directory)) return list;
-        foreach (string file in Directory.GetFiles(directory, "*.dll").OrderBy(x => x, StringComparer.Ordinal))
+        foreach (string file in Siblings(self))
         {
-            string name = System.IO.Path.GetFileNameWithoutExtension(file);
-            if (name == self.Name || Find(name) != null || UnityTypes.IsClassLibrary(name) || UnityTypes.IsEngine(name) || name.StartsWith("UnityMicroEditor", StringComparison.Ordinal)) continue;
-            if (Resolve(name) is not { } a) continue;
-            bool related = referenced.Contains(name) || name.StartsWith("Assembly-CSharp", StringComparison.Ordinal);
-            foreach (var h in a.MD.AssemblyReferences) related |= a.MD.GetString(a.MD.GetAssemblyReference(h).Name) == self.Name;
+            if (UnityTypes.IsEngine(System.IO.Path.GetFileNameWithoutExtension(file))) continue;
             // Its code is read too, so the whole image.
-            if (related && Whole(file) is { } whole) list.Add(whole);
+            if (Whole(file) is { } whole) list.Add(whole);
         }
         return list;
     })).Value;
+
+    readonly ConcurrentDictionary<string, Lazy<List<Asm>>> packages = new(StringComparer.Ordinal);
+
+    /// The engine's packages next to the loaded assembly (`Unity.*`): code that may send a message
+    /// to an object of the game by a name it computes.
+    public List<Asm> Packages(Entry self) => packages.GetOrAdd(self.Name, _ => new Lazy<List<Asm>>(() =>
+    {
+        var list = new List<Asm>();
+        foreach (string file in Siblings(self))
+            if (System.IO.Path.GetFileNameWithoutExtension(file).StartsWith("Unity.", StringComparison.Ordinal) && Whole(file) is { } whole) list.Add(whole);
+        return list;
+    })).Value;
+
+    /// The assemblies next to the loaded one that are neither in the request nor the class library
+    /// nor the bridge, in name order.
+    IEnumerable<string> Siblings(Entry self)
+    {
+        string directory = System.IO.Path.GetDirectoryName(self.Loaded.Path) ?? "";
+        if (!Directory.Exists(directory)) yield break;
+        foreach (string file in Directory.GetFiles(directory, "*.dll").OrderBy(x => x, StringComparer.Ordinal))
+        {
+            string name = System.IO.Path.GetFileNameWithoutExtension(file);
+            if (name == self.Name || Find(name) != null || UnityTypes.IsClassLibrary(name) || name.StartsWith("UnityMicroEditor", StringComparison.Ordinal)) continue;
+            yield return file;
+        }
+    }
 
     readonly ConcurrentDictionary<string, Asm?> wholes = new(StringComparer.Ordinal);
 
@@ -498,24 +517,29 @@ internal sealed class Workspace : IDisposable
         catch (Exception error) when (error is IOException or BadImageFormatException or InvalidDataException or UnauthorizedAccessException) { return null; }
     });
 
-    readonly ConcurrentDictionary<Asm, Lazy<HashSet<string>>> strings = new();
+    readonly ConcurrentDictionary<Asm, Lazy<List<Differ.NameCall>>> nameCalls = new();
 
-    /// Every string the code of an assembly can load.
-    public HashSet<string> Strings(Asm a) => strings.GetOrAdd(a, x => new Lazy<HashSet<string>>(() =>
+    /// The calls of an assembly that look a method up by its name: SendMessage,
+    /// SendMessageUpwards, BroadcastMessage, Invoke, InvokeRepeating, CancelInvoke, IsInvoking,
+    /// StartCoroutine and StopCoroutine of the engine's objects, and reflection on a type
+    /// (GetMethod, GetProperty, GetField, GetMember, InvokeMember), each with the name when the call
+    /// has it written as a string.
+    public List<Differ.NameCall> NameCalls(Asm a) => nameCalls.GetOrAdd(a, x => new Lazy<List<Differ.NameCall>>(() => Differ.NameCalls(x))).Value;
+
+    /// The assembly with its code: an entry as it is, a sibling read for its metadata alone as the
+    /// whole image of the same file.
+    public Asm Code(Asm a)
     {
-        var set = new HashSet<string>(StringComparer.Ordinal);
-        if (x.MD.GetHeapSize(System.Reflection.Metadata.Ecma335.HeapIndex.UserString) == 0) return set;
-        for (var h = x.MD.GetNextHandle(MetadataTokens.UserStringHandle(0)); !h.IsNil; h = x.MD.GetNextHandle(h)) set.Add(x.MD.GetUserString(h));
-        return set;
-    })).Value;
+        foreach (var e in Entries) if (e.Current == a || e.Loaded == a) return a;
+        return Whole(a.Path) ?? a;
+    }
 
-    readonly ConcurrentDictionary<Asm, Lazy<List<string>>> dynamic = new();
+    readonly ConcurrentDictionary<Asm, Lazy<Differ.Callers>> callers = new();
 
-    /// The methods of an assembly that call a method of the engine's objects by a name they
-    /// compute: SendMessage, SendMessageUpwards, BroadcastMessage, Invoke, InvokeRepeating,
-    /// CancelInvoke, IsInvoking, StartCoroutine and StopCoroutine with a string that is not
-    /// written in the call. As member ids, sorted.
-    public List<string> DynamicByName(Asm a) => dynamic.GetOrAdd(a, x => new Lazy<List<string>>(() => Differ.DynamicByName(x))).Value;
+    /// What runs once in another assembly of the game (see `Differ.Callers`), for an override of
+    /// a method it declares.
+    public Differ.Callers Callers(Asm a) => callers.GetOrAdd(a, x => new Lazy<Differ.Callers>(() =>
+        Differ.BuildCallers(this, x, Netcode.Uses(x), new Lazy<HashSet<System.Reflection.Metadata.MethodDefinitionHandle>>(() => Differ.Initialized(x))))).Value;
 
     public void Dispose()
     {
