@@ -19,6 +19,16 @@ pub(crate) const KEPT_REVISIONS: usize = 4;
 /// Directories of compiles that published nothing (a compile error's
 /// diagnostics), newest first.
 pub(crate) const KEPT_UNPUBLISHED: usize = 2;
+/// Scene revisions (`<output>/revisions/<id>`) kept, newest first, besides
+/// those in use.
+pub(crate) const KEPT_SCENE_REVISIONS: usize = 8;
+/// Entries of the assembly cache (`<output>/compiler/assemblies/<key>`)
+/// kept, newest first, besides those the compiler uses.
+pub(crate) const KEPT_ASSEMBLIES: usize = 64;
+/// Run directories (`<output>/runs/<id>`: the Player's log, reports and
+/// patches of one Player process) kept, newest first, besides the running
+/// one.
+pub(crate) const KEPT_RUNS: usize = 8;
 /// Recorded preparations larger than this are not read; whatever lies in a
 /// directory they could name then stays.
 const PREPARATION_LIMIT: u64 = 256 << 20;
@@ -56,6 +66,8 @@ pub(crate) fn record_prepared(output: &str, record: &serde_json::Value) -> Resul
 /// What a prune removed and why the rest stayed.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct Pruned {
+    /// Scene revisions and compiled assemblies removed beyond the newest.
+    pub files: usize,
     pub removed: Vec<String>,
     pub entries: Vec<String>,
     pub kept: Vec<String>,
@@ -197,6 +209,14 @@ impl Pruner {
     /// revision entry names. Must not run beside a compile or a Player start.
     pub fn prune(&mut self, keep: &[String]) -> Pruned {
         let mut pruned = Pruned::default();
+        let recorded = match self.recorded() {
+            Ok(recorded) => recorded,
+            Err(path) => {
+                pruned.refused = path;
+                return pruned;
+            }
+        };
+        self.bound_files(keep, &recorded, &mut pruned);
         let compiler = sysutil::join(&[&self.output, "compiler"]);
         let mut candidates = directories(&sysutil::join(&[&self.output, "players"]), |_| true);
         candidates.extend(directories(&compiler, |name| {
@@ -205,13 +225,6 @@ impl Pruner {
         if candidates.is_empty() {
             return pruned;
         }
-        let recorded = match self.recorded() {
-            Ok(recorded) => recorded,
-            Err(path) => {
-                pruned.refused = path;
-                return pruned;
-            }
-        };
         let running = running_executables();
         let used = |directory: &str| {
             keep.iter()
@@ -281,6 +294,41 @@ impl Pruner {
         }
         pruned
     }
+
+    /// The scene revisions, the compiled assemblies and the run directories
+    /// of the output, one per scene save, per source state and per Player
+    /// process: the newest stay, with those `keep` names (the running
+    /// Player's scene and run, the compiler's current assemblies) and those
+    /// a record names (the manifest of a prepare-only run). A scene revision
+    /// and an assembly are made again when they are needed and gone
+    /// (caches6-3).
+    fn bound_files(&self, keep: &[String], recorded: &BTreeSet<String>, pruned: &mut Pruned) {
+        for (parent, kept) in [
+            (sysutil::join(&[&self.output, "revisions"]), KEPT_SCENE_REVISIONS),
+            (
+                sysutil::join(&[&self.output, "compiler", "assemblies"]),
+                KEPT_ASSEMBLIES,
+            ),
+            (sysutil::join(&[&self.output, "runs"]), KEPT_RUNS),
+        ] {
+            let mut entries: Vec<(SystemTime, String)> = directories(&parent, |_| true)
+                .into_iter()
+                .map(|directory| (modified(&directory), directory))
+                .collect();
+            if entries.len() <= kept {
+                continue;
+            }
+            entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            for (_, directory) in entries.into_iter().skip(kept) {
+                if keep.iter().chain(recorded).any(|path| holds(&directory, path)) {
+                    continue;
+                }
+                if fs::remove_dir_all(&directory).is_ok() {
+                    pruned.files += 1;
+                }
+            }
+        }
+    }
 }
 
 /// One line on standard error when anything was removed or a preparation
@@ -298,6 +346,12 @@ pub(crate) fn report(pruned: &Pruned) {
             pruned.removed.len(),
             pruned.entries.len(),
             pruned.kept.len()
+        );
+    }
+    if pruned.files > 0 {
+        eprintln!(
+            "[unity-micro-editor] removed {} scene revisions, compiled assemblies and run directories beyond the newest",
+            pruned.files
         );
     }
 }
