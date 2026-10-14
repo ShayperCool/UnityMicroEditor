@@ -745,23 +745,46 @@ struct Live<'a> {
     restarted: bool,
 }
 impl Live<'_> {
-    /// Every Player directory the session may still start or runs: the
-    /// baselines, the running Player, the newest compile and the compile the
-    /// running Player was started on.
+    /// Every Player directory the session may still start, runs or reads:
+    /// see [`in_use`].
     fn in_use(&self) -> Vec<String> {
-        let mut keep = self.baselines.clone();
-        if let Some(player) = &self.owned.0 {
-            keep.push(player.path.clone());
-        }
-        keep.push(self.compiler.player.clone());
-        for compile in [&self.pending_compile, &self.active_compile]
-            .into_iter()
-            .flatten()
-        {
-            keep.push(compile.player.clone());
-        }
-        keep
+        let readers: Vec<&str> = std::iter::once(self.native_importer.opts.player.as_str())
+            .chain(
+                self.content_importers
+                    .values()
+                    .map(|content| content.importer.opts.player.as_str()),
+            )
+            .collect();
+        in_use(
+            &self.baselines,
+            self.owned.0.as_ref().map(|player| player.path.as_str()),
+            &self.compiler.player,
+            [&self.pending_compile, &self.active_compile]
+                .into_iter()
+                .flatten()
+                .map(|compile| compile.player.as_str()),
+            &readers,
+        )
     }
+}
+
+/// The Player directories a session keeps: the baselines, the running
+/// Player, the compiler's, the newest compile and the compile the running
+/// Player was started on, and those its importers read (the built-in shaders
+/// of the host in its data, caches6-1).
+pub(crate) fn in_use<'a>(
+    baselines: &[String],
+    running: Option<&str>,
+    compiler: &str,
+    compiles: impl Iterator<Item = &'a str>,
+    readers: &[&str],
+) -> Vec<String> {
+    let mut keep = baselines.to_vec();
+    keep.extend(running.map(str::to_string));
+    keep.push(compiler.to_string());
+    keep.extend(compiles.map(str::to_string));
+    keep.extend(readers.iter().map(|player| player.to_string()));
+    keep
 }
 impl Live<'_> {
     fn player(&mut self) -> &mut Player {
@@ -1199,8 +1222,12 @@ fn run_session(
             apply_compiled_bindings(&session, compiled, &script_types);
         }
         apply_builtin_shaders(&session, &opts.builtin_shaders)?;
+        // The importer reads the built-in shaders of the host from the
+        // Player's data. A compile copies that data as it is, and the bound
+        // of the output removes a compile no Player runs any more, also the
+        // one of the session's start: the staged host stays (caches6-1).
         let mut native_importer =
-            NativeProjectImporter::new(opts.native(&baseline.player), session.clone())?;
+            NativeProjectImporter::new(opts.native(&staged_player), session.clone())?;
         native_importer.script_assemblies = compiler.script_assemblies();
         let layouts = compiler.behaviour_layouts(ctx, &script_types)?;
         native_importer.behaviour_code = compiler.behaviour_code.clone();

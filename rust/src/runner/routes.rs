@@ -248,7 +248,10 @@ pub fn prepare_content_routes(
                 extra_assets: Vec::new(),
                 script_types: script_types.clone(),
             })?;
-            let mut route_options = opts.native(&baseline.player);
+            // The Player whose data the root importer reads, which the bound
+            // of the output keeps; a compile's copy may be removed (caches6-1).
+            let mut route_options =
+                opts.native(root.map_or(&baseline.player, |root| &root.opts.player));
             route_options.output = sysutil::join(&[&opts.output, "content", &guid]);
             let importer = NativeProjectImporter::new(route_options, Arc::new(session))?;
             importers.insert(
