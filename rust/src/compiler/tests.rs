@@ -2355,8 +2355,9 @@ fn save_code_revision_fixture(
         assemblies: NilVec::from([dll]),
         ..Default::default()
     };
+    let map = PlayerMap::read(&folder).unwrap();
     compiler
-        .save_code_revision(key, &update, &compiler.proofs)
+        .save_code_revision(key, &update, &compiler.proofs, &map)
         .unwrap();
     update
 }
@@ -3111,4 +3112,179 @@ fn a_compiler_plan_accepts_the_sources_it_was_made_with() {
     // The plan of another project is none of this one.
     let (_other_guard, other) = temp();
     assert!(Compiler::graph_accepts_sources(&other, &plain).is_err());
+}
+
+/// A Player directory with a few files, as `code_revision_fixture` has one.
+fn player_map_fixture() -> (TempDir, String) {
+    let (guard, root) = temp();
+    for (path, text) in [
+        ("Player/Host.x86_64", "native executable"),
+        ("Player/Host_Data/Managed/Game.dll", "baseline game"),
+        ("Player/Host_Data/Managed/Host.dll", "managed bridge"),
+        ("Player/UnityPlayer.so", "native Unity"),
+    ] {
+        write_graph_file(&root, path, text);
+    }
+    (guard, join(&[&root, "Player"]))
+}
+
+/// Writes other bytes of the same length and gives the file its old
+/// modification time back: only the change time and the content moved.
+fn rewrite_keeping_size_and_mtime(path: &str, text: &str) {
+    let modified = fs::metadata(path).unwrap().modified().unwrap();
+    assert_eq!(fs::metadata(path).unwrap().len(), text.len() as u64);
+    // The change time has a coarse clock; let it move.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    sys::write(path, text.as_bytes()).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    assert_eq!(fs::metadata(path).unwrap().modified().unwrap(), modified);
+}
+
+fn copy_player(source: &str, destination: &str) {
+    sys::mkdir_all(destination).unwrap();
+    compiler_command(
+        &background(),
+        "",
+        "cp",
+        &["-a", "--reflink=auto", &format!("{source}/."), destination],
+    )
+    .unwrap();
+}
+
+#[test]
+fn player_map_hashes_what_player_files_hashes() {
+    let (_guard, player) = player_map_fixture();
+    let map = PlayerMap::read(&player).unwrap();
+    assert_eq!(map.files, player_files(&player).unwrap());
+    assert_eq!(map.directory, player);
+    assert_eq!(map.stamps.len(), map.files.len());
+    assert!(map.still(), "an untouched directory is not still");
+    // The rules of player_files hold: a symbolic link is not a Player file.
+    symlink(
+        join(&[&player, "UnityPlayer.so"]),
+        join(&[&player, "link.so"]),
+    )
+    .unwrap();
+    assert!(PlayerMap::read(&player).is_err() && player_files(&player).is_err());
+}
+
+#[test]
+fn player_map_is_not_still_after_any_change() {
+    let game = "Host_Data/Managed/Game.dll";
+    for change in ["same size and mtime", "added", "removed", "replaced"] {
+        let (_guard, player) = player_map_fixture();
+        let map = PlayerMap::read(&player).unwrap();
+        let path = join(&[&player, game]);
+        match change {
+            "same size and mtime" => rewrite_keeping_size_and_mtime(&path, "changed  game"),
+            "added" => {
+                write_graph_file(&player, "Host_Data/Managed/Extra.dll", "x");
+            }
+            "removed" => fs::remove_file(&path).unwrap(),
+            _ => {
+                let other = join(&[&player, "other"]);
+                sys::write(&other, b"baseline game").unwrap();
+                fs::rename(&other, &path).unwrap();
+            }
+        }
+        assert!(
+            !map.still(),
+            "{change}: the map of a changed directory is still"
+        );
+    }
+}
+
+#[test]
+fn player_map_stays_still_while_it_is_copied() {
+    let (_guard, player) = player_map_fixture();
+    let map = PlayerMap::read(&player).unwrap();
+    let copy = join(&[&sysutil::dir(&player), "Copy"]);
+    copy_player(&player, &copy);
+    copy_player(&player, &join(&[&sysutil::dir(&player), "Again"]));
+    assert!(
+        map.still(),
+        "copying a Player directory moved the stamps of its files"
+    );
+    let copied = map
+        .copied_to(&copy)
+        .expect("a cp -a copy is not recognized");
+    assert_eq!(copied.files, player_files(&copy).unwrap());
+    assert_eq!(copied.directory, copy);
+    // The copy of a copy keeps it too.
+    let next = join(&[&sysutil::dir(&player), "Next"]);
+    copy_player(&copy, &next);
+    assert!(copied.still());
+    assert_eq!(
+        copied.copied_to(&next).unwrap().files,
+        player_files(&next).unwrap()
+    );
+}
+
+#[test]
+fn player_map_rejects_a_copy_that_differs() {
+    let game = "Host_Data/Managed/Game.dll";
+    for change in ["size", "mtime", "extra", "missing"] {
+        let (_guard, player) = player_map_fixture();
+        let map = PlayerMap::read(&player).unwrap();
+        let copy = join(&[&sysutil::dir(&player), "Copy"]);
+        copy_player(&player, &copy);
+        let path = join(&[&copy, game]);
+        match change {
+            "size" => sys::write(&path, b"a longer recompiled game").unwrap(),
+            "mtime" => fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap(),
+            "extra" => {
+                write_graph_file(&copy, "Host_Data/Managed/Extra.dll", "x");
+            }
+            _ => fs::remove_file(&path).unwrap(),
+        }
+        assert!(
+            map.copied_to(&copy).is_none(),
+            "{change}: a copy that differs took the map of its source"
+        );
+    }
+}
+
+/// The map a compile gives the Player directory it copied is the map of the
+/// bytes in that directory, also when something else changed the source of
+/// the copy after it was hashed, or the copy after it was made.
+#[test]
+fn copied_player_map_names_the_bytes_of_the_copy() {
+    let game = "Host_Data/Managed/Game.dll";
+    for change in ["source", "copy", "none"] {
+        let (_guard, player) = player_map_fixture();
+        let map = std::sync::Arc::new(PlayerMap::read(&player).unwrap());
+        if change == "source" {
+            rewrite_keeping_size_and_mtime(&join(&[&player, game]), "foreign  game");
+        }
+        let copy = join(&[&sysutil::dir(&player), "Copy"]);
+        copy_player(&player, &copy);
+        if change == "copy" {
+            sys::write(&join(&[&copy, game]), b"foreign game, longer").unwrap();
+        }
+        let derived = PlayerMap::after_copy(Some(map.clone()), &copy).unwrap();
+        assert_eq!(
+            derived.files,
+            player_files(&copy).unwrap(),
+            "{change}: the map of a copy does not name its bytes"
+        );
+        let mut written = derived.clone();
+        let dll = join(&[&copy, game]);
+        sys::write(&dll, b"recompiled").unwrap();
+        written.wrote(&dll, sha256(b"recompiled")).unwrap();
+        assert_eq!(written.files, player_files(&copy).unwrap());
+        assert!(
+            written.still(),
+            "{change}: the map of a written copy is not still"
+        );
+    }
 }
