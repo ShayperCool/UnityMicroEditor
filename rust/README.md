@@ -208,7 +208,8 @@ checks): NetworkList, a NetworkBehaviour whose base class is in another game
 assembly, every universal RPC target and a first use of Netcode in a body
 behaved in every Player as a restart on the new code would. Known not to
 work in a session, with or without hot reload: a generic NetworkBehaviour
-cannot be prepared (the lifecycle rewrite refuses generic MonoBehaviours);
+cannot be prepared unless it declares no lifecycle callback and a base class
+declares `Awake` (the lifecycle rewrite's two refusals);
 with scene management on (NGO's default) clients never synchronize, because
 the session's scene has no build-settings path; without it, clients do not
 find in-scene placed NetworkObjects.

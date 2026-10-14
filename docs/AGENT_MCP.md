@@ -1013,12 +1013,14 @@ Limits:
 
 These hold for a session with or without hot reload.
 
-- A generic MonoBehaviour cannot be prepared. The lifecycle rewrite refuses a
-  lifecycle callback in a generic engine object class ("Lifecycle callbacks on
-  generic engine object classes are unsupported"), and a generic or nested
-  MonoBehaviour with no `Awake` in its class chain ("Synthetic Awake on
-  nested/generic MonoBehaviour classes is unsupported"). A generic
-  NetworkBehaviour is one.
+- A generic MonoBehaviour (a generic NetworkBehaviour among them) cannot be
+  prepared when it declares `Awake`, `OnEnable`, `OnDisable` or `OnDestroy`
+  ("Lifecycle callbacks on generic engine object classes are unsupported"), or
+  when no class of its chain declares `Awake` ("Synthetic Awake on
+  nested/generic MonoBehaviour classes is unsupported", which holds for a
+  nested MonoBehaviour too). One that declares none of them and inherits
+  `Awake` from a base class is not refused by the rewrite; it is not verified
+  in a session.
 - Netcode for GameObjects, found in Players with
   `com.unity.netcode.gameobjects` 2.13.2: with scene management on, which is
   NGO's default, the host's connection approval fails because the session's
