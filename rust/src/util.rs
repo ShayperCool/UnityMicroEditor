@@ -131,6 +131,38 @@ pub fn lock_session(output: &str) -> Result<File> {
     Ok(file)
 }
 
+/// Whether another process holds the session lock of `output`, with its
+/// PID when /proc/locks names it. Takes the lock for a moment when nobody
+/// holds it, so the caller does this only before it starts a runner itself.
+pub fn session_lock_holder(output: &str) -> Option<Option<i32>> {
+    use std::os::unix::fs::MetadataExt;
+    let path = sysutil::join(&[output, ".session.lock"]);
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+        .ok()?;
+    match file.try_lock() {
+        Ok(()) => None,
+        Err(fs::TryLockError::Error(_)) => None,
+        Err(fs::TryLockError::WouldBlock) => {
+            let inode = file.metadata().ok()?.ino();
+            let holder = fs::read_to_string("/proc/locks").ok().and_then(|locks| {
+                locks.lines().find_map(|line| {
+                    let fields: Vec<&str> = line.split_whitespace().collect();
+                    // `1: FLOCK  ADVISORY  WRITE 4242 fd:01:1234 0 EOF`
+                    let (pid, at) = (fields.get(4)?, fields.get(5)?);
+                    let lock_inode = at.rsplit(':').next()?.parse::<u64>().ok()?;
+                    (fields.get(1) == Some(&"FLOCK") && lock_inode == inode)
+                        .then(|| pid.parse::<i32>().ok())
+                        .flatten()
+                })
+            });
+            Some(holder)
+        }
+    }
+}
+
 /// An OS error carrying operation, path and cause in its text; whether the path
 /// was missing stays answerable through `downcast_ref::<sysutil::Error>()`.
 fn os_error(operation: &str, path: &str, error: &io::Error) -> anyhow::Error {
