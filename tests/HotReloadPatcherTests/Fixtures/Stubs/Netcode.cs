@@ -92,3 +92,11 @@ namespace Unity.Netcode
         public virtual void OnNetworkSpawn() { }
     }
 }
+
+namespace Unity.Netcode.Components
+{
+    public class NetworkTransform : Unity.Netcode.NetworkBehaviour
+    {
+        protected virtual bool OnIsServerAuthoritative() => true;
+    }
+}

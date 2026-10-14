@@ -63,6 +63,7 @@ internal static class Codes
     public const string AccessibilityChanged = "accessibility_changed";
     public const string RuntimeInitializerAdded = "runtime_initializer_added";
     public const string RuntimeInitializerRemoved = "runtime_initializer_removed";
+    public const string RuntimeInitializerChanged = "runtime_initializer_changed";
 
     public static readonly (string Code, string Meaning)[] Unsupported =
     {
@@ -114,9 +115,9 @@ internal static class Codes
         (SerializedFieldNotRestored, "An added field that Unity would serialize is not restored from scenes, prefabs or assets until a restart."),
         (FieldValueReset, "A field whose type or static modifier changed is stored anew; its previous value is lost."),
         (ConstructorAppliesToNewObjects, "A changed constructor or instance field initializer affects only objects constructed after the patch."),
-        (StartedObjectsKeepState, "A changed parameterless Start of a MonoBehaviour, or Awake of a MonoBehaviour or ScriptableObject, does not run again for the objects that already ran it; it runs for objects that start after the patch."),
-        (SpawnedObjectsKeepState, "A changed OnNetworkSpawn, OnNetworkPreSpawn, OnNetworkPostSpawn, OnNetworkSessionSynchronized or OnInSceneObjectsSpawned of a NetworkBehaviour does not run again for the objects that are spawned; it runs for objects spawned after the patch."),
-        (RunningCoroutinesKeepOldCode, "Coroutines, iterators and async methods that are already running finish on the old code; new calls run the new code."),
+        (StartedObjectsKeepState, "A changed method that the engine calls once for an object does not run again for the objects that already ran it: the parameterless Start of a MonoBehaviour, Awake of a MonoBehaviour or ScriptableObject, OnEnable (again only when the object is disabled and enabled; what the old body subscribed stays), OnEnable of a ScriptableObject (when the asset loads) and OnAfterDeserialize; also a method that only such methods call. Its new body runs for objects that start after the patch."),
+        (SpawnedObjectsKeepState, "A changed OnNetworkSpawn, OnNetworkPreSpawn, OnNetworkPostSpawn, OnNetworkSessionSynchronized or OnInSceneObjectsSpawned of a NetworkBehaviour, or a method that only they call, does not run again for the objects that are spawned; it runs for objects spawned after the patch. A changed OnIsServerAuthoritative of a NetworkTransform is read at spawn and kept, so the objects that are spawned mix the old and the new answer."),
+        (RunningCoroutinesKeepOldCode, "Coroutines, iterators and async methods that are already running finish on the old code, also when the method was removed or renamed; new calls run the new code."),
         (LambdaNotRemapped, "A lambda or local function was edited, moved or removed and its old version is not redirected: which lambda it became is only known while the code that creates it is unchanged, and a redirect needs the same captures, none of them taken by reference. Delegates and calls made by code from before the patch keep the old body."),
         (EarlierPatchDelegatesKeepOldCode, "An added method, lambda, local function or state machine that an earlier patch brought was changed or dropped; delegates, coroutines and async calls created while that patch was applied keep running its code."),
         (AddedMethodDelegateIdentity, "Patched code makes a delegate of an added method that the earlier patch also had; each patch has its own copy, so `-=` does not remove a handler subscribed while the earlier patch was applied, until a full recompile."),
@@ -126,6 +127,7 @@ internal static class Codes
         (AccessibilityChanged, "The accessibility of an existing member changed; reflection keeps the loaded accessibility until a full recompile. A field that Unity would serialize differently is refused instead (serialization_changed)."),
         (RuntimeInitializerAdded, "A [RuntimeInitializeOnLoadMethod] method was added; it runs at the next start."),
         (RuntimeInitializerRemoved, "A [RuntimeInitializeOnLoadMethod] method was removed or renamed; the change is effective at the next start."),
+        (RuntimeInitializerChanged, "The body of a [RuntimeInitializeOnLoadMethod] method, or of a method only such methods call, changed; it ran when the Player started and does not run again, so the new body is not in effect before the next start."),
     };
 }
 

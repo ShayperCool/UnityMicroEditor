@@ -308,7 +308,8 @@ internal static class Program
         ["LAMBDA_IN_ITERATOR"] = Patch().Redirects("changed Edits.Wiring::Makers()", "lambda Edits.Wiring::Makers() [lambda 0]")
             .Noted("running_coroutines_keep_old_code Edits.Wiring::Makers()"),
         ["RECORD_WITH"] = Patch().Redirects("changed Edits.Figures::Grow(Edits.Figure)"),
-        ["LIFECYCLE_BODY"] = Patch().Redirects("changed Edits.Behaviour1::__UnityPlay_Awake()").Noted("started_objects_keep_state Edits.Behaviour1::__UnityPlay_Awake()"),
+        // The note names the Awake the user wrote, not the helper the lifecycle rewrite moved its body into.
+        ["LIFECYCLE_BODY"] = Patch().Redirects("changed Edits.Behaviour1::__UnityPlay_Awake()").Noted("started_objects_keep_state Edits.Behaviour1::Awake()"),
         // Start of an engine object ran for the objects that exist; a plain class has no such method.
         ["START_BODY"] = Patch().Redirects("changed Edits.Starting::Start()", "changed Edits.PlainStarting::Start()").Noted("started_objects_keep_state Edits.Starting::Start()"),
         ["CHANGE_CONST"] = Patch().Redirects("changed Edits.Consts::Use()"),
@@ -339,6 +340,19 @@ internal static class Program
         ["ACCESSIBILITY_NOT_SERIALIZED"] = Unchanged().Noted("accessibility_changed Edits.Exposure::shared", "accessibility_changed Edits.Exposure::frozen", "accessibility_changed Edits.Exposure::marked"),
         ["RUNTIME_INITIALIZER_ADD"] = Patch().Methods("Edits.BootA::Extra()").Noted("runtime_initializer_added Edits.BootA"),
         ["RUNTIME_INITIALIZER_REMOVE"] = Unchanged().Noted("runtime_initializer_removed Edits.BootB"),
+        // Methods that ran once for what exists, and methods only they call.
+        ["ONCE_INITIALIZER"] = Patch().Redirects("changed Edits.BootC::Init()", "changed Edits.BootC::Register()")
+            .Noted("runtime_initializer_changed Edits.BootC::Init()", "runtime_initializer_changed Edits.BootC::Register()"),
+        ["ONCE_ENABLE"] = Patch().Redirects("changed Edits.Listener::__UnityPlay_OnEnable()", "changed Edits.Listener::__UnityPlay_OnDisable()")
+            .Noted("started_objects_keep_state Edits.Listener::OnEnable()"),
+        ["ONCE_ASSET"] = Patch().Redirects("changed Edits.Settings::__UnityPlay_OnEnable()").Noted("started_objects_keep_state Edits.Settings::OnEnable()"),
+        ["ONCE_DESERIALIZED"] = Patch().Redirects("changed Edits.Table::OnAfterDeserialize()").Noted("started_objects_keep_state Edits.Table::OnAfterDeserialize()"),
+        // Bonus() is called by Update as well: it runs again, and gets no note.
+        ["ONCE_HOOK"] = Patch().Redirects("changed Edits.Enemy::OnSetup()", "changed Edits.Actor::Prepare()", "changed Edits.Actor::Bonus()")
+            .Noted("started_objects_keep_state Edits.Enemy::OnSetup()", "started_objects_keep_state Edits.Actor::Prepare()"),
+        // The instances of a renamed coroutine that run keep the removed code.
+        ["COROUTINE_REMOVED"] = Patch().Methods("Edits.Blinker::Pulse()").Redirects("changed Edits.Blinker::Update()")
+            .Noted("running_coroutines_keep_old_code Edits.Blinker::Blink()", "added_method_invisible_by_name Edits.Blinker::Pulse()"),
 
         // Fields.
         ["ADD_INSTANCE_FIELD"] = Patch().Fields("Edits.AddField::extra", "Edits.AddField::primed").Redirects("changed Edits.AddField::.ctor()", "changed Edits.AddField::Use()")
@@ -648,6 +662,9 @@ internal static class Program
         ["BODY"] = Patch().Redirects("changed " + Thing + "::Value()"),
         ["PLAIN"] = Patch().Redirects("changed Net.Plain::Twice(System.Int32)"),
         ["SPAWN"] = Patch().Redirects("changed " + Thing + "::OnNetworkSpawn()").Noted("spawned_objects_keep_state " + Thing + "::OnNetworkSpawn()"),
+        // A method only OnNetworkSpawn calls, and the authority NetworkTransform takes at spawn.
+        ["SPAWN_HOOK"] = Patch().Redirects("changed " + Thing + "::Arm()").Noted("spawned_objects_keep_state " + Thing + "::Arm()"),
+        ["AUTHORITY"] = Patch().Redirects("changed Net.ClientMover::OnIsServerAuthoritative()").Noted("spawned_objects_keep_state Net.ClientMover::OnIsServerAuthoritative()"),
         ["METHOD_ADDED"] = Patch().Methods(Thing + "::Helper()").Noted("added_method_invisible_by_name " + Thing + "::Helper()"),
         ["FIELD_ADDED"] = Patch().Redirects("changed " + Thing + "::Value()").Fields(Thing + "::plain").Noted("serialized_field_not_restored " + Thing + "::plain"),
         // Patched: the body of an RPC, while the code in front of it that sends it is as it was.
