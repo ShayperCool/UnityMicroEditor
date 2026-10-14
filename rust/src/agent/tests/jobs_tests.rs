@@ -679,6 +679,72 @@ fn start_does_not_ignore_preparation_inputs_or_unknown_keys() {
     }
 }
 
+/// The start that began a preparation with an input is reissued, as the
+/// documentation says, with the same input; once that preparation is the
+/// session's, the input is what the session runs and the start goes on
+/// (session6-5). Another input, or one of the wrong type, is refused
+/// (mcp6-3).
+#[test]
+fn a_start_reissued_with_the_inputs_of_its_preparation_goes_on() {
+    let (_guard, project) = review_project();
+    let id = "auto-prepared";
+    let record = join(&[
+        &project,
+        "Library/UnityMicroEditor/action-jobs",
+        &crate::sha256(id.as_bytes()),
+        "request.json",
+    ]);
+    fs::create_dir_all(crate::sysutil::dir(&record)).unwrap();
+    write(
+        &record,
+        &format!(
+            r#"{{"schemaVersion":1,"project":"{project}","action":"project_prepare","identity":"{id}","arguments":{{"activate":true,"hostPlayer":"/host/Player","rebuildHost":true,"requestId":"{id}","scene":"Assets/Main.unity"}}}}"#
+        ),
+    );
+    let service = Service::new(Options {
+        project: project.clone(),
+        baseline: join(&[
+            &project,
+            "Library/UnityMicroEditor/preparations",
+            id,
+            "current.json",
+        ]),
+        scene: "Assets/Main.unity".into(),
+        ..Default::default()
+    });
+    let code = |arguments: Value| {
+        let raw = bytes(&json!({"action": "start", "arguments": arguments}));
+        let outcome = service.runtime_with_action_jobs(&ctx(), "session_control", &raw);
+        let error = outcome.error.expect("no controller in this test");
+        typed(&error).map_or(format!("{error:#}"), |detail| detail.code.clone())
+    };
+    // Taken to the controller, which this test does not have.
+    for arguments in [
+        json!({"hostPlayer": "/host/Player"}),
+        json!({"hostPlayer": "/host/Player", "rebuildHost": true}),
+        json!({"rebuildHost": false, "nativeCatalog": null}),
+    ] {
+        assert_eq!(
+            code(arguments.clone()),
+            "runtime controller is not configured",
+            "{arguments}"
+        );
+    }
+    for arguments in [
+        json!({"hostPlayer": "/elsewhere/Player"}),
+        json!({"hostPlayer": "/host/Player", "nativeCatalog": "/c"}),
+    ] {
+        assert_eq!(code(arguments.clone()), "preparation_input_ignored", "{arguments}");
+    }
+    for arguments in [
+        json!({"nativeCatalog": true}),
+        json!({"hostPlayer": 7}),
+        json!({"rebuildHost": "true"}),
+    ] {
+        assert_eq!(code(arguments.clone()), "invalid_request", "{arguments}");
+    }
+}
+
 /// The receipt bytes written for the same outcomes, which the persisted format fixes.
 #[test]
 fn receipts_have_fixed_layout() {
