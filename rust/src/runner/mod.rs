@@ -8,6 +8,7 @@ mod noop;
 mod patch;
 mod player;
 mod prepared;
+mod prune;
 mod routes;
 mod watch;
 mod window;
@@ -16,6 +17,8 @@ mod window;
 mod hot_tests;
 #[cfg(test)]
 mod oracle_tests;
+#[cfg(test)]
+mod prune_tests;
 #[cfg(test)]
 mod tests;
 
@@ -734,6 +737,31 @@ struct Live<'a> {
     /// Whether a line of timings is printed per window (`UME_TIMINGS=1`).
     timings: bool,
     times: WindowTimes,
+    /// Removes the Player directories of the output that nothing uses.
+    pruner: prune::Pruner,
+    /// The staged host and the prepared baseline of the session.
+    baselines: Vec<String>,
+    /// A Player was started in the window that ends.
+    restarted: bool,
+}
+impl Live<'_> {
+    /// Every Player directory the session may still start or runs: the
+    /// baselines, the running Player, the newest compile and the compile the
+    /// running Player was started on.
+    fn in_use(&self) -> Vec<String> {
+        let mut keep = self.baselines.clone();
+        if let Some(player) = &self.owned.0 {
+            keep.push(player.path.clone());
+        }
+        keep.push(self.compiler.player.clone());
+        for compile in [&self.pending_compile, &self.active_compile]
+            .into_iter()
+            .flatten()
+        {
+            keep.push(compile.player.clone());
+        }
+        keep
+    }
 }
 impl Live<'_> {
     fn player(&mut self) -> &mut Player {
@@ -932,6 +960,7 @@ impl Steps for Live<'_> {
         if let Some(pending) = &compile {
             self.active_compile = Some(pending.clone());
         }
+        self.restarted = true;
         if let (Some(hot), Some(applier)) = (&mut self.hot, applier) {
             // A process whose assemblies cannot be read is patched with
             // nothing: every edit then takes the fallback.
@@ -1041,6 +1070,11 @@ impl Steps for Live<'_> {
         if let Some(line) = timings_report(self.timings, window, &times, compile, patch) {
             eprintln!("{line}");
         }
+        // After the answer: what the last compile or restart left unused goes.
+        if times.compile.is_some() || std::mem::take(&mut self.restarted) {
+            let keep = self.in_use();
+            prune::report(&self.pruner.prune(&keep));
+        }
     }
 }
 
@@ -1114,6 +1148,7 @@ fn run_session(
         true => Commands::read(std::io::stdin(), wake),
         false => Commands::none(),
     };
+    let prepared_player = baseline.player.clone();
     let staged_player = compiler::stage_host(ctx, &opts.output, &opts.editor, &baseline.player)?;
     baseline.player = staged_player.clone();
     // The patch builder and the applier are built beside the startup compile
@@ -1281,6 +1316,17 @@ fn run_session(
         ready = ready.with("hotReload", &hot.is_some());
     }
     ready.emit();
+    // What earlier starts of this output left that nothing uses goes once
+    // the Player runs.
+    let mut pruner = prune::Pruner::new(&project, &output);
+    let baselines = vec![staged_player.clone(), prepared_player.clone()];
+    {
+        let mut keep = baselines.clone();
+        keep.push(player!().path.clone());
+        keep.push(compiler.player.clone());
+        keep.extend(initial_compile.iter().map(|compile| compile.player.clone()));
+        prune::report(&pruner.prune(&keep));
+    }
     let Some(watcher) = watcher else {
         loop {
             let seen = wake.seen();
@@ -1322,6 +1368,9 @@ fn run_session(
         hot,
         timings: timings_enabled(),
         times: WindowTimes::default(),
+        pruner,
+        baselines,
+        restarted: false,
     };
     watch(
         ctx,
