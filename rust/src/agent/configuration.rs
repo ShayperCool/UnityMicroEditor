@@ -25,6 +25,29 @@ pub(crate) use crate::compiler::requires_new_graph;
 const PACKAGE_CACHE: &str = "Library/PackageCache";
 const PACKAGE_STORE: &str = "Library/UnityMicroEditor/packages/content";
 
+/// How many request ids the recovery has for one state of the sources, and
+/// how many other preparations of the project it looks at for one that fits.
+const RECOVERY_ATTEMPTS: u32 = 16;
+const KNOWN_PREPARATIONS: usize = 8;
+/// The error code of a preparation whose sources changed while it ran.
+pub(crate) const SUPERSEDED: &str = "preparation_superseded";
+
+/// What the service knows of the preparation job a request id names.
+enum Known {
+    Nothing,
+    Running,
+    Confirmed(Box<super::Preparation>),
+    /// The error code of its receipt.
+    Failed(String),
+}
+/// How a rejection that needs a new graph is answered.
+enum Plan {
+    /// The session restarts on a preparation the project has.
+    Continue(Box<super::Preparation>),
+    /// The preparation with this request id is queued, or runs, or failed.
+    Request(String),
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ConfigurationSelection {
     pub scene: String,
@@ -319,6 +342,12 @@ impl Service {
         let RuntimeValue::Controller(Reply::State(state)) = &outcome.value else {
             return outcome;
         };
+        // The runner marked its answer as not its last: it is still working
+        // on source changes, and the rejection may be taken back by the
+        // next one. No preparation is queued on such an answer.
+        if state.update_pending {
+            return outcome;
+        }
         // An edit that hot reload refused is answered by a recompile of the
         // prepared graph, whatever its text says; it never needs a preparation.
         // A session that could not start because the sources have left the
@@ -372,26 +401,23 @@ impl Service {
                 };
             }
         };
-        let identity = format!(
-            "config-{}",
-            &sha256(format!("{scene}\n{revision}").as_bytes())[..40]
-        );
+        // The preparation that answers this rejection: one the project
+        // already has, or the request that makes it.
+        let plan = self.plan_recovery(&scene, &revision);
         let reply = || -> Result<_> {
-            let arguments = marshal(&Any::Object(obj([
-                ("scene", scene.clone().into()),
-                ("requestId", identity.into()),
-                ("activate", true.into()),
-            ])))?;
-            // Sources that were prepared before under this identity (an edit
-            // that was undone and made again, a branch switched back) have a
-            // confirmed receipt: no job runs for them, so no job activates
-            // their preparation either. The session continues on it here.
-            let (preparation, continued) = match self.handle(ctx, "project_prepare", &arguments) {
-                Ok(receipt) => match self.continue_on_confirmed(ctx, &receipt) {
-                    Ok(continued) => (Ok(receipt), continued),
+            let (preparation, continued) = match &plan {
+                Plan::Continue(known) => match self.continue_on(known, &revision) {
+                    Ok(current) => (super::json_reply(known), current),
                     Err(error) => (Err(error), None),
                 },
-                Err(error) => (Err(error), None),
+                Plan::Request(identity) => {
+                    let arguments = marshal(&Any::Object(obj([
+                        ("scene", scene.clone().into()),
+                        ("requestId", identity.clone().into()),
+                        ("activate", true.into()),
+                    ])))?;
+                    (self.handle(ctx, "project_prepare", &arguments), None)
+                }
             };
             if action == "status" {
                 let mut reply = match &continued {
@@ -430,13 +456,15 @@ impl Service {
                 ),
                 ("configurationRevision", revision.clone().into()),
             ]);
-            if continued.is_some() {
-                reply.insert(
-                    "message".into(),
-                    "these sources already have a preparation; the session is restarting on it, reissue the call"
-                        .into(),
-                );
-            }
+            reply.insert(
+                "message".into(),
+                match continued {
+                    Some(_) => "these sources already have a preparation; the session is restarting on it, reissue the call",
+                    None if matches!(plan, Plan::Continue(_)) => "these sources already have a preparation; the session restarts on it when the project action that runs has ended, reissue the call",
+                    None => "the project is being prepared for the saved sources; the Player keeps its code until then and the session continues on the new preparation by itself, reissue the call",
+                }
+                .into(),
+            );
             map_reply(reply)
         };
         match reply() {
@@ -445,33 +473,195 @@ impl Service {
         }
     }
 
-    /// Makes a confirmed preparation that is not the selected one the
-    /// selected one and restarts the session on it, as the job of a
-    /// preparation does when it ends. Returns the state of the session after
-    /// that, and `None` when there is nothing to do: the receipt is of a job
-    /// that still runs, or its preparation is the selected one.
-    fn continue_on_confirmed(
+    /// The request id of the preparation of these sources. The first is a
+    /// function of the scene and the sources; the next ones exist because a
+    /// receipt is durable and its name can be wrong about it: see
+    /// `plan_recovery`.
+    pub(crate) fn recovery_identity(scene: &str, revision: &str, attempt: u32) -> String {
+        let named = match attempt {
+            0 => format!("{scene}\n{revision}"),
+            attempt => format!("{scene}\n{revision}\n{attempt}"),
+        };
+        format!("config-{}", &sha256(named.as_bytes())[..40])
+    }
+
+    /// Whether `id` is a request of the recovery for the sources as they are
+    /// on disk now. A request that is not was made for sources that have
+    /// changed since: its preparation answers no rejection of the session.
+    /// True when the sources cannot be read, so that nothing is held back
+    /// on a guess.
+    pub(crate) fn recovery_current(&self, id: &str, scene: &str) -> bool {
+        let selection = ConfigurationSelection {
+            scene: scene.into(),
+            baseline: self.baseline(),
+        };
+        match configuration_revision(&self.0.project, &[selection]) {
+            Ok(revision) => (0..RECOVERY_ATTEMPTS)
+                .any(|attempt| Self::recovery_identity(scene, &revision, attempt) == id),
+            Err(_) => true,
+        }
+    }
+
+    /// What the service knows of the preparation job `id`.
+    fn known_preparation(&self, id: &str) -> Known {
+        let receipt = {
+            let jobs = self.0.jobs.lock().unwrap();
+            match jobs.jobs.get(id) {
+                Some(job) => {
+                    let job = job.lock().unwrap();
+                    if job.active {
+                        return Known::Running;
+                    }
+                    job.receipt.clone()
+                }
+                None => None,
+            }
+        };
+        let receipt = match receipt {
+            Some(receipt) => receipt,
+            None => {
+                let path = join(&[
+                    &self.0.project,
+                    "Library/UnityMicroEditor/action-jobs",
+                    &sha256(id.as_bytes()),
+                    "result.json",
+                ]);
+                match super::jobs::JobReceipt::read(&path) {
+                    Ok(receipt) => receipt,
+                    Err(_) => return Known::Nothing,
+                }
+            }
+        };
+        if let Some(error) = &receipt.error {
+            return Known::Failed(error.code.clone());
+        }
+        match serde_json::from_slice::<Option<super::Preparation>>(&receipt.result) {
+            Ok(Some(preparation))
+                if preparation.schema_version == 1 && !preparation.baseline.is_empty() =>
+            {
+                Known::Confirmed(Box::new(preparation))
+            }
+            _ => Known::Failed("invalid_job_receipt".into()),
+        }
+    }
+
+    /// Whether the session can continue on a preparation the project has:
+    /// it is of this scene, it is not the one the session runs on (the
+    /// runner has just rejected the sources for that one), and its graph
+    /// accepts the sources on disk. The last is the check a start of the
+    /// runner makes, made before anything is stopped: a preparation is not
+    /// taken on the word of its request id.
+    fn fits(&self, preparation: &super::Preparation, scene: &str) -> bool {
+        preparation.schema_version == 1
+            && preparation.project == self.0.project
+            && preparation.scene == scene
+            && !preparation.baseline.is_empty()
+            && preparation.baseline != self.baseline()
+            && !self
+                .0
+                .continued
+                .lock()
+                .unwrap()
+                .1
+                .contains(&preparation.baseline)
+            && crate::compiler::Compiler::graph_accepts_sources(
+                &self.0.project,
+                &preparation.baseline,
+            )
+            .is_ok()
+    }
+
+    /// Decides how a rejection that needs a new graph is answered.
+    ///
+    /// The request id of a recovery names the sources it was computed from,
+    /// and the job reads the sources later: an edit that is taken back in
+    /// between is prepared under the name of the edit. Such a receipt says
+    /// "confirmed" for sources its preparation was not made from. So a
+    /// confirmed receipt counts only when its preparation fits the sources,
+    /// and one that does not, or whose job says that the sources changed
+    /// under it, is passed over for the next name. A receipt with any other
+    /// error is the answer to its request: the same sources would fail the
+    /// same way, and a repair changes the name.
+    ///
+    /// When no request of these sources has a preparation that fits, another
+    /// preparation of the project may: the one a session started on, after
+    /// an edit that left its graph was undone. The newest are looked at.
+    fn plan_recovery(&self, scene: &str, revision: &str) -> Plan {
+        // What the recovery continued on for these very sources and the
+        // runner rejected again is not tried a second time: the check here
+        // and the runner's own would otherwise pass the session back and
+        // forth between two preparations.
+        {
+            let mut continued = self.0.continued.lock().unwrap();
+            if continued.0 != revision {
+                *continued = (revision.to_string(), Vec::new());
+            }
+        }
+        let mut request = None;
+        for attempt in 0..RECOVERY_ATTEMPTS {
+            let id = Self::recovery_identity(scene, revision, attempt);
+            match self.known_preparation(&id) {
+                Known::Running => return Plan::Request(id),
+                Known::Confirmed(preparation) if self.fits(&preparation, scene) => {
+                    return Plan::Continue(preparation);
+                }
+                Known::Confirmed(_) => {}
+                Known::Failed(code) if code == SUPERSEDED => {}
+                Known::Failed(_) => return Plan::Request(id),
+                Known::Nothing => {
+                    request = Some(id);
+                    break;
+                }
+            }
+        }
+        let directory = join(&[&self.0.project, "Library/UnityMicroEditor/preparations"]);
+        let mut known: Vec<(std::time::SystemTime, super::Preparation)> =
+            std::fs::read_dir(&directory)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|entry| {
+                    let result = entry.path().join("result.json");
+                    let modified = std::fs::metadata(&result).ok()?.modified().ok()?;
+                    let preparation: super::Preparation =
+                        read_json(&result.to_string_lossy(), 1 << 20).ok()?;
+                    Some((modified, preparation))
+                })
+                .collect();
+        known.sort_by_key(|known| std::cmp::Reverse(known.0));
+        for (_, preparation) in known.into_iter().take(KNOWN_PREPARATIONS) {
+            if self.fits(&preparation, scene) {
+                return Plan::Continue(Box::new(preparation));
+            }
+        }
+        // Every name is taken by a receipt that does not fit: the sources
+        // changed under each of their jobs. The last one is asked again and
+        // answers with what it is.
+        Plan::Request(
+            request
+                .unwrap_or_else(|| Self::recovery_identity(scene, revision, RECOVERY_ATTEMPTS - 1)),
+        )
+    }
+
+    /// Makes a preparation the project has the selected one and restarts the
+    /// session on it, as the job of a preparation does when it ends. Returns
+    /// the state of the session after that.
+    ///
+    /// The restart runs under the lifetime of the service, not under the
+    /// caller's request: a caller that gives up while the old Player is
+    /// being stopped would otherwise leave a stopped session, with nothing
+    /// selected and nothing started.
+    ///
+    /// `None`: a project action runs, and the next call decides anew.
+    fn continue_on(
         &self,
-        ctx: &Context,
-        receipt: &crate::mcp::HandlerValue,
+        preparation: &super::Preparation,
+        revision: &str,
     ) -> Result<Option<crate::agentcontrol::State>> {
         let Some(controller) = &self.0.controller else {
             return Ok(None);
         };
-        let preparation =
-            match serde_json::from_slice::<Option<super::Preparation>>(reply_bytes(receipt)) {
-                Ok(Some(preparation))
-                    if preparation.schema_version == 1 && !preparation.baseline.is_empty() =>
-                {
-                    preparation
-                }
-                _ => return Ok(None),
-            };
-        if preparation.baseline == self.baseline() {
-            return Ok(None);
-        }
-        // Never behind a project action that runs: the receipt stays, and
-        // the next call finds it.
+        // Never behind a project action that runs.
         let _guard = match self.0.mu.try_lock() {
             Ok(guard) => guard,
             Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
@@ -479,7 +669,14 @@ impl Service {
         };
         // Another call can have done it meanwhile.
         if preparation.baseline == self.baseline() {
-            return Ok(None);
+            return Ok(Some(controller.status_reply()));
+        }
+        {
+            let mut continued = self.0.continued.lock().unwrap();
+            if continued.0 != revision {
+                *continued = (revision.to_string(), Vec::new());
+            }
+            continued.1.push(preparation.baseline.clone());
         }
         let activate = || -> Result<()> {
             let directory = join(&[
@@ -493,26 +690,38 @@ impl Service {
                 &preparation.scene,
                 &preparation.request_id,
                 &directory,
-                &preparation,
+                preparation,
             )?;
+            let lifetime = self.lifetime();
             let running = controller.status().phase != "stopped";
-            if running {
-                controller.stop(ctx).map_err(|failure| failure.error)?;
-            }
-            controller.configure_prepared(&preparation.baseline, &preparation.scene)?;
-            self.select(&preparation.baseline, &preparation.scene);
-            if running {
-                controller.start()?;
-            }
-            Ok(())
+            self.0
+                .swapping
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let swapped = (|| -> Result<()> {
+                if running {
+                    controller
+                        .stop(&lifetime)
+                        .map_err(|failure| failure.error)?;
+                }
+                controller.configure_prepared(&preparation.baseline, &preparation.scene)?;
+                self.select(&preparation.baseline, &preparation.scene);
+                if running {
+                    controller.start()?;
+                }
+                Ok(())
+            })();
+            self.0
+                .swapping
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            swapped
         };
         match activate() {
             Ok(()) => Ok(Some(controller.status_reply())),
             Err(error) if context_error(&error) => Err(error),
-            // The receipt stays the answer to its request, so the same call
-            // would end here again: the caller is told what begins anew.
+            // It is not tried again for these sources: the next call
+            // requests a preparation instead.
             Err(error) => Err(anyhow!(
-                "the preparation {} that these sources already have could not be activated: {}. Call project_prepare with this scene, a new requestId and activate true",
+                "the preparation {} that fits these sources could not be activated: {}. The Player keeps its code; the next call requests a new preparation",
                 preparation.request_id,
                 super::error_text(&error)
             )),

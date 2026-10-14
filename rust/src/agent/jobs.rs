@@ -85,7 +85,7 @@ impl Serialize for JobReceipt {
 }
 impl JobReceipt {
     /// Reads a receipt of at most 80 MiB; member names match case-insensitively.
-    fn read(path: &str) -> Result<Self> {
+    pub(crate) fn read(path: &str) -> Result<Self> {
         let data = read_agent_file(path, 80 << 20)?;
         let (parsed, used) = jsondoc::parse_first(&data).map_err(|e| anyhow!(e))?;
         if !jsondoc::rest_is_space(&data, used) {
@@ -560,8 +560,61 @@ impl Service {
         let Some(controller) = &self.0.controller else {
             return self.controller_handle(ctx, name, raw);
         };
+        // A session that has a preparation is started again by whoever
+        // replaces it (the job of a preparation when it ends, the recovery
+        // that continues on a known one): the caller has nothing to start
+        // and repeats its call. Before the first preparation it is the start
+        // itself that reports the progress.
+        let pending = |phase: &str, progress: Option<AnyMap>| {
+            let message = match (self.baseline().is_empty(), progress.is_some()) {
+                (true, _) => {
+                    "preparation is still running and no Player has started; reissue the same session_control(start) until it completes, then wait"
+                }
+                (false, true) => {
+                    "a preparation of the project is running; the session starts on it by itself when it is done, reissue this call"
+                }
+                (false, false) => {
+                    "the session is being restarted on another preparation of the project, reissue this call"
+                }
+            };
+            let mut reply = obj([
+                ("success", false.into()),
+                ("status", "result_pending".into()),
+                ("phase", phase.into()),
+                ("backend", "project_action_job".into()),
+                ("message", message.into()),
+            ]);
+            if let Some(progress) = progress {
+                reply.insert("preparation".into(), Any::Object(progress));
+            }
+            Ok(reply)
+        };
+        // The Player is replaced by a stop and a start. A wait that was held
+        // through that sees the session stopped, which is no failure of
+        // anything: it is told to ask again, like a wait that comes later.
+        let swapping = || self.0.swapping.load(std::sync::atomic::Ordering::SeqCst);
+        let through = |began: bool| -> RuntimeOutcome {
+            let outcome = self.controller_handle(ctx, name, raw);
+            let stopped = outcome.error.is_some()
+                && matches!(
+                    &outcome.value,
+                    RuntimeValue::Controller(crate::agentcontrol::Reply::State(state))
+                        if state.phase == "stopped" || state.phase == "stopping"
+                );
+            if action == "status" || !stopped {
+                return outcome;
+            }
+            let progress = self.preparation_progress();
+            if progress.is_none() && !began && !swapping() {
+                return outcome;
+            }
+            match pending("preparing_configuration", progress).and_then(map_reply) {
+                Ok(value) => RuntimeOutcome::handler(value),
+                Err(error) => RuntimeOutcome::failed(error),
+            }
+        };
         let Some(progress) = self.preparation_progress() else {
-            return self.controller_handle(ctx, name, raw);
+            return through(swapping());
         };
         let state = controller.status_reply();
         let reply = if action == "status" {
@@ -570,20 +623,9 @@ impl Service {
                 reply
             })
         } else if state.phase == "stopped" || state.phase == "failed" {
-            Ok(obj([
-                ("success", false.into()),
-                ("status", "result_pending".into()),
-                ("phase", "preparing".into()),
-                ("backend", "project_action_job".into()),
-                (
-                    "message",
-                    "preparation is still running and no Player has started; reissue the same session_control(start) until it completes, then wait"
-                        .into(),
-                ),
-                ("preparation", Any::Object(progress)),
-            ]))
+            pending("preparing", Some(progress))
         } else {
-            return self.controller_handle(ctx, name, raw);
+            return through(true);
         };
         match reply.and_then(map_reply) {
             Ok(value) => RuntimeOutcome {
@@ -613,6 +655,30 @@ impl Service {
         }
         if input.action != "start" && input.action != "reset" {
             return self.session_with_preparation(ctx, name, raw, &input.action);
+        }
+        // A preparation holds the project action lock for as long as it
+        // runs, minutes for a large project. A start or a reset that waited
+        // for the lock would hang that long; it comes back with the stage
+        // instead. A preparation that activates starts the session itself.
+        if !self.baseline().is_empty()
+            && let Some(progress) = self.preparation_progress()
+        {
+            let reply = map_reply(obj([
+                ("success", false.into()),
+                ("status", "result_pending".into()),
+                ("phase", "preparing".into()),
+                ("backend", "project_action_job".into()),
+                (
+                    "message",
+                    "a preparation of the project is running; when it activates, the session starts on it by itself: wait with session_control(wait), and reissue this call only after the preparation has ended"
+                        .into(),
+                ),
+                ("preparation", Any::Object(progress)),
+            ]));
+            return match reply {
+                Ok(value) => RuntimeOutcome::handler(value),
+                Err(error) => RuntimeOutcome::failed(error),
+            };
         }
         let selected = text(&input.arguments, "scene");
         let mut scene = String::new();
