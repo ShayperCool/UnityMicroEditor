@@ -2145,6 +2145,9 @@ public static class RawPrefabTransforms {
         &sysutil::join(&[&project, "Temp/session/compiler"]),
     )
     .unwrap();
+    // As a watched session compiles: through its kept processes and caches,
+    // unless UME_COMPILER_COLD=1.
+    compiler.serve(&sysutil::join(&[&project, "Temp/session/compiler"]));
     // The preparation names the lifecycle helper that rewrote its assembly,
     // and a session with that helper has nothing to compile.
     let helper_key = compiler.lifecycle_helper_key().unwrap().0;

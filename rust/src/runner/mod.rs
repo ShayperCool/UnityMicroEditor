@@ -1133,6 +1133,11 @@ fn run_session(
         &opts.editor,
         &sysutil::join(&[&output, "compiler"]),
     )?;
+    // A watched session compiles again and again; its compiles keep their
+    // processes and caches. Preparations and runs without --watch do not.
+    if opts.watch {
+        compiler.serve(&sysutil::join(&[&output, "compiler"]));
+    }
     let initial_compile = compiler.compile(ctx, None)?;
     if let Some(compiled) = &initial_compile {
         baseline.player = compiled.player.clone();
