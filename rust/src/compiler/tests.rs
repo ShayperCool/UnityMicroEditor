@@ -3338,6 +3338,15 @@ fn compiler_server_restarts_when_a_reference_changes_or_it_ended() {
     let first = server.client(&inputs("a1")).expect("a server starts");
     let pid = server.pid().unwrap();
     assert!(process_alive(pid) && sys::absent(&first.no_host));
+    // The workstation collector: a quarter of the memory per compile of the
+    // server one the SDK's server asks for (served6-3).
+    let environment = fs::read(format!("/proc/{pid}/environ")).unwrap();
+    assert!(
+        environment
+            .split(|byte| *byte == 0)
+            .any(|entry| entry == b"DOTNET_gcServer=0"),
+        "the compiler server runs with the server collector"
+    );
     assert_eq!(
         first.arguments,
         [
