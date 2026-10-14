@@ -4215,12 +4215,18 @@ fn player_maps_are_kept_only_with_the_hash_cache() {
     assert!(!compiler.hashes.is_on());
     let first = compiler.baseline_player_map(&staged).unwrap();
     let second = compiler.baseline_player_map(&staged).unwrap();
-    assert!(!Arc::ptr_eq(&first, &second), "a cold compiler kept the map");
+    assert!(
+        !Arc::ptr_eq(&first, &second),
+        "a cold compiler kept the map"
+    );
     assert!(compiler.known_player_map(&staged).is_none());
     compiler.hashes = HashCache::on();
     let first = compiler.baseline_player_map(&staged).unwrap();
     let second = compiler.baseline_player_map(&staged).unwrap();
-    assert!(Arc::ptr_eq(&first, &second), "the warm compiler read the baseline again");
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "the warm compiler read the baseline again"
+    );
     assert!(compiler.known_player_map(&staged).is_some());
 }
 

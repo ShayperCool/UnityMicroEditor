@@ -697,7 +697,7 @@ fn a_start_reissued_with_the_inputs_of_its_preparation_goes_on() {
     fs::create_dir_all(crate::sysutil::dir(&record)).unwrap();
     write(
         &record,
-        &format!(
+        format!(
             r#"{{"schemaVersion":1,"project":"{project}","action":"project_prepare","identity":"{id}","arguments":{{"activate":true,"hostPlayer":"/host/Player","rebuildHost":true,"requestId":"{id}","scene":"Assets/Main.unity"}}}}"#
         ),
     );
@@ -734,7 +734,11 @@ fn a_start_reissued_with_the_inputs_of_its_preparation_goes_on() {
         json!({"hostPlayer": "/elsewhere/Player"}),
         json!({"hostPlayer": "/host/Player", "nativeCatalog": "/c"}),
     ] {
-        assert_eq!(code(arguments.clone()), "preparation_input_ignored", "{arguments}");
+        assert_eq!(
+            code(arguments.clone()),
+            "preparation_input_ignored",
+            "{arguments}"
+        );
     }
     for arguments in [
         json!({"nativeCatalog": true}),

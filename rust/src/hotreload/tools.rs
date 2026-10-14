@@ -6,8 +6,7 @@ use super::wire::RUNTIME_ASSEMBLY;
 use crate::{
     cancel::Context,
     compiler::{
-        NilMap, Service, compiler_cold, compiler_command, glob, glob_lossy,
-        verify_cache_files,
+        NilMap, Service, compiler_cold, compiler_command, glob, glob_lossy, verify_cache_files,
     },
     sha256, sysutil,
     util::{atomic_json, file_hash, marshal, micro_editor_root, read_json_file},

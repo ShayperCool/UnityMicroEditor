@@ -559,9 +559,11 @@ impl HotReload {
             format!("{text} [{}]", note.code)
         };
         if self.full_recompile_required {
-            return self.unsupported.first().map(said).unwrap_or_else(|| {
-                bounded(self.refused_summary.trim_end_matches('.'))
-            });
+            return self
+                .unsupported
+                .first()
+                .map(said)
+                .unwrap_or_else(|| bounded(self.refused_summary.trim_end_matches('.')));
         }
         let mut notes: Vec<&Reason> = self
             .notes

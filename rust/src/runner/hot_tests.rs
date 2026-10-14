@@ -2862,17 +2862,26 @@ fn a_position_override_is_no_value_of_an_added_field() {
     }];
     let mut state = Loop::new(true, Fallback::Report);
     let mut steps = Script::new().updated().patched(Outcome::Patched(added));
-    steps.scripts.insert("Game.Wave".into(), "abababababababababababababababab".into());
+    steps.scripts.insert(
+        "Game.Wave".into(),
+        "abababababababababababababababab".into(),
+    );
     run(&mut state, &mut steps, &window(&["/p/Assets/Wave.cs"]));
     steps.clear();
     steps.compiles.push_back(Ok(Compiled::Unaffected));
     steps.reloads.push_back(Reload::Updated);
     run(&mut state, &mut steps, &window(&[path.as_str()]));
     let events = steps.clear();
-    assert!(events.iter().all(|event| event.get("newNotes").is_none()), "{events:?}");
+    assert!(
+        events.iter().all(|event| event.get("newNotes").is_none()),
+        "{events:?}"
+    );
     steps.compiles.push_back(Ok(Compiled::Unaffected));
     steps.reloads.push_back(Reload::Updated);
     run(&mut state, &mut steps, &window(&[own.as_str()]));
     let events = steps.clear();
-    assert!(events.iter().any(|event| event.get("newNotes").is_some()), "{events:?}");
+    assert!(
+        events.iter().any(|event| event.get("newNotes").is_some()),
+        "{events:?}"
+    );
 }

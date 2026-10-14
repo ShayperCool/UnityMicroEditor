@@ -459,9 +459,22 @@ public class Stats
 }
 "#;
     let mut wrong = Vec::new();
-    for name in ["cachedScore", "lastHit", "Speed", "onDeath", "hp", "oldField", "commented", "quoted", "Gold", "local"] {
+    for name in [
+        "cachedScore",
+        "lastHit",
+        "Speed",
+        "onDeath",
+        "hp",
+        "oldField",
+        "commented",
+        "quoted",
+        "Gold",
+        "local",
+    ] {
         if declares(source, name) {
-            wrong.push(format!("{name}: taken, Unity does not serialize it as a field of Hero"));
+            wrong.push(format!(
+                "{name}: taken, Unity does not serialize it as a field of Hero"
+            ));
         }
     }
     for name in ["speed", "armor", "ammo", "clips", "stats", "waves", "motto"] {
@@ -528,10 +541,17 @@ fn set_property_types_a_new_key_and_finds_inherited_fields() {
         ("waves", json!([1, 2, 3])),
         ("tags", json!(["a", "b"])),
     ] {
-        set(property, value.clone()).unwrap_or_else(|error| panic!("{property} = {value}: {} {}", error.code, error.message));
+        set(property, value.clone()).unwrap_or_else(|error| {
+            panic!("{property} = {value}: {} {}", error.code, error.message)
+        });
     }
     let text = fs::read_to_string(temp.path().join(PATH)).unwrap();
-    for line in ["  boost: 3\n", "  count: 12\n", "  alive: 1\n", "  title: \"007\"\n"] {
+    for line in [
+        "  boost: 3\n",
+        "  count: 12\n",
+        "  alive: 1\n",
+        "  title: \"007\"\n",
+    ] {
         assert!(text.contains(line), "{line:?} in {text}");
     }
 }

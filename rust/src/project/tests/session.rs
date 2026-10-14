@@ -118,7 +118,11 @@ fn an_unchanged_preparation_is_the_revision_before_it() {
     };
     let again = f.session.prepare(&f.output).unwrap();
     assert_eq!(
-        (again.revision.as_str(), again.manifest.as_str(), revisions()),
+        (
+            again.revision.as_str(),
+            again.manifest.as_str(),
+            revisions()
+        ),
         (first.revision.as_str(), first.manifest.as_str(), 1)
     );
     // A revision that is gone is published again.
@@ -147,14 +151,37 @@ fn an_override_of_a_script_field_the_prefab_lacks_is_applied() {
     use crate::project::expand::apply_override;
     let reference = value::map([("fileID", Value::Int(0))]);
     let mut data = value::map([("level", Value::Int(1))]);
-    apply_override(&mut data, "power", &Value::String("7".into()), &reference, true).unwrap();
-    apply_override(&mut data, "tuning.armor", &Value::String("2".into()), &reference, true).unwrap();
+    apply_override(
+        &mut data,
+        "power",
+        &Value::String("7".into()),
+        &reference,
+        true,
+    )
+    .unwrap();
+    apply_override(
+        &mut data,
+        "tuning.armor",
+        &Value::String("2".into()),
+        &reference,
+        true,
+    )
+    .unwrap();
     assert_eq!(number(data.get("power").unwrap()), 7);
     assert_eq!(number(data.get("tuning").unwrap().field("armor")), 2);
     let mut transform = value::map([("m_LocalPosition", Value::Null)]);
-    let error = apply_override(&mut transform, "m_Missing", &Value::String("1".into()), &reference, false)
-        .unwrap_err();
-    assert!(error.to_string().contains("field m_Missing does not exist"), "{error}");
+    let error = apply_override(
+        &mut transform,
+        "m_Missing",
+        &Value::String("1".into()),
+        &reference,
+        false,
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("field m_Missing does not exist"),
+        "{error}"
+    );
 }
 
 #[test]

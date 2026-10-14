@@ -5184,9 +5184,7 @@ fn a_scene_naming_an_added_method_is_said_by_the_wait_after_the_save() {
     let saved = run(&c, &mut state, &mut script, &window(&[&scene], None));
     let waited = c.wait(&seconds(1), patched.last_sequence, false).unwrap();
     assert!(
-        waited
-            .attention
-            .contains("[added_method_named_by_string]"),
+        waited.attention.contains("[added_method_named_by_string]"),
         "{:?} {:?}",
         waited.attention,
         waited.hot_reload.new_notes
@@ -5270,7 +5268,12 @@ fn a_recompile_says_what_it_put_into_effect_for_other_processes_of_the_game() {
     };
     // A refused edit.
     script.edit(refused());
-    run(&c, &mut state, &mut script, &window(&["/p/Assets/A.cs"], None));
+    run(
+        &c,
+        &mut state,
+        &mut script,
+        &window(&["/p/Assets/A.cs"], None),
+    );
     let answered = recompile(&mut state, &mut script, "rc-refused");
     assert_eq!(
         answered.attention,
@@ -5287,7 +5290,12 @@ fn a_recompile_says_what_it_put_into_effect_for_other_processes_of_the_game() {
             "Game.Codec::Register() ran when the Player started and does not run again.",
         )],
     ));
-    run(&c, &mut state, &mut script, &window(&["/p/Assets/A.cs"], None));
+    run(
+        &c,
+        &mut state,
+        &mut script,
+        &window(&["/p/Assets/A.cs"], None),
+    );
     let answered = recompile(&mut state, &mut script, "rc-noted");
     assert!(
         answered.attention.starts_with("The Player was restarted on the saved code, which puts into effect what it did not run before: Game.Codec::Register(): Game.Codec::Register() ran when the Player started and does not run again [runtime_initializer_changed].")
@@ -5303,7 +5311,12 @@ fn a_recompile_says_what_it_put_into_effect_for_other_processes_of_the_game() {
         2,
         vec![note("added_method_invisible_by_name", "Game.A::OnJump()")],
     ));
-    run(&c, &mut state, &mut script, &window(&["/p/Assets/A.cs"], None));
+    run(
+        &c,
+        &mut state,
+        &mut script,
+        &window(&["/p/Assets/A.cs"], None),
+    );
     let answered = recompile(&mut state, &mut script, "rc-minor");
     assert_eq!(answered.attention, "");
 }

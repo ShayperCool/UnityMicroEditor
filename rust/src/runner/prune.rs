@@ -304,7 +304,10 @@ impl Pruner {
     /// (caches6-3).
     fn bound_files(&self, keep: &[String], recorded: &BTreeSet<String>, pruned: &mut Pruned) {
         for (parent, kept) in [
-            (sysutil::join(&[&self.output, "revisions"]), KEPT_SCENE_REVISIONS),
+            (
+                sysutil::join(&[&self.output, "revisions"]),
+                KEPT_SCENE_REVISIONS,
+            ),
             (
                 sysutil::join(&[&self.output, "compiler", "assemblies"]),
                 KEPT_ASSEMBLIES,
@@ -320,7 +323,11 @@ impl Pruner {
             }
             entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
             for (_, directory) in entries.into_iter().skip(kept) {
-                if keep.iter().chain(recorded).any(|path| holds(&directory, path)) {
+                if keep
+                    .iter()
+                    .chain(recorded)
+                    .any(|path| holds(&directory, path))
+                {
                     continue;
                 }
                 if fs::remove_dir_all(&directory).is_ok() {
