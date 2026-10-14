@@ -758,7 +758,8 @@ internal sealed partial class Differ
         if (UnityTypes.EngineNative.Contains(name)) return true;
         if (UnityTypes.EngineSkipped.Contains(name)) return false;
         if (reference && !assembly.IsValueType(type)) return true;
-        if (UnityTypes.Classify(workspace, assembly, type).Kind != UnityKind.No) return true;
+        // UnityEngine.Object itself is no class below it, and a field of it is a reference.
+        if (name == "UnityEngine.Object" || UnityTypes.Classify(workspace, assembly, type).Kind != UnityKind.No) return true;
         var flags = assembly.MD.GetTypeDefinition(type).Attributes;
         return (flags & TypeAttributes.Abstract) == 0 && (flags & SerializableType) != 0;
     }
