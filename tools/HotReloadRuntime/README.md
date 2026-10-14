@@ -163,7 +163,7 @@ What a redirect does not do:
 
 - A frame that is on a stack while its method is redirected finishes the old body. A running coroutine or `async` method keeps the body it started with.
 - A thread inside an island or a relay is at an address the runtime has no method for. A stack walk of that thread from outside (a sampling profiler) loses frames for those one or two instructions.
-- An island is never unmapped, because a thread may be inside it at any time; a later first redirect of the same method uses it again. Pages are unmapped in one case only: an attempt that failed returns the pages it mapped itself, to which no jump was ever written.
+- An island is never unmapped, because a thread may be inside it at any time; a later first redirect of the same method uses it again, the way it was mapped for. The island and that way are kept together from the plan on, also when the request that mapped it is then refused: a window island is reached behind the gate, never by the first byte alone, whose jump would lead to the taken fixed address. Pages are unmapped in one case only: an attempt that failed returns the pages it mapped itself, to which no jump was ever written.
 
 Mean time inside the applier for a request with one detour, under the three calling threads on the Player runtime: 0.76 ms for a first redirect through an island or a relay, 1.84 ms behind the gate (1 ms of it the drain), 0.57 ms for a retarget, 0.23 ms for a restore. Nearly all of it is the request itself: reading and hashing the descriptor and the patch assembly, the callbacks. A request with 590 first redirects of methods that were never compiled took 26 ms in the stock Player process, compiling included.
 
