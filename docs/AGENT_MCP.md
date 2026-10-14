@@ -657,9 +657,12 @@ Only a recompile applies what a note names:
   field's name.
 - An added method that a string of the game names is not found by that name
   (`added_method_named_by_string`): `Invoke("Blast", 1f)`, `SendMessage` and
-  `StartCoroutine("Blast")` look in the loaded class and do nothing. The note
-  comes with the edit that adds the method when a string names it then, and
-  again with a later edit that starts to. A field whose type
+  `StartCoroutine("Blast")` look in the loaded class and do nothing. The
+  string may stand in another assembly of the game. The note comes with the
+  edit that adds the method when a string names it then, and again with a
+  later edit that starts to. When the game calls such methods with a name it
+  computes (`SendMessage("On" + kind)`), an added method of an engine object
+  has the note `added_method_computed_name`. A field whose type
   changed is stored anew and loses its value (`field_value_reset`); a renamed
   field, and the field behind an auto-property that became a full property,
   are a removed and an added field.

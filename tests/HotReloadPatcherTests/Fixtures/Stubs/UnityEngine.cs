@@ -6,7 +6,10 @@ using System;
 namespace UnityEngine
 {
     public class Object { }
-    public class Component : Object { }
+    public class Component : Object
+    {
+        public void SendMessage(string methodName) { }
+    }
     public class Behaviour : Component { }
     public class MonoBehaviour : Behaviour
     {

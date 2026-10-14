@@ -920,19 +920,129 @@ internal sealed partial class Differ
         // has no effect, which the note for every added method of an engine object does not say.
         // The note is a change of its own: it is about the code that holds the string, and its
         // revision moves when another place starts or stops naming the method.
-        if (!special && userStrings.Value.Contains(name) && namedByString.Value.TryGetValue(name, out var holders))
+        // The string may stand in another assembly of the game: SendMessage("TakeDamage") needs
+        // no reference to the class that has the method.
+        var holders = !special ? Holders(name) : null;
+        bool engine = instance && (!special || name.StartsWith("set_", StringComparison.Ordinal)) && Unity(type).Kind != UnityKind.No;
+        // A call by a name the game computes may mean any method of its objects.
+        var computed = holders == null && engine ? Computed() : null;
+        if (holders != null || computed != null)
         {
             var named = Add("method_named", id, Actions.Note);
             using (var sha = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256))
             {
                 sha.AppendData(hash);
-                foreach (var (holder, count) in holders) sha.AppendData(Encoding.UTF8.GetBytes(holder + "=" + count.ToString(CultureInfo.InvariantCulture) + ";"));
+                foreach (var (holder, count) in (IEnumerable<KeyValuePair<string, int>>?)holders ?? computed!.Select(x => new KeyValuePair<string, int>(x, 1)))
+                    sha.AppendData(Encoding.UTF8.GetBytes(holder + "=" + count.ToString(CultureInfo.InvariantCulture) + ";"));
                 named.Revision = Short(sha.GetHashAndReset());
             }
-            named.Notes.Add((Codes.AddedMethodNamedByString, $"The string \"{name}\" in code of {string.Join(", ", holders.Keys)} names the added method {id}; Invoke, SendMessage, StartCoroutine(string) and reflection look in the loaded class and do not find it until a full recompile, so a call by that name does nothing."));
+            if (holders != null)
+                named.Notes.Add((Codes.AddedMethodNamedByString, $"The string \"{name}\" in code of {string.Join(", ", holders.Keys)} names the added method {id}; Invoke, SendMessage, StartCoroutine(string) and reflection look in the loaded class and do not find it until a full recompile, so a call by that name does nothing."));
+            else
+                named.Notes.Add((Codes.AddedMethodComputedName, $"The game calls methods of its objects by a name it computes ({string.Join(", ", computed!.Take(3))}{(computed!.Count > 3 ? $" and {computed.Count - 3} more" : "")}); SendMessage, Invoke and StartCoroutine(string) look in the loaded class, so such a call that means the added method {id} does nothing until a full recompile."));
         }
-        else if (instance && (!special || name.StartsWith("set_", StringComparison.Ordinal)) && Unity(type).Kind != UnityKind.No)
+        else if (engine)
             change.Notes.Add((Codes.AddedMethodInvisibleByName, $"The added method {id} belongs to an engine object; SendMessage, Invoke, StartCoroutine(string), a UnityEvent, an animation event or an input message cannot find it by name until a full recompile."));
+    }
+
+    /// The types whose code holds the string `name`, with how often: in this assembly by type, in
+    /// another assembly of the game as `type (assembly)`. Null when no code holds it.
+    SortedDictionary<string, int>? Holders(string name)
+    {
+        var holders = new SortedDictionary<string, int>(StringComparer.Ordinal);
+        if (userStrings.Value.Contains(name) && namedByString.Value.TryGetValue(name, out var own))
+            foreach (var (holder, count) in own) holders[holder] = count;
+        if (workspace.Find(n.Name) is { } self)
+            foreach (var other in workspace.Others(self))
+            {
+                if (!workspace.Strings(other).Contains(name)) continue;
+                foreach (var (holder, count) in StringHolders(other, name)) holders[holder + " (" + other.Name + ")"] = count;
+            }
+        return holders.Count > 0 ? holders : null;
+    }
+
+    /// The user types whose code loads the string, with how often.
+    static SortedDictionary<string, int> StringHolders(Asm a, string text)
+    {
+        var found = new SortedDictionary<string, int>(StringComparer.Ordinal);
+        foreach (var m in a.MD.MethodDefinitions)
+        {
+            var d = a.MD.GetMethodDefinition(m);
+            if (d.RelativeVirtualAddress == 0) continue;
+            byte[] il = a.PE.GetMethodBody(d.RelativeVirtualAddress).GetILBytes() ?? Array.Empty<byte>();
+            var r = new IL.Reader(il);
+            while (r.Read())
+            {
+                if (r.Operand != System.Reflection.Emit.OperandType.InlineString) continue;
+                int token = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(r.OperandOffset));
+                if (a.MD.GetUserString(MetadataTokens.UserStringHandle(token & 0xFFFFFF)) != text) continue;
+                var user = d.GetDeclaringType();
+                while (a.Kind(user) != GenKind.User && !a.MD.GetTypeDefinition(user).GetDeclaringType().IsNil) user = a.MD.GetTypeDefinition(user).GetDeclaringType();
+                string holder = a.TypeName(user);
+                found[holder] = found.GetValueOrDefault(holder) + 1;
+            }
+        }
+        return found;
+    }
+
+    /// Where the game calls a method of its objects by a name it computes, in this assembly and
+    /// the others of the game; null when nowhere.
+    List<string>? Computed()
+    {
+        var sites = new SortedSet<string>(workspace.DynamicByName(n), StringComparer.Ordinal);
+        if (workspace.Find(n.Name) is { } self)
+            foreach (var other in workspace.Others(self)) sites.UnionWith(workspace.DynamicByName(other));
+        return sites.Count > 0 ? sites.ToList() : null;
+    }
+
+    static readonly HashSet<string> ByName = new(StringComparer.Ordinal)
+    {
+        "SendMessage", "SendMessageUpwards", "BroadcastMessage", "Invoke", "InvokeRepeating", "CancelInvoke", "IsInvoking", "StartCoroutine", "StopCoroutine",
+    };
+
+    /// See `Workspace.DynamicByName`.
+    internal static List<string> DynamicByName(Asm a)
+    {
+        var sites = new SortedSet<string>(StringComparer.Ordinal);
+        Canon? canon = null;
+        foreach (var m in a.MD.MethodDefinitions)
+        {
+            var d = a.MD.GetMethodDefinition(m);
+            if (d.RelativeVirtualAddress == 0) continue;
+            byte[] il = a.PE.GetMethodBody(d.RelativeVirtualAddress).GetILBytes() ?? Array.Empty<byte>();
+            var r = new IL.Reader(il);
+            bool calls = false;
+            while (r.Read() && !calls)
+                calls = r.OpCode is IL.Call or IL.Callvirt && MetadataTokens.EntityHandle(System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(r.OperandOffset))) is { Kind: HandleKind.MemberReference } h
+                    && ByNameCall(a, (MemberReferenceHandle)h);
+            if (!calls) continue;
+            canon ??= new Canon(a);
+            var code = canon.Instructions(m);
+            for (int i = 0; i < code.Count; i++)
+            {
+                var x = code[i];
+                if (x.OpCode is not (IL.Call or IL.Callvirt) || x.Pops < 1 || !ByName.Any(name => x.Text.Contains("::" + name + "(System.String", StringComparison.Ordinal))) continue;
+                if (!x.Text.Contains("UnityEngine.", StringComparison.Ordinal)) continue;
+                // The name is the first argument after the object.
+                string? argument = Argument(code, i, x.Pops, 1);
+                if (argument != null && argument.Split('\n').Length == 1 && argument.StartsWith("72 S:", StringComparison.Ordinal)) continue;
+                var user = d.GetDeclaringType();
+                while (a.Kind(user) != GenKind.User && !a.MD.GetTypeDefinition(user).GetDeclaringType().IsNil) user = a.MD.GetTypeDefinition(user).GetDeclaringType();
+                sites.Add(a.TypeName(user));
+            }
+        }
+        return sites.ToList();
+    }
+
+    /// A call of one of the engine's by-name methods whose first parameter is the name.
+    static bool ByNameCall(Asm a, MemberReferenceHandle handle)
+    {
+        var mr = a.MD.GetMemberReference(handle);
+        if (mr.GetKind() != MemberReferenceKind.Method || !ByName.Contains(a.MD.GetString(mr.Name))) return false;
+        string parent = a.HandleText(mr.Parent, bare: true);
+        if (parent is not ("UnityEngine.Component" or "UnityEngine.GameObject" or "UnityEngine.MonoBehaviour")) return false;
+        var signature = mr.DecodeMethodSignature(a.Bare, null);
+        return signature.ParameterTypes.Length > 0 && signature.ParameterTypes[0] == "System.String";
     }
 
     /// The strings that method bodies of the assembly load and that equal the name of one of its
