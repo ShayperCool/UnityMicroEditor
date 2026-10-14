@@ -140,7 +140,9 @@ internal static class Program
         public Patch? Patch;
         public string Path = "", Sha256 = "", Pdb = "";
         public readonly List<(string Code, string Member, string Message)> Unsupported = new();
-        public readonly List<(string Code, string Member, string Message, string Revision)> Notes = new();
+        /// `Holders`: of a note about an added field Unity serializes on an engine object, the classes
+        /// whose saved documents hold its value (see `Differ.DocumentHolders`).
+        public readonly List<(string Code, string Member, string Message, string Revision, IReadOnlyList<string>? Holders)> Notes = new();
     }
 
     public static int Main(string[] args)
@@ -399,7 +401,8 @@ internal static class Program
             foreach (var outcome in outcomes)
                 foreach (var c in outcome.Changes)
                     // A note names what the user wrote: Awake, not the lifecycle rewrite's helper.
-                    foreach (var (code, message) in c.Notes) outcome.Notes.Add((code, Differ.Authored(c.Member), message, c.Revision));
+                    foreach (var (code, message) in c.Notes)
+                        outcome.Notes.Add((code, Differ.Authored(c.Member), message, c.Revision, code == Codes.SerializedFieldNotRestored ? c.Holders : null));
         long emitMs = watch.ElapsedMilliseconds;
         return Result(request, outcomes, verdict, readMs, diffMs, emitMs);
     }
@@ -433,16 +436,22 @@ internal static class Program
         var buffer = new MemoryStream();
         using (var w = new Utf8JsonWriter(buffer, new JsonWriterOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }))
         {
-            void Reasons(string name, IEnumerable<(string Code, string Member, string Message, string Revision)> list)
+            void Reasons(string name, IEnumerable<(string Code, string Member, string Message, string Revision, IReadOnlyList<string>? Holders)> list)
             {
                 w.WriteStartArray(name);
-                foreach (var (code, member, message, revision) in list)
+                foreach (var (code, member, message, revision, holders) in list)
                 {
                     w.WriteStartObject();
                     w.WriteString("code", code);
                     w.WriteString("member", member);
                     w.WriteString("message", message);
                     if (revision.Length > 0) w.WriteString("revision", revision);
+                    if (holders is { Count: > 0 })
+                    {
+                        w.WriteStartArray("holders");
+                        foreach (var holder in holders) w.WriteStringValue(holder);
+                        w.WriteEndArray();
+                    }
                     w.WriteEndObject();
                 }
                 w.WriteEndArray();
@@ -520,7 +529,7 @@ internal static class Program
                     w.WriteEndObject();
                 }
                 w.WriteEndArray();
-                Reasons("unsupported", outcome.Unsupported.Select(x => (x.Code, x.Member, x.Message, "")));
+                Reasons("unsupported", outcome.Unsupported.Select(x => (x.Code, x.Member, x.Message, "", (IReadOnlyList<string>?)null)));
                 Reasons("notes", outcome.Notes);
                 w.WriteEndObject();
             }

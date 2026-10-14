@@ -30,6 +30,13 @@ pub struct Reason {
     /// is about code that changed since.
     #[serde(deserialize_with = "nz", skip_serializing_if = "String::is_empty")]
     pub revision: String,
+    /// Of a note about a field the patch added to an engine object: the
+    /// classes whose saved documents hold a value of it, the declaring class
+    /// and every class of the game the builder read that derives from it.
+    /// Empty for a field of a `[Serializable]` class or struct, which any
+    /// document may hold inline.
+    #[serde(deserialize_with = "nz", skip_serializing_if = "Vec::is_empty")]
+    pub holders: Vec<String>,
 }
 impl Reason {
     pub fn new(code: &str, member: &str, message: &str) -> Self {
@@ -38,6 +45,7 @@ impl Reason {
             member: member.into(),
             message: message.into(),
             revision: String::new(),
+            holders: Vec::new(),
         }
     }
 }

@@ -216,16 +216,6 @@ fn key_of(line: &str) -> Option<&str> {
     let key = &line[..colon];
     (!key.is_empty() && !key.contains(char::is_whitespace)).then_some(key)
 }
-/// Whether a prefab instance's override in the document sets the field:
-/// its property path has the field as one of its parts.
-fn overridden(document: &str, field: &str) -> bool {
-    document.lines().any(|line| {
-        let line = line.trim_start().trim_start_matches("- ");
-        line.strip_prefix("propertyPath:")
-            .is_some_and(|path| path.trim().split('.').any(|part| part == field))
-    })
-}
-
 fn capped<T: Clone>(list: &[T]) -> Vec<T> {
     list.iter().take(LIST_MAXIMUM).cloned().collect()
 }
@@ -443,104 +433,144 @@ impl Loop {
     /// initializer gave it, and a UnityEvent or an animation event that
     /// names the method finds nothing. A caller that is told `updated` and
     /// nothing else takes the saved value or call for applied. The files are
-    /// Unity's YAML. A value of the field is a key of a document of the
-    /// declaring type's script (any document when no script declares the
-    /// type, a [Serializable] class held by another), or the property path
-    /// of a prefab instance's override (`propertyPath: field`, also as a part
-    /// of a longer path such as `tuning.field` or `field.Array.data[0]`).
+    /// Unity's YAML. A value of a field of an engine object is a key of a
+    /// document whose script declares the class or derives from it (the
+    /// note's `holders`; any document when none of them has a script), or a
+    /// prefab instance's override whose property path begins with the field.
+    /// A field of a `[Serializable]` class or struct is held inline by any
+    /// document, as a key below the field that holds the object, and an
+    /// override names it after that field (`tuning.armor`). Each file is
+    /// read and split once for all notes.
     fn unfilled(&self, paths: &[String], script: &dyn Fn(&str) -> Option<String>) -> Vec<Reason> {
         if self.unrestored.is_empty() && self.unnamed.is_empty() {
             return Vec::new();
         }
-        let read = |extensions: &[&str]| -> Vec<(String, String)> {
-            let mut files: Vec<&String> = paths
-                .iter()
-                .filter(|path| extensions.iter().any(|extension| path.ends_with(extension)))
-                .collect();
-            files.sort();
-            files.dedup();
-            files
-                .into_iter()
-                .filter_map(|path| {
-                    Some((
-                        path.clone(),
-                        String::from_utf8(std::fs::read(path).ok()?).ok()?,
-                    ))
-                })
-                .collect()
-        };
-        let mut notes = Vec::new();
-        if !self.unrestored.is_empty() {
-            let texts = read(&[".unity", ".prefab", ".asset", ".controller"]);
-            for note in &self.unrestored {
-                let Some((declaring, field)) = note.member.rsplit_once("::") else {
-                    continue;
-                };
-                let guid = script(declaring);
-                let holder = texts.iter().find(|(_, text)| {
-                    !field.is_empty()
-                        && documents(text).any(|document| {
-                            let own = match (&guid, document_script(document)) {
-                                (Some(guid), Some(script)) => guid == script,
-                                (Some(_), None) => false,
-                                (None, _) => true,
+        // The fields: the note, the name, and the scripts whose documents
+        // hold it (`None`: any document). `engine`: a field of a component
+        // or an asset, at the top of its document.
+        let fields: Vec<(&Reason, &str, Option<Vec<String>>, bool)> = self
+            .unrestored
+            .iter()
+            .filter_map(|note| {
+                let (_, field) = note.member.rsplit_once("::")?;
+                let engine = !note.holders.is_empty();
+                let guids: Vec<String> = note.holders.iter().filter_map(|h| script(h)).collect();
+                (!field.is_empty()).then(|| (note, field, (!guids.is_empty()).then_some(guids), engine))
+            })
+            .collect();
+        let methods: Vec<(&Reason, &str)> = self
+            .unnamed
+            .iter()
+            .filter_map(|note| {
+                let (_, method) = note.member.rsplit_once("::")?;
+                Some((note, method.split_once('(')?.0))
+            })
+            .collect();
+        let wanted: std::collections::HashSet<&str> =
+            fields.iter().map(|(_, field, _, _)| *field).collect();
+        let named: std::collections::HashSet<&str> =
+            methods.iter().map(|(_, name)| *name).collect();
+        let mut files: Vec<&String> = paths
+            .iter()
+            .filter(|path| {
+                [".unity", ".prefab", ".asset", ".controller", ".anim", ".meta"]
+                    .iter()
+                    .any(|extension| path.ends_with(extension))
+            })
+            .collect();
+        files.sort();
+        files.dedup();
+        // Per field: the first file that holds a value. Per method: the
+        // first file and key that name it.
+        let mut held: Vec<Option<&String>> = vec![None; fields.len()];
+        let mut called: Vec<Option<(&String, &str)>> = vec![None; methods.len()];
+        for path in files {
+            let data = path.ends_with(".unity")
+                || path.ends_with(".prefab")
+                || path.ends_with(".asset")
+                || path.ends_with(".controller");
+            if held.iter().all(Option::is_some) && called.iter().all(Option::is_some) {
+                break;
+            }
+            let Some(text) = std::fs::read(path).ok().and_then(|bytes| String::from_utf8(bytes).ok())
+            else {
+                continue;
+            };
+            for document in documents(&text) {
+                let mut owner: Option<Option<&str>> = None;
+                for line in document.lines() {
+                    let item = line.trim_start().trim_start_matches("- ");
+                    if !named.is_empty() {
+                        for key in ["m_MethodName", "functionName"] {
+                            let Some(value) = item.strip_prefix(key).and_then(|rest| rest.strip_prefix(':')) else {
+                                continue;
                             };
-                            (own && document.lines().any(|line| key_of(line) == Some(field)))
-                                || overridden(document, field)
-                        })
-                });
-                if let Some((path, _)) = holder {
-                    notes.push(Reason::new(
-                        CODE_FIELD_NOT_RESTORED,
-                        &note.member,
-                        &format!(
-                            "{path} holds a value for the added field {}, which the Player does not read from scenes, prefabs or assets until a restart; its objects keep what the field's initializer gave them.",
-                            note.member
-                        ),
-                    ));
+                            for (index, (_, name)) in methods.iter().enumerate() {
+                                if called[index].is_none() && value.trim() == *name {
+                                    called[index] = Some((path, key));
+                                }
+                            }
+                        }
+                    }
+                    if !data || wanted.is_empty() {
+                        continue;
+                    }
+                    if let Some(path_text) = item.strip_prefix("propertyPath:") {
+                        let parts: Vec<&str> = path_text.trim().split('.').collect();
+                        for (index, (_, field, _, engine)) in fields.iter().enumerate() {
+                            // The field of a component begins the path; one
+                            // of an object held inline stands after the
+                            // field that holds it (session6-8).
+                            let found = match engine {
+                                true => parts.first() == Some(field),
+                                false => parts.iter().skip(1).any(|part| part == field),
+                            };
+                            if held[index].is_none() && found {
+                                held[index] = Some(path);
+                            }
+                        }
+                        continue;
+                    }
+                    let Some(key) = key_of(line).filter(|key| wanted.contains(key)) else {
+                        continue;
+                    };
+                    let owner = *owner.get_or_insert_with(|| document_script(document));
+                    for (index, (_, field, guids, _)) in fields.iter().enumerate() {
+                        let own = match (guids, owner) {
+                            (Some(guids), Some(owner)) => guids.iter().any(|guid| guid == owner),
+                            (Some(_), None) => false,
+                            (None, _) => true,
+                        };
+                        if held[index].is_none() && own && key == *field {
+                            held[index] = Some(path);
+                        }
+                    }
                 }
             }
         }
-        if !self.unnamed.is_empty() {
-            let texts = read(&[
-                ".unity",
-                ".prefab",
-                ".asset",
-                ".controller",
-                ".anim",
-                ".meta",
-            ]);
-            for note in &self.unnamed {
-                let Some(name) = note
-                    .member
-                    .rsplit_once("::")
-                    .and_then(|(_, method)| method.split_once('(').map(|(name, _)| name))
-                else {
-                    continue;
-                };
-                let named = texts.iter().find_map(|(path, text)| {
-                    text.lines().find_map(|line| {
-                        let line = line.trim_start().trim_start_matches("- ");
-                        ["m_MethodName", "functionName"]
-                            .into_iter()
-                            .find(|key| {
-                                line.strip_prefix(key)
-                                    .and_then(|rest| rest.strip_prefix(':'))
-                                    .is_some_and(|value| value.trim() == name)
-                            })
-                            .map(|key| (path, key))
-                    })
-                });
-                if let Some((path, key)) = named {
-                    notes.push(Reason::new(
-                        CODE_METHOD_NAMED,
-                        &note.member,
-                        &format!(
-                            "{path} names the added method {} ({key}); a UnityEvent or an animation event looks it up by name in the loaded class and does not find it until a full recompile, so that call does nothing.",
-                            note.member
-                        ),
-                    ));
-                }
+        let mut notes = Vec::new();
+        for ((note, _, _, _), path) in fields.iter().zip(&held) {
+            if let Some(path) = path {
+                notes.push(Reason::new(
+                    CODE_FIELD_NOT_RESTORED,
+                    &note.member,
+                    &format!(
+                        "{path} holds a value for the added field {}, which the Player does not read from scenes, prefabs or assets until a restart; its objects keep what the field's initializer gave them.",
+                        note.member
+                    ),
+                ));
+            }
+        }
+        for ((note, _), named) in methods.iter().zip(&called) {
+            if let Some((path, key)) = named {
+                notes.push(Reason::new(
+                    CODE_METHOD_NAMED,
+                    &note.member,
+                    &format!(
+                        "{path} names the added method {} ({key}); a UnityEvent or an animation event looks it up by name in the loaded class and does not find it until a full recompile, so that call does nothing.",
+                        note.member
+                    ),
+                ));
             }
         }
         notes

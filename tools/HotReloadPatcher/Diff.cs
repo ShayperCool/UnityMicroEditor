@@ -27,6 +27,9 @@ internal sealed class Change
     public TypeDefinitionHandle NewType;
     /// Old lambdas and local functions to redirect to their edited versions.
     public List<LambdaPair>? Lambdas;
+    /// Of an added field Unity serializes on an engine object: the classes whose saved documents
+    /// hold its value. Null for a field of a [Serializable] class or struct.
+    public List<string>? Holders;
 }
 
 internal sealed partial class Differ
@@ -617,9 +620,33 @@ internal sealed partial class Differ
             change.Notes.Add((Codes.ExistingInstancesKeepDefault, $"Objects that already exist read the default value of the added field {id}; if it is a renamed field, the value they had under the old name is not taken over."));
         var attributes = AuthoredAttributes(n, d.GetCustomAttributes());
         if (Serialized(d, d.Attributes, type, attributes))
+        {
             change.Notes.Add((Codes.SerializedFieldNotRestored, $"The added field {id} is not restored from scenes, prefabs or assets until a restart."));
+            change.Holders = DocumentHolders(type);
+        }
         if (attributes.Count > 0)
             change.Notes.Add((Codes.AddedMemberAttributesIgnored, $"[{string.Join("], [", attributes)}] on the added field {id} is invisible to reflection until a full recompile."));
+    }
+
+    /// The classes whose saved documents (a component of a scene or prefab, an asset) hold the value
+    /// of an instance field of `type`: the type and every class of the game that derives from it,
+    /// in this assembly and in the others that may name it. Unity writes an inherited field into
+    /// the document of the derived class. Null when the type is no engine object: a [Serializable]
+    /// class or struct is held inline by whatever document holds a field of it.
+    List<string>? DocumentHolders(TypeDefinitionHandle type)
+    {
+        if (Unity(type).Kind == UnityKind.No) return null;
+        string name = n.TypeName(type);
+        var holders = new SortedSet<string>(StringComparer.Ordinal) { name };
+        void Scan(Asm a)
+        {
+            foreach (var (_, h) in a.Types)
+                if (a.Kind(h) == GenKind.User && Bases(workspace, a, h).Any(x => x.Name == name)) holders.Add(a.TypeName(h));
+        }
+        Scan(n);
+        if (workspace.Find(n.Name) is { } self)
+            foreach (var other in workspace.Others(self)) Scan(other);
+        return holders.ToList();
     }
 
     /// Whether a constructor of the type gives the field a value or hands out its address: an
