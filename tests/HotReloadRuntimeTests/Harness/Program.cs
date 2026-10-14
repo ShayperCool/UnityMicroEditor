@@ -567,13 +567,27 @@ internal static class Program
         taken = Occupy(split);
         long fixedIsland = Island(split);
         Check(taken.Count != 0 && (Words(split)[0] & 0xFFFFFF) == 0xEC8348 && !LoadsConstant(Words(split)[0]), "the harness holds the fixed island page of a body that starts with sub rsp, imm8 and a mov to the stack");
+        // A request that lists it twice: the plan maps the window island for its first listing
+        // before the duplicate is refused (the one refusal that needs no second held page, so it
+        // holds on every runtime). The island stays mapped, and the way to it must stay with it,
+        // or the next first redirect writes the first byte alone and jumps to the taken fixed address.
+        ack = Send(++generation, new List<object> { Target("Game", patchBulk, Detour(split, patchBulk, "Patch.Bulk.Many::M599"), Detour(split, patchBulk, "Patch.Bulk.Many::M599")) });
+        Refused(ack, "write", "listed twice", "the edit after its plan mapped the window island of the sub rsp, imm8 body");
         ack = Send(++generation, new List<object> { Target("Game", patchBulk, Detour(split, patchBulk, "Patch.Bulk.Many::M599")) });
         Applied(ack, generation, 1, 4, "redirected behind the gate to an island in its window");
         expected = Words();
-        Equal(Json.Integer(ack, "islandWrites") + "/" + Json.Integer(ack, "gatedWrites") + "/" + Many.M599(1, "s"), "0/1/s1y602", "a gated island write: through an island, after the one drain");
         long windowIsland = Island(split);
-        Check(ByGatedIsland(Words(split)[0], Pick(unsplit, split)[0]) && windowIsland != fixedIsland && Lead(Pair(split, patchBulk, "Patch.Bulk.Many::M599")),
-            "byte 0 is E9, bytes 1 to 3 changed, byte 4 is the body's own, and the jump leads to an island that is not the taken fixed address");
+        bool gated = Json.Integer(ack, "islandWrites") == 0 && Json.Integer(ack, "gatedWrites") == 1 && ByGatedIsland(Words(split)[0], Pick(unsplit, split)[0])
+            && windowIsland != fixedIsland && Lead(Pair(split, patchBulk, "Patch.Bulk.Many::M599"));
+        Check(gated, "a gated island write through the island the refused request mapped: byte 0 is E9, bytes 1 to 3 changed, byte 4 is the body's own, and the jump leads to an island that is not the taken fixed address");
+        if (!gated)
+        {
+            // Its jump may lead into the taken page: put the body back before anything calls it.
+            Applied(Send(++generation, new List<object>()), generation, 0, 1, "restored");
+            expected = Words();
+            return;
+        }
+        Equal(Many.M599(1, "s"), "s1y602", "the replacement runs");
         // A retarget stores the island slot and leaves the body alone; a restore puts bytes 0 to 3
         // back and leaves byte 4; a later first redirect finds the same window island again.
         ack = Send(++generation, new List<object> { Target("Game", patchBulk, Detour(split, patchBulk, "Patch.Bulk.Many::M599")) });
@@ -668,10 +682,14 @@ internal static class Program
         Check(Same(Words(large), Pick(unjumped, large)) && Hot.Large(7) == 22, "the saved instruction is back");
         expected = Words();
         Vacate(taken);
+        // A request refused after its plan mapped the island, which is free now: the island stays
+        // mapped, and the way the body last took, the whole jump, must not stay with it.
+        ack = Send(++generation, new List<object> { Target("Game", patch1, Detour(large, patch1, "Patch.G1.Others::Large"), Detour(large, patch1, "Patch.G1.Others::Large")) });
+        Refused(ack, "write", "listed twice", "the method listed twice, after the plan of its first listing mapped its island");
         ack = Send(++generation, new List<object> { Target("Game", patch1, Detour(large, patch1, "Patch.G1.Others::Large")) });
         Applied(ack, generation, 1, 0, "redirected again once the address is free");
         expected = Words();
-        Equal(Json.Integer(ack, "islandWrites") + "/" + Json.Integer(ack, "gatedWrites") + "/" + Hot.Large(7), "1/0/23", "through an island now: the way is decided per redirect");
+        Equal(Json.Integer(ack, "islandWrites") + "/" + Json.Integer(ack, "gatedWrites") + "/" + Hot.Large(7), "1/0/23", "through the island the refused request mapped: the way is decided per redirect and kept with its island");
 
         Console.WriteLine("first redirects: islands 16 bytes apart");
         // Ten bytes of code each, compiled in a row: the smallest distance two islands can have.

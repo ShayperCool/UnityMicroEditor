@@ -48,7 +48,7 @@ namespace UnityMicroEditor.HotReload
             internal ulong Saved;              // first word of the original body, read before the first write
             internal byte Rest;                // and its ninth byte: the end of a second instruction of five bytes
             internal Island Island, Relay;     // kept once mapped: a later first redirect uses them again
-            internal int Way;                  // how the body is redirected now
+            internal int Way;                  // how the body is redirected now, or reaches its kept island
         }
 
         // The ways into a replacement. Each replaces bytes of one instruction of the body only.
@@ -388,7 +388,8 @@ namespace UnityMicroEditor.HotReload
                     ulong start = Detour.Read(step.From);
                     if (Detour.LoadsConstant(redirect.Saved) ? start != redirect.Saved || Detour.Rest(step.From) != redirect.Rest : ((start ^ redirect.Saved) & Detour.JumpBytes) != 0)
                         result.Fail(step.Assembly, step.Member, "write", "The start of the compiled body is not what it was when the applier first read it; something else rewrites this method.");
-                    // An island already mapped is used again; the way it took is the way it takes now.
+                    // An island already mapped is used again, the way it was mapped for. Both are kept
+                    // together when the island is mapped, even by a request refused after its plan.
                     else if (redirect.Island != null) step.Way = redirect.Way;
                     else unmapped.Add(step);
                 }
@@ -397,8 +398,12 @@ namespace UnityMicroEditor.HotReload
             foreach (Step step in unmapped)
             {
                 Redirect redirect = step.Redirect;
+                // A mapped island is never unmapped, so its way is kept with it now, not when the
+                // request is written: a request refused after this plan leaves the island for the
+                // next first redirect, which must reach it the same way. A first byte alone leads
+                // to the fixed address only; a window island needs the jump written behind the gate.
                 redirect.Island = Island.Map(step.From, out string problem);
-                if (redirect.Island != null) continue;
+                if (redirect.Island != null) { redirect.Way = ByFirstByte; continue; }
                 if (Detour.LoadsConstant(redirect.Saved))
                 {
                     string other = null;
@@ -411,7 +416,7 @@ namespace UnityMicroEditor.HotReload
                     // Its first instruction is four bytes, so bytes 1 to 3 can be rewritten behind
                     // the gate to reach an island anywhere in the 16 MiB window of its fifth byte.
                     redirect.Island = Island.MapInWindow(step.From, out string window);
-                    if (redirect.Island != null) step.Way = ByGatedIsland;
+                    if (redirect.Island != null) step.Way = redirect.Way = ByGatedIsland;
                     else result.Fail(step.Assembly, step.Member, "write", "The method cannot be redirected while other threads may run it. Its fixed island address is taken (" + problem
                         + ") and " + window + ".");
                 }
