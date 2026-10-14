@@ -1049,7 +1049,7 @@ fn fake_player(root: &str, ready: &str, body: &str) -> String {
     write_executable(
         &path,
         &format!(
-            "#!/bin/sh\nwhile [ $# -gt 0 ]; do case \"$1\" in --unity-cli-report) report=\"$2\"; shift;; esac; shift; done\n{}\n{body}\n",
+            "#!/bin/sh\nwhile [ $# -gt 0 ]; do case \"$1\" in --unity-cli-report) report=\"$2\"; shift;; -logFile) log=\"$2\"; shift;; esac; shift; done\n{}\n{body}\n",
             ready.replace("READY", "\"$report.ready.json\"")
         ),
     );
@@ -1173,9 +1173,25 @@ fn fake_player_readiness_failures() {
     ] {
         let mut player = launch(&root, &fake_player(&root, &ready, keep), &wake);
         let error = failure(player.wait_ready(&ctx, ReadyBudget::fixed(Duration::from_secs(10))));
-        assert!(error.ends_with(&expected), "{error}");
+        assert!(error.contains(&expected), "{error}");
         player.stop();
     }
+    // Errors logged before ready: the first is quoted with the log (mcp6-5).
+    let logged = format!(
+        "printf 'Loaded\\nUnityEngine.Debug:Log (object)\\n\\nUnsupported enum type '\\''RgLong'\\'' used for field '\\''longKind'\\''\\nUnityEngine.Debug:ExtractStackTraceNoAlloc (byte*,int,string)\\n' > \"$log\"\n{}",
+        READY.replace("\"errors\":0", "\"errors\":9")
+    );
+    let mut player = launch(&root, &fake_player(&root, &logged, keep), &wake);
+    let error = failure(player.wait_ready(&ctx, ReadyBudget::fixed(Duration::from_secs(10))));
+    let log = sysutil::join(&[&sysutil::dir(&player.report), "player.log"]);
+    assert!(
+        error.contains("errors=9")
+            && error.ends_with(&format!(
+                "the first: \"Unsupported enum type 'RgLong' used for field 'longKind'\"; see {log}"
+            )),
+        "{error}"
+    );
+    player.stop();
     // Timeout and cancellation.
     let mut player = launch(&root, &fake_player(&root, "", keep), &wake);
     let error = failure(player.wait_ready(&ctx, ReadyBudget::fixed(Duration::from_secs(1))));
