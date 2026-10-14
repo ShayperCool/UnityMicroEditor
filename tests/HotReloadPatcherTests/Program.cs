@@ -72,10 +72,11 @@ internal static class Program
 
     /// Compiles a game assembly with the switches of rust/src/compiler/compile.rs against Unity's
     /// reference class library.
-    static string Compile(string output, IEnumerable<string> sources, IEnumerable<string>? references = null, string? define = null, string target = "library", string? library = null)
+    static string Compile(string output, IEnumerable<string> sources, IEnumerable<string>? references = null, string? define = null, string target = "library", string? library = null, bool unsafeCode = false)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(output)!);
-        var lines = new List<string>(Switches) { "-target:" + target, "-out:" + output };
+        var lines = new List<string>(Switches.Where(s => !unsafeCode || s != "-unsafe-")) { "-target:" + target, "-out:" + output };
+        if (unsafeCode) lines.Add("-unsafe+");
         if (define != null) lines.Add("-define:" + define);
         library ??= bclAot;
         foreach (string file in Directory.GetFiles(library, "*.dll").OrderBy(x => x, StringComparer.Ordinal)) lines.Add("-reference:" + file);
@@ -561,8 +562,47 @@ internal static class Program
                 Refused("unity_message_added Real.Mover::Update()"));
             Expect("real engine, message removed", Patcher("real engine, message removed", Path.Combine(root, "real-remove"), 1, new[] { new AssemblyPair("Real", realLoaded, realRemove) }), "Real",
                 Patch().Redirects("removed Real.Mover::LateUpdate()"));
+            Serialization(root, Path.GetDirectoryName(real)!);
         }
         else Console.WriteLine("note: " + real + " is not installed; the checks against the real engine module were skipped.");
+    }
+
+    /// What Unity serializes, decided against the real engine modules lying next to the loaded
+    /// assembly as in a Player's Managed directory (Fixtures/Classify/Serial.cs).
+    static void Serialization(string root, string managed)
+    {
+        string[] modules = { "UnityEngine.CoreModule.dll", "UnityEngine.PhysicsModule.dll", "UnityEngine.InputLegacyModule.dll" };
+        string source = Fixture("Classify", "Serial.cs");
+        string loadedDirectory = Path.Combine(root, "serial", "loaded");
+        Directory.CreateDirectory(loadedDirectory);
+        var references = modules.Select(m => Path.Combine(managed, m)).ToArray();
+        foreach (string module in references) File.Copy(module, Path.Combine(loadedDirectory, Path.GetFileName(module)), overwrite: true);
+        string loaded = Compile(Path.Combine(loadedDirectory, "Serial.dll"), new[] { source }, references, unsafeCode: true);
+        var cases = new Dictionary<string, Expectation>
+        {
+            // Long enums and the engine's types it skips: a note, as for any field Unity never serializes.
+            ["SER_ENGINE_ACCESS"] = Refused(new[] { "narrow", "bounds", "mask", "hash", "matrix", "cell", "gradient", "curve", "offset", "rect", "tint", "property", "turn", "clicked", "scored", "lazy", "exposed", "texture" }
+                .Select(field => "serialization_changed Serial.Kept::" + field).ToArray()),
+            ["SER_FIXED"] = Refused("serialization_changed Serial.Packed::bytes"),
+            ["SER_DICT_READONLY"] = Refused("serialization_changed Serial.Shop::prices"),
+            ["SER_DICT_ADD"] = Patch().Fields("Serial.Shop::stock", "Serial.Shop::lists", "Serial.Shop::unmarked", "Serial.Shop::set").Redirects("changed Serial.Shop::Count()")
+                .Noted("serialized_field_not_restored Serial.Shop::stock", "serialized_field_not_restored Serial.Shop::lists",
+                    "added_member_attributes_ignored Serial.Shop::stock", "added_member_attributes_ignored Serial.Shop::lists", "added_member_attributes_ignored Serial.Shop::set"),
+        };
+        foreach (var (name, expectation) in cases)
+        {
+            string label = name, directory = Path.Combine(root, "serial", name);
+            string current = Compile(Path.Combine(directory, "Serial.dll"), new[] { source }, references, define: name, unsafeCode: true);
+            Expect(label, Patcher(label, directory, 1, new[] { new AssemblyPair("Serial", loaded, current) }), "Serial", expectation);
+        }
+        // The fields of the types Unity skips: patched with the note alone. They stand in the same
+        // edit as the refused ones above, so the notes are read from that result's changes.
+        var result = JsonDocument.Parse(File.ReadAllText(Path.Combine(root, "serial", "SER_ENGINE_ACCESS", "result.json"))).RootElement;
+        var noted = result.GetProperty("assemblies")[0].GetProperty("changes").EnumerateArray()
+            .Where(c => c.GetProperty("action").GetString() == "note" && c.GetProperty("code").GetString() == "accessibility_changed")
+            .Select(c => c.GetProperty("member").GetString()!).OrderBy(x => x, StringComparer.Ordinal).ToList();
+        Same("SER_ENGINE_ACCESS", "accessibility notes", new[] { "wide", "uwide", "routine", "wait", "aim", "aim2", "hit", "touch", "ground", "range", "native", "pool", "routines" }
+            .Select(field => "Serial.Skipped::" + field), noted);
     }
 
     /// Gives the reference to the type `ns.name` of another assembly the module itself as its

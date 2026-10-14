@@ -644,7 +644,9 @@ Only a recompile applies what a note names:
   it is not a note but a refusal (`serialization_changed`), like
   `[SerializeField]` added to it: nothing of such an edit is in the Player
   before a restart. A field of a type Unity never serializes (a delegate, a
-  dictionary, an interface, a class without `[Serializable]`) is the note.
+  dictionary without `[SerializeField]`, an interface, a class without
+  `[Serializable]`, a 64-bit enum, engine types such as `Coroutine`, `Ray` or
+  `NativeArray<T>`) is the note.
 - An added field has its default value in objects that existed before the
   patch, also when the source gives it an initializer; an added serialized
   field is not filled from the scene until a restart. A later scene, prefab or
