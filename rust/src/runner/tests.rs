@@ -1022,6 +1022,9 @@ fn raw_session_owned_ddol_lifecycle_sdk() {
             "--nologo",
             "-v:q",
             "-p:NuGetAudit=false",
+            // Without build servers: one would outlive the test.
+            compiler::BUILD_WITHOUT_SERVERS[0],
+            compiler::BUILD_WITHOUT_SERVERS[1],
         ],
     )
     .unwrap();

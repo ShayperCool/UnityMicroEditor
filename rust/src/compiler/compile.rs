@@ -620,6 +620,8 @@ impl Compiler {
                 || assembly.sources.is_empty()
                 || !assembly.netcode_postprocessor.is_empty()
                     && (!needs_netcode(assembly) || !valid_sha256(&assembly.netcode_postprocessor))
+                || !assembly.lifecycle_helper.is_empty()
+                    && !valid_sha256(&assembly.lifecycle_helper)
                 || !valid_lifecycle_proof(&assembly.lifecycle_barrier, &assembly.name)
                 || !lifecycle_sources_match(&assembly.lifecycle_barrier, &assembly.sources)
             {
@@ -684,6 +686,85 @@ impl Compiler {
             }
         }
         Ok(compiler)
+    }
+
+    /// Whether a session can start on the prepared baseline with the managed
+    /// sources as they are on disk: the part of [`Compiler::new`] and of the
+    /// startup compile that reads the graph, without a Player. The error is
+    /// the one the runner's start would end with ("... requires a fresh
+    /// managed graph"). It passes when every configuration input the
+    /// baseline recorded (assembly definitions, references, packages and
+    /// their manifest, project settings, script metadata) is as it was, no
+    /// source of the graph is gone and `Assets` holds no managed
+    /// configuration outside the graph; C# sources may differ in content
+    /// and new ones may have been added, which the startup compile takes.
+    ///
+    /// A request identity or a receipt says what a preparation was asked
+    /// for. This says what it was made from.
+    pub fn graph_accepts_sources(project: &str, baseline_manifest: &str) -> Result<()> {
+        let project = crate::project::lexpath::abs(project)?;
+        let project = sysutil::eval_symlinks(&project)?;
+        let (manifest, baseline_path) = match compiler_manifest(baseline_manifest) {
+            Ok(read) => read,
+            // A plan without a game assembly is no plan a session compiles
+            // from, and it still says which managed inputs it was made
+            // with: there is nothing but those to compare.
+            Err(error) => {
+                #[derive(Deserialize, Default)]
+                #[serde(default)]
+                struct Wrapper {
+                    compiler: Option<CompileManifest>,
+                }
+                let embedded = sys::read(baseline_manifest)
+                    .ok()
+                    .and_then(|data| unmarshal::<Wrapper>(&data).ok())
+                    .and_then(|wrapper| wrapper.compiler)
+                    .filter(|manifest| manifest.schema == 1 && manifest.assemblies.is_empty());
+                match embedded {
+                    Some(manifest) => (manifest, baseline_manifest.to_string()),
+                    None => return Err(error),
+                }
+            }
+        };
+        if manifest.project != project {
+            bail!("compiler baseline belongs to another project");
+        }
+        let mut compiler = Compiler {
+            project,
+            manifest: manifest.clone(),
+            configs: NilMap::make(),
+            configuration_hashes: NilMap::make(),
+            sources: NilMap::make(),
+            configuration: NilMap::make(),
+            ..Default::default()
+        };
+        for assembly in &manifest.assemblies {
+            let (config, hash) =
+                read_assembly_configuration(&baseline_path, assembly, Some(&manifest))?;
+            compiler.configs.insert(&assembly.name, config);
+            compiler.configuration_hashes.insert(&assembly.name, hash);
+            for source in &assembly.sources {
+                let digest = manifest.compiler_inputs.at(source);
+                if digest.is_empty() {
+                    bail!("baseline lacks runtime source digest: {source}");
+                }
+                if sys::absent(source) {
+                    bail!(
+                        "a source of the prepared managed graph is gone; regenerate source graph: {source}"
+                    );
+                }
+                compiler.sources.insert(source, digest.to_string());
+                let meta = format!("{source}.meta");
+                let hash = manifest.compiler_inputs.at(&meta);
+                if !hash.is_empty() {
+                    compiler
+                        .configuration
+                        .insert(meta.clone(), hash.to_string());
+                }
+            }
+        }
+        compiler.collect_configuration_inputs();
+        compiler.source_graph_candidate(&[]).map(drop)
     }
 
     /// The active Player is a copy of the prepared native host. Match native DLL
@@ -1050,6 +1131,24 @@ impl Compiler {
             }
         }
         let mut dirty = dirty_assemblies(&assemblies, &self.sources, &current_sources);
+        // A preparation holds the output of the lifecycle rewrite that made
+        // it. Another build of the helper writes other text for the same
+        // source (line directives, the paths of caller information), so the
+        // Player would load one rewrite and the first edit compile another:
+        // the patch builder then sees differences nobody made. Such
+        // assemblies are compiled again before the session starts, like the
+        // caches of assemblies, code revisions and the helper itself, which
+        // all miss when the helper changes.
+        let mut forced_lifecycle = BTreeSet::new();
+        if !self.startup_complete {
+            let (helper_key, _) = self.lifecycle_helper_key()?;
+            for assembly in &assemblies {
+                if assembly.lifecycle_helper != helper_key {
+                    forced_lifecycle.insert(assembly.name.clone());
+                    dirty.insert(assembly.name.clone());
+                }
+            }
+        }
         // The old raw baseline predates NGO IL postprocessing. Rebuild its
         // networking assemblies once even when the source bytes are unchanged.
         let mut forced_netcode = BTreeSet::new();
@@ -1126,6 +1225,7 @@ impl Compiler {
         let mut direct_dirty =
             source_dirty_assemblies(&assemblies, &self.sources, &current_sources);
         direct_dirty.extend(forced_netcode);
+        direct_dirty.extend(forced_lifecycle);
         let mut declarations_changed: BTreeMap<String, bool> = BTreeMap::new();
         let mut rebuilt = BTreeSet::new();
         let mut compiled = NilVec::nil();
@@ -1446,12 +1546,9 @@ impl Compiler {
         Ok(())
     }
 
-    /// Builds (or reuses) our Roslyn helper with the
-    /// installed SDK. The cache entry is keyed by its sources and the SDK.
-    pub fn prepare_lifecycle_helper(&mut self, ctx: &Context) -> Result<String> {
-        if !self.helper.is_empty() {
-            return Ok(self.helper.clone());
-        }
+    /// The cache key of the lifecycle helper: the hashes of its two sources
+    /// and of the SDK's compiler and launcher, with the hashes themselves.
+    pub fn lifecycle_helper_key(&self) -> Result<(String, BTreeMap<String, String>)> {
         let tool_root = micro_editor_root()?;
         let source_root = join(&[&tool_root, "tools/LifecycleCompiler"]);
         let mut inputs = BTreeMap::new();
@@ -1464,13 +1561,27 @@ impl Compiler {
             let hash = file_hash(&filename)?;
             inputs.insert(filename, hash);
         }
-        let key = sha256(&marshal(&inputs)?);
+        Ok((sha256(&marshal(&inputs)?), inputs))
+    }
+
+    /// Builds (or reuses) our Roslyn helper with the
+    /// installed SDK. The cache entry is keyed by its sources and the SDK.
+    pub fn prepare_lifecycle_helper(&mut self, ctx: &Context) -> Result<String> {
+        if !self.helper.is_empty() {
+            return Ok(self.helper.clone());
+        }
+        let tool_root = micro_editor_root()?;
+        let source_root = join(&[&tool_root, "tools/LifecycleCompiler"]);
+        let (key, inputs) = self.lifecycle_helper_key()?;
         let entry = join(&[&self.cache, "lifecycle", &key]);
         let helper = join(&[&entry, "LifecycleCompiler.dll"]);
-        if read_json_file::<NilMap<String>>(&join(&[&entry, "files.json"]))
-            .is_ok_and(|metadata| verify_cache_files(&entry, &metadata))
-        {
+        let verified = || {
+            read_json_file::<NilMap<String>>(&join(&[&entry, "files.json"]))
+                .is_ok_and(|metadata| verify_cache_files(&entry, &metadata))
+        };
+        if verified() {
             self.helper = helper.clone();
+            self.helper_key = key;
             return Ok(helper);
         }
         sys::mkdir_all(&sysutil::dir(&entry))?;
@@ -1501,6 +1612,8 @@ impl Compiler {
                 &payload,
                 &format!("-p:RoslynPath={}", sysutil::dir(&self.csc)),
                 "-p:NuGetAudit=false",
+                sys::BUILD_WITHOUT_SERVERS[0],
+                sys::BUILD_WITHOUT_SERVERS[1],
             ],
         )
         .map_err(|error| anyhow!("build SDK lifecycle helper: {error}"))?;
@@ -1513,8 +1626,9 @@ impl Compiler {
             bail!("SDK helper build produced no verified executable");
         }
         atomic_json(&join(&[&payload, "files.json"]), &metadata)?;
-        sys::rename(&payload, &entry)?;
+        sys::publish(&payload, &entry, verified)?;
         self.helper = helper.clone();
+        self.helper_key = key;
         Ok(helper)
     }
 
@@ -1567,17 +1681,23 @@ impl Compiler {
         let key = sha256(&marshal(&identity)?);
         let entry = join(&[&self.cache, "assemblies", &key]);
         let library = format!("{}.dll", assembly.name);
-        if let Ok(Some(cached)) =
+        // The entry as it stands, when every part of it holds.
+        let cached = || {
             read_json_file::<Option<CompiledCache>>(&join(&[&entry, "compile-cache.json"]))
-            && cached.schema_version == 1
-            && cached.key == key
-            && cached.name == assembly.name
-            && cached.netcode_key == netcode_key
-            && valid_lifecycle_proof(&cached.proof, &assembly.name)
-            && lifecycle_sources_match(&cached.proof, &assembly.sources)
-            && verify_cache_files(&entry, &cached.files)
-            && !cached.files.at(&library).is_empty()
-        {
+                .ok()
+                .flatten()
+                .filter(|cached| {
+                    cached.schema_version == 1
+                        && cached.key == key
+                        && cached.name == assembly.name
+                        && cached.netcode_key == netcode_key
+                        && valid_lifecycle_proof(&cached.proof, &assembly.name)
+                        && lifecycle_sources_match(&cached.proof, &assembly.sources)
+                        && verify_cache_files(&entry, &cached.files)
+                        && !cached.files.at(&library).is_empty()
+                })
+        };
+        if let Some(cached) = cached() {
             return Ok((join(&[&entry, &library]), cached.proof));
         }
         let folder = join(&[staging, "Compile", &assembly.name]);
@@ -1733,14 +1853,17 @@ impl Compiler {
             &join(&[&payload, "compile-cache.json"]),
             &CompiledCache {
                 schema_version: 1,
-                key,
+                key: key.clone(),
                 name: assembly.name.clone(),
                 files,
                 proof: proof.clone(),
-                netcode_key,
+                netcode_key: netcode_key.clone(),
             },
         )?;
-        sys::rename(&payload, &entry)?;
+        // Another process may have published the same state meanwhile: its
+        // entry is the one to use then, with the proof it recorded.
+        sys::publish(&payload, &entry, || cached().is_some())?;
+        let proof = cached().map_or(proof, |cached| cached.proof);
         Ok((join(&[&entry, &library]), proof))
     }
 }

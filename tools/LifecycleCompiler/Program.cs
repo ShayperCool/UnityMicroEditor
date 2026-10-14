@@ -1252,8 +1252,22 @@ internal static class Program
                 if (primaryTypes.Length > 1)
                     throw new InvalidOperationException("Ambiguous primary MonoScript class in " + request.Sources[index].OriginalPath);
                 if (primaryTypes.Length == 1) scriptTypes.Add(request.Sources[index].OriginalPath, primaryTypes[0]);
+                int callbackCount = callbacks.Count, initializerCount = runtimeInitializers.Count;
                 var rewriter = new LifecycleRewriter(model, mono, callbacks, runtimeInitializers, request);
-                var rewritten = rewriter.Visit(trees[index].GetRoot())!.ToFullString();
+                var visited = rewriter.Visit(trees[index].GetRoot())!;
+                // Every statement and member must stand on the line it has in the source. A
+                // rewrite that moved one would make frames, breakpoints and caller line numbers
+                // name the authored file with a wrong line, which is worse than naming the
+                // copy: such a file is written again without directives, like a source that
+                // sets its own lines.
+                if (rewriter.LineDirectives && !rewriter.LinesKept(visited))
+                {
+                    callbacks.RemoveRange(callbackCount, callbacks.Count - callbackCount);
+                    runtimeInitializers.RemoveRange(initializerCount, runtimeInitializers.Count - initializerCount);
+                    rewriter = new LifecycleRewriter(model, mono, callbacks, runtimeInitializers, request, lineDirectives: false);
+                    visited = rewriter.Visit(trees[index].GetRoot())!;
+                }
+                var rewritten = visited.ToFullString();
                 // The compiler reads the copy; errors, traces and caller information name the source.
                 if (rewriter.LineDirectives) rewritten = $"#line 1 \"{trees[index].FilePath}\"\n" + rewritten;
                 activeAndEnabledReads += rewriter.ActiveAndEnabledReads;
@@ -1375,16 +1389,57 @@ internal static class Program
         public int GetComponentInChildrenCalls { get; private set; }
         public int ScriptableObjectCallbacks { get; private set; }
 
+        /// `lineDirectives: false` writes a copy that names itself, whatever the source allows.
         public LifecycleRewriter(SemanticModel model, INamedTypeSymbol? mono, List<CallbackInfo> callbacks,
-            List<RuntimeInitializerInfo> runtimeInitializers, Request request)
+            List<RuntimeInitializerInfo> runtimeInitializers, Request request, bool lineDirectives = true)
         { this.model = model; this.mono = mono; this.callbacks = callbacks;
           this.runtimeInitializers = runtimeInitializers; this.request = request;
           usedIdentifiers = model.SyntaxTree.GetRoot().DescendantTokens()
               .Where(token => token.IsKind(SyntaxKind.IdentifierToken)).Select(token => token.ValueText).ToHashSet();
           string path = model.SyntaxTree.FilePath;
-          lineDirectives = path.Length != 0 && path.IndexOfAny(new[] { '"', '\n', '\r' }) < 0
+          // A directive ends at any line terminator of the language, also the three Unicode
+          // ones. Only a `#line` the compiler obeys sets lines: one in a branch that is
+          // switched off is text.
+          this.lineDirectives = lineDirectives && path.Length != 0 && path.IndexOfAny(new[] { '"', '\n', '\r', '\u0085', '\u2028', '\u2029' }) < 0
               && !model.SyntaxTree.GetRoot().DescendantTrivia(descendIntoTrivia: true).Any(trivia =>
-                  trivia.IsKind(SyntaxKind.LineDirectiveTrivia) || trivia.IsKind(SyntaxKind.LineSpanDirectiveTrivia)); }
+                  (trivia.IsKind(SyntaxKind.LineDirectiveTrivia) || trivia.IsKind(SyntaxKind.LineSpanDirectiveTrivia))
+                  && trivia.GetStructure() is DirectiveTriviaSyntax { IsActive: true }); }
+
+        private const string LineAnchor = "UnityMicroEditor.Line";
+
+        /// Statements and members carry the line they start on in the source, so that
+        /// `LinesKept` can compare it with the line they have after the rewrite.
+        public override SyntaxNode? Visit(SyntaxNode? node)
+        {
+            var visited = base.Visit(node);
+            if (!lineDirectives || visited is null || node is not (StatementSyntax or MemberDeclarationSyntax)
+                || node is BlockSyntax or BaseTypeDeclarationSyntax or BaseNamespaceDeclarationSyntax) return visited;
+            int line = node.SyntaxTree.GetLineSpan(new Microsoft.CodeAnalysis.Text.TextSpan(node.SpanStart, 0)).StartLinePosition.Line + 1;
+            return visited.WithAdditionalAnnotations(new SyntaxAnnotation(LineAnchor, line.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        }
+
+        /// Whether every statement and member of the rewritten tree that came from the source
+        /// stands on the line the source has it on, as the directives of the tree map it.
+        public bool LinesKept(SyntaxNode rewritten)
+        {
+            var tree = CSharpSyntaxTree.Create((CSharpSyntaxNode)rewritten, (CSharpParseOptions)model.SyntaxTree.Options, model.SyntaxTree.FilePath);
+            foreach (var node in tree.GetRoot().GetAnnotatedNodes(LineAnchor))
+            {
+                int mapped = tree.GetMappedLineSpan(new Microsoft.CodeAnalysis.Text.TextSpan(node.SpanStart, 0)).StartLinePosition.Line + 1;
+                if (node.GetAnnotations(LineAnchor).First().Data != mapped.ToString(System.Globalization.CultureInfo.InvariantCulture)) return false;
+            }
+            return true;
+        }
+
+        /// What stands around tokens that a replacement leaves out: line breaks, comments and
+        /// directives. It goes behind the receiver, which every replacement keeps, so that the
+        /// output has the lines of the source and no directive is lost.
+        private static T After<T>(T receiver, params SyntaxTriviaList[] dropped) where T : SyntaxNode
+        {
+            var all = dropped.SelectMany(list => list).ToList();
+            if (all.All(trivia => trivia.IsKind(SyntaxKind.WhitespaceTrivia))) return receiver;
+            return receiver.WithTrailingTrivia(receiver.GetTrailingTrivia().AddRange(all));
+        }
 
         private bool IsMonoBehaviour(INamedTypeSymbol? type)
         {
@@ -1425,9 +1480,17 @@ internal static class Program
             node.Ancestors().OfType<ConditionalAccessExpressionSyntax>()
                 .FirstOrDefault(conditional => conditional.WhenNotNull.Span.Contains(node.Span));
 
+        /// `original` is `receiver.root` or the `.root` of a null-conditional chain. Its first
+        /// and last trivia stay where they are; what stood around the operator and in front of
+        /// the name goes behind the receiver.
         private ExpressionSyntax RootCall(ExpressionSyntax receiver, SyntaxNode original)
         {
             TransformRootReads++;
+            var (operatorToken, name) = original is MemberAccessExpressionSyntax member ? (member.OperatorToken, member.Name)
+                : (((MemberBindingExpressionSyntax)original).OperatorToken, ((MemberBindingExpressionSyntax)original).Name);
+            receiver = original is MemberAccessExpressionSyntax
+                ? After(receiver.WithoutLeadingTrivia(), operatorToken.LeadingTrivia, operatorToken.TrailingTrivia, name.GetLeadingTrivia())
+                : After(receiver, operatorToken.TrailingTrivia, name.GetLeadingTrivia());
             return SyntaxFactory.InvocationExpression(SyntaxFactory.ParseExpression(PrefabTransforms + ".Root"),
                 SyntaxFactory.ArgumentList(SyntaxFactory.SingletonSeparatedList(SyntaxFactory.Argument(receiver))))
                 .WithTriviaFrom(original);
@@ -1455,8 +1518,11 @@ internal static class Program
             ExpressionSyntax whenNotNull;
             try { whenNotNull = (ExpressionSyntax)Visit(node.WhenNotNull)!; }
             finally { conditionalReceivers.Remove(node.SpanStart); }
-            return SyntaxFactory.ParseExpression("(" + receiver.WithoutTrivia().ToFullString() + " is { } " + name
-                + " ? " + whenNotNull.WithoutTrivia().ToFullString() + " : ("
+            // The chain may run over several lines. What stands behind the receiver and around
+            // the `?` stays between the two parts, so every line of it keeps its number.
+            string between = string.Concat(node.OperatorToken.LeadingTrivia.Concat(node.OperatorToken.TrailingTrivia).Select(trivia => trivia.ToFullString()));
+            return SyntaxFactory.ParseExpression("(" + receiver.WithoutLeadingTrivia().ToFullString() + " is { } " + name
+                + " ? " + between + whenNotNull.WithoutTrailingTrivia().ToFullString() + " : ("
                 + resultType!.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) + ")null)").WithTriviaFrom(node);
         }
 
@@ -1499,7 +1565,13 @@ internal static class Program
                 SimpleNameSyntax name;
                 if (node.Expression is MemberAccessExpressionSyntax member)
                 {
-                    receiver = member.Expression is BaseExpressionSyntax ? SyntaxFactory.ThisExpression() : (ExpressionSyntax)Visit(member.Expression)!;
+                    // The receiver moves behind the name. What stood in front of it stands in
+                    // front of the whole call, which gets it back below; what stood around the
+                    // operator follows the receiver.
+                    receiver = member.Expression is BaseExpressionSyntax
+                        ? SyntaxFactory.ThisExpression().WithTrailingTrivia(member.Expression.GetTrailingTrivia())
+                        : ((ExpressionSyntax)Visit(member.Expression)!).WithoutLeadingTrivia();
+                    receiver = After(receiver, member.OperatorToken.LeadingTrivia, member.OperatorToken.TrailingTrivia);
                     name = member.Name;
                 }
                 else if (node.Expression is MemberBindingExpressionSyntax binding
@@ -1518,19 +1590,29 @@ internal static class Program
                     string bridgeName = parameter.Type.SpecialType == SpecialType.System_Boolean ? "includeInactive" : "type";
                     return argument.WithNameColon(argument.NameColon.WithName(SyntaxFactory.IdentifierName(bridgeName)
                         .WithTriviaFrom(argument.NameColon.Name)));
-                })));
+                }), arguments.Arguments.GetSeparators()));
                 GetComponentInChildrenCalls++;
                 // Preserve argument order and evaluation. Unity's Component uses
                 // "t" where GameObject uses "type"; the bridge normalizes names.
+                // The name is not the first token any more: a simple call had the trivia of the
+                // whole expression in front of it.
+                var visitedName = (SimpleNameSyntax)Visit(name)!;
+                if (node.Expression is SimpleNameSyntax) visitedName = visitedName.WithoutLeadingTrivia();
                 return SyntaxFactory.InvocationExpression(SyntaxFactory.MemberAccessExpression(SyntaxKind.SimpleMemberAccessExpression,
-                    SyntaxFactory.ParseExpression(PrefabTransforms), (SimpleNameSyntax)Visit(name)!),
+                    SyntaxFactory.ParseExpression(PrefabTransforms), visitedName),
                     arguments.WithArguments(arguments.Arguments.Insert(0, SyntaxFactory.Argument(receiver)))).WithTriviaFrom(node);
             }
             if (IsSetActive(node))
             {
                 if (node.Expression is not MemberAccessExpressionSyntax member)
                     Reject(node, "Null-conditional GameObject.SetActive calls are unsupported by the initialization barrier; use an explicit null check");
-                var receiver = (ExpressionSyntax)Visit(((MemberAccessExpressionSyntax)node.Expression).Expression)!;
+                // The receiver becomes the first argument. What stands in front of it (a blank
+                // line, a comment, `#endif`) stands in front of the statement and comes back
+                // with the trivia of the call: left on the receiver it would be in the output
+                // twice, a directive of it inside the argument list.
+                var call = (MemberAccessExpressionSyntax)node.Expression;
+                var receiver = After(((ExpressionSyntax)Visit(call.Expression)!).WithoutLeadingTrivia(),
+                    call.OperatorToken.LeadingTrivia, call.OperatorToken.TrailingTrivia, call.Name.GetLeadingTrivia(), call.Name.GetTrailingTrivia());
                 var arguments = (ArgumentListSyntax)Visit(node.ArgumentList)!;
                 SetActiveCalls++;
                 return SyntaxFactory.InvocationExpression(SyntaxFactory.ParseExpression(Lifecycle + ".SetActive"),
@@ -1552,8 +1634,9 @@ internal static class Program
             if (owner is not null && conditionalReceivers.TryGetValue(owner.SpanStart, out var receiver))
             {
                 if (IsTransformRootRead(node)) return RootCall(receiver, node);
+                var bound = (SimpleNameSyntax)Visit(node.Name)!;
                 return SyntaxFactory.MemberAccessExpression(SyntaxKind.SimpleMemberAccessExpression, receiver,
-                    (SimpleNameSyntax)Visit(node.Name)!).WithTriviaFrom(node);
+                    bound.WithLeadingTrivia(node.OperatorToken.TrailingTrivia.AddRange(bound.GetLeadingTrivia()))).WithTriviaFrom(node);
             }
             return base.VisitMemberBindingExpression(node);
         }
@@ -1568,8 +1651,9 @@ internal static class Program
             if (IsTransformRootRead(node)) return RootCall((ExpressionSyntax)Visit(node.Expression)!, node);
             if (!IsActiveAndEnabledRead(node)) return base.VisitMemberAccessExpression(node);
             ActiveAndEnabledReads++;
-            var receiver = node.Expression is BaseExpressionSyntax ? SyntaxFactory.ThisExpression()
-                : (ExpressionSyntax)Visit(node.Expression)!;
+            var receiver = node.Expression is BaseExpressionSyntax ? SyntaxFactory.ThisExpression().WithTrailingTrivia(node.Expression.GetTrailingTrivia())
+                : ((ExpressionSyntax)Visit(node.Expression)!).WithoutLeadingTrivia();
+            receiver = After(receiver, node.OperatorToken.LeadingTrivia, node.OperatorToken.TrailingTrivia, node.Name.GetLeadingTrivia());
             return SyntaxFactory.InvocationExpression(SyntaxFactory.ParseExpression(Lifecycle + ".IsActiveAndEnabled"),
                 SyntaxFactory.ArgumentList(SyntaxFactory.SingletonSeparatedList(SyntaxFactory.Argument(receiver))))
                 .WithTriviaFrom(node);
@@ -1789,10 +1873,13 @@ internal static class Program
 
         /// A `#line` directive that gives the line of `token` its number in the source file.
         /// `token` belongs to the tree as it was read.
+        /// The line after the directive begins with as many spaces as stand in front of the
+        /// token in the source, so what shares its line (`void OnEnable() { Fire(); }`) also
+        /// keeps its column.
         private SyntaxTriviaList Resume(SyntaxToken token)
         {
-            int line = token.SyntaxTree!.GetLineSpan(new Microsoft.CodeAnalysis.Text.TextSpan(token.FullSpan.Start, 0)).StartLinePosition.Line + 1;
-            return SyntaxFactory.ParseLeadingTrivia($"\n#line {line} \"{token.SyntaxTree.FilePath}\"\n");
+            var start = token.SyntaxTree!.GetLineSpan(new Microsoft.CodeAnalysis.Text.TextSpan(token.FullSpan.Start, 0)).StartLinePosition;
+            return SyntaxFactory.ParseLeadingTrivia($"\n#line {start.Line + 1} \"{token.SyntaxTree.FilePath}\"\n{new string(' ', start.Character)}");
         }
 
         private static void Reject(SyntaxNode node, string message)

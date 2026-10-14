@@ -284,6 +284,8 @@ impl Compiler {
                 "-o",
                 &payload,
                 "-p:NuGetAudit=false",
+                sys::BUILD_WITHOUT_SERVERS[0],
+                sys::BUILD_WITHOUT_SERVERS[1],
             ],
         )
         .map_err(|error| anyhow!("build standalone NGO postprocessor: {error}"))?;
@@ -296,7 +298,15 @@ impl Compiler {
             bail!("Netcode processor build produced no executable");
         }
         atomic_json(&join(&[&payload, "files.json"]), &files)?;
-        sys::rename(&payload, &entry)?;
+        sys::publish(&payload, &entry, || {
+            read_json_file::<NilMap<String>>(&join(&[&entry, "files.json"])).is_ok_and(|files| {
+                !files.at("Unity.Netcode.Editor.CodeGen.dll").is_empty()
+                    && verify_cache_files(&entry, &files)
+            })
+        })?;
+        // The entry another process published meanwhile lists its own files.
+        let files = read_json_file::<NilMap<String>>(&join(&[&entry, "files.json"]))
+            .map_err(|error| anyhow!("read the published Netcode processor: {error}"))?;
         self.netcode_ready(&entry, &key, inputs, files)
     }
 

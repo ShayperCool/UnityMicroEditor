@@ -144,6 +144,8 @@ pub fn prepare_patcher(ctx: &Context, sdk: &Sdk, cache: &str) -> Result<String> 
             &payload,
             &format!("-p:RoslynPath={}", sysutil::dir(&sdk.csc)),
             "-p:NuGetAudit=false",
+            crate::compiler::BUILD_WITHOUT_SERVERS[0],
+            crate::compiler::BUILD_WITHOUT_SERVERS[1],
         ],
     )
     .map_err(|error| anyhow!("build hot reload patch builder: {error}"))?;

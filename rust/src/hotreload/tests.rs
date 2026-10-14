@@ -1817,6 +1817,32 @@ fn newest_copy(root: &str, name: &str) -> String {
     found.expect("a rewritten copy of the source").1
 }
 
+/// The marks `/*L<n>*/` of a source or of its rewritten copy, each with the
+/// line it stands on as the `#line` directives of the text number the lines.
+fn marked_lines(text: &str) -> Vec<(u32, u32)> {
+    let mut marks = Vec::new();
+    let mut line = 1;
+    for content in text.split('\n') {
+        if let Some(directive) = content.trim_start().strip_prefix("#line ") {
+            line = directive
+                .split_whitespace()
+                .next()
+                .and_then(|number| number.parse().ok())
+                .expect("a line number");
+            continue;
+        }
+        for (at, _) in content.match_indices("/*L") {
+            let digits: String = content[at + 3..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            marks.push((digits.parse().unwrap(), line));
+        }
+        line += 1;
+    }
+    marks
+}
+
 /// The whole way of an edit without a Player: the real compiler pipeline
 /// (lifecycle helper, Roslyn, a Player directory per revision) on a
 /// synthetic project, the assemblies as the runner reads them from it, the
@@ -1890,6 +1916,19 @@ public static class RawLifecycle {
  public static bool ShouldCollect(ScriptableObject target, Phase phase) => false;
  public static void Enqueue(MonoBehaviour target, Phase phase, Action callback, int order) {}
  public static void Enqueue(ScriptableObject target, Phase phase, Action callback, int order) {}
+ public static bool IsActiveAndEnabled(Behaviour target) => true;
+ public static void SetActive(GameObject target, bool value) {}
+}
+public static class RawPrefabTransforms {
+ public static Transform Root(Transform target) => target;
+ public static Component GetComponentInChildren(Component target, Type type) => null;
+ public static Component GetComponentInChildren(Component target, Type type, bool includeInactive) => null;
+ public static Component GetComponentInChildren(GameObject target, Type type) => null;
+ public static Component GetComponentInChildren(GameObject target, Type type, bool includeInactive) => null;
+ public static T GetComponentInChildren<T>(Component target) => default;
+ public static T GetComponentInChildren<T>(Component target, bool includeInactive) => default;
+ public static T GetComponentInChildren<T>(GameObject target) => default;
+ public static T GetComponentInChildren<T>(GameObject target, bool includeInactive) => default;
 }}"#,
         &[],
     );
@@ -1913,8 +1952,74 @@ public static class RawLifecycle {
         "Assets/Probe.cs.meta",
         "guid: 10000000000000000000000000000001\nMonoImporter:\n  executionOrder: 0\n",
     );
+    // The calls the rewrite replaces by calls of the bridge, written the
+    // ways scripts write them: after a blank line, a comment, `#endif` and
+    // `#region`, and over several lines. A mark `/*L<n>*/` stands on line n.
+    const LINES: &str = "public class Lines : UnityEngine.MonoBehaviour
+{
+    public UnityEngine.GameObject panel;
+    public UnityEngine.Transform target;
+    void OnDisable() { /*C*/Note(); }
+    void Note() { }
+    public string Run()
+    {
+        /*L9*/Note();
+
+        /*L11*/panel.SetActive(true);
+        // a comment in front
+        /*L13*/panel.SetActive(false);
+#if UNITY_6000_6
+        /*L15*/Note();
+#endif
+        /*L17*/panel.SetActive(true);
+        #region Shown
+        /*L19*/panel.SetActive(false);
+        #endregion
+        /*L21*/panel
+            .SetActive(
+                /*L23*/true);
+        /*L24*/var found = GetComponentInChildren<UnityEngine.Transform>(
+            /*L25*/true);
+        /*L26*/var other = panel.GetComponentInChildren(
+            typeof(UnityEngine.Transform),
+            /*L28*/includeInactive: false);
+        /*L29*/var root = target
+            .root;
+        /*L31*/var chained = target
+            ?.root
+            /*L33*/?.name;
+        /*L34*/bool on = this
+            .isActiveAndEnabled;
+        /*L36*/Note();
+        return chained + found + other + root + on;
+    }
+}
+";
+    let lines = file("Assets/Lines.cs", LINES);
+    file(
+        "Assets/Lines.cs.meta",
+        "guid: 10000000000000000000000000000002\nMonoImporter:\n  executionOrder: 0\n",
+    );
+    // A `#line` that the compiler does not obey sets no line, and a path
+    // that holds a line terminator cannot stand in a directive.
+    const INACTIVE: &str = "public static class Inactive
+{
+#if UNITY_EDITOR
+#line 5 \"nowhere.cs\"
+#endif
+    public static int One() { return 1; }
+}
+";
+    let inactive = file("Assets/Inactive.cs", INACTIVE);
+    const SEPARATED: &str =
+        "public static class Separated { public static int Two() { return 2; } }\n";
+    let separated = file("Assets/line\u{2028}sep/Separated.cs", SEPARATED);
     let exported = sysutil::join(&[&project, "Library/ScriptAssemblies/Assembly-CSharp.dll"]);
-    compile(&exported, &probe(1, 1, ""), &[&bridge]);
+    compile(
+        &exported,
+        &format!("{}{LINES}{INACTIVE}{SEPARATED}", probe(1, 1, "")),
+        &[&bridge],
+    );
     let graph = CompilerGraphExport {
         schema_version: 1,
         project: project.clone(),
@@ -1922,7 +2027,12 @@ public static class RawLifecycle {
         assemblies: NilVec::from([CompilerGraphAssembly {
             config: AssemblyConfig {
                 name: "Assembly-CSharp".into(),
-                sources: NilVec::from([source.clone()]),
+                sources: NilVec::from([
+                    source.clone(),
+                    lines.clone(),
+                    inactive.clone(),
+                    separated.clone(),
+                ]),
                 defines: NilVec::from(["UNITY_6000_6".to_string()]),
                 config: crate::compiler::AssemblyOptions {
                     allow_unsafe: true,
@@ -1934,13 +2044,22 @@ public static class RawLifecycle {
             references: NilVec::from(["UnityMicroEditor".to_string()]),
             ..Default::default()
         }]),
-        scripts: NilVec::from([CompileScript {
-            guid: "10000000000000000000000000000001".into(),
-            path: source.clone(),
-            assembly: "Assembly-CSharp".into(),
-            type_name: "Probe".into(),
-            host_provided: false,
-        }]),
+        scripts: NilVec::from([
+            CompileScript {
+                guid: "10000000000000000000000000000001".into(),
+                path: source.clone(),
+                assembly: "Assembly-CSharp".into(),
+                type_name: "Probe".into(),
+                host_provided: false,
+            },
+            CompileScript {
+                guid: "10000000000000000000000000000002".into(),
+                path: lines.clone(),
+                assembly: "Assembly-CSharp".into(),
+                type_name: "Lines".into(),
+                host_provided: false,
+            },
+        ]),
         compiler_inputs: crate::compiler::NilMap::make(),
         ..Default::default()
     };
@@ -1955,6 +2074,39 @@ public static class RawLifecycle {
         &sysutil::join(&[&project, "Temp/prepared/compile.json"]),
     )
     .unwrap();
+    // The rewrite kept every line: each mark of the copy stands on the line
+    // it names, once, as the directives of the copy number the lines. The
+    // compile above is the proof that no directive of the source ended up
+    // inside an argument list.
+    let copy = fs::read_to_string(newest_copy(&project, "Lines.cs")).unwrap();
+    assert!(
+        copy.starts_with(&format!("#line 1 \"{lines}\"\n")),
+        "{copy}"
+    );
+    let marks = marked_lines(&copy);
+    let named: Vec<u32> = marked_lines(LINES).iter().map(|(mark, _)| *mark).collect();
+    assert_eq!(named.len(), 17);
+    assert_eq!(
+        marks,
+        named.iter().map(|mark| (*mark, *mark)).collect::<Vec<_>>(),
+        "{copy}"
+    );
+    // A callback on one line keeps its column behind the directive.
+    let column = |text: &str| {
+        let line = text.lines().find(|line| line.contains("/*C*/")).unwrap();
+        line.find("/*C*/").unwrap()
+    };
+    assert_eq!(column(&copy), column(LINES), "{copy}");
+    // An inactive `#line` leaves the directives on, a path that cannot
+    // stand in one switches them off.
+    let copy = fs::read_to_string(newest_copy(&project, "Inactive.cs")).unwrap();
+    assert!(
+        copy.starts_with(&format!("#line 1 \"{inactive}\"\n")),
+        "{copy}"
+    );
+    let copy = fs::read_to_string(newest_copy(&project, "Separated.cs")).unwrap();
+    assert_eq!(copy, SEPARATED);
+
     let baseline = sysutil::join(&[&project, "Temp/scene-prepared/current.json"]);
     fs::create_dir_all(sysutil::dir(&baseline)).unwrap();
     crate::util::atomic_json(&baseline, &prepared).unwrap();
@@ -1966,7 +2118,58 @@ public static class RawLifecycle {
         &sysutil::join(&[&project, "Temp/session/compiler"]),
     )
     .unwrap();
+    // The preparation names the lifecycle helper that rewrote its assembly,
+    // and a session with that helper has nothing to compile.
+    let helper_key = compiler.lifecycle_helper_key().unwrap().0;
+    assert_eq!(prepared.compiler.assemblies[0].lifecycle_helper, helper_key);
     assert!(matches!(compiler.compile(&ctx, None), Ok(None)));
+    // A preparation of another build of the helper (here: one made before
+    // the helper was recorded) holds the output of another rewrite. The
+    // session compiles the assembly again before a Player starts on it.
+    let mut older = prepared.clone();
+    older.compiler.assemblies[0].lifecycle_helper = String::new();
+    let older_baseline = sysutil::join(&[&project, "Temp/scene-prepared/older.json"]);
+    crate::util::atomic_json(&older_baseline, &older).unwrap();
+    let older_cache = sysutil::join(&[&project, "Temp/older-session/compiler"]);
+    let recompile = || {
+        Compiler::new(
+            &project,
+            &older_baseline,
+            &prepared.player,
+            &editor,
+            &older_cache,
+        )
+        .unwrap()
+        .compile(&ctx, None)
+        .unwrap()
+        .expect("a preparation of another helper is compiled again")
+    };
+    let update = recompile();
+    assert_eq!(update.compiled_assemblies.to_vec(), ["Assembly-CSharp"]);
+    assert!(!update.cache_reused);
+    // The next session of that preparation takes the revision from the cache.
+    assert!(recompile().cache_reused);
+    // A cache entry that fails its check is replaced, not a reason to
+    // reject every compile of that state: without the revision cache the
+    // assembly is looked up again, and its entry holds a changed DLL.
+    fs::remove_dir_all(sysutil::join(&[&older_cache, "code-revisions"])).unwrap();
+    let entries = sysutil::join(&[&older_cache, "assemblies"]);
+    let mut damaged = 0;
+    for entry in fs::read_dir(&entries).unwrap().flatten() {
+        let dll = entry.path().join("Assembly-CSharp.dll");
+        if dll.is_file() {
+            fs::write(&dll, b"cut short").unwrap();
+            damaged += 1;
+        }
+    }
+    assert_eq!(damaged, 1);
+    let update = recompile();
+    assert_eq!(update.compiled_assemblies.to_vec(), ["Assembly-CSharp"]);
+    assert_eq!(
+        fs::read_dir(&entries).unwrap().count(),
+        1,
+        "the rebuilt entry replaces the damaged one and leaves no payload behind"
+    );
 
     // The session's two programs, and a Player that "starts" on the
     // baseline assemblies.
@@ -2084,7 +2287,11 @@ public static class RawLifecycle {
         "{copy}: {}",
         &rewritten[..rewritten.len().min(200)]
     );
-    let resumed = format!("\n#line 7 \"{source}\"\n{{ seed += 2; }}");
+    // The line behind the directive starts with the column the brace has.
+    let resumed = format!(
+        "\n#line 7 \"{source}\"\n{}{{ seed += 2; }}",
+        " ".repeat("    void Awake() ".len())
+    );
     assert!(rewritten.contains(&resumed), "{copy}:\n{rewritten}");
     let (request, descriptor) = player.seen()[0].clone();
     assert_eq!(request["generation"], 1);

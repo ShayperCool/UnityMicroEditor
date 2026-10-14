@@ -66,6 +66,9 @@ impl Compiler {
                     assembly.name
                 );
             }
+            // The accepted graph was checked against the session's helper when
+            // it started, and what differed was compiled again.
+            assembly.lifecycle_helper = self.lifecycle_helper_key()?.0;
             if needs_netcode(&assembly) && self.netcode_processed.on(&assembly.name) {
                 assembly.netcode_postprocessor = self.prepare_netcode_processor(ctx)?.key;
             }
