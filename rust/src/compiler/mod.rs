@@ -13,6 +13,7 @@ mod prepare;
 mod revision;
 mod script_types;
 mod server;
+mod service;
 mod source_graph;
 mod stamp;
 mod sys;
@@ -39,6 +40,7 @@ pub use prepare::{
 };
 pub use revision::{CodeRevision, player_files};
 pub use server::{Client as CompilerClient, CompilerServer, analyzer_failure, csc_command};
+pub use service::{Reply as ServiceReply, Service, ServiceError};
 pub use source_graph::{managed_plugin, remove_source_native_initializers};
 pub use stamp::{PlayerMap, Stamp};
 pub use sys::{BUILD_WITHOUT_SERVERS, CommandError, compiler_command, glob, path_match};
@@ -535,6 +537,11 @@ pub struct Compiler {
     /// `UME_COMPILER_VERIFY=1`: every served compile is compared with a
     /// compile in a process of its own.
     pub verify_compiles: bool,
+    /// Whether the lifecycle helper runs as a service of the session.
+    pub serve_helper: bool,
+    /// The service of the lifecycle helper, kept by every clone of this
+    /// compiler and bound to the helper it was started from.
+    pub helper_service: Arc<Mutex<Option<Arc<Service>>>>,
 }
 
 /// `UME_COMPILER_COLD=1`: a session starts no process that outlives one
@@ -554,6 +561,7 @@ impl Compiler {
         if compiler_cold() {
             return;
         }
+        self.serve_helper = true;
         self.compiler_server = Some(Arc::new(CompilerServer::new(
             &self.dotnet,
             &self.csc,

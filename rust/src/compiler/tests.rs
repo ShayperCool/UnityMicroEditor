@@ -3675,3 +3675,381 @@ fn compiler_server_restarts_on_a_changed_reference_sdk() {
         "the server that held the old reference still runs"
     );
 }
+
+/// A stand-in for `dotnet <program> --serve` that speaks the protocol of
+/// `service.rs` in the way the file `mode` beside the program says, and for
+/// `dotnet <program> <arguments>` run once.
+fn stand_in_service(root: &str) -> (String, String, String) {
+    let dotnet = write_graph_file(
+        root,
+        "sdk/dotnet",
+        r#"#!/bin/sh
+mode_file="$(dirname "$1")/mode"
+if [ "$2" != "--serve" ]; then
+  if [ "$2" = "fail" ]; then echo "Program.cs(1,1): error CS0103: boom" >&2; exit 1; fi
+  echo "one-shot $2"; exit 0
+fi
+[ "$(cat "$mode_file")" = "noserve" ] && { echo "Unknown argument --serve"; exit 1; }
+echo '{"ready":true,"protocol":1}'
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
+  case "$(cat "$mode_file")" in
+    ok) printf '{"id":%s,"exit":0,"output":"served %s\\n","error":"","kind":""}\n' "$id" "$id" ;;
+    wrongid) printf '{"id":%s,"exit":0,"output":"","error":"","kind":""}\n' "$((id + 100))" ;;
+    truncated) printf '{"id":%s,"exit":0' "$id"; exit 0 ;;
+    exit) exit 3 ;;
+    hang) sleep 300 ;;
+    error) printf '{"id":%s,"exit":1,"output":"","error":"a defect of the helper\\n","kind":"error"}\n' "$id" ;;
+    diagnostics) printf '{"id":%s,"exit":1,"output":"","error":"Program.cs(1,1): error CS0103: boom\\n","kind":"diagnostics"}\n' "$id" ;;
+  esac
+done
+"#,
+    );
+    fs::set_permissions(&dotnet, fs::Permissions::from_mode(0o700)).unwrap();
+    let program = write_graph_file(root, "helper/Helper.dll", "helper");
+    let mode = join(&[root, "helper/mode"]);
+    (dotnet, program, mode)
+}
+
+#[test]
+fn service_answers_and_falls_back_on_every_failure_of_its_process() {
+    let (_guard, root) = temp();
+    let (dotnet, program, mode) = stand_in_service(&root);
+    let set = |value: &str| sys::write(&mode, value.as_bytes()).unwrap();
+    let ctx = background();
+    let limit = std::time::Duration::from_millis(500);
+    let service = Service::new("test helper", &dotnet, &program);
+    set("ok");
+    let reply = service.call(&ctx, &root, &["a"], limit).unwrap();
+    assert_eq!((reply.exit, reply.output.as_str()), (0, "served 1\n"));
+    let first = service.pid().unwrap();
+    assert_eq!(
+        service.call(&ctx, &root, &["b"], limit).unwrap().output,
+        "served 2\n"
+    );
+    assert_eq!(
+        service.pid(),
+        Some(first),
+        "a second request started another process"
+    );
+    for (failure, timed_out) in [
+        ("wrongid", false),
+        ("truncated", false),
+        ("exit", false),
+        ("hang", true),
+    ] {
+        set(failure);
+        let error = service.call(&ctx, &root, &["c"], limit).unwrap_err();
+        assert_eq!(
+            matches!(error, ServiceError::TimedOut(_)),
+            timed_out,
+            "{failure}: {error}"
+        );
+        assert_eq!(service.pid(), None, "{failure}: the process was kept");
+        assert!(!process_alive(first) || failure != "wrongid");
+        set("ok");
+        // The next request starts another process.
+        assert!(
+            service.call(&ctx, &root, &["d"], limit).is_ok(),
+            "{failure}"
+        );
+        assert!(service.pid().is_some_and(|pid| pid != first));
+    }
+    let started = service.started();
+    // Three failures in a row and the session runs the helper once per request.
+    set("exit");
+    for _ in 0..3 {
+        assert!(service.call(&ctx, &root, &["e"], limit).is_err());
+    }
+    assert!(service.disabled());
+    set("ok");
+    assert!(service.call(&ctx, &root, &["f"], limit).is_err());
+    assert_eq!(service.pid(), None);
+    // The process that was running took the first, two new ones the others.
+    assert_eq!(service.started(), started + 2);
+    // A program without the mode is no service.
+    let other = Service::new("test helper", &dotnet, &program);
+    set("noserve");
+    assert!(other.call(&ctx, &root, &["g"], limit).is_err());
+    assert_eq!(other.pid(), None);
+    // Dropping the handle ends the process.
+    set("ok");
+    let last = Service::new("test helper", &dotnet, &program);
+    last.call(&ctx, &root, &["h"], limit).unwrap();
+    let pid = last.pid().unwrap();
+    drop(last);
+    assert!(!process_alive(pid), "a dropped service still runs");
+}
+
+/// What the lifecycle helper's caller gets from the service is what the
+/// helper run once gives: its output, or a compile error of the sources in
+/// the same words. Any other failure of the service is not reported: the
+/// request runs once more in a process of its own.
+#[test]
+fn helper_command_reports_only_what_a_one_shot_run_would() {
+    let (_guard, root) = temp();
+    let (dotnet, program, mode) = stand_in_service(&root);
+    let set = |value: &str| sys::write(&mode, value.as_bytes()).unwrap();
+    let ctx = background();
+    let compiler = Compiler {
+        dotnet: dotnet.clone(),
+        serve_helper: true,
+        ..Default::default()
+    };
+    set("ok");
+    assert_eq!(
+        compiler
+            .helper_command(&ctx, &root, &[&program, "request.json"])
+            .unwrap(),
+        b"served 1\n"
+    );
+    for failure in ["error", "wrongid", "exit", "truncated"] {
+        set(failure);
+        assert_eq!(
+            compiler
+                .helper_command(&ctx, &root, &[&program, "request.json"])
+                .unwrap(),
+            b"one-shot request.json\n",
+            "{failure}: a failure of the service was not run once more"
+        );
+    }
+    set("diagnostics");
+    let served = compiler
+        .helper_command(&ctx, &root, &[&program, "fail"])
+        .unwrap_err();
+    let cold = compiler_command(&ctx, &root, &dotnet, &[&program, "fail"]).unwrap_err();
+    assert_eq!(
+        served.message, cold.message,
+        "a compile error reads otherwise when served"
+    );
+    assert_eq!(served.output, cold.output);
+    // Without the service: the helper runs once per request.
+    let cold_compiler = Compiler {
+        dotnet,
+        ..Default::default()
+    };
+    set("ok");
+    assert_eq!(
+        cold_compiler
+            .helper_command(&ctx, &root, &[&program, "x"])
+            .unwrap(),
+        b"one-shot x\n"
+    );
+}
+
+/// The lifecycle helper served by one process gives, for the rewrite of an
+/// assembly, `--type-definitions` and `--declaration-hashes`, the output and
+/// the files its one-shot run gives, request after request; a compile error
+/// in the same words; it refuses what it does not serve and a reference
+/// whose bytes are not those the request names.
+#[test]
+fn compiler_lifecycle_service_matches_one_shot_sdk() {
+    let Some(editor) = sdk(
+        "UME_LIFECYCLE_SDK",
+        "set UME_LIFECYCLE_SDK to the matching Unity executable; SDK only",
+    ) else {
+        return;
+    };
+    let (_guard, root) = temp();
+    let ctx = background();
+    let mut cold = Compiler {
+        editor: editor.clone(),
+        cache: join(&[&root, "compiler"]),
+        ..Default::default()
+    };
+    cold.initialize_sdk().unwrap();
+    let helper = cold.prepare_lifecycle_helper(&ctx).unwrap();
+    let mut references: Vec<String> = cold.base_references.to_vec();
+    references.extend(cold.engine_references.iter().cloned());
+    let references = deduplicate_references(&references).to_vec();
+    // The part of the bridge the rewrite compiles against.
+    let bridge_source = write_graph_file(
+        &root,
+        "bridge/Bridge.cs",
+        r#"using System; using UnityEngine; namespace UnityMicroEditor.Raw {
+[AttributeUsage(AttributeTargets.Assembly)] public sealed class RawLifecycleInstrumentedAttribute : Attribute { public RawLifecycleInstrumentedAttribute(int version) {} }
+[AttributeUsage(AttributeTargets.Assembly)] public sealed class RawScriptableObjectInstrumentedAttribute : Attribute { public RawScriptableObjectInstrumentedAttribute(int version) {} }
+public static class RawLifecycle {
+ public enum Phase { Awake, OnEnable, OnDisable, OnDestroy }
+ public static bool ShouldCollect(MonoBehaviour target, Phase phase) => false;
+ public static bool ShouldCollect(ScriptableObject target, Phase phase) => false;
+ public static void Enqueue(MonoBehaviour target, Phase phase, Action callback, int order) {}
+ public static void Enqueue(ScriptableObject target, Phase phase, Action callback, int order) {}
+ public static bool IsActiveAndEnabled(Behaviour target) => true;
+ public static void SetActive(GameObject target, bool value) {}
+}}"#,
+    );
+    let bridge = join(&[&root, "bridge/UnityMicroEditor.dll"]);
+    let mut arguments = vec![
+        cold.csc.clone(),
+        "-nologo".into(),
+        "-target:library".into(),
+        "-nostdlib+".into(),
+        format!("-out:{bridge}"),
+    ];
+    arguments.extend(references.iter().map(|path| format!("-reference:{path}")));
+    arguments.push(bridge_source);
+    let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+    compiler_command(&ctx, &root, &cold.dotnet, &arguments).unwrap();
+    let mut all_references = references.clone();
+    all_references.push(bridge.clone());
+    let reference_hashes: BTreeMap<String, String> = all_references
+        .iter()
+        .map(|path| (path.clone(), hash(path)))
+        .collect();
+    let state = |value: u32, broken: bool| {
+        let text = format!(
+            "using UnityEngine;\npublic class Probe : MonoBehaviour\n{{\n    public int seed;\n    void Awake() {{ seed += {value}; }}\n    void OnEnable() {{ seed++; }}\n    void Update() {{ seed += {value}; }}\n}}\n{}",
+            if broken {
+                "public class Broken { int x = missing; }\n"
+            } else {
+                ""
+            }
+        );
+        let source = write_graph_file(&root, &format!("states/{value}-{broken}/Probe.cs"), &text);
+        let folder = join(&[&root, &format!("states/{value}-{broken}/out")]);
+        let request = join(&[&folder, "lifecycle-request.json"]);
+        sys::mkdir_all(&folder).unwrap();
+        atomic_json(
+            &request,
+            &json!({
+                "AllowUnsafe": false,
+                "AssemblyName": "Assembly-CSharp",
+                "Defines": ["UNITY_6000_6"],
+                "ExecutionOrders": {},
+                "MarkerPath": join(&[&folder, "Marker.cs"]),
+                "NativeBaseAssemblies": [],
+                "ReferenceHashes": reference_hashes,
+                "References": all_references,
+                "Sources": [{"OriginalPath": join(&[&root, "Assets/Probe.cs"]), "OutputPath": join(&[&folder, "Probe.cs"]), "Path": source}],
+            }),
+        )
+        .unwrap();
+        (folder, request)
+    };
+    let files =
+        |folder: &str| ["Probe.cs", "Marker.cs"].map(|name| fs::read(join(&[folder, name])).ok());
+    let clear = |folder: &str| {
+        for name in ["Probe.cs", "Marker.cs"] {
+            let _ = fs::remove_file(join(&[folder, name]));
+        }
+    };
+    let served = Compiler {
+        dotnet: cold.dotnet.clone(),
+        serve_helper: true,
+        ..Default::default()
+    };
+    let states: Vec<(String, String)> = (1..=2).map(|value| state(value, false)).collect();
+    let mut expected = Vec::new();
+    for (folder, request) in &states {
+        clear(folder);
+        let output = compiler_command(&ctx, folder, &cold.dotnet, &[&helper, request]).unwrap();
+        expected.push((output, files(folder)));
+    }
+    for round in 0..20 {
+        let index = round % 2;
+        let (folder, request) = &states[index];
+        clear(folder);
+        let output = served
+            .helper_command(&ctx, folder, &[&helper, request])
+            .unwrap();
+        assert_eq!(
+            output, expected[index].0,
+            "round {round}: the served proof differs"
+        );
+        assert_eq!(
+            files(folder),
+            expected[index].1,
+            "round {round}: the rewritten files differ"
+        );
+    }
+    let service = served.helper_service.lock().unwrap().clone().unwrap();
+    assert_eq!(service.started(), 1, "one process served every request");
+    let pid = service.pid().unwrap();
+    // A compile error: the same words, and the process stays.
+    let (folder, request) = state(3, true);
+    let cold_error =
+        compiler_command(&ctx, &folder, &cold.dotnet, &[&helper, &request]).unwrap_err();
+    let served_error = served
+        .helper_command(&ctx, &folder, &[&helper, &request])
+        .unwrap_err();
+    assert!(
+        served_error.message.contains("CS0103"),
+        "{}",
+        served_error.message
+    );
+    assert_eq!(served_error.message, cold_error.message);
+    assert_eq!(service.pid(), Some(pid));
+    // Metadata of two compiled assemblies, as the type and declaration checks ask.
+    let dlls: Vec<String> = [
+        "UnityEngine.CoreModule.dll",
+        "UnityEngine.PhysicsModule.dll",
+    ]
+    .iter()
+    .map(|name| {
+        references
+            .iter()
+            .find(|path| path.ends_with(&format!("/{name}")))
+            .unwrap()
+            .clone()
+    })
+    .chain([bridge.clone()])
+    .collect();
+    for mode in ["--type-definitions", "--declaration-hashes"] {
+        let mut arguments = vec![helper.as_str(), mode];
+        arguments.extend(dlls.iter().map(String::as_str));
+        let one_shot = compiler_command(&ctx, &root, &cold.dotnet, &arguments).unwrap();
+        assert_eq!(
+            served.helper_command(&ctx, &root, &arguments).unwrap(),
+            one_shot,
+            "{mode}"
+        );
+    }
+    // A reference whose bytes are not those the request names fails the
+    // served request, and the caller then runs it once.
+    let (folder, request) = state(4, false);
+    let mut document = read_json_file::<serde_json::Value>(&request).unwrap();
+    document["ReferenceHashes"][&bridge] = json!(sha256(b"other bytes"));
+    atomic_json(&request, &document).unwrap();
+    let reply = service
+        .call(
+            &ctx,
+            &folder,
+            &[&request],
+            std::time::Duration::from_secs(120),
+        )
+        .unwrap();
+    assert!(
+        reply.exit == 1
+            && reply.kind == "error"
+            && reply.error.contains("does not have the content"),
+        "{reply:?}"
+    );
+    let output = served
+        .helper_command(&ctx, &folder, &[&helper, &request])
+        .unwrap();
+    assert_eq!(
+        output,
+        compiler_command(&ctx, &folder, &cold.dotnet, &[&helper, &request]).unwrap()
+    );
+    // What runs game code, or is no request of a compile, is not served.
+    for arguments in [
+        vec!["--behaviour-objects", "/nowhere.json"],
+        vec!["--behaviour-layouts", "/nowhere.json"],
+        vec!["--source-type-declarations", "/nowhere.json"],
+        vec!["a.json", "b.json"],
+    ] {
+        let reply = service
+            .call(&ctx, &root, &arguments, std::time::Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(
+            (reply.exit, reply.kind.as_str()),
+            (64, "refused"),
+            "{arguments:?}"
+        );
+    }
+    assert_eq!(service.started(), 1);
+    drop(served);
+    drop(service);
+    assert!(!process_alive(pid), "the served helper outlived its owner");
+}
