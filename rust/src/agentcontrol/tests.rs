@@ -5351,5 +5351,9 @@ fn a_start_on_an_output_another_session_holds_is_refused() {
     );
     assert_eq!(c.status().phase, "stopped");
     drop(held);
+    // A child another test forks meanwhile shares the lock until it execs.
+    wait_for("the lock to be free", || {
+        crate::util::session_lock_holder(&output).is_none()
+    });
     start_ready(&c);
 }
