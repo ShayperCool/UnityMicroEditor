@@ -4,6 +4,8 @@ After a C# edit in a watched session the runner recompiles the changed game asse
 
 It is built with the .NET 8 SDK of the Unity installation and uses only `System.Reflection.Metadata` from the shared framework: no package, no reference, no Unity process.
 
+[docs/HOT_RELOAD.md](../../docs/HOT_RELOAD.md) is the guide for users and agents: every edit, reason and note code with what to do. This README is the builder's own account of how it decides.
+
 ```bash
 dotnet HotReloadPatcher.dll <request.json>                       # one JSON document on stdout, exit 0
 dotnet HotReloadPatcher.dll --codes                              # every reason and note code with its meaning
@@ -38,7 +40,7 @@ The policy is in `Diff.cs`, and in `Netcode.cs` for assemblies that use Netcode 
 
 ## Netcode for GameObjects
 
-The compiler runs the package's post-processor on every assembly whose compiled image references `Unity.Netcode.Runtime` (`tools/NetcodePostProcessor`). The builder is given the post-processed images and compares them like any others, so it also sees what the post-processor generated, and it reads from that what Netcode registered when the Player started. The rule: what is registered once, and what the two ends of a connection must agree on, is fixed in a running Player; everything else is code like any other.
+The compiler runs the package's post-processor (`tools/NetcodePostProcessor`) on every assembly that the prepared graph lets reference `Unity.Netcode.Runtime`; an image that does not reference it comes back as Roslyn wrote it. The builder is given the post-processed images and compares them like any others, so it also sees what the post-processor generated, and it reads from that what Netcode registered when the Player started. The rule: what is registered once, and what the two ends of a connection must agree on, is fixed in a running Player; everything else is code like any other.
 
 | Edit | Result |
 | --- | --- |
