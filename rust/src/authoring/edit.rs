@@ -181,11 +181,28 @@ impl Store {
                     changes.push(item);
                 }
                 "set_property" => {
-                    let before = asset.set_property(
-                        &operation.file_id,
-                        &operation.property,
-                        operation.value.as_ref().unwrap_or(&Value::Null),
-                    )?;
+                    let value = operation.value.as_ref().unwrap_or(&Value::Null);
+                    // A field the component's script declares and the file
+                    // does not hold yet (one added since the file was saved,
+                    // also by a hot reload patch) is written as a new key.
+                    let before =
+                        match asset.set_property(&operation.file_id, &operation.property, value) {
+                            Err(error)
+                                if error.code == "unsupported_property"
+                                    && error.message
+                                        == "property path is absent in authored data" =>
+                            {
+                                self.add_declared_field(
+                                    &mut asset,
+                                    &operation.file_id,
+                                    &operation.property,
+                                    value,
+                                )
+                                .map_err(|refusal| refusal.unwrap_or(error))?;
+                                Value::Null
+                            }
+                            other => other?,
+                        };
                     let mut item = change(&operation.file_id, &action);
                     item.property = operation.property;
                     item.before = (!before.is_null()).then_some(before);
@@ -304,6 +321,73 @@ impl Store {
             changes,
         })
     }
+    /// Writes `property` into a MonoBehaviour that lacks it, when it is a
+    /// top-level field that the component's script declares as one Unity
+    /// serializes: public or `[SerializeField]`, not static, const or
+    /// readonly. `Err(None)` when that cannot be shown, so the absent path
+    /// stands; `Err(Some(...))` for a script that declares no such field.
+    fn add_declared_field(
+        &self,
+        asset: &mut TextAsset,
+        file_id: &str,
+        property: &str,
+        value: &Value,
+    ) -> std::result::Result<(), Option<AuthoringError>> {
+        let Some(document) = asset.find(file_id) else {
+            return Err(None);
+        };
+        if document.class_id() != 114 || !super::script::identifier(property) {
+            return Err(None);
+        }
+        let guid = document.field("m_Script")["guid"]
+            .as_str()
+            .unwrap_or_default()
+            .to_lowercase();
+        let script = self.find_script_guid(&guid).map_err(|_| None)?;
+        let source = String::from_utf8(read_limited(&self.root.join(&script)).map_err(|_| None)?)
+            .map_err(|_| None)?;
+        if !declares_serialized_field(&source, property) {
+            return Err(Some(failure(
+                "unsupported_property",
+                "property path is absent in authored data, and the component's script declares no field of that name that Unity serializes",
+                Some(json!({"property": property, "script": script})),
+            )));
+        }
+        asset
+            .insert_top_level(
+                file_id,
+                property,
+                &super::yaml_edit::normalize(value).map_err(Some)?,
+            )
+            .map_err(Some)
+    }
+
+    /// The script source under Assets whose `.meta` holds `guid`.
+    fn find_script_guid(&self, guid: &str) -> Result<String> {
+        let mut found = Vec::new();
+        for path in self.walk_assets()? {
+            let relative = self.relative(&path);
+            if !relative.ends_with(".cs.meta")
+                || std::fs::symlink_metadata(&path)?.file_type().is_symlink()
+            {
+                continue;
+            }
+            let text = String::from_utf8(read_limited(&path)?).unwrap_or_default();
+            let matches: Vec<_> = guid_pattern().captures_iter(&text).collect();
+            if matches.len() == 1 && matches[0][1].to_lowercase() == guid {
+                found.push(relative.strip_suffix(".meta").unwrap().to_string());
+            }
+        }
+        match found.as_slice() {
+            [only] => Ok(only.clone()),
+            _ => Err(failure(
+                "not_found",
+                "the component's script is not one source under Assets",
+                Some(json!({"guid": guid})),
+            )),
+        }
+    }
+
     pub fn edit(&self, request: &EditRequest) -> Result<EditResult> {
         self.asset_path(&request.path, &[".unity", ".prefab", ".asset", ".mat"])?;
         if request.operations.is_empty() || request.operations.len() > 256 {
@@ -423,4 +507,25 @@ impl Store {
         }
         Ok(())
     }
+}
+
+/// Whether C# source declares `name` as a field Unity serializes: a
+/// declaration line that is public or carries `[SerializeField]`, ends the
+/// name with `=` or `;`, and is not static, const or readonly.
+pub(crate) fn declares_serialized_field(source: &str, name: &str) -> bool {
+    let pattern = regex::Regex::new(&format!(
+        r"(?m)^[ \t]*((?:\[[^\]\n]*\][ \t]*)*)([A-Za-z_][^;=(){{}}\n]*?)\b{}\s*(=[^;]*)?;",
+        regex::escape(name)
+    ))
+    .unwrap();
+    pattern.captures_iter(source).any(|capture| {
+        let (attributes, declaration) = (&capture[1], &capture[2]);
+        let words: Vec<&str> = declaration.split_whitespace().collect();
+        let modifiers = |word: &str| words.contains(&word);
+        !modifiers("static")
+            && !modifiers("const")
+            && !modifiers("readonly")
+            && !modifiers("return")
+            && (modifiers("public") || attributes.contains("SerializeField"))
+    })
 }
