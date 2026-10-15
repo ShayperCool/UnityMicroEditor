@@ -46,6 +46,13 @@ impl From<&SnapshotInput> for PublicationInput {
     }
 }
 
+/// Most non-metadata sources a snapshot records. With every file hashed and
+/// every source's revision, a snapshot of this many stays below
+/// `SNAPSHOT_MAXIMUM` even with long paths.
+const SOURCE_MAXIMUM: usize = 32768;
+/// Largest stored snapshot that is read back.
+pub(crate) const SNAPSHOT_MAXIMUM: u64 = 64 << 20;
+
 pub(crate) fn phase_id(id: &str, phase: &str) -> String {
     format!("{}-{phase}", &sha256(id.as_bytes())[..32])
 }
@@ -87,10 +94,13 @@ pub fn snapshot_source(ctx: &Context, project: &str) -> Result<SourceSnapshot> {
             Ok(Walk::Continue)
         })?;
     }
-    if sources.len() > 4096 {
+    if sources.len() > SOURCE_MAXIMUM {
         return Err(fail(
             "project_too_large",
-            "staged publication currently supports at most 4096 source dependencies",
+            format!(
+                "staging supports at most {SOURCE_MAXIMUM} authored sources, the project has {}",
+                sources.len()
+            ),
         ));
     }
     sources.sort();
@@ -161,7 +171,7 @@ pub fn clone_staging(
     let stage = join(&[directory, "project"]);
     agent_canonical(&stage)?;
     let marker = join(&[directory, "clone-complete.json"]);
-    match read_json::<SourceSnapshot>(&marker, 8 << 20) {
+    match read_json::<SourceSnapshot>(&marker, SNAPSHOT_MAXIMUM) {
         Ok(snapshot) => {
             if !sysutil::lstat(&stage).is_ok_and(|info| info.is_dir()) {
                 return Err(anyhow!(

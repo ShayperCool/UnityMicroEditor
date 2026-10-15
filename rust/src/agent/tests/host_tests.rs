@@ -61,6 +61,21 @@ fn host_stage_contains_addressables_generated_source_changes() {
 }
 
 #[test]
+fn snapshot_records_projects_above_four_thousand_sources() {
+    let (_guard, project) = review_project();
+    let folder = join(&[&project, "Assets/Many"]);
+    for index in 0..5000 {
+        write(&join(&[&folder, &format!("{index}.txt")]), "text");
+        write(
+            &join(&[&folder, &format!("{index}.txt.meta")]),
+            format!("fileFormatVersion: 2\nguid: {:032x}\n", index + 1),
+        );
+    }
+    let snapshot = snapshot_source(&ctx(), &project).unwrap();
+    assert!(snapshot.inputs.len() > 5000);
+}
+
+#[test]
 fn host_stage_normalizes_relative_packages_without_changing_source_manifest() {
     // The registered package is a sibling of the project.
     let (_guard, parent) = temp_dir();

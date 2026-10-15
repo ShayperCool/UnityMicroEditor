@@ -85,7 +85,8 @@ pub(crate) fn prepare_agent_host(
     )?;
 
     let snapshot_path = join(&[&directory, "source-snapshot.json"]);
-    let snapshot: SourceSnapshot = match read_json(&snapshot_path, 8 << 20) {
+    let snapshot: SourceSnapshot = match read_json(&snapshot_path, super::staging::SNAPSHOT_MAXIMUM)
+    {
         Ok(snapshot) => snapshot,
         Err(error) if not_exist(&error) => {
             let snapshot = super::snapshot_source(ctx, project)?;
