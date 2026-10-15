@@ -576,6 +576,37 @@ impl TextAsset {
             .replace_range(start..end, &replacement);
         self.refresh()
     }
+    /// Appends the top-level key `key` with `value` to an object that does
+    /// not have it, at the indentation of its other keys.
+    pub fn insert_top_level(&mut self, file_id: &str, key: &str, value: &Value) -> Result<()> {
+        let position = self.position(file_id).ok_or_else(|| {
+            failure(
+                "not_found",
+                "serialized object does not exist",
+                Some(json!({"fileId": file_id})),
+            )
+        })?;
+        let doc = &self.docs[position];
+        if doc.node.field(key).is_some() {
+            return Err(failure(
+                "invalid_request",
+                "the property exists already",
+                Some(json!({"property": key})),
+            ));
+        }
+        let pad = match doc.node.content.first() {
+            Some(first) => " ".repeat(column(&doc.body, first.start)),
+            None => "  ".into(),
+        };
+        let text = yamlcodec::encode_node(&yamlcodec::value_node(value)?)?;
+        let text = text.replace('\n', &format!("{}{pad}", self.newline));
+        let body = &mut self.docs[position].body;
+        if !body.is_empty() && !body.ends_with('\n') {
+            body.push_str(self.newline);
+        }
+        body.push_str(&format!("{pad}{key}: {text}{}", self.newline));
+        self.refresh()
+    }
     pub fn set_property(&mut self, file_id: &str, path: &str, value: &Value) -> Result<Value> {
         self.set_property_mode(file_id, path, value, true)
     }

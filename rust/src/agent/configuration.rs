@@ -10,7 +10,7 @@ use crate::{
     cancel::Context,
     compiler::{CompileManifest, CompilerGraphExport, NilMap, Walk, WalkEntry, walk_dir},
     jsondoc::{self, Json},
-    project::{is_owned_cache_path, value},
+    project::{is_owned_cache_path, lexpath::rune_lower, value},
     sha256, sysutil,
     util::{agent_canonical, file_hash, within_directory},
 };
@@ -19,6 +19,34 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 
 pub(crate) use crate::compiler::requires_new_graph;
+
+/// Unity's package cache and the content store of `crate::packages`, below
+/// the project.
+const PACKAGE_CACHE: &str = "Library/PackageCache";
+const PACKAGE_STORE: &str = "Library/UnityMicroEditor/packages/content";
+
+/// How many request ids the recovery has for one state of the sources, and
+/// how many other preparations of the project it looks at for one that fits.
+const RECOVERY_ATTEMPTS: u32 = 16;
+const KNOWN_PREPARATIONS: usize = 8;
+/// The error code of a preparation whose sources changed while it ran.
+pub(crate) const SUPERSEDED: &str = "preparation_superseded";
+
+/// What the service knows of the preparation job a request id names.
+enum Known {
+    Nothing,
+    Running,
+    Confirmed(Box<super::Preparation>),
+    /// The error code of its receipt.
+    Failed(String),
+}
+/// How a rejection that needs a new graph is answered.
+enum Plan {
+    /// The session restarts on a preparation the project has.
+    Continue(Box<super::Preparation>),
+    /// The preparation with this request id is queued, or runs, or failed.
+    Request(String),
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ConfigurationSelection {
@@ -39,27 +67,46 @@ pub(crate) fn managed_configuration_path(path: &str) -> bool {
 }
 
 struct Tracker {
+    /// The graph: what a preparation is made from.
     hashes: BTreeMap<String, String>,
+    /// The content of every tracked file, the scene and the sources too.
+    contents: BTreeMap<String, String>,
     file_hashes: BTreeMap<String, String>,
+}
+/// Whether only the presence of a file names the graph, not its content: a
+/// C# source (its `.meta` holds its identity and stays tracked whole), and the
+/// selected scene. A session compiles the content of the sources it starts
+/// on, and the runner loads the scene it has; a preparation made from other
+/// content of them serves as well. A save of such a file while the
+/// preparation of a recovery runs must not void that preparation and ask for
+/// another one.
+fn presence_only(path: &str) -> bool {
+    rune_lower(sysutil::ext(path)) == ".cs"
 }
 impl Tracker {
     fn track(&mut self, path: &str, key: String, optional: bool) -> Result<()> {
-        if let Some(hash) = self.file_hashes.get(path).filter(|hash| !hash.is_empty()) {
-            self.hashes.insert(key, hash.clone());
-            return Ok(());
-        }
-        agent_canonical(path)?;
-        if let Err(error) = lstat(path) {
-            if not_exist(&error) && optional {
-                self.hashes.insert(key, "absent".into());
-                self.file_hashes.insert(path.into(), "absent".into());
-                return Ok(());
+        self.track_as(path, key, optional, presence_only(path))
+    }
+    fn track_as(&mut self, path: &str, key: String, optional: bool, presence: bool) -> Result<()> {
+        let hash = match self.file_hashes.get(path).filter(|hash| !hash.is_empty()) {
+            Some(hash) => hash.clone(),
+            None => {
+                agent_canonical(path)?;
+                let hash = match lstat(path) {
+                    Err(error) if not_exist(&error) && optional => "absent".to_string(),
+                    Err(error) => return Err(error),
+                    Ok(_) => file_hash(path)?,
+                };
+                self.file_hashes.insert(path.into(), hash.clone());
+                hash
             }
-            return Err(error);
-        }
-        let hash = file_hash(path)?;
-        self.hashes.insert(key, hash.clone());
-        self.file_hashes.insert(path.into(), hash);
+        };
+        let graph = match presence && hash != "absent" {
+            true => "present".to_string(),
+            false => hash.clone(),
+        };
+        self.hashes.insert(key.clone(), graph);
+        self.contents.insert(key, hash);
         Ok(())
     }
 }
@@ -68,13 +115,26 @@ impl Tracker {
 /// authored roots, the selected scene, and registered package sources from the
 /// active preparation's verified graph. Missing declared inputs have an
 /// identity too, so repairing a failed preparation cannot remain stuck on a
-/// prior durable job after a source is added or removed.
+/// prior durable job after a source is added or removed. A C# source and the
+/// selected scene count by their presence (see `presence_only`).
 pub fn configuration_revision(
     project: &str,
     selections: &[ConfigurationSelection],
 ) -> Result<String> {
+    revisions(project, selections).map(|(graph, _)| graph)
+}
+
+/// The same inputs by their content, the sources and the scene too: a
+/// failed preparation is not the answer for sources that were edited since.
+#[cfg(test)]
+pub fn sources_revision(project: &str, selections: &[ConfigurationSelection]) -> Result<String> {
+    revisions(project, selections).map(|(_, content)| content)
+}
+
+fn revisions(project: &str, selections: &[ConfigurationSelection]) -> Result<(String, String)> {
     let mut tracker = Tracker {
         hashes: BTreeMap::new(),
+        contents: BTreeMap::new(),
         file_hashes: BTreeMap::new(),
     };
     for folder in ["Assets", "Packages", "ProjectSettings"] {
@@ -110,7 +170,7 @@ pub fn configuration_revision(
                 ));
             }
             let path = join(&[project, &selection.scene]);
-            tracker.track(&path, selection.scene.clone(), false)?;
+            tracker.track_as(&path, selection.scene.clone(), false, true)?;
             tracker.track(
                 &format!("{path}.meta"),
                 format!("{}.meta", selection.scene),
@@ -187,12 +247,20 @@ pub fn configuration_revision(
                 }
                 continue;
             }
-            if within_directory(&root.source, &join(&[project, "Library"]))
-                && !within_directory(&root.source, &join(&[project, "Library/PackageCache"]))
+            // Two places below `Library` hold package sources as they were
+            // published: Unity's package cache, and the content store of
+            // this tool's own resolver, which names each package by the
+            // hash of its content. Everything else there is an output.
+            let published = [PACKAGE_CACHE, PACKAGE_STORE]
+                .iter()
+                .any(|store| within_directory(&root.source, &join(&[project, store])));
+            if within_directory(&root.source, &join(&[project, "Library"])) && !published
                 || within_directory(&root.source, &join(&[project, "Temp"]))
             {
                 return Err(anyhow!(
-                    "registered package source crosses a private project cache"
+                    "the package {} of the prepared graph has its source in a private cache of the project: {}",
+                    root.path,
+                    root.source
                 ));
             }
             agent_canonical(&root.source)?;
@@ -270,7 +338,10 @@ pub fn configuration_revision(
             tracker.track(path, format!("compiler-input:{path}"), true)?;
         }
     }
-    Ok(sha256(&marshal(&tracker.hashes)?))
+    Ok((
+        sha256(&marshal(&tracker.hashes)?),
+        sha256(&marshal(&tracker.contents)?),
+    ))
 }
 
 impl Service {
@@ -298,56 +369,115 @@ impl Service {
             _ => String::new(),
         };
         // A status poll must not hide the rejection either: it reports that a
-        // new preparation is required and starts the same recovery.
-        if action != "wait_update" && action != "status" {
+        // new preparation is required and starts the same recovery. Both
+        // waits report an edit alike.
+        if action != "wait_update" && action != "wait" && action != "status" {
             return outcome;
         }
         let RuntimeValue::Controller(Reply::State(state)) = &outcome.value else {
             return outcome;
         };
-        if state.phase != "ready"
-            || !requires_new_graph(&state.update_error)
-            || outcome.error.as_ref().is_some_and(context_error)
-        {
+        // The runner marked its answer as not its last: it is still working
+        // on source changes, and the rejection may be taken back by the
+        // next one. No preparation is queued on such an answer.
+        if state.update_pending {
+            return outcome;
+        }
+        // An edit that hot reload refused is answered by a recompile of the
+        // prepared graph, whatever its text says; it never needs a preparation.
+        // A session that could not start because the sources have left the
+        // prepared graph (a reset after such an edit) needs the same.
+        let reason = match state.phase.as_str() {
+            "ready" if !state.code_refused() && requires_new_graph(&state.update_error) => {
+                state.update_error.clone()
+            }
+            "failed" if requires_new_graph(&state.last_error) => state.last_error.clone(),
+            _ => return outcome,
+        };
+        if outcome.error.as_ref().is_some_and(context_error) {
             return outcome;
         }
         let (scene, baseline) = (self.scene(), self.baseline());
         if scene.is_empty() {
             return outcome;
         }
-        let revision = match configuration_revision(
+        let revision = match revisions(
             &self.0.project,
             &[ConfigurationSelection {
                 scene: scene.clone(),
                 baseline,
             }],
         ) {
-            Ok(revision) => revision,
+            Ok(revisions) => revisions,
+            // The recovery cannot begin. A status still is the state of the
+            // session, with what stands in its way; a wait fails with the
+            // reason of the rejection and the calls that are left.
             Err(error) => {
-                return RuntimeOutcome {
-                    value: outcome.value,
-                    error: Some(error),
+                let unqueued = format!(
+                    "the preparation this change needs could not be queued: {}. Call project_prepare with this scene and activate true, or session_control(reset)",
+                    super::error_text(&error)
+                );
+                if action != "status" {
+                    let failure = anyhow!("{reason}; {unqueued}");
+                    return RuntimeOutcome {
+                        value: outcome.value,
+                        error: Some(failure),
+                    };
+                }
+                let reply = super::jobs::state_members(state).and_then(|mut reply| {
+                    reply.insert("preparationRequired".into(), true.into());
+                    reply.insert("preparationReason".into(), reason.clone().into());
+                    reply.insert("preparationError".into(), unqueued.into());
+                    map_reply(reply)
+                });
+                return match reply {
+                    Ok(value) => RuntimeOutcome::handler(value),
+                    Err(error) => RuntimeOutcome::failed(error),
                 };
             }
         };
-        let identity = format!(
-            "config-{}",
-            &sha256(format!("{scene}\n{revision}").as_bytes())[..40]
-        );
+        // The preparation that answers this rejection: one the project
+        // already has, or the request that makes it.
+        let (revision, sources) = revision;
+        let plan = self.plan_recovery(&scene, &revision, &sources);
         let reply = || -> Result<_> {
-            let arguments = marshal(&Any::Object(obj([
-                ("scene", scene.clone().into()),
-                ("requestId", identity.into()),
-                ("activate", true.into()),
-            ])))?;
-            let preparation = self.handle(ctx, "project_prepare", &arguments);
+            let (preparation, continued) = match &plan {
+                Plan::Continue(known) => match self.continue_on(known, &revision) {
+                    Ok(current) => (super::json_reply(known), current),
+                    Err(error) => (Err(error), None),
+                },
+                Plan::Request(identity) => {
+                    let arguments = marshal(&Any::Object(obj([
+                        ("scene", scene.clone().into()),
+                        ("requestId", identity.clone().into()),
+                        ("activate", true.into()),
+                    ])))?;
+                    // The receipt of a failed job answers these sources for
+                    // as long as they stay as they are. The failure may not be
+                    // theirs (an Editor that did not exit in time, a full
+                    // disk), so the reply names the call that tries again.
+                    let prepared = self.handle(ctx, "project_prepare", &arguments).map_err(|error| {
+                        match context_error(&error) {
+                            true => error,
+                            false => anyhow!(
+                                "{}; the preparation of these sources ({identity}) failed and is not tried again while they stay as they are: call project_prepare with this scene, a new requestId and activate true to prepare them again",
+                                super::error_text(&error)
+                            ),
+                        }
+                    });
+                    (prepared, None)
+                }
+            };
             if action == "status" {
-                let mut reply = super::jobs::state_members(state)?;
-                reply.insert("preparationRequired".into(), true.into());
-                reply.insert(
-                    "preparationReason".into(),
-                    state.update_error.clone().into(),
-                );
+                let mut reply = match &continued {
+                    Some(current) => super::jobs::state_members(current)?,
+                    None => {
+                        let mut reply = super::jobs::state_members(state)?;
+                        reply.insert("preparationRequired".into(), true.into());
+                        reply.insert("preparationReason".into(), reason.clone().into());
+                        reply
+                    }
+                };
                 // A failed recovery must not turn the status itself into an error.
                 match &preparation {
                     Ok(preparation) => reply.insert(
@@ -362,20 +492,324 @@ impl Service {
                 return map_reply(reply);
             }
             let preparation = preparation?;
-            map_reply(obj([
+            let mut reply = obj([
                 ("status", "result_pending".into()),
                 ("phase", "preparing_configuration".into()),
-                ("currentPlayer", value::raw(state.as_ref())?),
+                (
+                    "currentPlayer",
+                    value::raw(continued.as_ref().unwrap_or(state.as_ref()))?,
+                ),
                 (
                     "preparation",
                     Any::Raw(String::from_utf8_lossy(reply_bytes(&preparation)).into()),
                 ),
                 ("configurationRevision", revision.clone().into()),
-            ]))
+            ]);
+            reply.insert(
+                "message".into(),
+                match continued {
+                    Some(_) => "these sources already have a preparation; the session is restarting on it, reissue the call",
+                    None if matches!(plan, Plan::Continue(_)) => "these sources already have a preparation; the session restarts on it when the project action that runs has ended, reissue the call",
+                    None => "the project is being prepared for the saved sources; the Player keeps its code until then and the session continues on the new preparation by itself, reissue the call",
+                }
+                .into(),
+            );
+            map_reply(reply)
         };
         match reply() {
             Ok(value) => RuntimeOutcome::handler(value),
             Err(error) => RuntimeOutcome::failed(error),
+        }
+    }
+
+    /// The request id of the preparation of these sources. The first is a
+    /// function of the scene and the sources; the next ones exist because a
+    /// receipt is durable and its name can be wrong about it: see
+    /// `plan_recovery`.
+    pub(crate) fn recovery_identity(scene: &str, revision: &str, attempt: u32) -> String {
+        let named = match attempt {
+            0 => format!("{scene}\n{revision}"),
+            attempt => format!("{scene}\n{revision}\n{attempt}"),
+        };
+        format!("config-{}", &sha256(named.as_bytes())[..40])
+    }
+
+    /// Whether `id` is a request of the recovery for the sources as they are
+    /// on disk now. A request that is not was made for sources that have
+    /// changed since: its preparation answers no rejection of the session.
+    /// True when the sources cannot be read, so that nothing is held back
+    /// on a guess.
+    pub(crate) fn recovery_current(&self, id: &str, scene: &str) -> bool {
+        let selection = ConfigurationSelection {
+            scene: scene.into(),
+            baseline: self.baseline(),
+        };
+        match configuration_revision(&self.0.project, &[selection]) {
+            Ok(revision) => (0..RECOVERY_ATTEMPTS)
+                .any(|attempt| Self::recovery_identity(scene, &revision, attempt) == id),
+            Err(_) => true,
+        }
+    }
+
+    /// The file that holds the content revision of the sources a request
+    /// of the recovery was made for.
+    fn recovery_sources_path(&self, id: &str) -> String {
+        join(&[
+            &self.0.project,
+            "Library/UnityMicroEditor/action-jobs",
+            &sha256(id.as_bytes()),
+            "sources.txt",
+        ])
+    }
+    pub(crate) fn recovery_sources(&self, id: &str) -> Option<String> {
+        std::fs::read_to_string(self.recovery_sources_path(id)).ok()
+    }
+    /// Records the content of the sources a request of the recovery is made
+    /// for, once.
+    pub(crate) fn note_recovery_sources(&self, id: &str, sources: &str) {
+        let path = self.recovery_sources_path(id);
+        if std::fs::metadata(&path).is_ok() {
+            return;
+        }
+        let _ = std::fs::create_dir_all(sysutil::dir(&path))
+            .and_then(|()| std::fs::write(&path, sources));
+    }
+
+    /// What the service knows of the preparation job `id`.
+    fn known_preparation(&self, id: &str) -> Known {
+        let receipt = {
+            let jobs = self.0.jobs.lock().unwrap();
+            match jobs.jobs.get(id) {
+                Some(job) => {
+                    let job = job.lock().unwrap();
+                    if job.active {
+                        return Known::Running;
+                    }
+                    job.receipt.clone()
+                }
+                None => None,
+            }
+        };
+        let receipt = match receipt {
+            Some(receipt) => receipt,
+            None => {
+                let path = join(&[
+                    &self.0.project,
+                    "Library/UnityMicroEditor/action-jobs",
+                    &sha256(id.as_bytes()),
+                    "result.json",
+                ]);
+                match super::jobs::JobReceipt::read(&path) {
+                    Ok(receipt) => receipt,
+                    Err(_) => return Known::Nothing,
+                }
+            }
+        };
+        if let Some(error) = &receipt.error {
+            return Known::Failed(error.code.clone());
+        }
+        match serde_json::from_slice::<Option<super::Preparation>>(&receipt.result) {
+            Ok(Some(preparation))
+                if preparation.schema_version == 1 && !preparation.baseline.is_empty() =>
+            {
+                Known::Confirmed(Box::new(preparation))
+            }
+            _ => Known::Failed("invalid_job_receipt".into()),
+        }
+    }
+
+    /// Whether the session can continue on a preparation the project has:
+    /// it is of this scene, it is not the one the session runs on (the
+    /// runner has just rejected the sources for that one), and its graph
+    /// accepts the sources on disk. The last is the check a start of the
+    /// runner makes, made before anything is stopped: a preparation is not
+    /// taken on the word of its request id.
+    fn fits(&self, preparation: &super::Preparation, scene: &str) -> bool {
+        preparation.schema_version == 1
+            && preparation.project == self.0.project
+            && preparation.scene == scene
+            && !preparation.baseline.is_empty()
+            && preparation.baseline != self.baseline()
+            && !self
+                .0
+                .continued
+                .lock()
+                .unwrap()
+                .1
+                .contains(&preparation.baseline)
+            && crate::compiler::Compiler::graph_accepts_sources(
+                &self.0.project,
+                &preparation.baseline,
+            )
+            .is_ok()
+    }
+
+    /// Decides how a rejection that needs a new graph is answered.
+    ///
+    /// The request id of a recovery names the sources it was computed from,
+    /// and the job reads the sources later: an edit that is taken back in
+    /// between is prepared under the name of the edit. Such a receipt says
+    /// "confirmed" for sources its preparation was not made from. So a
+    /// confirmed receipt counts only when its preparation fits the sources,
+    /// and one that does not, or whose job says that the sources changed
+    /// under it, is passed over for the next name. A receipt with any other
+    /// error is the answer to its request: the same sources would fail the
+    /// same way, and a repair changes the name.
+    ///
+    /// When no request of these sources has a preparation that fits, another
+    /// preparation of the project may: the one a session started on, after
+    /// an edit that left its graph was undone. The newest are looked at.
+    fn plan_recovery(&self, scene: &str, revision: &str, sources: &str) -> Plan {
+        // What the recovery continued on for these very sources and the
+        // runner rejected again is not tried a second time: the check here
+        // and the runner's own would otherwise pass the session back and
+        // forth between two preparations.
+        {
+            let mut continued = self.0.continued.lock().unwrap();
+            if continued.0 != revision {
+                *continued = (revision.to_string(), Vec::new());
+            }
+        }
+        let mut request = None;
+        for attempt in 0..RECOVERY_ATTEMPTS {
+            let id = Self::recovery_identity(scene, revision, attempt);
+            match self.known_preparation(&id) {
+                Known::Running => return Plan::Request(id),
+                Known::Confirmed(preparation) if self.fits(&preparation, scene) => {
+                    return Plan::Continue(preparation);
+                }
+                Known::Confirmed(_) => {}
+                Known::Failed(code) if code == SUPERSEDED => {}
+                // A failure answers the sources it was made from; an edit of
+                // them since (the fix of a compile error) is tried anew.
+                Known::Failed(_)
+                    if self
+                        .recovery_sources(&id)
+                        .is_some_and(|made| made != sources) => {}
+                Known::Failed(_) => return Plan::Request(id),
+                Known::Nothing => {
+                    self.note_recovery_sources(&id, sources);
+                    request = Some(id);
+                    break;
+                }
+            }
+        }
+        let directory = join(&[&self.0.project, "Library/UnityMicroEditor/preparations"]);
+        let mut known: Vec<(std::time::SystemTime, super::Preparation)> =
+            std::fs::read_dir(&directory)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|entry| {
+                    let result = entry.path().join("result.json");
+                    let modified = std::fs::metadata(&result).ok()?.modified().ok()?;
+                    let preparation: super::Preparation =
+                        read_json(&result.to_string_lossy(), 1 << 20).ok()?;
+                    Some((modified, preparation))
+                })
+                .collect();
+        known.sort_by_key(|known| std::cmp::Reverse(known.0));
+        // The newest of this scene: those of other scenes do not fit anyway.
+        for (_, preparation) in known
+            .into_iter()
+            .filter(|(_, preparation)| preparation.scene == scene)
+            .take(KNOWN_PREPARATIONS)
+        {
+            if self.fits(&preparation, scene) {
+                return Plan::Continue(Box::new(preparation));
+            }
+        }
+        // Every name is taken by a receipt that does not fit: the sources
+        // changed under each of their jobs. The last one is asked again and
+        // answers with what it is.
+        Plan::Request(
+            request
+                .unwrap_or_else(|| Self::recovery_identity(scene, revision, RECOVERY_ATTEMPTS - 1)),
+        )
+    }
+
+    /// Makes a preparation the project has the selected one and restarts the
+    /// session on it, as the job of a preparation does when it ends. Returns
+    /// the state of the session after that.
+    ///
+    /// The restart runs under the lifetime of the service, not under the
+    /// caller's request: a caller that gives up while the old Player is
+    /// being stopped would otherwise leave a stopped session, with nothing
+    /// selected and nothing started.
+    ///
+    /// `None`: a project action runs, and the next call decides anew.
+    fn continue_on(
+        &self,
+        preparation: &super::Preparation,
+        revision: &str,
+    ) -> Result<Option<crate::agentcontrol::State>> {
+        let Some(controller) = &self.0.controller else {
+            return Ok(None);
+        };
+        // Never behind a project action that runs.
+        let _guard = match self.0.mu.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+        };
+        // Another call can have done it meanwhile.
+        if preparation.baseline == self.baseline() {
+            return Ok(Some(controller.status_reply()));
+        }
+        {
+            let mut continued = self.0.continued.lock().unwrap();
+            if continued.0 != revision {
+                *continued = (revision.to_string(), Vec::new());
+            }
+            continued.1.push(preparation.baseline.clone());
+        }
+        let activate = || -> Result<()> {
+            let directory = join(&[
+                &self.0.project,
+                "Library/UnityMicroEditor/preparations",
+                &preparation.request_id,
+            ]);
+            super::validate_cached_preparation(
+                &self.0.project,
+                &self.0.editor,
+                &preparation.scene,
+                &preparation.request_id,
+                &directory,
+                preparation,
+            )?;
+            let lifetime = self.lifetime();
+            let running = controller.status().phase != "stopped";
+            self.0
+                .swapping
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let swapped = (|| -> Result<()> {
+                if running {
+                    controller
+                        .stop(&lifetime)
+                        .map_err(|failure| failure.error)?;
+                }
+                controller.configure_prepared(&preparation.baseline, &preparation.scene)?;
+                self.select(&preparation.baseline, &preparation.scene);
+                if running {
+                    controller.start()?;
+                }
+                Ok(())
+            })();
+            self.0
+                .swapping
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            swapped
+        };
+        match activate() {
+            Ok(()) => Ok(Some(controller.status_reply())),
+            Err(error) if context_error(&error) => Err(error),
+            // It is not tried again for these sources: the next call
+            // requests a preparation instead.
+            Err(error) => Err(anyhow!(
+                "the preparation {} that fits these sources could not be activated: {}. The Player keeps its code; the next call requests a new preparation",
+                preparation.request_id,
+                super::error_text(&error)
+            )),
         }
     }
 }

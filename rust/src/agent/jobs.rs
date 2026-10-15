@@ -85,7 +85,7 @@ impl Serialize for JobReceipt {
 }
 impl JobReceipt {
     /// Reads a receipt of at most 80 MiB; member names match case-insensitively.
-    fn read(path: &str) -> Result<Self> {
+    pub(crate) fn read(path: &str) -> Result<Self> {
         let data = read_agent_file(path, 80 << 20)?;
         let (parsed, used) = jsondoc::parse_first(&data).map_err(|e| anyhow!(e))?;
         if !jsondoc::rest_is_space(&data, used) {
@@ -560,30 +560,78 @@ impl Service {
         let Some(controller) = &self.0.controller else {
             return self.controller_handle(ctx, name, raw);
         };
-        let Some(progress) = self.preparation_progress() else {
-            return self.controller_handle(ctx, name, raw);
+        // A session that has a preparation is started again by whoever
+        // replaces it (the job of a preparation when it ends, the recovery
+        // that continues on a known one): the caller has nothing to start
+        // and repeats its call. Before the first preparation it is the start
+        // itself that reports the progress.
+        let swapping = || self.0.swapping.load(std::sync::atomic::Ordering::SeqCst);
+        let pending = |phase: &str, progress: Option<AnyMap>| {
+            // A preparation starts a session that ran when it replaces it; a
+            // session that was stopped stays stopped.
+            let stopped = controller.status().phase == "stopped" && !swapping();
+            let message = match (self.baseline().is_empty(), progress.is_some(), stopped) {
+                (true, _, _) => {
+                    "preparation is still running and no Player has started; reissue the same session_control(start) until it completes, then wait"
+                }
+                (false, true, true) => {
+                    "a preparation of the project is running, and the session is stopped: nothing starts it by itself. Call session_control(start) once the preparation has ended (until then it returns the stage)"
+                }
+                (false, true, false) => {
+                    "a preparation of the project is running; when it activates, the session starts on it by itself, reissue this call"
+                }
+                (false, false, _) => {
+                    "the session is being restarted on another preparation of the project, reissue this call"
+                }
+            };
+            let mut reply = obj([
+                ("success", false.into()),
+                ("status", "result_pending".into()),
+                ("phase", phase.into()),
+                ("backend", "project_action_job".into()),
+                ("message", message.into()),
+            ]);
+            if let Some(progress) = progress {
+                reply.insert("preparation".into(), Any::Object(progress));
+            }
+            Ok(reply)
         };
-        let state = controller.status();
+        // The Player is replaced by a stop and a start. A wait that was held
+        // through that sees the session stopped, which is no failure of
+        // anything: it is told to ask again, like a wait that comes later.
+        let through = |began: bool| -> RuntimeOutcome {
+            let outcome = self.controller_handle(ctx, name, raw);
+            let stopped = outcome.error.is_some()
+                && matches!(
+                    &outcome.value,
+                    RuntimeValue::Controller(crate::agentcontrol::Reply::State(state))
+                        if state.phase == "stopped" || state.phase == "stopping"
+                );
+            if action == "status" || !stopped {
+                return outcome;
+            }
+            let progress = self.preparation_progress();
+            if progress.is_none() && !began && !swapping() {
+                return outcome;
+            }
+            match pending("preparing_configuration", progress).and_then(map_reply) {
+                Ok(value) => RuntimeOutcome::handler(value),
+                Err(error) => RuntimeOutcome::failed(error),
+            }
+        };
+        let Some(progress) = self.preparation_progress() else {
+            return through(swapping());
+        };
+        let state = controller.status_reply();
         let reply = if action == "status" {
             state_members(&state).map(|mut reply| {
                 reply.insert("preparation".into(), Any::Object(progress));
                 reply
             })
         } else if state.phase == "stopped" || state.phase == "failed" {
-            Ok(obj([
-                ("success", false.into()),
-                ("status", "result_pending".into()),
-                ("phase", "preparing".into()),
-                ("backend", "project_action_job".into()),
-                (
-                    "message",
-                    "preparation is still running and no Player has started; reissue the same session_control(start) until it completes, then wait"
-                        .into(),
-                ),
-                ("preparation", Any::Object(progress)),
-            ]))
+            pending("preparing", Some(progress))
         } else {
-            return self.controller_handle(ctx, name, raw);
+            return through(true);
         };
         match reply.and_then(map_reply) {
             Ok(value) => RuntimeOutcome {
@@ -601,6 +649,42 @@ impl Service {
         raw: &[u8],
     ) -> RuntimeOutcome {
         const SCENE: &str = "prepare and activate the selected scene with project_prepare before starting or resetting this runtime";
+        // A recompile restarts the Player on the prepared graph. Sources that
+        // have left it need a new preparation, which no recompile makes: the
+        // caller is answered as a wait would be, with the preparation that
+        // answers the rejection (session6-4).
+        if name == "hot_reload"
+            && let Some(controller) = &self.0.controller
+            && matches!(
+                jsondoc::parse(raw),
+                Ok(Json::Object(members)) if members.iter().any(|member| member.key == "action" && member.value.as_str() == Some("recompile"))
+            )
+        {
+            let state = controller.status();
+            if state.phase == "ready"
+                && !state.code_refused()
+                && (state.preparation_required
+                    || crate::compiler::requires_new_graph(&state.update_error))
+            {
+                let standing = RuntimeOutcome {
+                    value: RuntimeValue::Controller(crate::agentcontrol::Reply::State(Box::new(
+                        state,
+                    ))),
+                    error: None,
+                };
+                let recovered = self.recover_configuration(
+                    ctx,
+                    "session_control",
+                    br#"{"action":"wait_update"}"#,
+                    standing,
+                );
+                // Without a recovery to name the controller refuses the
+                // recompile itself; the state of the session is no answer.
+                if !matches!(recovered.value, RuntimeValue::Controller(_)) {
+                    return recovered;
+                }
+            }
+        }
         if name != "session_control" {
             return self.controller_handle(ctx, name, raw);
         }
@@ -613,6 +697,53 @@ impl Service {
         }
         if input.action != "start" && input.action != "reset" {
             return self.session_with_preparation(ctx, name, raw, &input.action);
+        }
+        // A misspelled key is refused before a preparation of minutes runs.
+        if let Some(key) = input
+            .arguments
+            .keys()
+            .find(|key| !crate::agentcontrol::LAUNCH_ARGUMENTS.contains(&key.as_str()))
+        {
+            return RuntimeOutcome::failed(anyhow!(
+                "unknown start/reset argument {}; the arguments are {}",
+                jsondoc::quoted_text(key),
+                crate::agentcontrol::LAUNCH_ARGUMENTS.join(", ")
+            ));
+        }
+        // A preparation holds the project action lock for as long as it
+        // runs, minutes for a large project. A start or a reset that waited
+        // for the lock would hang that long; it comes back with the stage
+        // instead. A preparation that activates starts the session itself.
+        if !self.baseline().is_empty()
+            && let Some(progress) = self.preparation_progress()
+        {
+            // The job starts a session that ran when it replaces it, and
+            // leaves a stopped one stopped.
+            let stopped = self
+                .0
+                .controller
+                .as_ref()
+                .is_some_and(|controller| controller.status().phase == "stopped");
+            let message = match stopped {
+                true => {
+                    "a preparation of the project is running, and it does not start a stopped session: reissue this call after the preparation has ended (preparation names its stage)"
+                }
+                false => {
+                    "a preparation of the project is running; when it activates, the session starts on it by itself: wait with session_control(wait), and reissue this call only after the preparation has ended"
+                }
+            };
+            let reply = map_reply(obj([
+                ("success", false.into()),
+                ("status", "result_pending".into()),
+                ("phase", "preparing".into()),
+                ("backend", "project_action_job".into()),
+                ("message", message.into()),
+                ("preparation", Any::Object(progress)),
+            ]));
+            return match reply {
+                Ok(value) => RuntimeOutcome::handler(value),
+                Err(error) => RuntimeOutcome::failed(error),
+            };
         }
         let selected = text(&input.arguments, "scene");
         let mut scene = String::new();
@@ -634,6 +765,29 @@ impl Service {
                     return Some(RuntimeOutcome::failed(fail(
                         "scene_requires_preparation",
                         SCENE,
+                    )));
+                }
+                // The inputs of a preparation do nothing to a session that
+                // has one; a caller that gives them must not be told that the
+                // Player runs with them. The inputs the active preparation
+                // was made with are what the session runs: the start that
+                // began that preparation is reissued with them (session6-5).
+                let inputs = match preparation_inputs(&input.arguments) {
+                    Ok(inputs) => inputs,
+                    Err(error) => return Some(RuntimeOutcome::failed(error)),
+                };
+                let given: Vec<&str> = match self.made_with(&baseline, &inputs) {
+                    true => Vec::new(),
+                    false => inputs.iter().map(|(key, _)| *key).collect(),
+                };
+                if !given.is_empty() {
+                    return Some(RuntimeOutcome::failed(fail(
+                        "preparation_input_ignored",
+                        format!(
+                            "{} {} an input of a preparation, and this session already has one, so a start or reset would ignore it; call project_prepare with this scene, the input, a new requestId and activate true: the session restarts on that preparation when it activates",
+                            given.join(", "),
+                            if given.len() == 1 { "is" } else { "are" }
+                        ),
                     )));
                 }
                 Some(self.controller_handle(ctx, name, raw))
@@ -662,14 +816,15 @@ impl Service {
         ]);
         // Optional preparation inputs travel with the start. Without them the
         // preparation finds and reuses the newest valid host by itself.
-        for key in ["hostPlayer", "nativeCatalog", "engineProfile"] {
-            let value = text(&input.arguments, key);
-            if !value.is_empty() {
-                preparation.insert(key.into(), value.into());
-            }
-        }
-        if input.arguments.get("rebuildHost").is_some_and(Any::is_true) {
-            preparation.insert("rebuildHost".into(), true.into());
+        let inputs = match preparation_inputs(&input.arguments) {
+            Ok(inputs) => inputs,
+            Err(error) => return RuntimeOutcome::failed(error),
+        };
+        for (key, value) in inputs {
+            match key {
+                "rebuildHost" => preparation.insert(key.into(), true.into()),
+                _ => preparation.insert(key.into(), value.into()),
+            };
         }
         let encoded = match super::marshal(&Any::Object(preparation)) {
             Ok(encoded) => encoded,
@@ -702,5 +857,67 @@ impl Service {
             self.controller_handle(ctx, name, raw)
         })
         .unwrap_or_else(RuntimeOutcome::failed)
+    }
+}
+
+/// The preparation inputs a start or reset names, as given: a path for
+/// `hostPlayer`, `nativeCatalog` and `engineProfile`, `true` for
+/// `rebuildHost`. Null, an empty path and `false` name none. A value of
+/// another type is refused rather than taken for none (mcp6-3).
+pub(crate) fn preparation_inputs(arguments: &AnyMap) -> Result<Vec<(&'static str, String)>> {
+    let mut given = Vec::new();
+    for key in ["hostPlayer", "nativeCatalog", "engineProfile"] {
+        match arguments.get(key) {
+            None | Some(Any::Null) => {}
+            Some(Any::String(path)) if path.is_empty() => {}
+            Some(Any::String(path)) => given.push((key, path.clone())),
+            Some(_) => {
+                return Err(fail(
+                    "invalid_request",
+                    format!("{key} must be a path (a string) or null"),
+                ));
+            }
+        }
+    }
+    match arguments.get("rebuildHost") {
+        None | Some(Any::Null) | Some(Any::Bool(false)) => {}
+        Some(Any::Bool(true)) => given.push(("rebuildHost", "true".into())),
+        Some(_) => {
+            return Err(fail(
+                "invalid_request",
+                "rebuildHost must be true, false or null",
+            ));
+        }
+    }
+    Ok(given)
+}
+
+impl Service {
+    /// Whether the preparation of `baseline` was requested with every one of
+    /// these inputs: the job record of its request id names them.
+    fn made_with(&self, baseline: &str, inputs: &[(&str, String)]) -> bool {
+        if inputs.is_empty() {
+            return true;
+        }
+        let id = crate::sysutil::base(&crate::sysutil::dir(baseline));
+        let record = join(&[
+            &self.0.project,
+            "Library/UnityMicroEditor/action-jobs",
+            &sha256(id.as_bytes()),
+            "request.json",
+        ]);
+        let Some(record) = std::fs::read(&record)
+            .ok()
+            .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
+        else {
+            return false;
+        };
+        let arguments = &record["arguments"];
+        record["action"] == "project_prepare"
+            && record["identity"] == id.as_str()
+            && inputs.iter().all(|(key, value)| match *key {
+                "rebuildHost" => arguments[key] == serde_json::Value::Bool(true),
+                _ => arguments[key].as_str() == Some(value.as_str()),
+            })
     }
 }

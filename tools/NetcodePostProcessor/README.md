@@ -10,6 +10,8 @@ After post-processing, the helper checks RPC handlers, send and registration pat
 
 Roslyn drops unused assembly references. If the emitted DLL does not actually use Netcode, the helper returns its original bytes with a confirmed `required=false`.
 
+The hot reload patch builder is given the processed images and reads from them what Netcode registered when the Player started (`tools/HotReloadPatcher/Netcode.cs`): the generated members of every NetworkBehaviour, the types of the namespace `__GEN`, and the code the processors put in front of every RPC body. A change of what this helper adds, or a package version whose CodeGen writes another form, has to be taken up there; an image of a form it does not know gets no patch.
+
 The cache key covers the helper source, the package CodeGen source, SDK and compiler binaries, every helper dependency and the hashes of the built helper. Processed DLLs and PDBs are verified on reuse.
 
 SDK-only check, without a Player or Editor:
@@ -17,5 +19,8 @@ SDK-only check, without a Player or Editor:
 ```bash
 UME_NETCODE_SDK=/absolute/Unity/Editor/Unity \
 UNITY_MICRO_EDITOR_TEST_PROJECT=/absolute/prepared/game/project \
+UME_HOT_RELOAD_HOST=/absolute/prepared/game/project/Library/UnityMicroEditor/stage/project/Builds/UnityMicroEditor/<id>-host/Project.x86_64 \
   cargo test --locked --lib compiler::tests::netcode_postprocessor_sdk -- --nocapture
 ```
+
+`UME_HOT_RELOAD_HOST` names the host Player that `auto-prepare` built for the project, whose `Managed` directory holds the assemblies the fixture is compiled against. Without it the test looks for `Builds/CLIPlayHybridHost/UnityPlayHost.x86_64` in the project, where earlier hosts were built.

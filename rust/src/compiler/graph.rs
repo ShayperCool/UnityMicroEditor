@@ -15,6 +15,127 @@ use serde::Deserialize;
 use std::{collections::BTreeMap, fs, path::Path};
 
 impl Compiler {
+    /// The packages of the project itself (`Packages/<name>`) are the
+    /// project's sources too, and a script added to one belongs to an
+    /// assembly of the graph that a session cannot extend: the runner
+    /// refuses it, and a preparation made before it does not hold it. Every
+    /// root of a prepared runtime assembly there (the folder of its
+    /// definition, without folders of other definitions) is walked; a
+    /// managed file the plan does not hold needs a fresh graph.
+    fn check_package_sources(&self, tracked: &BTreeMap<String, String>) -> Result<()> {
+        #[derive(Deserialize, Default)]
+        #[serde(default)]
+        struct Platforms {
+            #[serde(rename = "includePlatforms")]
+            include: Vec<String>,
+        }
+        let packages = join(&[&self.project, "Packages"]);
+        let definition = |filename: &str| matches!(sysutil::ext(filename), ".asmdef" | ".asmref");
+        // An assembly for the Editor alone is no part of a Player.
+        let editor_only = |filename: &str| {
+            sysutil::ext(filename) == ".asmdef"
+                && read_json_file::<Option<Platforms>>(filename)
+                    .is_ok_and(|platforms| platforms.unwrap_or_default().include == ["Editor"])
+        };
+        // A definition the plan does not hold anywhere in a package of the project is a new
+        // assembly: below the root of a known one (a folder of its own) or in a package that is
+        // new as a whole (session6-3). One for the Editor alone is no part of a Player.
+        let ignored = |filename: &str| {
+            let base = sysutil::base(filename);
+            base.starts_with('.') || base.ends_with('~')
+        };
+        let mut packages_found: Vec<String> = fs::read_dir(&packages)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                    .map(|entry| join(&[&packages, &entry.file_name().to_string_lossy()]))
+                    .filter(|directory| {
+                        !ignored(directory)
+                            && fs::metadata(join(&[directory, "package.json"]))
+                                .is_ok_and(|info| info.is_file())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        packages_found.sort();
+        for package in &packages_found {
+            sys::walk_dir(package, &mut |entry| {
+                let filename = entry.path;
+                if entry.is_dir() {
+                    return Ok(match filename != package.as_str() && ignored(filename) {
+                        true => Walk::SkipDir,
+                        false => Walk::Continue,
+                    });
+                }
+                if definition(filename)
+                    && self.manifest.compiler_inputs.at(filename).is_empty()
+                    && !editor_only(filename)
+                {
+                    bail!("new managed configuration requires a fresh managed graph: {filename}");
+                }
+                Ok(Walk::Continue)
+            })?;
+        }
+        let mut roots: Vec<String> = self
+            .manifest
+            .compiler_inputs
+            .keys()
+            .filter(|filename| {
+                definition(filename)
+                    && within_directory(filename, &packages)
+                    && !editor_only(filename)
+            })
+            .map(|filename| sysutil::dir(filename))
+            .collect();
+        roots.sort();
+        roots.dedup();
+        for root in &roots {
+            sys::walk_dir(root, &mut |entry| {
+                let filename = entry.path;
+                if entry.is_dir() {
+                    // Unity compiles nothing in a hidden folder or one whose name
+                    // ends with `~`, and another definition below makes its
+                    // folder another assembly.
+                    let base = sysutil::base(filename);
+                    let ignored =
+                        filename != root.as_str() && (base.starts_with('.') || base.ends_with('~'));
+                    let nested = ignored
+                        || filename != root.as_str()
+                            && fs::read_dir(filename).is_ok_and(|mut entries| {
+                                entries.any(|entry| {
+                                    entry.is_ok_and(|entry| {
+                                        definition(&entry.file_name().to_string_lossy())
+                                    })
+                                })
+                            });
+                    return Ok(if nested {
+                        Walk::SkipDir
+                    } else {
+                        Walk::Continue
+                    });
+                }
+                if !self.manifest.compiler_inputs.at(filename).is_empty()
+                    || tracked.contains_key(filename)
+                {
+                    return Ok(Walk::Continue);
+                }
+                match rune_lower(sysutil::ext(filename)).as_str() {
+                    ".cs" => bail!(
+                        "a new runtime C# source of a package requires a fresh managed graph: {filename}"
+                    ),
+                    ".asmdef" | ".asmref" | ".rsp" | ".dll" => {
+                        bail!(
+                            "new managed configuration requires a fresh managed graph: {filename}"
+                        )
+                    }
+                    _ => Ok(Walk::Continue),
+                }
+            })?;
+        }
+        Ok(())
+    }
+
     /// Source path to owning assembly.
     pub fn graph_source_assemblies(&self) -> BTreeMap<String, String> {
         let mut result = BTreeMap::new();
@@ -71,6 +192,7 @@ impl Compiler {
             }
             Ok(Walk::Continue)
         })?;
+        self.check_package_sources(&tracked)?;
         let mut candidate = self.clone();
         if candidate.configuration.is_nil() {
             candidate.configuration = NilMap::make();

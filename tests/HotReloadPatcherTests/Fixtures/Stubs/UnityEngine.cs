@@ -1,0 +1,40 @@
+// Stand-in for UnityEngine.CoreModule: the classes the patch builder recognises at the top of a
+// script's base chain. The fixtures run on Unity's standalone Mono, where the real module's
+// native calls are not available.
+using System;
+
+namespace UnityEngine
+{
+    public class Object { }
+    public class Component : Object
+    {
+        public void SendMessage(string methodName) { }
+    }
+    public class Behaviour : Component { }
+    public class MonoBehaviour : Behaviour
+    {
+        public void Invoke(string methodName, float time) { }
+    }
+    public class ScriptableObject : Object { }
+
+    [AttributeUsage(AttributeTargets.Field)]
+    public sealed class SerializeField : Attribute { }
+
+    [AttributeUsage(AttributeTargets.Method)]
+    public sealed class RuntimeInitializeOnLoadMethodAttribute : Attribute { }
+
+    public interface ISerializationCallbackReceiver
+    {
+        void OnBeforeSerialize();
+        void OnAfterDeserialize();
+    }
+}
+
+namespace UnityEngine.Serialization
+{
+    [AttributeUsage(AttributeTargets.Field, AllowMultiple = true)]
+    public sealed class FormerlySerializedAsAttribute : Attribute
+    {
+        public FormerlySerializedAsAttribute(string oldName) { }
+    }
+}

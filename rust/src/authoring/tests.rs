@@ -338,6 +338,224 @@ fn script_creation_attachment_editing_and_guid_preservation() {
     create.operation_id = "duplicate-script".into();
     code(store.create_script(&create), "duplicate_guid");
 }
+/// A field added to a script after the scene was saved (by a hot reload
+/// patch, for example) has no key in the component yet: set_property writes
+/// it when the script declares it as a field Unity serializes, and refuses
+/// a name the script does not declare so (stage 5 mcp5-2).
+#[test]
+fn set_property_adds_a_field_the_script_declares() {
+    let (_temp, store, source) = fixture(SCENE);
+    let create = script(
+        "Assets/Scripts/Lamp.cs",
+        "create-lamp",
+        "using UnityEngine;\npublic class Lamp : MonoBehaviour\n{\n    public float dim = 0.5f;\n}\n",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    store.create_script(&create).unwrap();
+    let attached = edit(&store, &source, "attach-lamp", json!([{"action": "add_component", "fileId": "100", "key": "lamp", "scriptPath": "Assets/Scripts/Lamp.cs", "fields": {"dim": 0.5}}])).unwrap();
+    let lamp = attached.mutation.created_ids["lamp"].clone();
+    // The script gains fields; the scene does not have them.
+    let authored = store.read_script("Assets/Scripts/Lamp.cs").unwrap();
+    store
+        .edit_script(&ScriptRequest {
+            path: authored.path.clone(),
+            expected_revision: authored.revision.clone(),
+            operation_id: "grow-lamp".into(),
+            content: authored.content.replacen(
+                "    public float dim = 0.5f;\n",
+                "    public float dim = 0.5f;\n    [SerializeField] private float glowCut = 0.9f;\n    public static int count;\n    private int hidden;\n",
+                1,
+            ),
+            guid: String::new(),
+        })
+        .unwrap();
+    let latest = store.read(PATH).unwrap();
+    edit(
+        &store,
+        &latest,
+        "set-glow",
+        json!([{"action": "set_property", "fileId": lamp, "property": "glowCut", "value": 0.25}]),
+    )
+    .unwrap();
+    let text = fs::read_to_string(_temp.path().join(PATH)).unwrap();
+    assert!(text.contains("\n  glowCut: 0.25\n"), "{text}");
+    // Set again: now it is an ordinary key.
+    let latest = store.read(PATH).unwrap();
+    edit(
+        &store,
+        &latest,
+        "set-glow-again",
+        json!([{"action": "set_property", "fileId": lamp, "property": "glowCut", "value": 0.5}]),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(_temp.path().join(PATH))
+            .unwrap()
+            .matches("glowCut:")
+            .count(),
+        1
+    );
+    // Not serialized, or not declared at all: the path stays absent.
+    for property in ["count", "hidden", "glowCutt"] {
+        let latest = store.read(PATH).unwrap();
+        code(
+            edit(
+                &store,
+                &latest,
+                &format!("set-{property}"),
+                json!([{"action": "set_property", "fileId": lamp, "property": property, "value": 1}]),
+            ),
+            "unsupported_property",
+        );
+    }
+}
+#[test]
+fn a_declared_field_is_found_in_the_source() {
+    use super::edit::declares_serialized_field as declares;
+    let source = "public class A : MonoBehaviour {\n  public float speed = 1f;\n  [SerializeField] private int armor;\n  [SerializeField, Range(0, 1)] float tint = 0.5f;\n  public static int count;\n  public const int Max = 3;\n  public readonly int fixedOne = 1;\n  private int hidden;\n  public void Jump() { }\n  public int Health { get; set; }\n  void Update() { int local = 2; return; }\n}\n";
+    for name in ["speed", "armor", "tint"] {
+        assert!(declares(source, name), "{name}");
+    }
+    for name in [
+        "count", "Max", "fixedOne", "hidden", "Jump", "Health", "local", "missing",
+    ] {
+        assert!(!declares(source, name), "{name}");
+    }
+}
+/// The declarations Unity serializes as fields of the script's class, and
+/// those it does not, read from the class body: attributes on lines of
+/// their own, `[NonSerialized]`, properties, delegates, comments, several
+/// declarators, another class of the same file (session6-7).
+#[test]
+fn the_fields_unity_serializes_are_read_from_the_class_body() {
+    use super::edit::declares_serialized_field as declares;
+    let source = r#"using System;
+using UnityEngine;
+public class Hero : MonoBehaviour
+{
+    [NonSerialized] public int cachedScore;
+    [System.NonSerialized] public float lastHit;
+    public int Speed => speed;
+    [SerializeField]
+    private int speed = 3;
+    [SerializeField]
+    [Range(0, 10)] private float armor = 1f;
+    public int ammo, clips;
+    public Action onDeath;
+    public Stats stats;
+    public System.Collections.Generic.List<int> waves = new System.Collections.Generic.List<int> { 1, 2 };
+    /*
+    public int oldField;
+    */
+    // public int commented;
+    public string motto = "public int quoted;";
+    [field: SerializeField] public int Gold { get; private set; }
+    void Update() { int local = 2; }
+}
+[Serializable]
+public class Stats
+{
+    public int hp;
+}
+"#;
+    let mut wrong = Vec::new();
+    for name in [
+        "cachedScore",
+        "lastHit",
+        "Speed",
+        "onDeath",
+        "hp",
+        "oldField",
+        "commented",
+        "quoted",
+        "Gold",
+        "local",
+    ] {
+        if declares(source, name) {
+            wrong.push(format!(
+                "{name}: taken, Unity does not serialize it as a field of Hero"
+            ));
+        }
+    }
+    for name in ["speed", "armor", "ammo", "clips", "stats", "waves", "motto"] {
+        if !declares(source, name) {
+            wrong.push(format!("{name}: refused, Unity serializes it"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// A field of a base class in another file is a field of the component;
+/// a value of the wrong type for a new key is refused, as on a key the data
+/// holds, and one of the right type is written (session6-6, session6-7).
+#[test]
+fn set_property_types_a_new_key_and_finds_inherited_fields() {
+    let (temp, store, source) = fixture(SCENE);
+    store
+        .create_script(&script(
+            "Assets/Scripts/Unit.cs",
+            "create-unit",
+            "using UnityEngine;\npublic class Unit : MonoBehaviour\n{\n    public int boost = 1;\n}\n",
+            "cccccccccccccccccccccccccccccccc",
+        ))
+        .unwrap();
+    store
+        .create_script(&script(
+            "Assets/Scripts/Hero.cs",
+            "create-hero",
+            "using System.Collections.Generic;\nusing UnityEngine;\npublic class Hero : Unit\n{\n    public float dim = 0.5f;\n    public int count;\n    public bool alive;\n    public string title;\n    public Vector3 spawn;\n    public Color tint;\n    public Transform target;\n    public int[] waves;\n    public List<string> tags;\n}\n",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ))
+        .unwrap();
+    let attached = edit(&store, &source, "attach-hero", json!([{"action": "add_component", "fileId": "100", "key": "hero", "scriptPath": "Assets/Scripts/Hero.cs", "fields": {"dim": 0.5}}])).unwrap();
+    let hero = attached.mutation.created_ids["hero"].clone();
+    let set = |property: &str, value: Value| {
+        let latest = store.read(PATH).unwrap();
+        edit(
+            &store,
+            &latest,
+            &format!("set-{property}-{}", value.to_string().len()),
+            json!([{"action": "set_property", "fileId": hero, "property": property, "value": value}]),
+        )
+    };
+    for (property, value) in [
+        ("count", json!("12")),
+        ("alive", json!("true")),
+        ("title", json!(42)),
+        ("spawn", json!([1, 2, 3])),
+        ("tint", json!({"red": 1})),
+        ("waves", json!("1,2,3")),
+        ("tags", json!([1, 2])),
+        ("target", json!("101")),
+    ] {
+        code(set(property, value.clone()), "invalid_property_value");
+    }
+    for (property, value) in [
+        ("boost", json!(3)),
+        ("count", json!(12)),
+        ("alive", json!(true)),
+        ("title", json!("007")),
+        ("spawn", json!({"x": 1, "y": 2, "z": 3})),
+        ("tint", json!({"r": 1, "g": 0.5, "b": 0, "a": 1})),
+        ("target", json!({"fileID": "101"})),
+        ("waves", json!([1, 2, 3])),
+        ("tags", json!(["a", "b"])),
+    ] {
+        set(property, value.clone()).unwrap_or_else(|error| {
+            panic!("{property} = {value}: {} {}", error.code, error.message)
+        });
+    }
+    let text = fs::read_to_string(temp.path().join(PATH)).unwrap();
+    for line in [
+        "  boost: 3\n",
+        "  count: 12\n",
+        "  alive: 1\n",
+        "  title: \"007\"\n",
+    ] {
+        assert!(text.contains(line), "{line:?} in {text}");
+    }
+}
+
 #[test]
 fn external_references_prevent_deletion() {
     let (temp, store, source) = fixture(SCENE);

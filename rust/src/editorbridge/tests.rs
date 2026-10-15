@@ -1067,3 +1067,46 @@ fn recorded_cases_agree_on_documents_and_receipts() {
         jsondoc::marshal(&response)
     });
 }
+
+/// The import workers an owned Editor leaves behind are ended with it; those
+/// of another Editor or project are not (stage 5 mcp5-4).
+#[test]
+fn import_workers_of_the_editor_are_ended() {
+    let (_guard, project) = crate::sysutil::testing::temp_dir();
+    let project = crate::sysutil::eval_symlinks(&project).unwrap();
+    let (_other_guard, other) = crate::sysutil::testing::temp_dir();
+    let spawn = |parent: &str, path: &str| {
+        std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                "while :; do sleep 1; done",
+                "sh",
+                "-name",
+                "AssetImportWorker0",
+                "-parentPid",
+                parent,
+                "-projectPath",
+                path,
+            ])
+            // A failed assertion must not leave the test's output open.
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let mut ours = spawn("4194301", &project);
+    let mut theirs = spawn("4194302", &project);
+    let mut elsewhere = spawn("4194301", &other);
+    std::thread::sleep(Duration::from_millis(100));
+    end_import_workers(4194301, &project);
+    let ended = (0..60).any(|_| {
+        std::thread::sleep(Duration::from_millis(50));
+        ours.try_wait().unwrap().is_some()
+    });
+    assert!(ended, "the worker of the Editor still runs");
+    assert!(theirs.try_wait().unwrap().is_none() && elsewhere.try_wait().unwrap().is_none());
+    for child in [&mut theirs, &mut elsewhere] {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}

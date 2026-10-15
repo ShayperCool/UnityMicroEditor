@@ -2,7 +2,8 @@
 //! incremental compilation and the Roslyn/lifecycle helper invocations.
 use super::{
     AssemblyConfig, CompileAssembly, CompileManifest, CompileUpdate, CompiledCache, Compiler,
-    LifecycleCallback, LifecycleProof, NilMap, NilVec, RuntimeInitializer, float_layout, join,
+    LifecycleCallback, LifecycleProof, NilMap, NilVec, PlayerMap, RuntimeInitializer, float_layout,
+    join,
     netcode::needs_netcode,
     nilable::{nz, unmarshal},
     player_data,
@@ -25,6 +26,9 @@ use std::{
     fs,
     time::Instant,
 };
+
+/// How long one served request of the lifecycle helper may take.
+const HELPER_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
 
 fn raw<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Box<RawValue>>, D::Error> {
     Box::<RawValue>::deserialize(deserializer).map(Some)
@@ -412,6 +416,12 @@ struct LifecycleRequest<'a> {
     marker_path: &'a str,
     #[serde(rename = "NativeBaseAssemblies")]
     native_base_assemblies: &'a NilVec<String>,
+    /// The content of every reference as the driver checked it: a served
+    /// helper keeps reference metadata under it and reads a reference it
+    /// does not hold, which must have this content. A one-shot run reads
+    /// every reference and ignores it.
+    #[serde(rename = "ReferenceHashes")]
+    reference_hashes: &'a BTreeMap<String, String>,
     #[serde(rename = "References")]
     references: &'a NilVec<String>,
     #[serde(rename = "Sources")]
@@ -620,6 +630,8 @@ impl Compiler {
                 || assembly.sources.is_empty()
                 || !assembly.netcode_postprocessor.is_empty()
                     && (!needs_netcode(assembly) || !valid_sha256(&assembly.netcode_postprocessor))
+                || !assembly.lifecycle_helper.is_empty()
+                    && !valid_sha256(&assembly.lifecycle_helper)
                 || !valid_lifecycle_proof(&assembly.lifecycle_barrier, &assembly.name)
                 || !lifecycle_sources_match(&assembly.lifecycle_barrier, &assembly.sources)
             {
@@ -684,6 +696,93 @@ impl Compiler {
             }
         }
         Ok(compiler)
+    }
+
+    /// Whether a session can start on the prepared baseline with the managed
+    /// sources as they are on disk: the part of [`Compiler::new`] and of the
+    /// startup compile that reads the graph, without a Player. The error is
+    /// the one the runner's start would end with ("... requires a fresh
+    /// managed graph"). It passes when every configuration input the
+    /// baseline recorded (assembly definitions, references, packages and
+    /// their manifest, project settings, script metadata) is as it was, no
+    /// source of the graph is gone and `Assets` holds no managed
+    /// configuration outside the graph; C# sources may differ in content
+    /// and new ones may have been added, which the startup compile takes.
+    ///
+    /// A request identity or a receipt says what a preparation was asked
+    /// for. This says what it was made from.
+    pub fn graph_accepts_sources(project: &str, baseline_manifest: &str) -> Result<()> {
+        let project = crate::project::lexpath::abs(project)?;
+        let project = sysutil::eval_symlinks(&project)?;
+        let (manifest, baseline_path) = match compiler_manifest(baseline_manifest) {
+            Ok(read) => read,
+            // A plan without a game assembly is no plan a session compiles
+            // from, and it still says which managed inputs it was made
+            // with: there is nothing but those to compare.
+            Err(error) => {
+                #[derive(Deserialize, Default)]
+                #[serde(default)]
+                struct Wrapper {
+                    compiler: Option<CompileManifest>,
+                }
+                let embedded = sys::read(baseline_manifest)
+                    .ok()
+                    .and_then(|data| unmarshal::<Wrapper>(&data).ok())
+                    .and_then(|wrapper| wrapper.compiler)
+                    .filter(|manifest| manifest.schema == 1 && manifest.assemblies.is_empty());
+                match embedded {
+                    Some(manifest) => (manifest, baseline_manifest.to_string()),
+                    None => return Err(error),
+                }
+            }
+        };
+        if manifest.project != project {
+            bail!("compiler baseline belongs to another project");
+        }
+        let mut compiler = Compiler {
+            project,
+            manifest: manifest.clone(),
+            configs: NilMap::make(),
+            configuration_hashes: NilMap::make(),
+            sources: NilMap::make(),
+            configuration: NilMap::make(),
+            ..Default::default()
+        };
+        for assembly in &manifest.assemblies {
+            let (config, hash) =
+                read_assembly_configuration(&baseline_path, assembly, Some(&manifest))?;
+            compiler.configs.insert(&assembly.name, config);
+            compiler.configuration_hashes.insert(&assembly.name, hash);
+            // The plan's assembly is the slot a new source under Assets is
+            // compiled into, as the runner's start takes it; without one
+            // every addition misfit.
+            let slot = match assembly.path.is_empty() {
+                true => format!("{}.dll", assembly.name),
+                false => assembly.path.clone(),
+            };
+            compiler.current_dlls.insert(&assembly.name, slot);
+            for source in &assembly.sources {
+                let digest = manifest.compiler_inputs.at(source);
+                if digest.is_empty() {
+                    bail!("baseline lacks runtime source digest: {source}");
+                }
+                if sys::absent(source) {
+                    bail!(
+                        "a source of the prepared managed graph is gone; regenerate source graph: {source}"
+                    );
+                }
+                compiler.sources.insert(source, digest.to_string());
+                let meta = format!("{source}.meta");
+                let hash = manifest.compiler_inputs.at(&meta);
+                if !hash.is_empty() {
+                    compiler
+                        .configuration
+                        .insert(meta.clone(), hash.to_string());
+                }
+            }
+        }
+        compiler.collect_configuration_inputs();
+        compiler.source_graph_candidate(&[]).map(drop)
     }
 
     /// The active Player is a copy of the prepared native host. Match native DLL
@@ -929,7 +1028,11 @@ impl Compiler {
                     "previously absent managed input appeared; regenerate source graph: {filename}"
                 );
             }
-            if !file_hash(filename).is_ok_and(|actual| actual == *expected) {
+            if !self
+                .hashes
+                .file_hash(filename)
+                .is_ok_and(|actual| actual == *expected)
+            {
                 bail!(
                     "managed assembly configuration/GUID changed; regenerate source graph: {filename}"
                 );
@@ -978,7 +1081,7 @@ impl Compiler {
                 if dependency.starts_with("UnityEditor") {
                     bail!("Editor dependency cannot be a Player reference: {dependency}");
                 }
-                file_hash(&filename).map_err(|error| {
+                self.hashes.file_hash(&filename).map_err(|error| {
                     anyhow!("Source dependency {dependency} is unavailable: {error}")
                 })?;
                 refs.push(filename);
@@ -1013,17 +1116,28 @@ impl Compiler {
         changed_paths: Option<&[String]>,
     ) -> Result<Option<CompileUpdate>> {
         ctx.err()?;
+        self.last_phases.clear();
         if let Some(changed) = changed_paths
             && !self.compiler_changes(changed)
         {
             return Ok(None);
         }
+        let started = Instant::now();
         let mut candidate = self.source_graph_candidate(changed_paths.unwrap_or(&[]))?;
-        let update = candidate.compile_graph(ctx, changed_paths)?;
-        // Graph extensions become visible together with their verified DLLs.
-        // Rejected edits retain the last accepted graph and immutable Player.
-        *self = candidate;
-        Ok(update)
+        candidate.last_phases.clear();
+        candidate.last_phases.lap("graph_candidate", started);
+        match candidate.compile_graph(ctx, changed_paths) {
+            Ok(update) => {
+                // Graph extensions become visible together with their verified DLLs.
+                // Rejected edits retain the last accepted graph and immutable Player.
+                *self = candidate;
+                Ok(update)
+            }
+            Err(error) => {
+                self.last_phases = candidate.last_phases;
+                Err(error)
+            }
+        }
     }
 
     pub fn compile_graph(
@@ -1041,7 +1155,9 @@ impl Compiler {
         {
             return Ok(None);
         }
+        let mut lap = Instant::now();
         self.check_configuration(changed_paths.unwrap_or(&[]))?;
+        lap = self.last_phases.lap("configuration_check", lap);
         let assemblies = self.manifest.assemblies.to_vec();
         let mut current_sources = NilMap::make();
         for assembly in &assemblies {
@@ -1049,7 +1165,26 @@ impl Compiler {
                 current_sources.insert(source, file_hash(source)?);
             }
         }
+        lap = self.last_phases.lap("source_hashes", lap);
         let mut dirty = dirty_assemblies(&assemblies, &self.sources, &current_sources);
+        // A preparation holds the output of the lifecycle rewrite that made
+        // it. Another build of the helper writes other text for the same
+        // source (line directives, the paths of caller information), so the
+        // Player would load one rewrite and the first edit compile another:
+        // the patch builder then sees differences nobody made. Such
+        // assemblies are compiled again before the session starts, like the
+        // caches of assemblies, code revisions and the helper itself, which
+        // all miss when the helper changes.
+        let mut forced_lifecycle = BTreeSet::new();
+        if !self.startup_complete {
+            let (helper_key, _) = self.lifecycle_helper_key()?;
+            for assembly in &assemblies {
+                if assembly.lifecycle_helper != helper_key {
+                    forced_lifecycle.insert(assembly.name.clone());
+                    dirty.insert(assembly.name.clone());
+                }
+            }
+        }
         // The old raw baseline predates NGO IL postprocessing. Rebuild its
         // networking assemblies once even when the source bytes are unchanged.
         let mut forced_netcode = BTreeSet::new();
@@ -1081,9 +1216,13 @@ impl Compiler {
             return Ok(None);
         }
         let revision_key = self.code_revision_key(ctx, &current_sources)?;
-        if !self.startup_complete
-            && let Some(mut update) = self.restore_code_revision(&revision_key, &current_sources)
-        {
+        lap = self.last_phases.lap("revision_key", lap);
+        let restored = match self.startup_complete {
+            true => None,
+            false => self.restore_code_revision(&revision_key, &current_sources),
+        };
+        lap = self.last_phases.lap("revision_restore", lap);
+        if let Some(mut update) = restored {
             self.check_configuration(&[])?;
             for (source, expected) in &current_sources {
                 if !file_hash(source).is_ok_and(|actual| actual == *expected) {
@@ -1121,11 +1260,13 @@ impl Compiler {
             }
         }
         let helper = self.prepare_lifecycle_helper(ctx)?;
+        self.last_phases.lap("snapshots", lap);
         let mut built: BTreeMap<String, String> = BTreeMap::new();
         let mut proofs: NilMap<LifecycleProof> = NilMap::make();
         let mut direct_dirty =
             source_dirty_assemblies(&assemblies, &self.sources, &current_sources);
         direct_dirty.extend(forced_netcode);
+        direct_dirty.extend(forced_lifecycle);
         let mut declarations_changed: BTreeMap<String, bool> = BTreeMap::new();
         let mut rebuilt = BTreeSet::new();
         let mut compiled = NilVec::nil();
@@ -1138,7 +1279,9 @@ impl Compiler {
                 proofs.insert(&assembly.name, self.proofs.value(&assembly.name));
                 continue;
             }
+            let started = Instant::now();
             let refs = self.references(assembly, &built)?;
+            self.last_phases.lap("references", started);
             let (dll, proof) = self.compile_assembly(
                 ctx,
                 &staging,
@@ -1151,16 +1294,20 @@ impl Compiler {
             built.insert(assembly.name.clone(), dll.clone());
             proofs.insert(&assembly.name, proof);
             let previous = self.current_dlls.at(&assembly.name).to_string();
+            let started = Instant::now();
             self.validate_compiled_script_types(ctx, &helper, &assembly.name, &previous, &dll)?;
+            let started = self.last_phases.lap("type_definitions", started);
             rebuilt.insert(assembly.name.clone());
             // A fingerprint is an optimization. Unknown metadata retains the
             // original conservative dependent rebuild instead of guessing.
             let changed = self
                 .declarations_changed(ctx, &helper, &previous, &dll)
                 .unwrap_or(true);
+            self.last_phases.lap("declaration_hashes", started);
             declarations_changed.insert(assembly.name.clone(), changed);
             compiled.push(assembly.name.clone());
         }
+        lap = Instant::now();
         self.check_configuration(&[])?;
         for (filename, expected) in &current_sources {
             if !file_hash(filename).is_ok_and(|hash| hash == *expected) {
@@ -1169,6 +1316,7 @@ impl Compiler {
                 );
             }
         }
+        lap = self.last_phases.lap("final_check", lap);
         let player_folder = join(&[&staging, "Player"]);
         sys::mkdir(&player_folder)?;
         compiler_command(
@@ -1183,6 +1331,13 @@ impl Compiler {
             ],
         )
         .map_err(|error| anyhow!("stage immutable Player: {error}"))?;
+        lap = self.last_phases.lap("player_copy", lap);
+        // The copy holds the bytes of its source, which this process hashed
+        // before and checks by `stat` now, after the copy; the files written
+        // below are hashed as written. Anything else is read again.
+        let source_directory = sysutil::dir(&self.player);
+        let mut map =
+            PlayerMap::after_copy(self.known_player_map(&source_directory), &player_folder)?;
         let player = join(&[&player_folder, &sysutil::base(&self.player)]);
         let managed = super::player_managed(&player);
         let mut update = CompileUpdate {
@@ -1197,16 +1352,22 @@ impl Compiler {
             let destination = join(&[&managed, &format!("{}.dll", assembly.name)]);
             if rebuilt.contains(&assembly.name) {
                 let source = &built[&assembly.name];
-                sys::write(&destination, &sys::read(source)?)?;
+                let data = sys::read(source)?;
+                sys::write(&destination, &data)?;
+                map.wrote(&destination, sha256(&data))?;
                 let stem = source.strip_suffix(".dll").unwrap_or(source);
                 if let Ok(data) = sys::read(&format!("{stem}.pdb")) {
                     let target = destination.strip_suffix(".dll").unwrap_or(&destination);
-                    sys::write(&format!("{target}.pdb"), &data)?;
+                    let target = format!("{target}.pdb");
+                    sys::write(&target, &data)?;
+                    map.wrote(&target, sha256(&data))?;
                 }
             }
-            update
-                .dll_hashes
-                .insert(&assembly.name, file_hash(&destination)?);
+            let hash = map.hash_of(&destination);
+            if hash.is_empty() {
+                bail!("compiled Player lacks game assembly {}", assembly.name);
+            }
+            update.dll_hashes.insert(&assembly.name, hash.to_string());
             update.assemblies.push(destination);
             if declarations_changed.get(&assembly.name) == Some(&true) {
                 update.declaration_changed.push(assembly.name.clone());
@@ -1221,7 +1382,10 @@ impl Compiler {
         }
         update.elapsed_seconds = float_layout(started.elapsed().as_secs_f64());
         atomic_json(&join(&[&staging, "compile-update.json"]), &update)?;
-        self.save_code_revision(&revision_key, &update, &proofs)?;
+        lap = self.last_phases.lap("player_dlls", lap);
+        self.save_code_revision(&revision_key, &update, &proofs, &map)?;
+        self.last_phases.lap("save_revision", lap);
+        self.player_map = Some(std::sync::Arc::new(map));
         self.use_code_revision(&update, proofs);
         Ok(Some(update))
     }
@@ -1263,6 +1427,64 @@ impl Compiler {
         false
     }
 
+    /// Runs the lifecycle helper (`arguments[0]`) on the rest of
+    /// `arguments` in `directory`: through the session's service when this
+    /// compiler has one, else in a process of its own, as it always runs
+    /// for a preparation. What the caller gets is what the one-shot run
+    /// gives. A served answer counts when it succeeded or names errors of
+    /// the sources; any other failure, and a service that could not
+    /// answer, runs the request once more in a process of its own.
+    pub fn helper_command(
+        &self,
+        ctx: &Context,
+        directory: &str,
+        arguments: &[&str],
+    ) -> std::result::Result<Vec<u8>, super::CommandError> {
+        if let Some(service) = self.helper_service(arguments[0]) {
+            match service.call(ctx, directory, &arguments[1..], HELPER_LIMIT) {
+                Ok(reply) if reply.exit == 0 => {
+                    return Ok(format!("{}{}", reply.output, reply.error).into_bytes());
+                }
+                Ok(reply) if reply.kind == "diagnostics" => {
+                    let output = format!("{}{}", reply.output, reply.error).into_bytes();
+                    return Err(super::CommandError {
+                        message: format!(
+                            "{}: exit status {}\n{}",
+                            sysutil::base(&self.dotnet),
+                            reply.exit,
+                            String::from_utf8_lossy(&output)
+                        ),
+                        output,
+                    });
+                }
+                _ => {}
+            }
+        }
+        compiler_command(ctx, directory, &self.dotnet, arguments)
+    }
+
+    /// The service of `helper`, started at its first request; `None` when
+    /// this compiler runs the helper once per request.
+    fn helper_service(&self, helper: &str) -> Option<std::sync::Arc<super::Service>> {
+        if !self.serve_helper || helper.is_empty() {
+            return None;
+        }
+        let mut kept = self.helper_service.lock().unwrap();
+        if let Some(service) = kept.as_ref()
+            && service.program() == helper
+        {
+            return Some(service.clone());
+        }
+        // Another build of the helper: the old process ends with its handle.
+        let service = std::sync::Arc::new(super::Service::new(
+            "lifecycle helper",
+            &self.dotnet,
+            helper,
+        ));
+        *kept = Some(service.clone());
+        Some(service)
+    }
+
     /// Compares the declaration fingerprints of two DLLs.
     pub fn declarations_changed(
         &self,
@@ -1271,10 +1493,9 @@ impl Compiler {
         previous_dll: &str,
         next_dll: &str,
     ) -> Result<bool> {
-        let output = compiler_command(
+        let output = self.helper_command(
             ctx,
             &self.cache,
-            &self.dotnet,
             &[helper, "--declaration-hashes", previous_dll, next_dll],
         )?;
         let hashes = unmarshal::<NilMap<String>>(&output).unwrap_or_default();
@@ -1364,12 +1585,8 @@ impl Compiler {
                 .cloned()
         };
         if previous_dll.is_empty() {
-            let output = compiler_command(
-                ctx,
-                &self.cache,
-                &self.dotnet,
-                &[helper, "--type-definitions", next_dll],
-            )?;
+            let output =
+                self.helper_command(ctx, &self.cache, &[helper, "--type-definitions", next_dll])?;
             let definitions = unmarshal::<NilMap<NilVec<String>>>(&output).unwrap_or_default();
             return match listed(&definitions, next_dll) {
                 Some(next) if definitions.len() == 1 => {
@@ -1378,13 +1595,13 @@ impl Compiler {
                 _ => bail!("SDK source output lacks exact type definition proof: {assembly}"),
             };
         }
-        let output = compiler_command(
-            ctx,
-            &self.cache,
-            &self.dotnet,
-            &[helper, "--type-definitions", previous_dll, next_dll],
-        )
-        .map_err(|error| anyhow!("validate baseline script types in {assembly}: {error}"))?;
+        let output = self
+            .helper_command(
+                ctx,
+                &self.cache,
+                &[helper, "--type-definitions", previous_dll, next_dll],
+            )
+            .map_err(|error| anyhow!("validate baseline script types in {assembly}: {error}"))?;
         let definitions = unmarshal::<NilMap<NilVec<String>>>(&output).unwrap_or_default();
         match (
             listed(&definitions, previous_dll),
@@ -1446,12 +1663,9 @@ impl Compiler {
         Ok(())
     }
 
-    /// Builds (or reuses) our Roslyn helper with the
-    /// installed SDK. The cache entry is keyed by its sources and the SDK.
-    pub fn prepare_lifecycle_helper(&mut self, ctx: &Context) -> Result<String> {
-        if !self.helper.is_empty() {
-            return Ok(self.helper.clone());
-        }
+    /// The cache key of the lifecycle helper: the hashes of its two sources
+    /// and of the SDK's compiler and launcher, with the hashes themselves.
+    pub fn lifecycle_helper_key(&self) -> Result<(String, BTreeMap<String, String>)> {
         let tool_root = micro_editor_root()?;
         let source_root = join(&[&tool_root, "tools/LifecycleCompiler"]);
         let mut inputs = BTreeMap::new();
@@ -1464,13 +1678,27 @@ impl Compiler {
             let hash = file_hash(&filename)?;
             inputs.insert(filename, hash);
         }
-        let key = sha256(&marshal(&inputs)?);
+        Ok((sha256(&marshal(&inputs)?), inputs))
+    }
+
+    /// Builds (or reuses) our Roslyn helper with the
+    /// installed SDK. The cache entry is keyed by its sources and the SDK.
+    pub fn prepare_lifecycle_helper(&mut self, ctx: &Context) -> Result<String> {
+        if !self.helper.is_empty() {
+            return Ok(self.helper.clone());
+        }
+        let tool_root = micro_editor_root()?;
+        let source_root = join(&[&tool_root, "tools/LifecycleCompiler"]);
+        let (key, inputs) = self.lifecycle_helper_key()?;
         let entry = join(&[&self.cache, "lifecycle", &key]);
         let helper = join(&[&entry, "LifecycleCompiler.dll"]);
-        if read_json_file::<NilMap<String>>(&join(&[&entry, "files.json"]))
-            .is_ok_and(|metadata| verify_cache_files(&entry, &metadata))
-        {
+        let verified = || {
+            read_json_file::<NilMap<String>>(&join(&[&entry, "files.json"]))
+                .is_ok_and(|metadata| verify_cache_files(&entry, &metadata))
+        };
+        if verified() {
             self.helper = helper.clone();
+            self.helper_key = key;
             return Ok(helper);
         }
         sys::mkdir_all(&sysutil::dir(&entry))?;
@@ -1501,6 +1729,8 @@ impl Compiler {
                 &payload,
                 &format!("-p:RoslynPath={}", sysutil::dir(&self.csc)),
                 "-p:NuGetAudit=false",
+                sys::BUILD_WITHOUT_SERVERS[0],
+                sys::BUILD_WITHOUT_SERVERS[1],
             ],
         )
         .map_err(|error| anyhow!("build SDK lifecycle helper: {error}"))?;
@@ -1513,8 +1743,9 @@ impl Compiler {
             bail!("SDK helper build produced no verified executable");
         }
         atomic_json(&join(&[&payload, "files.json"]), &metadata)?;
-        sys::rename(&payload, &entry)?;
+        sys::publish(&payload, &entry, verified)?;
         self.helper = helper.clone();
+        self.helper_key = key;
         Ok(helper)
     }
 
@@ -1532,7 +1763,12 @@ impl Compiler {
         hashes: &NilMap<String>,
     ) -> Result<(String, LifecycleProof)> {
         let config = self.configs.value(&assembly.name);
+        let mut lap = Instant::now();
         let mut identity: BTreeMap<String, String> = BTreeMap::new();
+        // What the compiler server is handed, by path: it must not keep
+        // older bytes of any of them.
+        let mut served: BTreeMap<String, String> = BTreeMap::new();
+        let mut reference_hashes: BTreeMap<String, String> = BTreeMap::new();
         identity.insert(
             "configuration".into(),
             self.configuration_hashes.at(&assembly.name).to_string(),
@@ -1546,17 +1782,23 @@ impl Compiler {
             }
         }
         for reference in refs {
+            let hash = self.hashes.file_hash(reference)?;
             identity.insert(
                 format!("reference:{}", sysutil::base(reference)),
-                file_hash(reference)?,
+                hash.clone(),
             );
+            reference_hashes.insert(reference.clone(), hash.clone());
+            served.insert(reference.clone(), hash);
         }
         for executable in [helper.to_string(), self.csc.clone()]
             .into_iter()
             .chain(self.generators.iter().cloned())
         {
-            let hash = file_hash(&executable)?;
-            identity.insert(executable, hash);
+            let hash = self.hashes.file_hash(&executable)?;
+            identity.insert(executable.clone(), hash.clone());
+            if self.generators.contains(&executable) {
+                served.insert(executable, hash);
+            }
         }
         let network = needs_netcode(assembly);
         let mut netcode_key = String::new();
@@ -1565,19 +1807,27 @@ impl Compiler {
             identity.insert("netcodePostprocessor".into(), netcode_key.clone());
         }
         let key = sha256(&marshal(&identity)?);
+        lap = self.last_phases.lap("assembly_identity", lap);
         let entry = join(&[&self.cache, "assemblies", &key]);
         let library = format!("{}.dll", assembly.name);
-        if let Ok(Some(cached)) =
+        // The entry as it stands, when every part of it holds.
+        let cached = || {
             read_json_file::<Option<CompiledCache>>(&join(&[&entry, "compile-cache.json"]))
-            && cached.schema_version == 1
-            && cached.key == key
-            && cached.name == assembly.name
-            && cached.netcode_key == netcode_key
-            && valid_lifecycle_proof(&cached.proof, &assembly.name)
-            && lifecycle_sources_match(&cached.proof, &assembly.sources)
-            && verify_cache_files(&entry, &cached.files)
-            && !cached.files.at(&library).is_empty()
-        {
+                .ok()
+                .flatten()
+                .filter(|cached| {
+                    cached.schema_version == 1
+                        && cached.key == key
+                        && cached.name == assembly.name
+                        && cached.netcode_key == netcode_key
+                        && valid_lifecycle_proof(&cached.proof, &assembly.name)
+                        && lifecycle_sources_match(&cached.proof, &assembly.sources)
+                        && verify_cache_files(&entry, &cached.files)
+                        && !cached.files.at(&library).is_empty()
+                })
+        };
+        if let Some(cached) = cached() {
+            self.last_phases.lap("assembly_cache", lap);
             return Ok((join(&[&entry, &library]), cached.proof));
         }
         let folder = join(&[staging, "Compile", &assembly.name]);
@@ -1616,12 +1866,16 @@ impl Compiler {
                 execution_orders: &execution_orders,
                 marker_path: &marker,
                 native_base_assemblies: &config.native_base,
+                reference_hashes: &reference_hashes,
                 references: refs,
                 sources: &sources,
             },
         )?;
-        let output = compiler_command(ctx, staging, &self.dotnet, &[helper, &request])
+        lap = self.last_phases.lap("assembly_cache", lap);
+        let output = self
+            .helper_command(ctx, staging, &[helper, &request])
             .map_err(|error| anyhow!("verify lifecycle {}: {error}", assembly.name))?;
+        lap = self.last_phases.lap("lifecycle_rewrite", lap);
         let wire: WireProof = unmarshal(&output)?;
         let mut proof = LifecycleProof {
             schema_version: wire.schema_version,
@@ -1694,21 +1948,25 @@ impl Compiler {
             text.push_str("\"\n");
         }
         sys::write(&response, text.as_bytes())?;
-        let (output, error) = match compiler_command(
+        let outputs = [
+            dll.clone(),
+            format!("{}.pdb", dll.strip_suffix(".dll").unwrap_or(&dll)),
+        ];
+        let (output, error) = match super::csc_command(
             ctx,
+            self.compiler_server.as_deref(),
+            self.verify_compiles,
             &self.project,
             &self.dotnet,
             &[&self.csc, &format!("@{response}")],
+            &served,
+            &outputs,
         ) {
             Ok(output) => (output, None),
             Err(error) => (error.output, Some(error.message)),
         };
         let listing = String::from_utf8_lossy(&output);
-        if error.is_some()
-            || listing.contains("CS8032")
-            || listing.contains("CS8784")
-            || listing.contains("CS8785")
-        {
+        if error.is_some() || super::analyzer_failure(&listing) {
             bail!(
                 "compile {} failed: {}\n{listing}",
                 assembly.name,
@@ -1716,9 +1974,11 @@ impl Compiler {
             );
         }
         fs::metadata(&dll).map_err(|e| sys::os_error("stat", &dll, &e))?;
+        lap = self.last_phases.lap("csc", lap);
         if network {
             (dll, proof) = self.postprocess_netcode(ctx, &folder, &dll, assembly, refs, proof)?;
         }
+        lap = self.last_phases.lap("netcode", lap);
         sys::mkdir_all(&sysutil::dir(&entry))?;
         let payload = sys::mkdir_temp(&sysutil::dir(&entry), ".assembly-")?;
         let mut files = NilMap::make();
@@ -1733,14 +1993,18 @@ impl Compiler {
             &join(&[&payload, "compile-cache.json"]),
             &CompiledCache {
                 schema_version: 1,
-                key,
+                key: key.clone(),
                 name: assembly.name.clone(),
                 files,
                 proof: proof.clone(),
-                netcode_key,
+                netcode_key: netcode_key.clone(),
             },
         )?;
-        sys::rename(&payload, &entry)?;
+        // Another process may have published the same state meanwhile: its
+        // entry is the one to use then, with the proof it recorded.
+        sys::publish(&payload, &entry, || cached().is_some())?;
+        let proof = cached().map_or(proof, |cached| cached.proof);
+        self.last_phases.lap("assembly_cache", lap);
         Ok((join(&[&entry, &library]), proof))
     }
 }

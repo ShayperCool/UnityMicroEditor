@@ -1022,6 +1022,9 @@ fn raw_session_owned_ddol_lifecycle_sdk() {
             "--nologo",
             "-v:q",
             "-p:NuGetAudit=false",
+            // Without build servers: one would outlive the test.
+            compiler::BUILD_WITHOUT_SERVERS[0],
+            compiler::BUILD_WITHOUT_SERVERS[1],
         ],
     )
     .unwrap();
@@ -1046,7 +1049,7 @@ fn fake_player(root: &str, ready: &str, body: &str) -> String {
     write_executable(
         &path,
         &format!(
-            "#!/bin/sh\nwhile [ $# -gt 0 ]; do case \"$1\" in --unity-cli-report) report=\"$2\"; shift;; esac; shift; done\n{}\n{body}\n",
+            "#!/bin/sh\nwhile [ $# -gt 0 ]; do case \"$1\" in --unity-cli-report) report=\"$2\"; shift;; -logFile) log=\"$2\"; shift;; esac; shift; done\n{}\n{body}\n",
             ready.replace("READY", "\"$report.ready.json\"")
         ),
     );
@@ -1170,9 +1173,25 @@ fn fake_player_readiness_failures() {
     ] {
         let mut player = launch(&root, &fake_player(&root, &ready, keep), &wake);
         let error = failure(player.wait_ready(&ctx, ReadyBudget::fixed(Duration::from_secs(10))));
-        assert!(error.ends_with(&expected), "{error}");
+        assert!(error.contains(&expected), "{error}");
         player.stop();
     }
+    // Errors logged before ready: the first is quoted with the log (mcp6-5).
+    let logged = format!(
+        "printf 'Loaded\\nUnityEngine.Debug:Log (object)\\n\\nUnsupported enum type '\\''RgLong'\\'' used for field '\\''longKind'\\''\\nUnityEngine.Debug:ExtractStackTraceNoAlloc (byte*,int,string)\\n' > \"$log\"\n{}",
+        READY.replace("\"errors\":0", "\"errors\":9")
+    );
+    let mut player = launch(&root, &fake_player(&root, &logged, keep), &wake);
+    let error = failure(player.wait_ready(&ctx, ReadyBudget::fixed(Duration::from_secs(10))));
+    let log = sysutil::join(&[&sysutil::dir(&player.report), "player.log"]);
+    assert!(
+        error.contains("errors=9")
+            && error.ends_with(&format!(
+                "the first: \"Unsupported enum type 'RgLong' used for field 'longKind'\"; see {log}"
+            )),
+        "{error}"
+    );
+    player.stop();
     // Timeout and cancellation.
     let mut player = launch(&root, &fake_player(&root, "", keep), &wake);
     let error = failure(player.wait_ready(&ctx, ReadyBudget::fixed(Duration::from_secs(1))));
@@ -1410,4 +1429,166 @@ fn baseline_and_launch_descriptors_decode() {
     );
     fs::write(&path, "{}").unwrap();
     assert_eq!(json::read_runtime_initializers(&path).unwrap(), Value::Null);
+}
+
+// Hot reload at the Player's launch
+
+/// A stand-in Player that records its arguments, the Mono options of its
+/// environment and what its standard input is, then becomes ready.
+fn recording_player(root: &str) -> String {
+    let path = sysutil::join(&[root, "Host.x86_64"]);
+    write_executable(
+        &path,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\nprintf '%s' \"${{MONO_ARGUMENTS-<unset>}}\" > \"$0.mono\"\nreadlink /proc/$$/fd/0 > \"$0.stdin\"\nwhile [ $# -gt 0 ]; do case \"$1\" in --unity-cli-report) report=\"$2\"; shift;; esac; shift; done\n{}\ntrap 'exit 0' INT\nwhile :; do sleep 0.05; done\n",
+            READY.replace("READY", "\"$report.ready.json\"")
+        ),
+    );
+    path
+}
+
+/// Starts the recording Player and returns its arguments and Mono options.
+fn launch_recording(opts: &LaunchOptions) -> (Vec<String>, String, String) {
+    let (_guard, root) = temp_dir();
+    let player = recording_player(&root);
+    let manifest = sysutil::join(&[&root, "manifest.json"]);
+    fs::write(&manifest, "{}").unwrap();
+    let run = sysutil::join(&[&root, "runs/r1"]);
+    fs::create_dir_all(&run).unwrap();
+    // Left by nobody in a real run directory; a request of another process
+    // must never be answered by this one.
+    let code_request = crate::hotreload::PlayerCode::request_path(&run);
+    for stale in [code_request.clone(), format!("{code_request}.ack.json")] {
+        fs::write(stale, "{}").unwrap();
+    }
+    let wake = Wake::new();
+    let request = sysutil::join(&[&run, "reload-request.json"]);
+    let mut player = start_player(&wake, opts, &player, &manifest, &run, &request).unwrap();
+    player
+        .wait_ready(
+            &Context::background(),
+            ReadyBudget::fixed(Duration::from_secs(10)),
+        )
+        .unwrap();
+    let exited = player.exit_probe();
+    assert!(!exited());
+    let read = |suffix: &str| fs::read_to_string(format!("{}.{suffix}", player.path)).unwrap();
+    let args: Vec<String> = read("args").lines().map(str::to_string).collect();
+    // No child of a session may take the lines meant for the command reader.
+    assert_eq!(read("stdin").trim(), "/dev/null");
+    let stale = fs::exists(&code_request).unwrap()
+        || fs::exists(format!("{code_request}.ack.json")).unwrap();
+    assert_eq!(stale, !(opts.interactive && opts.hot_reload));
+    let mono = read("mono");
+    player.stop();
+    // The probe keeps telling it after the loop has taken the exit result.
+    assert!(player.exited && exited());
+    (args, mono, run)
+}
+
+#[test]
+fn player_launch_for_hot_reload() {
+    let options = |hot_reload: bool| LaunchOptions {
+        frames: 120,
+        width: 960,
+        height: 540,
+        fps: 60,
+        watch: true,
+        interactive: true,
+        hot_reload,
+        ..Default::default()
+    };
+    // What the developer set for the Player's Mono is never replaced.
+    let inherited = std::env::var("MONO_ARGUMENTS").ok();
+    let (args, mono, run) = launch_recording(&options(true));
+    let position = |name: &str| args.iter().position(|argument| argument == name);
+    let code = position("--unity-cli-code-reload").expect("the code reload argument");
+    assert_eq!(
+        args[code + 1],
+        sysutil::join(&[&run, "code-reload-request.json"])
+    );
+    // The bridge takes it only in an interactive run with a raw manifest,
+    // and beside a scene reload request of another name.
+    assert!(position("--unity-cli-interactive").unwrap() < code);
+    assert!(position("--unity-cli-raw-manifest").is_some());
+    let scene = position("--unity-cli-raw-reload").unwrap();
+    assert_eq!(
+        args[scene + 1],
+        sysutil::join(&[&run, "reload-request.json"])
+    );
+    assert_eq!(
+        mono,
+        inherited.clone().unwrap_or("-O=-float32,-inline".into())
+    );
+
+    let (args, mono, _) = launch_recording(&options(false));
+    assert!(
+        !args
+            .iter()
+            .any(|argument| argument == "--unity-cli-code-reload")
+    );
+    assert_eq!(mono, inherited.clone().unwrap_or("<unset>".into()));
+    // A finite run starts no Player that could be patched.
+    let finite = LaunchOptions {
+        watch: false,
+        interactive: false,
+        ..options(true)
+    };
+    let (args, mono, _) = launch_recording(&finite);
+    assert!(
+        !args
+            .iter()
+            .any(|argument| argument == "--unity-cli-code-reload")
+    );
+    assert!(args.iter().any(|argument| argument == "-batchmode"));
+    assert_eq!(mono, inherited.unwrap_or("<unset>".into()));
+}
+
+/// Runs in a child process of the test below, which sets the variable.
+#[test]
+fn helper_player_reports_mono_arguments() {
+    let Ok(expected) = std::env::var("UME_TEST_EXPECT_MONO_ARGUMENTS") else {
+        return;
+    };
+    let opts = LaunchOptions {
+        frames: 120,
+        width: 960,
+        height: 540,
+        fps: 60,
+        watch: true,
+        interactive: true,
+        hot_reload: true,
+        ..Default::default()
+    };
+    assert_eq!(launch_recording(&opts).1, expected);
+}
+
+#[test]
+fn player_keeps_the_mono_arguments_of_the_caller() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(crate::sysutil::testing::helper_arguments(
+            "runner::tests::helper_player_reports_mono_arguments",
+        ))
+        .env("MONO_ARGUMENTS", "--debug -O=-inline")
+        .env("UME_TEST_EXPECT_MONO_ARGUMENTS", "--debug -O=-inline")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && text.contains("1 passed"),
+        "{text}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn sdk_tools_do_not_inherit_standard_input() {
+    let output = crate::compiler::compiler_command(
+        &Context::background(),
+        "",
+        "readlink",
+        &["/proc/self/fd/0"],
+    )
+    .unwrap();
+    assert_eq!(String::from_utf8_lossy(&output).trim(), "/dev/null");
 }
