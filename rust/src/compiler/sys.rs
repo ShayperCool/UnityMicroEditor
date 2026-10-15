@@ -78,9 +78,35 @@ pub fn mkdir_temp(directory: &str, prefix: &str) -> Result<String> {
         .map_err(|e| os_error("mkdir", &sysutil::join(&[directory, prefix]), &e))?;
     Ok(created.keep().to_string_lossy().into_owned())
 }
+/// The switches of every `dotnet build` the tool starts. Without them
+/// MSBuild starts a compiler server (VBCSCompiler) on a pipe that every
+/// process of the user with this Roslyn shares, and may keep worker nodes:
+/// processes of hundreds of megabytes in no group the tool ever signals,
+/// alive for ten minutes after the last build that used them, and used in
+/// turn by builds of other sessions. A build the tool starts leaves no
+/// process behind; it costs about a second more, once per cached helper.
+pub const BUILD_WITHOUT_SERVERS: [&str; 2] = ["--disable-build-servers", "-nodeReuse:false"];
 /// Renames a file or directory.
 pub fn rename(from: &str, to: &str) -> Result<()> {
     fs::rename(from, to).map_err(|e| os_error("rename", &format!("{from} {to}"), &e))
+}
+/// Publishes the cache entry built in the directory `payload` as `entry`.
+/// A directory cannot be renamed onto one that is not empty, so an entry
+/// that stands decides: one that passes `valid` was published by another
+/// process meanwhile and is kept, with the payload dropped; any other is a
+/// damaged entry of ours (a file cut short or changed: nothing is synced
+/// before the rename) and is removed first. Left in place it would fail the
+/// rename, and with it every compile of that state, until someone removed it
+/// by hand.
+pub fn publish(payload: &str, entry: &str, valid: impl Fn() -> bool) -> Result<()> {
+    if fs::symlink_metadata(entry).is_ok() {
+        if valid() {
+            let _ = fs::remove_dir_all(payload);
+            return Ok(());
+        }
+        fs::remove_dir_all(entry).map_err(|e| os_error("remove", entry, &e))?;
+    }
+    rename(payload, entry)
 }
 /// Names of the regular files in a directory, in name order.
 pub fn regular_files(directory: &str) -> Result<Vec<String>> {

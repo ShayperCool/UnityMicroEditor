@@ -46,12 +46,34 @@ impl SourceChange {
     }
 }
 
+/// The changes that wait for the loop, and how many there were in all.
+#[derive(Default)]
+struct Queue {
+    changes: VecDeque<SourceChange>,
+    /// Changes ever queued, and ever handed out.
+    queued: u64,
+    taken: u64,
+}
+
+/// The kernel's notification queue read to its end, by number of request.
+#[derive(Default)]
+struct Flushes {
+    requested: u64,
+    done: u64,
+    /// The reader ended: nothing more is read, and a change that says why
+    /// is queued.
+    ended: bool,
+}
+
 struct Shared {
     inotify: File,
-    /// Wakes the reader out of `poll` when the watcher closes.
+    /// Wakes the reader out of `poll` when the watcher closes or is asked
+    /// to read everything the kernel holds.
     wakeup: File,
-    queue: Mutex<VecDeque<SourceChange>>,
+    queue: Mutex<Queue>,
     space: Condvar,
+    flushes: Mutex<Flushes>,
+    flushed: Condvar,
     closed: Flag,
     ctx: Context,
     wake: Arc<Wake>,
@@ -63,13 +85,14 @@ impl Shared {
     /// `send`: blocks while the channel is full, until the watch ends.
     fn send(&self, event: SourceChange) {
         let mut queue = self.queue.lock().unwrap();
-        while queue.len() >= CAPACITY {
+        while queue.changes.len() >= CAPACITY {
             if self.stopped() {
                 return;
             }
             queue = self.space.wait(queue).unwrap();
         }
-        queue.push_back(event);
+        queue.changes.push_back(event);
+        queue.queued += 1;
         drop(queue);
         self.wake.notify();
     }
@@ -77,6 +100,8 @@ impl Shared {
         let _ = (&self.wakeup).write_all(&1u64.to_ne_bytes());
         drop(self.queue.lock().unwrap());
         self.space.notify_all();
+        drop(self.flushes.lock().unwrap());
+        self.flushed.notify_all();
     }
 }
 
@@ -86,20 +111,40 @@ pub struct ProjectWatcher {
     threads: Vec<JoinHandle<()>>,
 }
 
-fn add_watch(inotify: &File, path: &str) -> Result<i32> {
+/// `None`: no directory is at `path` any more.
+fn add_watch(inotify: &File, path: &str) -> Result<Option<i32>> {
     let name = CString::new(path).map_err(|_| anyhow!("invalid argument"))?;
     // SAFETY: `name` is a valid NUL-terminated path for the duration of the call.
     let descriptor = unsafe { libc::inotify_add_watch(inotify.as_raw_fd(), name.as_ptr(), MASK) };
     if descriptor < 0 {
-        bail!(sysutil::errno_text(&std::io::Error::last_os_error()));
+        let error = std::io::Error::last_os_error();
+        if gone(&error) {
+            return Ok(None);
+        }
+        bail!(sysutil::errno_text(&error));
     }
-    Ok(descriptor)
+    Ok(Some(descriptor))
+}
+
+/// A directory that was removed, renamed or replaced by a file since
+/// something named it.
+fn gone(error: &std::io::Error) -> bool {
+    matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory)
 }
 
 /// Watches a directory and everything below it, in walk order
 /// (names in byte order); symlinks are refused.
+///
+/// A directory that is gone again when the walk gets to it is left out: a
+/// temporary directory that a tool made and removed, or a tree that is
+/// being deleted. Nothing is lost by that. Its removal is a change of the
+/// directory above it, which is watched and reports it.
 fn add_tree(inotify: &File, directories: &mut BTreeMap<i32, String>, root: &str) -> Result<()> {
-    let info = sysutil::lstat(root).map_err(|e| os_error("lstat", root, &e))?;
+    let info = match sysutil::lstat(root) {
+        Ok(info) => info,
+        Err(error) if gone(&error) => return Ok(()),
+        Err(error) => return Err(os_error("lstat", root, &error)),
+    };
     let mut pending = vec![(root.to_string(), info.is_symlink(), info.is_dir())];
     while let Some((path, symlink, directory)) = pending.pop() {
         if symlink {
@@ -108,14 +153,30 @@ fn add_tree(inotify: &File, directories: &mut BTreeMap<i32, String>, root: &str)
         if !directory {
             continue;
         }
-        directories.insert(add_watch(inotify, &path)?, path.clone());
+        let Some(descriptor) = add_watch(inotify, &path)? else {
+            continue;
+        };
+        directories.insert(descriptor, path.clone());
         let mut entries = Vec::new();
-        for entry in std::fs::read_dir(&path).map_err(|e| os_error("open", &path, &e))? {
-            let entry = entry.map_err(|e| os_error("readdirent", &path, &e))?;
+        let listing = match std::fs::read_dir(&path) {
+            Ok(listing) => listing,
+            Err(error) if gone(&error) => continue,
+            Err(error) => return Err(os_error("open", &path, &error)),
+        };
+        for entry in listing {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) if gone(&error) => break,
+                Err(error) => return Err(os_error("readdirent", &path, &error)),
+            };
             let name = entry.file_name().to_string_lossy().into_owned();
-            let kind = entry
-                .file_type()
-                .map_err(|e| os_error("lstat", &sysutil::join(&[&path, &name]), &e))?;
+            let kind = match entry.file_type() {
+                Ok(kind) => kind,
+                Err(error) if gone(&error) => continue,
+                Err(error) => {
+                    return Err(os_error("lstat", &sysutil::join(&[&path, &name]), &error));
+                }
+            };
             entries.push((name, kind.is_symlink(), kind.is_dir()));
         }
         // The stack is popped from the end: push in reverse for lexical order.
@@ -158,15 +219,21 @@ impl ProjectWatcher {
         let shared = Arc::new(Shared {
             inotify,
             wakeup,
-            queue: Mutex::new(VecDeque::new()),
+            queue: Mutex::new(Queue::default()),
             space: Condvar::new(),
+            flushes: Mutex::new(Flushes::default()),
+            flushed: Condvar::new(),
             closed: Flag::new(),
             ctx: ctx.clone(),
             wake: wake.clone(),
         });
         let reader = {
             let shared = shared.clone();
-            std::thread::spawn(move || read(&shared, directories))
+            std::thread::spawn(move || {
+                read(&shared, directories);
+                shared.flushes.lock().unwrap().ended = true;
+                shared.flushed.notify_all();
+            })
         };
         // Interrupts the reader when the context ends or the watch is closed.
         let closer = {
@@ -187,11 +254,63 @@ impl ProjectWatcher {
 
     /// A receive from the events channel that does not block.
     pub fn try_recv(&self) -> Option<SourceChange> {
-        let event = self.shared.queue.lock().unwrap().pop_front();
+        let mut queue = self.shared.queue.lock().unwrap();
+        let event = queue.changes.pop_front();
         if event.is_some() {
+            queue.taken += 1;
+            drop(queue);
             self.shared.space.notify_one();
         }
         event
+    }
+
+    /// Whether a change waits to be received.
+    pub fn pending(&self) -> bool {
+        !self.shared.queue.lock().unwrap().changes.is_empty()
+    }
+    /// How many changes are held for the next windows.
+    #[cfg(test)]
+    pub fn queued(&self) -> usize {
+        self.shared.queue.lock().unwrap().changes.len()
+    }
+    /// How many changes were handed out by `try_recv` so far.
+    pub fn taken(&self) -> u64 {
+        self.shared.queue.lock().unwrap().taken
+    }
+
+    /// Reads everything the kernel has noted about the watched directories
+    /// and returns how many changes were queued in all by then. The end of
+    /// a write (the close of the file), a rename or a removal is noted
+    /// inside its system call, so every change that was complete when this
+    /// is called is among them: once `taken` has reached the returned
+    /// number, each has been handed to the loop.
+    ///
+    /// `None`: the queue is full, and the reader holds changes it cannot
+    /// queue before the caller has taken some. The count so far would
+    /// leave those out, although they were complete too. The caller takes
+    /// what is queued and asks again.
+    pub fn flush(&self) -> Option<u64> {
+        let wanted = {
+            let mut flushes = self.shared.flushes.lock().unwrap();
+            flushes.requested += 1;
+            flushes.requested
+        };
+        let _ = (&self.shared.wakeup).write_all(&1u64.to_ne_bytes());
+        let mut flushes = self.shared.flushes.lock().unwrap();
+        while flushes.done < wanted && !flushes.ended && !self.shared.stopped() {
+            // The reader waits for room that only the caller makes.
+            if self.shared.queue.lock().unwrap().changes.len() >= CAPACITY {
+                return None;
+            }
+            flushes = self
+                .shared
+                .flushed
+                .wait_timeout(flushes, Duration::from_millis(50))
+                .unwrap()
+                .0;
+        }
+        drop(flushes);
+        Some(self.shared.queue.lock().unwrap().queued)
     }
 
     /// Waits for the next change for at most `timeout`.
@@ -221,40 +340,60 @@ impl Drop for ProjectWatcher {
 
 fn read(shared: &Shared, mut directories: BTreeMap<i32, String>) {
     let mut buffer = vec![0u8; 256 << 10];
+    // The flush request that is answered when the kernel's queue is read to
+    // its end: the number asked for before the first read of this round.
+    let mut flushing = 0;
     loop {
-        let mut descriptors = [
-            libc::pollfd {
-                fd: shared.inotify.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            },
-            libc::pollfd {
-                fd: shared.wakeup.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            },
-        ];
-        // SAFETY: `descriptors` is a valid array of two entries.
-        let ready = unsafe { libc::poll(descriptors.as_mut_ptr(), 2, -1) };
         if shared.stopped() {
             return;
         }
-        if ready < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == ErrorKind::Interrupted {
-                continue;
+        // A round begins with something to read or a request to read all,
+        // and goes on without waiting until the kernel's queue is empty.
+        if flushing == 0 {
+            let mut descriptors = [
+                libc::pollfd {
+                    fd: shared.inotify.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: shared.wakeup.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            // SAFETY: `descriptors` is a valid array of two entries.
+            let ready = unsafe { libc::poll(descriptors.as_mut_ptr(), 2, -1) };
+            if shared.stopped() {
+                return;
             }
-            return shared.send(SourceChange::failed(format!(
-                "read project-inotify: {}",
-                sysutil::errno_text(&error)
-            )));
+            if ready < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == ErrorKind::Interrupted {
+                    continue;
+                }
+                return shared.send(SourceChange::failed(format!(
+                    "read project-inotify: {}",
+                    sysutil::errno_text(&error)
+                )));
+            }
+            // Emptied, so that `poll` waits again after this round. A
+            // request that comes during the round writes to it once more.
+            let _ = (&shared.wakeup).read(&mut [0u8; 8]);
+            flushing = shared.flushes.lock().unwrap().requested;
         }
         let n = match (&shared.inotify).read(&mut buffer) {
             Ok(0) => return shared.send(SourceChange::failed("EOF".into())),
             Ok(n) => n,
-            Err(error)
-                if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) =>
-            {
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            // Nothing is left in the kernel's queue: every request that was
+            // made before this round began has what it asked for.
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                let mut flushes = shared.flushes.lock().unwrap();
+                flushes.done = flushes.done.max(flushing);
+                flushing = 0;
+                drop(flushes);
+                shared.flushed.notify_all();
                 continue;
             }
             Err(error) => {

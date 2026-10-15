@@ -19,6 +19,9 @@ const WAIT: &[u8] = br#"{"action":"wait_update"}"#;
 fn revision(project: &str, selections: &[ConfigurationSelection]) -> Result<String> {
     configuration_revision(project, selections)
 }
+fn sources(project: &str, selections: &[ConfigurationSelection]) -> Result<String> {
+    configuration::sources_revision(project, selections)
+}
 fn rejected(state: &State, error: anyhow::Error) -> RuntimeOutcome {
     RuntimeOutcome {
         value: RuntimeValue::Controller(Reply::State(Box::new(state.clone()))),
@@ -41,8 +44,28 @@ fn revision_tracks_compiler_inputs() {
         original,
         "scene changes unexpectedly changed the managed configuration identity"
     );
+    // The content of a C# source is compiled at a session's start: only
+    // its presence names the graph, and its content the sources.
+    let (before, content) = (
+        revision(&project, &[]).unwrap(),
+        sources(&project, &[]).unwrap(),
+    );
+    write(
+        &join(&[&project, "Assets/Sample.cs"]),
+        "changed compiler input",
+    );
+    assert_eq!(
+        revision(&project, &[]).unwrap(),
+        before,
+        "a C# content edit changed the graph"
+    );
+    assert_ne!(
+        sources(&project, &[]).unwrap(),
+        content,
+        "the sources ignored a C# edit"
+    );
     for path in [
-        "Assets/Sample.cs",
+        "Assets/Added.cs",
         "Assets/Sample.cs.meta",
         "Assets/Gameplay.asmdef",
         "Packages/manifest.json",
@@ -231,10 +254,17 @@ fn revision_binds_scene_and_registered_public_inputs() {
         "unrelated scene or private cache changed recovery identity"
     );
     let scene = join(&[project, &fixture.selection.scene]);
+    // The scene and a source that exists count by their content for the
+    // sources only.
+    let sources_now = || sources(project, std::slice::from_ref(&fixture.selection)).unwrap();
+    for path in [scene.clone(), join(&[package_root, "External.cs"])] {
+        let (before, content) = (current(), sources_now());
+        write(&path, format!("changed content of {path}"));
+        assert_eq!(current(), before, "the content of {path} changed the graph");
+        assert_ne!(sources_now(), content, "the sources ignored {path}");
+    }
     for path in [
-        scene.clone(),
         format!("{scene}.meta"),
-        join(&[package_root, "External.cs"]),
         join(&[package_root, "External.asmdef"]),
         join(&[package_root, "External.asmdef.meta"]),
         join(&[package_root, "new.rsp.meta"]),
@@ -259,6 +289,182 @@ fn revision_binds_scene_and_registered_public_inputs() {
         before,
         "removing a registered package did not change recovery identity"
     );
+}
+
+/// A package that this tool's own resolver fetched lies in its content
+/// store below `Library/UnityMicroEditor`. A project without Unity's
+/// package cache has every registry package there, and the recovery of a
+/// changed configuration must read it as the published source it is.
+#[test]
+fn revision_reads_packages_of_the_tools_own_content_store() {
+    let fixture = fixture();
+    let stored = join(&[
+        &fixture.project,
+        "Library/UnityMicroEditor/packages/content/aef0dbe74b2a5e0196e6d71b9a02f07b4e71fbfff6d58575dc2048846a496022",
+    ]);
+    let cached = join(&[
+        &fixture.project,
+        "Library/PackageCache/com.example.cached@1.0.0",
+    ]);
+    for root in [&stored, &cached] {
+        write(&join(&[root, "package.json"]), r#"{"name":"com.example"}"#);
+        write(&join(&[root, "Runtime/Code.cs"]), "public class Code {}");
+    }
+    let graph_path = join(&[
+        &crate::sysutil::dir(&fixture.selection.baseline),
+        "graph.json",
+    ]);
+    let mut graph: Value = agent_read_json(&graph_path, 1 << 20).unwrap();
+    graph["sourceRoots"] = json!([
+        {"path": "Packages/com.example.stored", "source": stored},
+        {"path": "Packages/com.example.cached", "source": cached},
+    ]);
+    write(&graph_path, bytes(&graph));
+    let current = || revision(&fixture.project, std::slice::from_ref(&fixture.selection));
+    let original = current().expect("a package of the tool's content store was refused");
+    let content = || sources(&fixture.project, std::slice::from_ref(&fixture.selection)).unwrap();
+    for root in [&stored, &cached] {
+        let before = content();
+        write(
+            &join(&[root, "Runtime/Code.cs"]),
+            "public class Code { int changed; }",
+        );
+        assert_ne!(content(), before, "{root}: a package source is not tracked");
+        let before = current().unwrap();
+        write(&join(&[root, "Runtime/Added.cs"]), "public class Added {}");
+        assert_ne!(
+            current().unwrap(),
+            before,
+            "{root}: a new package source is not tracked"
+        );
+    }
+    assert_ne!(current().unwrap(), original);
+    // Anything else of the tool's own directory stays what it is: an output.
+    graph["sourceRoots"][0]["source"] = json!(join(&[
+        &fixture.project,
+        "Library/UnityMicroEditor/packages/staging/x"
+    ]));
+    write(&graph_path, bytes(&graph));
+    let refused = current().unwrap_err().to_string();
+    assert!(
+        refused.contains("Packages/com.example.stored") && refused.contains("private cache"),
+        "{refused}"
+    );
+}
+
+/// A session that could not start because the sources have left the
+/// prepared graph, as after a reset that follows such an edit, is recovered
+/// like a running one: the next status or wait queues the preparation.
+#[test]
+fn recovery_queues_preparation_for_a_session_that_could_not_start() {
+    let (_guard, project) = review_project();
+    write(&join(&[&project, "Assets/Main.unity"]), "selected scene");
+    let service = Service::new(Options {
+        project: project.clone(),
+        scene: "Assets/Main.unity".into(),
+        asynchronous: true,
+        lifetime: Some(ctx()),
+        ..Default::default()
+    });
+    let held = service.0.mu.lock().unwrap();
+    let state = State {
+        phase: "failed".into(),
+        last_error: "exit status 1\nrunner stderr:\nnew managed configuration requires a fresh managed graph: Assets/Lib/Lib.asmdef"
+            .into(),
+        ..Default::default()
+    };
+    let pending = recover(&service, &state, anyhow::anyhow!(state.last_error.clone())).unwrap();
+    assert_eq!(pending["status"], "result_pending");
+    assert_eq!(pending["phase"], "preparing_configuration");
+    assert_eq!(pending["preparation"]["status"], "result_pending");
+    // Any other failure of a session is what it is.
+    let other = State {
+        phase: "failed".into(),
+        last_error: "exit status 1\nrunner stderr:\nno graphics device".into(),
+        ..Default::default()
+    };
+    let failure = recover(&service, &other, anyhow::anyhow!(other.last_error.clone())).unwrap_err();
+    assert!(error_text(&failure).contains("no graphics device"));
+    service.close_action_jobs();
+    drop(held);
+    service.close();
+}
+
+/// When the recovery cannot begin, a status still is the state of the
+/// session with what stands in the way, and a wait names the calls left.
+#[test]
+fn a_recovery_that_cannot_begin_leaves_status_readable() {
+    let fixture = fixture();
+    let graph_path = join(&[
+        &crate::sysutil::dir(&fixture.selection.baseline),
+        "graph.json",
+    ]);
+    let mut graph: Value = agent_read_json(&graph_path, 1 << 20).unwrap();
+    graph["sourceRoots"][0]["source"] = json!(join(&[
+        &fixture.project,
+        "Library/UnityMicroEditor/private"
+    ]));
+    write(&graph_path, bytes(&graph));
+    let service = Service::new(Options {
+        project: fixture.project.clone(),
+        scene: fixture.selection.scene.clone(),
+        baseline: fixture.selection.baseline.clone(),
+        asynchronous: true,
+        lifetime: Some(ctx()),
+        ..Default::default()
+    });
+    let state = State {
+        phase: "ready".into(),
+        pid: 1234,
+        revision: "old-generation".into(),
+        last_sequence: 9,
+        update_error:
+            "managed assembly configuration/GUID changed; regenerate source graph: Assets/Gameplay.asmdef"
+                .into(),
+        preparation_required: true,
+        ..Default::default()
+    };
+    let read = |action: &str, error: Option<anyhow::Error>| {
+        let raw = bytes(&json!({"action": action}));
+        service.recover_configuration(
+            &ctx(),
+            "session_control",
+            &raw,
+            RuntimeOutcome {
+                value: RuntimeValue::Controller(Reply::State(Box::new(state.clone()))),
+                error,
+            },
+        )
+    };
+    let status = decoded(&read("status", None).finish().expect("status failed"));
+    assert_eq!(
+        (&status["phase"], &status["pid"], &status["lastSequence"]),
+        (&json!("ready"), &json!(1234), &json!(9))
+    );
+    assert_eq!(status["preparationRequired"], true);
+    assert_eq!(status["preparationReason"], state.update_error.as_str());
+    let reason = status["preparationError"].as_str().unwrap();
+    assert!(
+        reason.contains("could not be queued")
+            && reason.contains("Packages/com.example.external")
+            && reason.contains("project_prepare")
+            && reason.contains("session_control(reset)"),
+        "{reason}"
+    );
+    for action in ["wait_update", "wait"] {
+        let failed = read(action, Some(anyhow::anyhow!(state.update_error.clone())))
+            .finish()
+            .expect_err("a wait reported a change that needs a preparation as applied");
+        let message = error_text(&failed);
+        assert!(
+            message.starts_with(&state.update_error)
+                && message.contains("could not be queued")
+                && message.contains("project_prepare"),
+            "{action}: {message}"
+        );
+    }
+    service.close_action_jobs();
+    service.close();
 }
 
 #[test]
@@ -339,6 +545,11 @@ fn recovery_leaves_failed_job_when_scene_or_external_package_changes() {
         service
             .enqueue_action(&ctx(), "project_prepare", &raw, run.clone())
             .unwrap();
+        // As the recovery records it when it requests the preparation.
+        service.note_recovery_sources(
+            &id,
+            &sources(project, std::slice::from_ref(selection)).unwrap(),
+        );
         let deadline = Instant::now() + Duration::from_secs(1);
         while service
             .enqueue_action(&ctx(), "project_prepare", &raw, run.clone())

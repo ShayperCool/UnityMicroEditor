@@ -75,13 +75,16 @@ tokens when decoding arguments. Integer source fields and replies retain their
 JSON values; an omitted value remains absent.
 
 A configured Player adds `session_control`, `runtime_query`, `runtime_command`,
-`project_tools` and `remote_session` (a browser page with the Player's video and
+`project_tools`, `hot_reload` and `remote_session` (a browser page with the Player's video and
 input on a listener of its own; see [AGENT_MCP.md](AGENT_MCP.md)). Start can return `phase: starting`; wait for readiness before
 queries. While start still prepares the project it returns `result_pending` with
 `progress` (stage and Editor log path), and `status`/`wait` report the same
-preparation. `start`/`reset` take `gameArguments`, `contentScenes`,
-`contentPrefabs`, `addressables` and `rebuildHost` in `arguments`; see
-[AGENT_MCP.md](AGENT_MCP.md). Query operations are `status`, `hierarchy`, `inspect`, `logs`, `raycast`
+preparation. `start`/`reset` take `scene`, `gameArguments`, `contentScenes`,
+`contentPrefabs`, `addressables`, `hotReload`, `onUnsupportedEdit` and the
+inputs of the first preparation (`rebuildHost`, `hostPlayer`, `nativeCatalog`,
+`engineProfile`) in `arguments`; another key is refused. A start or reset while
+another `mcp` server of the project holds the session output is refused with
+`session_output_in_use`; see [AGENT_MCP.md](AGENT_MCP.md). Query operations are `status`, `hierarchy`, `inspect`, `logs`, `raycast`
 and `tools`. Commands include `screenshot`, `pause`, `resume`, `wait_frames`,
 `custom`, `invoke`, `simulation_pause`, `simulation_resume`, `simulation_step` and
 `input`. Arguments go in `arguments`; `requestId`, `expectedPid` and
@@ -96,12 +99,35 @@ its actual size, including overlay UI. `mode: "camera"` accepts a camera
 Player and return a PNG path, hash, size and frame. Screen capture completes
 after the end of the frame; preserve the request identity while waiting.
 
+`hot_reload` has the actions `status` and `recompile`. A saved C# edit is
+compiled by the running session and applied to the running Player when
+possible; the Player keeps its process and game state, and
+`session_control(wait_update)` succeeds with the same PID and an advanced
+`hotReload.codeGeneration`. An edit that cannot be applied live is refused,
+not approximated: both waits fail with `full_recompile_required` until the
+code is in the Player (a compile error saved after it is reported first, with
+`operation_failed`), and `hot_reload(recompile)` restarts the Player on the
+newest compiled code and resets game state. A change that is applied can
+leave something out until a restart; the reply of the wait then starts with
+`attention`, and `hotReload.newNotes` lists the notes. The session options
+`hotReload: false` (restart on every C# edit) and `onUnsupportedEdit:
+"restart"` (restart instead of the error) select the other behaviors. The
+session state omits `hotReload` while it has nothing to report: hot reload is
+enabled, no patch is applied, no edit is refused, no note stands, no
+recompile is pending and hot reload did not restart this Player.
+[HOT_RELOAD.md](HOT_RELOAD.md) is the guide (the edits, every code, the API
+for game code, the agent flow, timings and limits), and
+[AGENT_MCP.md](AGENT_MCP.md#hot-reload) the contract of the waits, their
+marks (`afterSequence`), the events a reply lists and the state.
+
 `project_tools` publishes public attributed/registered methods as
 `project.<name>` MCP tools. Their `parameters` follow the project's DTO schema,
 with a required `target` containing either `path` or `fileId` for component
 methods. Mutating methods require `requestId`. Omitted PID/revision guards bind
 the call to the catalog generation. The catalog refreshes after ready/update
-waits and drops stale tools after updates, stop/reset or failed discovery.
+waits and `hot_reload(recompile)`, and drops stale tools after updates,
+stop/reset or failed discovery. A code patch keeps the catalog: it changes
+neither the PID nor the revision.
 Read-only annotations come from the public project declarations. Invalid names,
 bindings or schemas are reported and not registered. There is no generic Editor
 code evaluator or foreign private reflection API; source C# authoring and
@@ -142,6 +168,25 @@ requestId to obtain its receipt. Unknown outcomes require inspecting the session
 before retrying the same requestId. Oversized confirmed mutation replies retain
 operation/request identities so the result remains recoverable.
 
+Error codes of hot reload:
+
+| Code | Returned by | Meaning and `error.details` |
+| --- | --- | --- |
+| `full_recompile_required` | `session_control(wait_update)` and `session_control(wait)`; `hot_reload(recompile)` when an edit compiled after its restart was refused | The C# edit compiled but cannot be applied to the running Player, which keeps the previous code. `unsupported` (at most 16 of `{code, member, message}`), `unsupportedCount`, `report` (file with the complete result) and `next`, the call that applies the edit: `{"tool": "hot_reload", "arguments": {"action": "recompile"}}`. `rejected` (`{error, sequence}`) when the running Player rejected a scene or asset change after `afterSequence` while the refusal stands. `lastSequence` of the session, the mark for the next wait: a failed call returns no session state. |
+| `wait_timeout` | `session_control(wait_update)` and `session_control(wait)` with `timeoutSeconds` (1 to 86400; a call without it has no limit, and a client that gives up cancels it, which is the reply `cancelled`) | The wait ended without an answer: the session was starting, the runner had not answered or was still working, or a recompile was pending. Nothing was decided and the same call can be repeated. `afterSequence`, `phase`, `lastSequence`, `lastUpdateSequence`, `lastUpdateRejectedSequence`, `updatePending`, and `runnerAnswered`: false while the runner has not said that it answered every change saved before the call. |
+| `session_not_ready` | `hot_reload(recompile)` | No Player is ready. `phase` of the session. |
+| `recompile_pending` | `hot_reload(recompile)` | Another recompile has not been answered. `requestId` of the pending one. |
+| `session_output_in_use` | `session_control(start)` and `reset` | Another session holds the project's session output (one started by another `mcp` server of the project); nothing was started. `output`; the message names the holding process and what to do. |
+
+A `hot_reload(recompile)` while the saved sources stand rejected for having
+left the prepared graph (a new assembly definition) restarts nothing: it is
+answered like `session_control(wait_update)`, with the preparation that
+answers the rejection (`status: result_pending`). A C# compile error is
+`operation_failed` with the compiler's text, from both waits and from
+`hot_reload(recompile)` alike, and keeps the Player. So is a `recompile`
+whose runner no longer reads commands; its message names
+`session_control(reset)`.
+
 ```sh
 cargo test --locked --lib mcp::
 cargo test --locked --test mcp
@@ -150,4 +195,6 @@ cargo test --locked --test mcp
 Tests cover real stdio framing and Streamable HTTP, authentication and Origin/Host
 rejection, paging and source conflicts, runtime routing, project action schemas,
 exact DTO validation, signed 64-bit argument forwarding, catalog generation
-changes and component target selection.
+changes, component target selection, and the `hot_reload` tool with its typed
+errors. The controller's hot reload events and the `recompile` command are
+tested with a simulated runner in `rust/src/agentcontrol/tests.rs`.

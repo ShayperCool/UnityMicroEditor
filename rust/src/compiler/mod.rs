@@ -8,10 +8,14 @@ mod host;
 mod metadata;
 mod netcode;
 mod nilable;
+mod phases;
 mod prepare;
 mod revision;
 mod script_types;
+mod server;
+mod service;
 mod source_graph;
+mod stamp;
 mod sys;
 #[cfg(test)]
 mod tests;
@@ -29,17 +33,22 @@ pub use metadata::{
 };
 pub use netcode::{HOST_CODEGEN_DIRECTORY, NetcodeProcessor, needs_netcode};
 pub use nilable::{NilMap, NilVec};
+pub use phases::{COMPILE_PHASES, PATCH_PHASES, Phases};
 pub use prepare::{
     PublishBaseline, canonical_configuration, order_compiler_assemblies, prepare_compiler_graph,
     prepare_compiler_graph_with, publish_baseline, register_compiler_assembly_slots,
 };
 pub use revision::{CodeRevision, player_files};
+pub use server::{Client as CompilerClient, CompilerServer, analyzer_failure, csc_command};
+pub use service::{Reply as ServiceReply, Service, ServiceError};
 pub use source_graph::{managed_plugin, remove_source_native_initializers};
-pub use sys::{CommandError, compiler_command, glob, path_match};
+pub use stamp::{HashCache, PlayerMap, Stamp};
+pub use sys::{BUILD_WITHOUT_SERVERS, CommandError, compiler_command, glob, path_match};
 pub use sys::{Walk, WalkEntry, glob_lossy, is_not_exist, walk_dir};
 
 use nilable::{is_empty, is_false, nz};
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 
 pub const UNITY_VERSION: &str = crate::ENGINE_VERSION;
 
@@ -145,6 +154,16 @@ pub struct CompileAssembly {
         skip_serializing_if = "is_empty"
     )]
     pub netcode_postprocessor: String,
+    /// The key of the lifecycle helper whose rewrite this DLL was compiled
+    /// from; empty in a preparation made before the helper was recorded. A
+    /// session with another helper compiles the assembly again before it
+    /// starts: its other caches are keyed by the helper too.
+    #[serde(
+        rename = "lifecycleHelper",
+        deserialize_with = "nz",
+        skip_serializing_if = "is_empty"
+    )]
+    pub lifecycle_helper: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -483,6 +502,8 @@ pub struct Compiler {
     pub dotnet: String,
     pub csc: String,
     pub helper: String,
+    /// The cache key of `helper`: its sources and the SDK that builds them.
+    pub helper_key: String,
     pub manifest: CompileManifest,
     pub configs: NilMap<AssemblyConfig>,
     pub configuration_hashes: NilMap<String>,
@@ -502,6 +523,55 @@ pub struct Compiler {
     pub startup_complete: bool,
     /// What runs the code of the script classes that were last laid out.
     pub behaviour_code: BehaviourCode,
+    /// Where the time of the last `compile` went.
+    pub last_phases: Phases,
+    /// The file map of the baseline Player directory, kept by every clone
+    /// of this compiler: a compile that fails must not lose it.
+    pub baseline_map: Arc<Mutex<Option<Arc<PlayerMap>>>>,
+    /// The file map of the directory of `player`, when this process made
+    /// or read it.
+    pub player_map: Option<Arc<PlayerMap>>,
+    /// The compiler server of a watched session; `None` compiles every
+    /// assembly in a process of its own.
+    pub compiler_server: Option<Arc<CompilerServer>>,
+    /// `UME_COMPILER_VERIFY=1`: every served compile is compared with a
+    /// compile in a process of its own.
+    pub verify_compiles: bool,
+    /// Whether the lifecycle helper runs as a service of the session.
+    pub serve_helper: bool,
+    /// The service of the lifecycle helper, kept by every clone of this
+    /// compiler and bound to the helper it was started from.
+    pub helper_service: Arc<Mutex<Option<Arc<Service>>>>,
+    /// The content hashes of inputs that do not change during a session:
+    /// configuration inputs, references, tools. Off, every check reads.
+    pub hashes: HashCache,
+}
+
+/// `UME_COMPILER_COLD=1`: a session starts no process that outlives one
+/// request and keeps no hash between two compiles.
+pub fn compiler_cold() -> bool {
+    std::env::var_os("UME_COMPILER_COLD").is_some_and(|value| value == "1")
+}
+
+impl Compiler {
+    /// Gives a compiler the processes and caches that a watched session
+    /// keeps between two compiles, unless `UME_COMPILER_COLD=1`. Nothing
+    /// starts here: each starts at its first use, on the calling thread,
+    /// whose end ends it.
+    pub fn serve(&mut self, output: &str) {
+        self.verify_compiles =
+            std::env::var_os("UME_COMPILER_VERIFY").is_some_and(|value| value == "1");
+        if compiler_cold() {
+            return;
+        }
+        self.serve_helper = true;
+        self.hashes = HashCache::on();
+        self.compiler_server = Some(Arc::new(CompilerServer::new(
+            &self.dotnet,
+            &self.csc,
+            output,
+        )));
+    }
 }
 
 /// `<player dir>/<player stem>_Data`.

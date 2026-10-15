@@ -18,6 +18,14 @@ pub(crate) fn string(description: &str) -> String {
 pub(crate) fn integer(description: &str) -> String {
     typed("\"integer\"", description)
 }
+/// An integer from `minimum` to `maximum`. The validator answers a value
+/// outside with the name of the argument, before any handler reads it.
+pub(crate) fn integer_between(minimum: u64, maximum: u64, description: &str) -> String {
+    format!(
+        "{{\"type\":\"integer\",\"minimum\":{minimum},\"maximum\":{maximum},\"description\":{}}}",
+        quote(description)
+    )
+}
 /// A boolean.
 pub(crate) fn boolean() -> String {
     typed("\"boolean\"", "")

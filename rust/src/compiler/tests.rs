@@ -1769,6 +1769,8 @@ namespace Package.Second { [UnityEngine.DefaultExecutionOrder(-5000)] public cla
     let cache = join(&[&project, "Temp/revisions"]);
     let mut accepted =
         Compiler::new(&project, &baseline, &prepared.player, &editor, &cache).unwrap();
+    // As a watched session compiles, unless UME_COMPILER_COLD=1.
+    accepted.serve(&cache);
     assert_eq!(
         accepted.configs["Assembly-CSharp"].native_base.to_vec(),
         ["Package.Runtime"],
@@ -1879,6 +1881,7 @@ namespace Package.Second { [UnityEngine.DefaultExecutionOrder(-5000)] public cla
     sys::write(&accepted_dll, &untampered).unwrap();
     let mut restarted =
         Compiler::new(&project, &baseline, &prepared.player, &editor, &cache).unwrap();
+    restarted.serve(&cache);
     let reused = restarted
         .compile(&ctx, None)
         .unwrap()
@@ -2355,8 +2358,9 @@ fn save_code_revision_fixture(
         assemblies: NilVec::from([dll]),
         ..Default::default()
     };
+    let map = PlayerMap::read(&folder).unwrap();
     compiler
-        .save_code_revision(key, &update, &compiler.proofs)
+        .save_code_revision(key, &update, &compiler.proofs, &map)
         .unwrap();
     update
 }
@@ -2612,13 +2616,23 @@ fn netcode_postprocessor_sdk() {
     let data = join(&[&sysutil::dir(&editor), "Data"]);
     let csc = sys::glob_lossy(&join(&[&data, "DotNetSdk/sdk/*/Roslyn/bincore/csc.dll"]));
     assert_eq!(csc.len(), 1, "expected one pinned SDK");
+    // The host Player of the project: `UME_HOT_RELOAD_HOST` names the
+    // executable that auto-prepare built (below
+    // Library/UnityMicroEditor/stage/project/Builds); without it the test
+    // looks where earlier hosts were built.
+    let player = std::env::var("UME_HOT_RELOAD_HOST")
+        .ok()
+        .filter(|host| !host.is_empty())
+        .map(|host| crate::project::lexpath::abs(&host).unwrap())
+        .unwrap_or_else(|| join(&[&project, "Builds/CLIPlayHybridHost/UnityPlayHost.x86_64"]));
+    let managed = crate::compiler::player_managed(&player);
     let (_guard, root) = temp();
     let ctx = background();
     let mut compiler = Compiler {
         project: project.clone(),
         editor,
         cache: join(&[&root, "compiler"]),
-        player: join(&[&project, "Builds/CLIPlayHybridHost/UnityPlayHost.x86_64"]),
+        player: player.clone(),
         dotnet: join(&[&data, "DotNetSdk/dotnet"]),
         csc: csc[0].clone(),
         configs: NilMap::from([(
@@ -2635,10 +2649,7 @@ fn netcode_postprocessor_sdk() {
     let bcl = join(&[&data, "MonoBleedingEdge/lib/mono/unityaot-linux"]);
     let mut references = sys::glob_lossy(&join(&[&bcl, "*.dll"]));
     references.extend(sys::glob_lossy(&join(&[&bcl, "Facades/*.dll"])));
-    references.extend(sys::glob_lossy(&join(&[
-        &project,
-        "Builds/CLIPlayHybridHost/UnityPlayHost_Data/Managed/*.dll",
-    ])));
+    references.extend(sys::glob_lossy(&join(&[&managed, "*.dll"])));
     let refs = deduplicate_references(&references);
     let source = write_graph_file(
         &root,
@@ -2677,13 +2688,13 @@ fn netcode_postprocessor_sdk() {
     assert!(
         result["rpcCount"] == 1
             && result["rpcs"].as_array().map_or(0, Vec::len) == 1
-            && rpc["Method"] == "UseRpc"
-            && rpc["Handler"]
+            && rpc["method"] == "UseRpc"
+            && rpc["handler"]
                 .as_str()
                 .is_some_and(|name| name.starts_with("__rpc_handler_"))
-            && calls("SendCalls") >= 2
-            && calls("WriteCalls") != 0
-            && calls("ReadCalls") != 0,
+            && calls("sendCalls") >= 2
+            && calls("writeCalls") != 0
+            && calls("readCalls") != 0,
         "RPC send/receive payload code was not generated: {result}"
     );
     assert!(
@@ -3047,4 +3058,1253 @@ fn compiler_behaviour_layouts_sdk() {
             "SmbCbMachineInherited"
         ])
     );
+}
+
+/// What a preparation was made from, read off its compiler plan: the
+/// managed inputs it recorded must be as they were, and `Assets` must hold
+/// no managed configuration that the plan does not know. This is the check
+/// of a runner's start, made without one.
+#[test]
+fn a_compiler_plan_accepts_the_sources_it_was_made_with() {
+    let (_guard, project) = temp();
+    let asmdef = join(&[&project, "Assets/Lib/Lib.asmdef"]);
+    write_graph_file(&project, "Assets/Main.unity", "scene");
+    let plan = |name: &str, inputs: &[&str]| -> String {
+        let mut recorded = NilMap::from([("public-input", "verified".to_string())]);
+        for input in inputs {
+            recorded.insert(*input, file_hash(input).unwrap());
+        }
+        let manifest = CompileManifest {
+            schema: 1,
+            project: project.clone(),
+            compiler_inputs: recorded,
+            ..Default::default()
+        };
+        let path = join(&[
+            &project,
+            "Library/UnityMicroEditor/preparations",
+            name,
+            "current.json",
+        ]);
+        fs::create_dir_all(sysutil::dir(&path)).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_vec(
+                &json!({"schemaVersion": 1, "project": project, "compiler": manifest}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        path
+    };
+    let plain = plan("plain", &[]);
+    Compiler::graph_accepts_sources(&project, &plain).unwrap();
+    // An assembly definition the plan does not know.
+    write_graph_file(&project, "Assets/Lib/Lib.asmdef", r#"{"name":"Lib"}"#);
+    let refused = Compiler::graph_accepts_sources(&project, &plain).unwrap_err();
+    assert!(requires_new_graph(&format!("{refused:#}")), "{refused:#}");
+    // A plan that was made with it accepts the sources, until the file
+    // changes or goes.
+    let with_library = plan("with-library", &[&asmdef]);
+    Compiler::graph_accepts_sources(&project, &with_library).unwrap();
+    fs::write(&asmdef, r#"{"name":"Lib","allowUnsafeCode":true}"#).unwrap();
+    assert!(Compiler::graph_accepts_sources(&project, &with_library).is_err());
+    fs::remove_file(&asmdef).unwrap();
+    assert!(Compiler::graph_accepts_sources(&project, &with_library).is_err());
+    Compiler::graph_accepts_sources(&project, &plain).unwrap();
+    // The plan of another project is none of this one.
+    let (_other_guard, other) = temp();
+    assert!(Compiler::graph_accepts_sources(&other, &plain).is_err());
+}
+
+/// A Player directory with a few files, as `code_revision_fixture` has one.
+fn player_map_fixture() -> (TempDir, String) {
+    let (guard, root) = temp();
+    for (path, text) in [
+        ("Player/Host.x86_64", "native executable"),
+        ("Player/Host_Data/Managed/Game.dll", "baseline game"),
+        ("Player/Host_Data/Managed/Host.dll", "managed bridge"),
+        ("Player/UnityPlayer.so", "native Unity"),
+    ] {
+        write_graph_file(&root, path, text);
+    }
+    (guard, join(&[&root, "Player"]))
+}
+
+/// Writes other bytes of the same length and gives the file its old
+/// modification time back: only the change time and the content moved.
+fn rewrite_keeping_size_and_mtime(path: &str, text: &str) {
+    let modified = fs::metadata(path).unwrap().modified().unwrap();
+    assert_eq!(fs::metadata(path).unwrap().len(), text.len() as u64);
+    // The change time has a coarse clock; let it move.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    sys::write(path, text.as_bytes()).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    assert_eq!(fs::metadata(path).unwrap().modified().unwrap(), modified);
+}
+
+fn copy_player(source: &str, destination: &str) {
+    sys::mkdir_all(destination).unwrap();
+    compiler_command(
+        &background(),
+        "",
+        "cp",
+        &["-a", "--reflink=auto", &format!("{source}/."), destination],
+    )
+    .unwrap();
+}
+
+#[test]
+fn player_map_hashes_what_player_files_hashes() {
+    let (_guard, player) = player_map_fixture();
+    let map = PlayerMap::read(&player).unwrap();
+    assert_eq!(map.files, player_files(&player).unwrap());
+    assert_eq!(map.directory, player);
+    assert_eq!(map.stamps.len(), map.files.len());
+    assert!(map.still(), "an untouched directory is not still");
+    // The rules of player_files hold: a symbolic link is not a Player file.
+    symlink(
+        join(&[&player, "UnityPlayer.so"]),
+        join(&[&player, "link.so"]),
+    )
+    .unwrap();
+    assert!(PlayerMap::read(&player).is_err() && player_files(&player).is_err());
+}
+
+#[test]
+fn player_map_is_not_still_after_any_change() {
+    let game = "Host_Data/Managed/Game.dll";
+    for change in ["same size and mtime", "added", "removed", "replaced"] {
+        let (_guard, player) = player_map_fixture();
+        let map = PlayerMap::read(&player).unwrap();
+        let path = join(&[&player, game]);
+        match change {
+            "same size and mtime" => rewrite_keeping_size_and_mtime(&path, "changed  game"),
+            "added" => {
+                write_graph_file(&player, "Host_Data/Managed/Extra.dll", "x");
+            }
+            "removed" => fs::remove_file(&path).unwrap(),
+            _ => {
+                let other = join(&[&player, "other"]);
+                sys::write(&other, b"baseline game").unwrap();
+                fs::rename(&other, &path).unwrap();
+            }
+        }
+        assert!(
+            !map.still(),
+            "{change}: the map of a changed directory is still"
+        );
+    }
+}
+
+#[test]
+fn player_map_stays_still_while_it_is_copied() {
+    let (_guard, player) = player_map_fixture();
+    let map = PlayerMap::read(&player).unwrap();
+    let copy = join(&[&sysutil::dir(&player), "Copy"]);
+    copy_player(&player, &copy);
+    copy_player(&player, &join(&[&sysutil::dir(&player), "Again"]));
+    assert!(
+        map.still(),
+        "copying a Player directory moved the stamps of its files"
+    );
+    let copied = map
+        .copied_to(&copy)
+        .expect("a cp -a copy is not recognized");
+    assert_eq!(copied.files, player_files(&copy).unwrap());
+    assert_eq!(copied.directory, copy);
+    // The copy of a copy keeps it too.
+    let next = join(&[&sysutil::dir(&player), "Next"]);
+    copy_player(&copy, &next);
+    assert!(copied.still());
+    assert_eq!(
+        copied.copied_to(&next).unwrap().files,
+        player_files(&next).unwrap()
+    );
+}
+
+#[test]
+fn player_map_rejects_a_copy_that_differs() {
+    let game = "Host_Data/Managed/Game.dll";
+    for change in ["size", "mtime", "extra", "missing"] {
+        let (_guard, player) = player_map_fixture();
+        let map = PlayerMap::read(&player).unwrap();
+        let copy = join(&[&sysutil::dir(&player), "Copy"]);
+        copy_player(&player, &copy);
+        let path = join(&[&copy, game]);
+        match change {
+            "size" => sys::write(&path, b"a longer recompiled game").unwrap(),
+            "mtime" => fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap(),
+            "extra" => {
+                write_graph_file(&copy, "Host_Data/Managed/Extra.dll", "x");
+            }
+            _ => fs::remove_file(&path).unwrap(),
+        }
+        assert!(
+            map.copied_to(&copy).is_none(),
+            "{change}: a copy that differs took the map of its source"
+        );
+    }
+}
+
+/// The map a compile gives the Player directory it copied is the map of the
+/// bytes in that directory, also when something else changed the source of
+/// the copy after it was hashed, or the copy after it was made.
+#[test]
+fn copied_player_map_names_the_bytes_of_the_copy() {
+    let game = "Host_Data/Managed/Game.dll";
+    for change in ["source", "copy", "none"] {
+        let (_guard, player) = player_map_fixture();
+        let map = std::sync::Arc::new(PlayerMap::read(&player).unwrap());
+        if change == "source" {
+            rewrite_keeping_size_and_mtime(&join(&[&player, game]), "foreign  game");
+        }
+        let copy = join(&[&sysutil::dir(&player), "Copy"]);
+        copy_player(&player, &copy);
+        if change == "copy" {
+            sys::write(&join(&[&copy, game]), b"foreign game, longer").unwrap();
+        }
+        let derived = PlayerMap::after_copy(Some(map.clone()), &copy).unwrap();
+        assert_eq!(
+            derived.files,
+            player_files(&copy).unwrap(),
+            "{change}: the map of a copy does not name its bytes"
+        );
+        let mut written = derived.clone();
+        let dll = join(&[&copy, game]);
+        sys::write(&dll, b"recompiled").unwrap();
+        written.wrote(&dll, sha256(b"recompiled")).unwrap();
+        assert_eq!(written.files, player_files(&copy).unwrap());
+        assert!(
+            written.still(),
+            "{change}: the map of a written copy is not still"
+        );
+    }
+}
+
+fn process_alive(pid: u32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(')')
+            .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
+    })
+}
+
+/// Processes whose command line names `text`.
+fn processes_naming(text: &str) -> Vec<u32> {
+    let mut found = Vec::new();
+    for item in fs::read_dir("/proc").unwrap().flatten() {
+        let Ok(pid) = item.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if let Ok(line) = fs::read(format!("/proc/{pid}/cmdline"))
+            && String::from_utf8_lossy(&line).contains(text)
+            && process_alive(pid)
+        {
+            found.push(pid);
+        }
+    }
+    found
+}
+
+/// A stand-in for `dotnet exec VBCSCompiler.dll -pipename:<name>`: it makes
+/// the socket file and waits.
+fn stand_in_server(root: &str) -> (String, String) {
+    let dotnet = write_graph_file(
+        root,
+        "sdk/dotnet",
+        "#!/bin/sh\npipe=${3#-pipename:}\n: > /tmp/$pipe\nexec sleep 300\n",
+    );
+    fs::set_permissions(&dotnet, fs::Permissions::from_mode(0o700)).unwrap();
+    let csc = write_graph_file(root, "sdk/bincore/csc.dll", "csc");
+    (dotnet, csc)
+}
+
+#[test]
+fn compiler_server_restarts_when_a_reference_changes_or_it_ended() {
+    let (_guard, root) = temp();
+    let (dotnet, csc) = stand_in_server(&root);
+    let server = CompilerServer::new(&dotnet, &csc, &join(&[&root, "output"]));
+    let inputs = |hash: &str| BTreeMap::from([("/refs/A.dll".to_string(), hash.to_string())]);
+    let first = server.client(&inputs("a1")).expect("a server starts");
+    let pid = server.pid().unwrap();
+    assert!(process_alive(pid) && sys::absent(&first.no_host));
+    // The workstation collector: a quarter of the memory per compile of the
+    // server one the SDK's server asks for (served6-3).
+    let environment = fs::read(format!("/proc/{pid}/environ")).unwrap();
+    assert!(
+        environment
+            .split(|byte| *byte == 0)
+            .any(|entry| entry == b"DOTNET_gcServer=0"),
+        "the compiler server runs with the server collector"
+    );
+    assert_eq!(
+        first.arguments,
+        [
+            format!("-shared:{}", first.pipe),
+            "-keepalive:86400".to_string()
+        ]
+    );
+    assert!(first.pipe.starts_with("ume-") && first.pipe.ends_with("-1"));
+    // The same content again, and another path: the same server.
+    let mut more = inputs("a1");
+    more.insert("/refs/B.dll".into(), "b1".into());
+    assert_eq!(server.client(&more).unwrap().pipe, first.pipe);
+    assert_eq!(server.pid(), Some(pid));
+    // A path with other content: another server under another name.
+    let second = server.client(&inputs("a2")).unwrap();
+    assert_ne!(second.pipe, first.pipe);
+    assert!(
+        !process_alive(pid),
+        "the server that saw the old content still runs"
+    );
+    assert!(sys::absent(&format!("/tmp/{}", first.pipe)));
+    // A server that ended by itself is replaced under a new name.
+    let pid = server.pid().unwrap();
+    sysutil::kill(i64::from(pid), libc::SIGKILL).unwrap();
+    let started = std::time::Instant::now();
+    while process_alive(pid) && started.elapsed() < std::time::Duration::from_secs(5) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let third = server.client(&inputs("a2")).unwrap();
+    assert!(third.pipe != second.pipe && third.pipe != first.pipe);
+    let pid = server.pid().unwrap();
+    drop(server);
+    assert!(!process_alive(pid), "a dropped server still runs");
+    assert!(sys::absent(&format!("/tmp/{}", third.pipe)));
+    assert!(processes_naming(&third.pipe).is_empty());
+}
+
+#[test]
+fn compiler_server_is_left_after_three_failures() {
+    let (_guard, root) = temp();
+    let (dotnet, csc) = stand_in_server(&root);
+    let server = CompilerServer::new(&dotnet, &csc, &join(&[&root, "output"]));
+    let inputs = BTreeMap::new();
+    for _ in 0..3 {
+        assert!(server.client(&inputs).is_some());
+        server.failed("test");
+    }
+    assert_eq!(
+        server.client(&inputs),
+        None,
+        "a failing server is used again"
+    );
+    assert_eq!(server.pid(), None);
+    // One that cannot start is a failure as well.
+    let (_guard, root) = temp();
+    let server = CompilerServer::new(
+        &join(&[&root, "missing-dotnet"]),
+        &join(&[&root, "csc.dll"]),
+        &root,
+    );
+    for _ in 0..3 {
+        assert_eq!(server.client(&inputs), None);
+    }
+    assert_eq!(server.client(&inputs), None);
+}
+
+/// Compiles with the SDK's csc, cold or through `server`, and returns the
+/// exit, the listing and the bytes of the DLL and the PDB.
+struct Csc {
+    dotnet: String,
+    csc: String,
+    references: Vec<String>,
+    generators: Vec<String>,
+}
+impl Csc {
+    fn new(editor: &str) -> Self {
+        let mut paths = Compiler {
+            editor: editor.into(),
+            ..Default::default()
+        };
+        paths.initialize_sdk().unwrap();
+        let mut references: Vec<String> = paths.base_references.to_vec();
+        references.extend(paths.engine_references.iter().cloned());
+        Self {
+            dotnet: paths.dotnet,
+            csc: paths.csc,
+            references: deduplicate_references(&references).to_vec(),
+            generators: paths.generators.to_vec(),
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn compile(
+        &self,
+        server: Option<&CompilerServer>,
+        directory: &str,
+        name: &str,
+        sources: &[String],
+        extra: &[String],
+        unsafe_code: bool,
+    ) -> (bool, String, Option<Vec<u8>>, Option<Vec<u8>>) {
+        let dll = join(&[directory, &format!("{name}.dll")]);
+        let pdb = join(&[directory, &format!("{name}.pdb")]);
+        let generated = join(&[directory, "Generated"]);
+        sys::mkdir_all(&generated).unwrap();
+        let mut text = String::new();
+        let mut arguments: Vec<String> = [
+            "-nologo",
+            "-target:library",
+            "-nostdlib+",
+            "-langversion:9.0",
+            "-deterministic+",
+            "-debug:portable",
+            "-optimize-",
+            if unsafe_code { "-unsafe+" } else { "-unsafe-" },
+        ]
+        .map(String::from)
+        .to_vec();
+        arguments.push(format!("-out:{dll}"));
+        arguments.push("-define:UNITY_6000_6".into());
+        let mut inputs = BTreeMap::new();
+        for reference in self.references.iter().chain(extra) {
+            arguments.push(format!("-reference:{reference}"));
+            inputs.insert(reference.clone(), hash(reference));
+        }
+        for generator in &self.generators {
+            arguments.push(format!("-analyzer:{generator}"));
+            inputs.insert(generator.clone(), hash(generator));
+        }
+        let additional = join(&[directory, &format!("{name}.UnityAdditionalFile.txt")]);
+        sys::write(&additional, directory.as_bytes()).unwrap();
+        arguments.push(format!("-generatedfilesout:{generated}"));
+        arguments.push(format!("-additionalfile:{additional}"));
+        arguments.extend(sources.iter().cloned());
+        for argument in &arguments {
+            text.push('"');
+            text.push_str(&argument.replace('"', "\\\""));
+            text.push_str("\"\n");
+        }
+        let response = join(&[directory, &format!("{name}.rsp")]);
+        sys::write(&response, text.as_bytes()).unwrap();
+        let result = csc_command(
+            &background(),
+            server,
+            false,
+            directory,
+            &self.dotnet,
+            &[&self.csc, &format!("@{response}")],
+            &inputs,
+            &[dll.clone(), pdb.clone()],
+        );
+        let (ok, listing) = match result {
+            Ok(output) => (true, String::from_utf8_lossy(&output).into_owned()),
+            Err(error) => (false, String::from_utf8_lossy(&error.output).into_owned()),
+        };
+        (ok, listing, fs::read(&dll).ok(), fs::read(&pdb).ok())
+    }
+}
+
+/// A compile through the server writes the bytes a compile in a process of
+/// its own writes into the same paths (the output path is an input of the
+/// bytes), and a compile error has the same listing.
+#[test]
+fn compiler_server_matches_cold_sdk() {
+    let Some(editor) = sdk(
+        "UME_LIFECYCLE_SDK",
+        "set UME_LIFECYCLE_SDK to the matching Unity executable; SDK only",
+    ) else {
+        return;
+    };
+    let (_guard, root) = temp();
+    let csc = Csc::new(&editor);
+    let server = CompilerServer::new(&csc.dotnet, &csc.csc, &join(&[&root, "output"]));
+    let directory = join(&[&root, "work"]);
+    sys::mkdir_all(&directory).unwrap();
+    // Each compile starts without outputs: a failed one leaves what was there.
+    let clear = |name: &str| {
+        for output in ["dll", "pdb"] {
+            let _ = fs::remove_file(join(&[&directory, &format!("{name}.{output}")]));
+        }
+    };
+    let both = |name: &str, sources: &[String], extra: &[String], unsafe_code: bool| {
+        clear(name);
+        let cold = csc.compile(None, &directory, name, sources, extra, unsafe_code);
+        clear(name);
+        let served = csc.compile(Some(&server), &directory, name, sources, extra, unsafe_code);
+        assert_eq!(
+            cold.0, served.0,
+            "{name}: exit differs:\n{}\n{}",
+            cold.1, served.1
+        );
+        assert_eq!(cold.1, served.1, "{name}: listing differs");
+        assert!(cold.2 == served.2, "{name}: DLL bytes differ");
+        assert!(cold.3 == served.3, "{name}: PDB bytes differ");
+        served
+    };
+    let source = join(&[&root, "work/Probe.cs"]);
+    let body = |value: u32| {
+        format!(
+            "using UnityEngine;\npublic class Probe : MonoBehaviour {{\n    public int seed;\n    void Update() {{ seed += {value}; }}\n}}\n"
+        )
+    };
+    let sources = [source.clone()];
+    for value in [1, 1, 2, 3, 4, 5, 6] {
+        sys::write(&source, body(value).as_bytes()).unwrap();
+        assert!(both("Game", &sources, &[], false).0);
+    }
+    let pid = server.pid().expect("the edits ran through a server");
+    // A compile error.
+    sys::write(&source, b"public class Broken { int x = missing; }\n").unwrap();
+    let broken = both("Game", &sources, &[], false);
+    assert!(!broken.0 && broken.1.contains("CS0103"), "{}", broken.1);
+    assert_eq!(server.pid(), Some(pid), "a compile error ended the server");
+    // Unsafe code, and a second assembly that references the first.
+    sys::write(
+        &source,
+        b"public static class Pointers { public static unsafe int Read(int* p) => *p; }\n",
+    )
+    .unwrap();
+    assert!(both("Game", &sources, &[], true).0);
+    let consumer = join(&[&root, "work/Consumer.cs"]);
+    sys::write(
+        &consumer,
+        b"public static class Consumer { public static unsafe int Twice(int* p) => 2 * Pointers.Read(p); }\n",
+    )
+    .unwrap();
+    let game = join(&[&directory, "Game.dll"]);
+    assert!(both("Consumer", &[consumer], &[game], true).0);
+    // A source that a Unity source generator emits code for.
+    sys::write(
+        &source,
+        b"[assembly: Unity.Properties.GeneratePropertyBagsForAssembly]\n[Unity.Properties.GeneratePropertyBag] public partial class Bagged { public int value; }\n",
+    )
+    .unwrap();
+    let generated = join(&[&directory, "Generated"]);
+    let _ = fs::remove_dir_all(&generated);
+    assert!(both("Game", &sources, &[], false).0);
+    let mut emitted = Vec::new();
+    sys::walk_dir(&generated, &mut |entry| {
+        if !entry.is_dir() {
+            emitted.push(sysutil::base(entry.path));
+        }
+        Ok(sys::Walk::Continue)
+    })
+    .unwrap();
+    assert!(
+        emitted.contains(&"Bagged_PropertyBag.cs".to_string()),
+        "the Unity generator emitted nothing: {emitted:?}"
+    );
+    let pipe = server.pipe();
+    assert_eq!(server.pid(), Some(pid), "the server was started again");
+    drop(server);
+    assert!(!process_alive(pid), "the server outlived its owner");
+    assert!(
+        processes_naming(&pipe).is_empty(),
+        "a process named the pipe after the end"
+    );
+    assert!(
+        sys::absent(&format!("/tmp/{pipe}")),
+        "the socket was left behind"
+    );
+}
+
+/// The server keeps reference metadata by path and modification time: a
+/// reference rewritten in place with its old modification time is not read
+/// again by it. The driver hands every reference with its content, and a
+/// path with other content ends the server first.
+#[test]
+fn compiler_server_restarts_on_a_changed_reference_sdk() {
+    let Some(editor) = sdk(
+        "UME_LIFECYCLE_SDK",
+        "set UME_LIFECYCLE_SDK to the matching Unity executable; SDK only",
+    ) else {
+        return;
+    };
+    let (_guard, root) = temp();
+    let csc = Csc::new(&editor);
+    let server = CompilerServer::new(&csc.dotnet, &csc.csc, &join(&[&root, "output"]));
+    let directory = join(&[&root, "work"]);
+    sys::mkdir_all(&directory).unwrap();
+    let library = |value: u32, name: &str| {
+        let source = join(&[&directory, &format!("{name}.cs")]);
+        sys::write(
+            &source,
+            format!("public static class L {{ public const int X = {value}; }}\n").as_bytes(),
+        )
+        .unwrap();
+        assert!(csc.compile(None, &directory, name, &[source], &[], false).0);
+        join(&[&directory, &format!("{name}.dll")])
+    };
+    let lib = library(1, "Lib");
+    let main = join(&[&directory, "Main.cs"]);
+    sys::write(
+        &main,
+        b"public static class M { public const int Y = L.X; }\n",
+    )
+    .unwrap();
+    let compile = |served: bool| {
+        let result = csc.compile(
+            served.then_some(&server),
+            &directory,
+            "Main",
+            std::slice::from_ref(&main),
+            std::slice::from_ref(&lib),
+            false,
+        );
+        assert!(result.0, "{}", result.1);
+        sha256(&result.2.unwrap())
+    };
+    let cold_first = compile(false);
+    assert_eq!(compile(true), cold_first);
+    let pid = server.pid().unwrap();
+    // The reference gets other bytes of the same size and its old
+    // modification time back.
+    let modified = fs::metadata(&lib).unwrap().modified().unwrap();
+    let other = fs::read(library(2, "Lib2")).unwrap();
+    assert_eq!(other.len() as u64, fs::metadata(&lib).unwrap().len());
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    sys::write(&lib, &other).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&lib)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    let served = compile(true);
+    let cold = compile(false);
+    assert_ne!(cold, cold_first, "the fixture did not change the reference");
+    assert_eq!(
+        served, cold,
+        "the server compiled against the old reference"
+    );
+    assert!(
+        !process_alive(pid),
+        "the server that held the old reference still runs"
+    );
+}
+
+/// A stand-in for `dotnet <program> --serve` that speaks the protocol of
+/// `service.rs` in the way the file `mode` beside the program says, and for
+/// `dotnet <program> <arguments>` run once.
+fn stand_in_service(root: &str) -> (String, String, String) {
+    let dotnet = write_graph_file(
+        root,
+        "sdk/dotnet",
+        r#"#!/bin/sh
+mode_file="$(dirname "$1")/mode"
+if [ "$2" != "--serve" ]; then
+  if [ "$2" = "fail" ]; then echo "Program.cs(1,1): error CS0103: boom" >&2; exit 1; fi
+  echo "one-shot $2"; exit 0
+fi
+[ "$(cat "$mode_file")" = "noserve" ] && { echo "Unknown argument --serve"; exit 1; }
+echo '{"ready":true,"protocol":1}'
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
+  case "$(cat "$mode_file")" in
+    ok) printf '{"id":%s,"exit":0,"output":"served %s\\n","error":"","kind":""}\n' "$id" "$id" ;;
+    wrongid) printf '{"id":%s,"exit":0,"output":"","error":"","kind":""}\n' "$((id + 100))" ;;
+    truncated) printf '{"id":%s,"exit":0' "$id"; exit 0 ;;
+    exit) exit 3 ;;
+    hang) sleep 300 ;;
+    error) printf '{"id":%s,"exit":1,"output":"","error":"a defect of the helper\\n","kind":"error"}\n' "$id" ;;
+    diagnostics) printf '{"id":%s,"exit":1,"output":"","error":"Program.cs(1,1): error CS0103: boom\\n","kind":"diagnostics"}\n' "$id" ;;
+  esac
+done
+"#,
+    );
+    fs::set_permissions(&dotnet, fs::Permissions::from_mode(0o700)).unwrap();
+    let program = write_graph_file(root, "helper/Helper.dll", "helper");
+    let mode = join(&[root, "helper/mode"]);
+    (dotnet, program, mode)
+}
+
+#[test]
+fn service_answers_and_falls_back_on_every_failure_of_its_process() {
+    let (_guard, root) = temp();
+    let (dotnet, program, mode) = stand_in_service(&root);
+    let set = |value: &str| sys::write(&mode, value.as_bytes()).unwrap();
+    let ctx = background();
+    let limit = std::time::Duration::from_millis(500);
+    let service = Service::new("test helper", &dotnet, &program);
+    set("ok");
+    let reply = service.call(&ctx, &root, &["a"], limit).unwrap();
+    assert_eq!((reply.exit, reply.output.as_str()), (0, "served 1\n"));
+    let first = service.pid().unwrap();
+    assert_eq!(
+        service.call(&ctx, &root, &["b"], limit).unwrap().output,
+        "served 2\n"
+    );
+    assert_eq!(
+        service.pid(),
+        Some(first),
+        "a second request started another process"
+    );
+    for (failure, timed_out) in [
+        ("wrongid", false),
+        ("truncated", false),
+        ("exit", false),
+        ("hang", true),
+    ] {
+        set(failure);
+        let error = service.call(&ctx, &root, &["c"], limit).unwrap_err();
+        assert_eq!(
+            matches!(error, ServiceError::TimedOut(_)),
+            timed_out,
+            "{failure}: {error}"
+        );
+        assert_eq!(service.pid(), None, "{failure}: the process was kept");
+        assert!(!process_alive(first) || failure != "wrongid");
+        set("ok");
+        // The next request starts another process.
+        assert!(
+            service.call(&ctx, &root, &["d"], limit).is_ok(),
+            "{failure}"
+        );
+        assert!(service.pid().is_some_and(|pid| pid != first));
+    }
+    let started = service.started();
+    // Three failures in a row and the session runs the helper once per request.
+    set("exit");
+    for _ in 0..3 {
+        assert!(service.call(&ctx, &root, &["e"], limit).is_err());
+    }
+    assert!(service.disabled());
+    set("ok");
+    assert!(service.call(&ctx, &root, &["f"], limit).is_err());
+    assert_eq!(service.pid(), None);
+    // The process that was running took the first, two new ones the others.
+    assert_eq!(service.started(), started + 2);
+    // A program without the mode is no service.
+    let other = Service::new("test helper", &dotnet, &program);
+    set("noserve");
+    assert!(other.call(&ctx, &root, &["g"], limit).is_err());
+    assert_eq!(other.pid(), None);
+    // Dropping the handle ends the process.
+    set("ok");
+    let last = Service::new("test helper", &dotnet, &program);
+    last.call(&ctx, &root, &["h"], limit).unwrap();
+    let pid = last.pid().unwrap();
+    drop(last);
+    assert!(!process_alive(pid), "a dropped service still runs");
+}
+
+/// What the lifecycle helper's caller gets from the service is what the
+/// helper run once gives: its output, or a compile error of the sources in
+/// the same words. Any other failure of the service is not reported: the
+/// request runs once more in a process of its own.
+#[test]
+fn helper_command_reports_only_what_a_one_shot_run_would() {
+    let (_guard, root) = temp();
+    let (dotnet, program, mode) = stand_in_service(&root);
+    let set = |value: &str| sys::write(&mode, value.as_bytes()).unwrap();
+    let ctx = background();
+    let compiler = Compiler {
+        dotnet: dotnet.clone(),
+        serve_helper: true,
+        ..Default::default()
+    };
+    set("ok");
+    assert_eq!(
+        compiler
+            .helper_command(&ctx, &root, &[&program, "request.json"])
+            .unwrap(),
+        b"served 1\n"
+    );
+    for failure in ["error", "wrongid", "exit", "truncated"] {
+        set(failure);
+        assert_eq!(
+            compiler
+                .helper_command(&ctx, &root, &[&program, "request.json"])
+                .unwrap(),
+            b"one-shot request.json\n",
+            "{failure}: a failure of the service was not run once more"
+        );
+    }
+    set("diagnostics");
+    let served = compiler
+        .helper_command(&ctx, &root, &[&program, "fail"])
+        .unwrap_err();
+    let cold = compiler_command(&ctx, &root, &dotnet, &[&program, "fail"]).unwrap_err();
+    assert_eq!(
+        served.message, cold.message,
+        "a compile error reads otherwise when served"
+    );
+    assert_eq!(served.output, cold.output);
+    // Without the service: the helper runs once per request.
+    let cold_compiler = Compiler {
+        dotnet,
+        ..Default::default()
+    };
+    set("ok");
+    assert_eq!(
+        cold_compiler
+            .helper_command(&ctx, &root, &[&program, "x"])
+            .unwrap(),
+        b"one-shot x\n"
+    );
+}
+
+/// The lifecycle helper served by one process gives, for the rewrite of an
+/// assembly, `--type-definitions` and `--declaration-hashes`, the output and
+/// the files its one-shot run gives, request after request; a compile error
+/// in the same words; it refuses what it does not serve and a reference
+/// whose bytes are not those the request names.
+#[test]
+fn compiler_lifecycle_service_matches_one_shot_sdk() {
+    let Some(editor) = sdk(
+        "UME_LIFECYCLE_SDK",
+        "set UME_LIFECYCLE_SDK to the matching Unity executable; SDK only",
+    ) else {
+        return;
+    };
+    let (_guard, root) = temp();
+    let ctx = background();
+    let mut cold = Compiler {
+        editor: editor.clone(),
+        cache: join(&[&root, "compiler"]),
+        ..Default::default()
+    };
+    cold.initialize_sdk().unwrap();
+    let helper = cold.prepare_lifecycle_helper(&ctx).unwrap();
+    let mut references: Vec<String> = cold.base_references.to_vec();
+    references.extend(cold.engine_references.iter().cloned());
+    let references = deduplicate_references(&references).to_vec();
+    // The part of the bridge the rewrite compiles against.
+    let bridge_source = write_graph_file(
+        &root,
+        "bridge/Bridge.cs",
+        r#"using System; using UnityEngine; namespace UnityMicroEditor.Raw {
+[AttributeUsage(AttributeTargets.Assembly)] public sealed class RawLifecycleInstrumentedAttribute : Attribute { public RawLifecycleInstrumentedAttribute(int version) {} }
+[AttributeUsage(AttributeTargets.Assembly)] public sealed class RawScriptableObjectInstrumentedAttribute : Attribute { public RawScriptableObjectInstrumentedAttribute(int version) {} }
+public static class RawLifecycle {
+ public enum Phase { Awake, OnEnable, OnDisable, OnDestroy }
+ public static bool ShouldCollect(MonoBehaviour target, Phase phase) => false;
+ public static bool ShouldCollect(ScriptableObject target, Phase phase) => false;
+ public static void Enqueue(MonoBehaviour target, Phase phase, Action callback, int order) {}
+ public static void Enqueue(ScriptableObject target, Phase phase, Action callback, int order) {}
+ public static bool IsActiveAndEnabled(Behaviour target) => true;
+ public static void SetActive(GameObject target, bool value) {}
+}}"#,
+    );
+    let bridge = join(&[&root, "bridge/UnityMicroEditor.dll"]);
+    let mut arguments = vec![
+        cold.csc.clone(),
+        "-nologo".into(),
+        "-target:library".into(),
+        "-nostdlib+".into(),
+        format!("-out:{bridge}"),
+    ];
+    arguments.extend(references.iter().map(|path| format!("-reference:{path}")));
+    arguments.push(bridge_source);
+    let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+    compiler_command(&ctx, &root, &cold.dotnet, &arguments).unwrap();
+    let mut all_references = references.clone();
+    all_references.push(bridge.clone());
+    let reference_hashes: BTreeMap<String, String> = all_references
+        .iter()
+        .map(|path| (path.clone(), hash(path)))
+        .collect();
+    let state = |value: u32, broken: bool| {
+        let text = format!(
+            "using UnityEngine;\npublic class Probe : MonoBehaviour\n{{\n    public int seed;\n    void Awake() {{ seed += {value}; }}\n    void OnEnable() {{ seed++; }}\n    void Update() {{ seed += {value}; }}\n}}\n{}",
+            if broken {
+                "public class Broken { int x = missing; }\n"
+            } else {
+                ""
+            }
+        );
+        let source = write_graph_file(&root, &format!("states/{value}-{broken}/Probe.cs"), &text);
+        let folder = join(&[&root, &format!("states/{value}-{broken}/out")]);
+        let request = join(&[&folder, "lifecycle-request.json"]);
+        sys::mkdir_all(&folder).unwrap();
+        atomic_json(
+            &request,
+            &json!({
+                "AllowUnsafe": false,
+                "AssemblyName": "Assembly-CSharp",
+                "Defines": ["UNITY_6000_6"],
+                "ExecutionOrders": {},
+                "MarkerPath": join(&[&folder, "Marker.cs"]),
+                "NativeBaseAssemblies": [],
+                "ReferenceHashes": reference_hashes,
+                "References": all_references,
+                "Sources": [{"OriginalPath": join(&[&root, "Assets/Probe.cs"]), "OutputPath": join(&[&folder, "Probe.cs"]), "Path": source}],
+            }),
+        )
+        .unwrap();
+        (folder, request)
+    };
+    let files =
+        |folder: &str| ["Probe.cs", "Marker.cs"].map(|name| fs::read(join(&[folder, name])).ok());
+    let clear = |folder: &str| {
+        for name in ["Probe.cs", "Marker.cs"] {
+            let _ = fs::remove_file(join(&[folder, name]));
+        }
+    };
+    let served = Compiler {
+        dotnet: cold.dotnet.clone(),
+        serve_helper: true,
+        ..Default::default()
+    };
+    let states: Vec<(String, String)> = (1..=2).map(|value| state(value, false)).collect();
+    let mut expected = Vec::new();
+    for (folder, request) in &states {
+        clear(folder);
+        let output = compiler_command(&ctx, folder, &cold.dotnet, &[&helper, request]).unwrap();
+        expected.push((output, files(folder)));
+    }
+    for round in 0..20 {
+        let index = round % 2;
+        let (folder, request) = &states[index];
+        clear(folder);
+        let output = served
+            .helper_command(&ctx, folder, &[&helper, request])
+            .unwrap();
+        assert_eq!(
+            output, expected[index].0,
+            "round {round}: the served proof differs"
+        );
+        assert_eq!(
+            files(folder),
+            expected[index].1,
+            "round {round}: the rewritten files differ"
+        );
+    }
+    let service = served.helper_service.lock().unwrap().clone().unwrap();
+    assert_eq!(service.started(), 1, "one process served every request");
+    let pid = service.pid().unwrap();
+    // A compile error: the same words, and the process stays.
+    let (folder, request) = state(3, true);
+    let cold_error =
+        compiler_command(&ctx, &folder, &cold.dotnet, &[&helper, &request]).unwrap_err();
+    let served_error = served
+        .helper_command(&ctx, &folder, &[&helper, &request])
+        .unwrap_err();
+    assert!(
+        served_error.message.contains("CS0103"),
+        "{}",
+        served_error.message
+    );
+    assert_eq!(served_error.message, cold_error.message);
+    assert_eq!(service.pid(), Some(pid));
+    // Metadata of two compiled assemblies, as the type and declaration checks ask.
+    let dlls: Vec<String> = [
+        "UnityEngine.CoreModule.dll",
+        "UnityEngine.PhysicsModule.dll",
+    ]
+    .iter()
+    .map(|name| {
+        references
+            .iter()
+            .find(|path| path.ends_with(&format!("/{name}")))
+            .unwrap()
+            .clone()
+    })
+    .chain([bridge.clone()])
+    .collect();
+    for mode in ["--type-definitions", "--declaration-hashes"] {
+        let mut arguments = vec![helper.as_str(), mode];
+        arguments.extend(dlls.iter().map(String::as_str));
+        let one_shot = compiler_command(&ctx, &root, &cold.dotnet, &arguments).unwrap();
+        assert_eq!(
+            served.helper_command(&ctx, &root, &arguments).unwrap(),
+            one_shot,
+            "{mode}"
+        );
+    }
+    // A reference whose bytes are not those the request names fails the
+    // served request, and the caller then runs it once.
+    let (folder, request) = state(4, false);
+    let mut document = read_json_file::<serde_json::Value>(&request).unwrap();
+    document["ReferenceHashes"][&bridge] = json!(sha256(b"other bytes"));
+    atomic_json(&request, &document).unwrap();
+    let reply = service
+        .call(
+            &ctx,
+            &folder,
+            &[&request],
+            std::time::Duration::from_secs(120),
+        )
+        .unwrap();
+    assert!(
+        reply.exit == 1
+            && reply.kind == "error"
+            && reply.error.contains("does not have the content"),
+        "{reply:?}"
+    );
+    let output = served
+        .helper_command(&ctx, &folder, &[&helper, &request])
+        .unwrap();
+    assert_eq!(
+        output,
+        compiler_command(&ctx, &folder, &cold.dotnet, &[&helper, &request]).unwrap()
+    );
+    // What runs game code, or is no request of a compile, is not served.
+    for arguments in [
+        vec!["--behaviour-objects", "/nowhere.json"],
+        vec!["--behaviour-layouts", "/nowhere.json"],
+        vec!["--source-type-declarations", "/nowhere.json"],
+        vec!["a.json", "b.json"],
+    ] {
+        let reply = service
+            .call(&ctx, &root, &arguments, std::time::Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(
+            (reply.exit, reply.kind.as_str()),
+            (64, "refused"),
+            "{arguments:?}"
+        );
+    }
+    assert_eq!(service.started(), 1);
+    drop(served);
+    drop(service);
+    assert!(!process_alive(pid), "the served helper outlived its owner");
+}
+
+/// Makes a file look as written `seconds` ago: its modification time. The
+/// change time cannot be set; a test that needs it old waits.
+fn age(path: &str, seconds: u64) {
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(seconds))
+        .unwrap();
+}
+
+#[test]
+fn hash_cache_answers_settled_files_and_reads_everything_else() {
+    let (_guard, root) = temp();
+    let settled = write_graph_file(&root, "settled.dll", "settled bytes");
+    let same_size = write_graph_file(&root, "same-size.dll", "first  bytes");
+    let replaced = write_graph_file(&root, "replaced.dll", "replaced bytes");
+    for path in [&settled, &same_size, &replaced] {
+        age(path, 60);
+    }
+    // Both times of a file must be two seconds old before its hash is kept.
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    let fresh = write_graph_file(&root, "fresh.dll", "fresh bytes");
+    let cache = HashCache::on();
+    for path in [&settled, &same_size, &replaced, &fresh] {
+        assert_eq!(cache.file_hash(path).unwrap(), hash(path));
+    }
+    assert_eq!(cache.reads(), 4);
+    // Settled and unchanged: answered without a read.
+    for path in [&settled, &same_size, &replaced] {
+        assert_eq!(cache.file_hash(path).unwrap(), hash(path));
+    }
+    assert_eq!(cache.reads(), 4, "a settled file was read again");
+    // A file written within the last two seconds is read every time.
+    assert_eq!(cache.file_hash(&fresh).unwrap(), hash(&fresh));
+    assert_eq!(cache.reads(), 5, "a fresh file was answered from the cache");
+    // Other bytes of the same size under the old modification time.
+    let modified = fs::metadata(&same_size).unwrap().modified().unwrap();
+    sys::write(&same_size, b"second bytes").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&same_size)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    assert_eq!(
+        cache.file_hash(&same_size).unwrap(),
+        sha256(b"second bytes")
+    );
+    // Replaced by a rename: another inode.
+    let other = write_graph_file(&root, "other.dll", "other bytes");
+    fs::rename(&other, &replaced).unwrap();
+    assert_eq!(cache.file_hash(&replaced).unwrap(), sha256(b"other bytes"));
+    // A file that is gone is an error, as it is without the cache.
+    fs::remove_file(&settled).unwrap();
+    assert!(cache.file_hash(&settled).is_err());
+    // Off, every hash is a read.
+    let off = HashCache::default();
+    assert!(!off.is_on());
+    assert_eq!(off.file_hash(&same_size).unwrap(), sha256(b"second bytes"));
+    assert_eq!(off.reads(), 0);
+}
+
+/// A configuration input that changes between two compiles is refused
+/// with the words it always had, also when its hash came from the cache.
+#[test]
+fn hash_cache_sees_a_configuration_input_that_changed() {
+    let (_guard, root) = temp();
+    let asmdef = write_graph_file(&root, "Assets/Game.asmdef", r#"{"name":"Game"}"#);
+    age(&asmdef, 60);
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    let compiler = Compiler {
+        project: root.clone(),
+        configuration: NilMap::from([(asmdef.clone(), hash(&asmdef))]),
+        hashes: HashCache::on(),
+        ..Default::default()
+    };
+    compiler.check_fixed_configuration().unwrap();
+    compiler.check_fixed_configuration().unwrap();
+    assert_eq!(
+        compiler.hashes.reads(),
+        1,
+        "the settled input was read twice"
+    );
+    let modified = fs::metadata(&asmdef).unwrap().modified().unwrap();
+    sys::write(&asmdef, br#"{"name":"Gamf"}"#).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&asmdef)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    let error = compiler
+        .check_fixed_configuration()
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("managed assembly configuration/GUID changed; regenerate source graph"),
+        "{error}"
+    );
+}
+
+/// With the hashes of a session, the revision key still sees a tool, a
+/// generator dependency and a file of the baseline Player that changed in
+/// place under its old size and modification time.
+#[test]
+fn code_revision_identity_tracks_changes_with_the_hash_cache() {
+    let (_guard, mut compiler, sources) = code_revision_fixture();
+    compiler.hashes = HashCache::on();
+    let ctx = background();
+    // Old enough to be kept.
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    let key = compiler.code_revision_key(&ctx, &sources).unwrap();
+    let reads = compiler.hashes.reads();
+    assert_eq!(compiler.code_revision_key(&ctx, &sources).unwrap(), key);
+    assert_eq!(
+        compiler.hashes.reads(),
+        reads,
+        "settled tools were read again"
+    );
+    let staged = sysutil::dir(&compiler.player);
+    for (path, text) in [
+        (
+            join(&[&sysutil::dir(&compiler.csc), "Microsoft.CodeAnalysis.dll"]),
+            "Roslyn dependenca",
+        ),
+        (
+            join(&[&sysutil::dir(&compiler.generators[0]), "Dependency.dll"]),
+            "generator dependencz",
+        ),
+        (join(&[&staged, "UnityPlayer.so"]), "native Unitz"),
+    ] {
+        rewrite_keeping_size_and_mtime(&path, text);
+        assert_ne!(
+            compiler.code_revision_key(&ctx, &sources).unwrap(),
+            key,
+            "a changed input kept the key with the hash cache: {path}"
+        );
+    }
+}
+
+/// `UME_COMPILER_COLD=1` leaves the hash cache off, and with it the maps of
+/// Player directories: each use reads the directory in full, as before a
+/// session kept anything (caches6-4). With the cache on, the baseline is
+/// read once.
+#[test]
+fn player_maps_are_kept_only_with_the_hash_cache() {
+    let (_guard, mut compiler, _) = code_revision_fixture();
+    let staged = sysutil::dir(&compiler.player);
+    assert!(!compiler.hashes.is_on());
+    let first = compiler.baseline_player_map(&staged).unwrap();
+    let second = compiler.baseline_player_map(&staged).unwrap();
+    assert!(
+        !Arc::ptr_eq(&first, &second),
+        "a cold compiler kept the map"
+    );
+    assert!(compiler.known_player_map(&staged).is_none());
+    compiler.hashes = HashCache::on();
+    let first = compiler.baseline_player_map(&staged).unwrap();
+    let second = compiler.baseline_player_map(&staged).unwrap();
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "the warm compiler read the baseline again"
+    );
+    assert!(compiler.known_player_map(&staged).is_some());
+}
+
+/// A runner that was killed leaves the socket of its server; the next
+/// server of the same output removes it, and nothing of a runner that runs.
+#[test]
+fn compiler_server_removes_sockets_of_dead_runners() {
+    let (_guard, root) = temp();
+    let output = join(&[&root, "output"]);
+    let prefix = format!("ume-{}", &sha256(output.as_bytes())[..16]);
+    // A process id that runs nothing: the largest one not in /proc.
+    let dead = (1..4_000_000u32)
+        .rev()
+        .find(|pid| fs::symlink_metadata(format!("/proc/{pid}")).is_err())
+        .unwrap();
+    let left = format!("/tmp/{prefix}-{dead}-3");
+    let running = format!("/tmp/{prefix}-1-2");
+    let other = format!("/tmp/ume-0000000000000000-{dead}-1");
+    for path in [&left, &running, &other] {
+        let _ = fs::remove_file(path);
+        drop(std::os::unix::net::UnixListener::bind(path).unwrap());
+    }
+    let (dotnet, csc) = stand_in_server(&root);
+    let server = CompilerServer::new(&dotnet, &csc, &output);
+    assert!(sys::absent(&left), "the socket of a dead runner stayed");
+    assert!(
+        !sys::absent(&running),
+        "the socket of a running process was removed"
+    );
+    assert!(
+        !sys::absent(&other),
+        "the socket of another output was removed"
+    );
+    drop(server);
+    for path in [&running, &other] {
+        fs::remove_file(path).unwrap();
+    }
+}
+
+/// A kept process above its memory limit is replaced before the next
+/// request, and that is no failure: the session keeps using the service.
+#[test]
+fn kept_processes_are_replaced_above_their_memory_limit() {
+    let (_guard, root) = temp();
+    let (dotnet, program, mode) = stand_in_service(&root);
+    sys::write(&mode, b"ok").unwrap();
+    let ctx = background();
+    let limit = std::time::Duration::from_secs(5);
+    // Every process holds more than a kilobyte.
+    let service = Service::new("test helper", &dotnet, &program).with_memory_limit(1024);
+    let mut pids = Vec::new();
+    for index in 0..5 {
+        let reply = service.call(&ctx, &root, &["a"], limit).unwrap();
+        assert_eq!(reply.exit, 0, "{index}");
+        pids.push(service.pid().unwrap());
+    }
+    assert_eq!(
+        service.started(),
+        5,
+        "a process above the limit was used again"
+    );
+    assert!(!service.disabled(), "a replacement counted as a failure");
+    assert!(pids.iter().take(4).all(|pid| !process_alive(*pid)));
+    // Within the limit the process stays.
+    let kept = Service::new("test helper", &dotnet, &program);
+    kept.call(&ctx, &root, &["a"], limit).unwrap();
+    kept.call(&ctx, &root, &["a"], limit).unwrap();
+    assert_eq!(kept.started(), 1);
+    // The same for the compiler server.
+    let (dotnet, csc) = stand_in_server(&root);
+    let server =
+        CompilerServer::new(&dotnet, &csc, &join(&[&root, "output"])).with_memory_limit(1024);
+    let inputs = BTreeMap::new();
+    let first = server.client(&inputs).unwrap();
+    let second = server.client(&inputs).unwrap();
+    assert_ne!(
+        first.pipe, second.pipe,
+        "a server above the limit was used again"
+    );
+    assert!(server.client(&inputs).is_some());
 }

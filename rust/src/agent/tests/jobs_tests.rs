@@ -17,7 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn run(
+pub(super) fn run(
     action: impl Fn(&Context, &str, &[u8]) -> Result<HandlerValue> + Send + Sync + 'static,
 ) -> Run {
     Arc::new(action)
@@ -28,7 +28,12 @@ fn map(value: Value) -> Result<HandlerValue> {
 fn pending(value: &HandlerValue) -> bool {
     is_map(value) && decoded(value)["status"] == "result_pending"
 }
-fn wait_job(service: &Service, action: &str, raw: &[u8], run: &Run) -> Result<HandlerValue> {
+pub(super) fn wait_job(
+    service: &Service,
+    action: &str,
+    raw: &[u8],
+    run: &Run,
+) -> Result<HandlerValue> {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let result = service.enqueue_action(&ctx(), action, raw, run.clone())?;
@@ -266,7 +271,18 @@ fn close_cancels_detached_work_before_taking_service_lock() {
     );
 }
 
-fn preparation_fixture(project: &str, id: &str) -> (Preparation, String, String) {
+pub(super) fn preparation_fixture(project: &str, id: &str) -> (Preparation, String, String) {
+    preparation_of(project, id, &[])
+}
+/// A preparation whose compiler plan was made with the managed inputs
+/// `inputs` as they are on disk now: its graph accepts the sources for as
+/// long as those files stay what they are and `Assets` holds no other
+/// managed configuration.
+pub(super) fn preparation_of(
+    project: &str,
+    id: &str,
+    inputs: &[&str],
+) -> (Preparation, String, String) {
     let directory = join(&[project, "Library/UnityMicroEditor/preparations", id]);
     let preparation = Preparation {
         schema_version: 1,
@@ -283,16 +299,29 @@ fn preparation_fixture(project: &str, id: &str) -> (Preparation, String, String)
         json!({"schemaVersion": 1, "projectRoot": project, "scenePath": preparation.scene, "supported": true, "unityVersion": UNITY_VERSION}),
     );
     write_mode(&player, "native Player", 0o700);
-    let compiler = CompileManifest {
+    let mut compiler = CompileManifest {
         schema: 1,
         project: project.into(),
         compiler_inputs: NilMap::from([("public-input", "verified".to_string())]),
         ..Default::default()
     };
+    // The scripts of `review_project` are sources the plan was made with.
+    let scripts = ["Assets/Sample.cs", "Assets/Other.cs"]
+        .into_iter()
+        .flat_map(|script| [script.to_string(), format!("{script}.meta")]);
+    for input in scripts.chain(inputs.iter().map(|input| input.to_string())) {
+        let path = join(&[project, &input]);
+        if let Ok(hash) = crate::util::file_hash(&path) {
+            compiler.compiler_inputs.insert(&path, hash);
+        }
+    }
     immutable(
         &preparation.baseline,
         json!({"schemaVersion": 1, "project": project, "manifest": manifest, "player": player, "compiler": compiler}),
     );
+    // What a preparation leaves beside its baseline: the result a later
+    // server reads to find it.
+    immutable(&join(&[&directory, "result.json"]), json!(preparation));
     (preparation, manifest, player)
 }
 fn stopped_controller(project: &str, lifetime: &Context) -> Controller {
@@ -314,6 +343,193 @@ fn restarted_service(project: &str, controller: &Controller, lifetime: &Context)
         asynchronous: true,
         ..Default::default()
     })
+}
+
+/// Sources that were prepared before under the identity the recovery gives
+/// them (an edit that was undone and made again, a branch switched back) have
+/// a confirmed receipt and no job, so no job activates their preparation. The
+/// recovery does, and restarts the session on it.
+#[test]
+fn recovery_continues_on_the_preparation_the_sources_already_have() {
+    let (_guard, project) = review_project();
+    write(&join(&[&project, "Assets/Main.unity"]), "selected scene");
+    let (active, _, _) = preparation_fixture(&project, "active-test");
+    let revision = configuration_revision(
+        &project,
+        &[ConfigurationSelection {
+            scene: active.scene.clone(),
+            baseline: active.baseline.clone(),
+        }],
+    )
+    .unwrap();
+    let identity = format!(
+        "config-{}",
+        &crate::sha256(format!("{}\n{revision}", active.scene).as_bytes())[..40]
+    );
+    let (known, _, _) = preparation_fixture(&project, &identity);
+    let raw = marshal(&Any::Object(obj([
+        ("scene", active.scene.clone().into()),
+        ("requestId", identity.clone().into()),
+        ("activate", true.into()),
+    ])))
+    .unwrap();
+    // An earlier server prepared these sources.
+    let earlier = plain_service(&project);
+    let confirmed = known.clone();
+    let outcome = wait_job(
+        &earlier,
+        "project_prepare",
+        &raw,
+        &run(move |_, _, _| json_reply(&confirmed)),
+    );
+    earlier.close();
+    outcome.unwrap();
+    // A runner that stays, and writes down what it was started with.
+    let (_runner_guard, directory) = temp_dir();
+    let runner = join(&[&directory, "runner"]);
+    write_mode(
+        &runner,
+        "#!/bin/sh\necho \"$@\" >> \"$0.arguments\"\nexec sleep 60\n",
+        0o700,
+    );
+    let started = || -> Vec<String> {
+        fs::read_to_string(format!("{runner}.arguments"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+    let launches = |count: usize| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while started().len() < count {
+            assert!(
+                Instant::now() < deadline,
+                "the runner was started {:?}",
+                started()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        started()
+    };
+    let lifetime = ctx().with_cancel();
+    let controller = Controller::new(
+        &lifetime,
+        agentcontrol::Options {
+            project: project.clone(),
+            runner: runner.clone(),
+            output: join(&[&project, "Library/UnityMicroEditor/agent"]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    controller
+        .configure_prepared(&active.baseline, &active.scene)
+        .unwrap();
+    let service = Service::new(Options {
+        project: project.clone(),
+        scene: active.scene.clone(),
+        baseline: active.baseline.clone(),
+        lifetime: Some(lifetime.clone()),
+        controller: Some(controller.clone()),
+        asynchronous: true,
+        ..Default::default()
+    });
+    let before = controller.start().unwrap();
+    assert!(launches(1)[0].contains(&format!("--baseline {}", active.baseline)));
+    // What the session answers after the edit that left the prepared graph.
+    let state = agentcontrol::State {
+        phase: "ready".into(),
+        pid: 1234,
+        session_id: before.session_id.clone(),
+        update_error:
+            "new managed configuration requires a fresh managed graph: Assets/Lib/Lib.asmdef".into(),
+        ..Default::default()
+    };
+    let recover = |action: &str| {
+        let outcome = service.recover_configuration(
+            &ctx(),
+            "session_control",
+            &bytes(&json!({"action": action})),
+            actions::RuntimeOutcome {
+                value: actions::RuntimeValue::Controller(agentcontrol::Reply::State(Box::new(
+                    state.clone(),
+                ))),
+                error: None,
+            },
+        );
+        decoded(&outcome.finish().unwrap())
+    };
+    // Not behind a project action that runs: the receipt is shown and stays.
+    let held = service.0.mu.lock().unwrap();
+    let busy = recover("status");
+    assert!(
+        busy["preparationRequired"] == true
+            && busy["preparation"]["requestId"] == identity.as_str()
+            && service.baseline() == active.baseline
+            && started().len() == 1,
+        "{busy}"
+    );
+    drop(held);
+    let status = recover("status");
+    assert_eq!(
+        (service.baseline(), service.scene()),
+        (known.baseline.clone(), active.scene.clone()),
+        "the recovery left the session on the preparation of other sources: {status}"
+    );
+    let after = controller.status();
+    assert!(
+        after.session_id != before.session_id && after.phase == "starting",
+        "the session was not restarted: {} {}",
+        after.session_id,
+        after.phase
+    );
+    assert!(
+        launches(2)[1].contains(&format!("--baseline {}", known.baseline)),
+        "{:?}",
+        started()
+    );
+    // The reply is the session as it continues: nothing is required any more.
+    assert!(
+        status.get("preparationRequired").is_none()
+            && status["sessionId"] == after.session_id.as_str()
+            && status["preparation"]["requestId"] == identity.as_str(),
+        "{status}"
+    );
+    // The same rejection on the preparation the recovery chose says that
+    // the choice did not fit after all. Nothing waits on a preparation that
+    // nobody makes: the session goes back to the one it had, which fits as
+    // well, and after that a new preparation is requested under a name of
+    // its own. No preparation is tried twice for the same sources.
+    let back = recover("wait_update");
+    assert!(
+        back["status"] == "result_pending"
+            && back["message"]
+                .as_str()
+                .is_some_and(|text| text.contains("restarting on it"))
+            && back["preparation"]["requestId"] == "active-test",
+        "{back}"
+    );
+    assert_eq!(service.baseline(), active.baseline);
+    assert_eq!(launches(3).len(), 3);
+    let held = service.0.mu.lock().unwrap();
+    let requested = recover("status");
+    let next = requested["preparation"]["requestId"].as_str().unwrap();
+    assert!(
+        requested["preparationRequired"] == true
+            && requested["preparation"]["status"] == "result_pending"
+            && next.starts_with("config-")
+            && next != identity
+            && service.baseline() == active.baseline,
+        "{requested}"
+    );
+    // A poll names the same request, and none restarts anything.
+    assert_eq!(recover("status")["preparation"]["requestId"], next);
+    assert_eq!(started().len(), 3);
+    service.close_action_jobs();
+    drop(held);
+    service.close();
+    let _ = controller.close();
+    lifetime.cancel();
 }
 
 #[test]
@@ -413,6 +629,123 @@ fn start_does_not_ignore_different_explicit_scene() {
             Some("scene_requires_preparation"),
             "{action} silently ignored the selected scene"
         );
+    }
+}
+
+/// A start or reset of a session that has a preparation cannot take the
+/// inputs of one: it names the call that does, instead of returning the
+/// running session as if they were used. A misspelled key is refused.
+#[test]
+fn start_does_not_ignore_preparation_inputs_or_unknown_keys() {
+    let (_guard, project) = review_project();
+    let service = Service::new(Options {
+        project,
+        baseline: "/prepared/current.json".into(),
+        scene: "Assets/Main.unity".into(),
+        ..Default::default()
+    });
+    for action in ["start", "reset"] {
+        for arguments in [
+            json!({"rebuildHost": true}),
+            json!({"hostPlayer": "/elsewhere/Player"}),
+            json!({"engineProfile": "/p.json", "nativeCatalog": "/c"}),
+        ] {
+            let raw = bytes(&json!({"action": action, "arguments": arguments}));
+            let outcome = service.runtime_with_action_jobs(&ctx(), "session_control", &raw);
+            let detail = outcome.error.as_ref().and_then(typed);
+            assert_eq!(
+                detail.map(|detail| detail.code.as_str()),
+                Some("preparation_input_ignored"),
+                "{action} {arguments} was taken for a launch with it"
+            );
+            assert!(
+                outcome
+                    .error
+                    .as_ref()
+                    .unwrap()
+                    .to_string()
+                    .contains("call project_prepare with this scene"),
+                "{:?}",
+                outcome.error
+            );
+        }
+        let raw = bytes(&json!({"action": action, "arguments": {"hotreload": false}}));
+        let outcome = service.runtime_with_action_jobs(&ctx(), "session_control", &raw);
+        let text = format!("{:#}", outcome.error.expect("a misspelled key is refused"));
+        assert!(
+            text.contains("unknown start/reset argument \"hotreload\""),
+            "{text}"
+        );
+    }
+}
+
+/// The start that began a preparation with an input is reissued, as the
+/// documentation says, with the same input; once that preparation is the
+/// session's, the input is what the session runs and the start goes on
+/// (session6-5). Another input, or one of the wrong type, is refused
+/// (mcp6-3).
+#[test]
+fn a_start_reissued_with_the_inputs_of_its_preparation_goes_on() {
+    let (_guard, project) = review_project();
+    let id = "auto-prepared";
+    let record = join(&[
+        &project,
+        "Library/UnityMicroEditor/action-jobs",
+        &crate::sha256(id.as_bytes()),
+        "request.json",
+    ]);
+    fs::create_dir_all(crate::sysutil::dir(&record)).unwrap();
+    write(
+        &record,
+        format!(
+            r#"{{"schemaVersion":1,"project":"{project}","action":"project_prepare","identity":"{id}","arguments":{{"activate":true,"hostPlayer":"/host/Player","rebuildHost":true,"requestId":"{id}","scene":"Assets/Main.unity"}}}}"#
+        ),
+    );
+    let service = Service::new(Options {
+        project: project.clone(),
+        baseline: join(&[
+            &project,
+            "Library/UnityMicroEditor/preparations",
+            id,
+            "current.json",
+        ]),
+        scene: "Assets/Main.unity".into(),
+        ..Default::default()
+    });
+    let code = |arguments: Value| {
+        let raw = bytes(&json!({"action": "start", "arguments": arguments}));
+        let outcome = service.runtime_with_action_jobs(&ctx(), "session_control", &raw);
+        let error = outcome.error.expect("no controller in this test");
+        typed(&error).map_or(format!("{error:#}"), |detail| detail.code.clone())
+    };
+    // Taken to the controller, which this test does not have.
+    for arguments in [
+        json!({"hostPlayer": "/host/Player"}),
+        json!({"hostPlayer": "/host/Player", "rebuildHost": true}),
+        json!({"rebuildHost": false, "nativeCatalog": null}),
+    ] {
+        assert_eq!(
+            code(arguments.clone()),
+            "runtime controller is not configured",
+            "{arguments}"
+        );
+    }
+    for arguments in [
+        json!({"hostPlayer": "/elsewhere/Player"}),
+        json!({"hostPlayer": "/host/Player", "nativeCatalog": "/c"}),
+    ] {
+        assert_eq!(
+            code(arguments.clone()),
+            "preparation_input_ignored",
+            "{arguments}"
+        );
+    }
+    for arguments in [
+        json!({"nativeCatalog": true}),
+        json!({"hostPlayer": 7}),
+        json!({"rebuildHost": "true"}),
+    ] {
+        assert_eq!(code(arguments.clone()), "invalid_request", "{arguments}");
     }
 }
 

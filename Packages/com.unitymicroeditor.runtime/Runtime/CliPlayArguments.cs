@@ -14,6 +14,7 @@ namespace UnityMicroEditor
         public string RawManifestPath { get; }
         public string RawContentRoutesPath { get; }
         public string RawReloadRequestPath { get; }
+        public string CodeReloadRequestPath { get; }
         public string ControlDirectory { get; }
         public int Frames { get; }
         public string Scene { get; }
@@ -22,7 +23,7 @@ namespace UnityMicroEditor
         public bool Interactive { get; }
 
         private CliPlayArguments(string reportPath, string readyPath, string screenshotPath, string contentManifestPath, string rawManifestPath, string rawReloadRequestPath, string rawContentRoutesPath,
-            int frames, string scene, int? targetFrameRate, bool noVsync, bool interactive, string controlDirectory)
+            int frames, string scene, int? targetFrameRate, bool noVsync, bool interactive, string controlDirectory, string codeReloadRequestPath)
         {
             ReportPath = reportPath;
             ReadyPath = readyPath;
@@ -30,6 +31,7 @@ namespace UnityMicroEditor
             ContentManifestPath = contentManifestPath;
             RawManifestPath = rawManifestPath;
             RawReloadRequestPath = rawReloadRequestPath;
+            CodeReloadRequestPath = codeReloadRequestPath;
             ControlDirectory = controlDirectory;
             RawContentRoutesPath = rawContentRoutesPath;
             Frames = frames;
@@ -57,6 +59,7 @@ namespace UnityMicroEditor
             string contentManifestPath = null;
             string rawManifestPath = null;
             string rawReloadRequestPath = null;
+            string codeReloadRequestPath = null;
             string rawContentRoutesPath = null;
             string controlDirectory = null;
             string scene = null;
@@ -100,6 +103,11 @@ namespace UnityMicroEditor
                 {
                     if (rawReloadRequestPath != null) throw new FormatException("Duplicate --unity-cli-raw-reload.");
                     rawReloadRequestPath = ReadAbsolutePath(arguments, ref index);
+                }
+                else if (argument == "--unity-cli-code-reload")
+                {
+                    if (codeReloadRequestPath != null) throw new FormatException("Duplicate --unity-cli-code-reload.");
+                    codeReloadRequestPath = ReadAbsolutePath(arguments, ref index);
                 }
                 else if (argument == "--unity-cli-raw-routes")
                 {
@@ -160,6 +168,12 @@ namespace UnityMicroEditor
                 || rawReloadRequestPath + ".ack.json" == reportPath || rawReloadRequestPath + ".ack.json" == readyPath
                 || rawReloadRequestPath + ".ack.json" == rawManifestPath || rawReloadRequestPath + ".ack.json" == contentManifestPath))
                 throw new FormatException("Raw reload request/ack and source/report destinations must use distinct paths.");
+            if (codeReloadRequestPath != null && (rawManifestPath == null || !interactive))
+                throw new FormatException("--unity-cli-code-reload requires an interactive raw manifest run.");
+            if (codeReloadRequestPath != null)
+                foreach (string file in new[] { reportPath, readyPath, contentManifestPath, rawManifestPath, rawContentRoutesPath, rawReloadRequestPath, rawReloadRequestPath == null ? null : rawReloadRequestPath + ".ack.json" })
+                    if (file != null && (file == codeReloadRequestPath || file == codeReloadRequestPath + ".ack.json"))
+                        throw new FormatException("Code reload request/ack and source/report destinations must use distinct paths.");
             if (interactive && screenshotPath != null)
                 throw new FormatException("--unity-cli-screenshot requires a finite run; capture during player shutdown is unavailable.");
             if (reportPath == readyPath || reportPath == screenshotPath || readyPath == screenshotPath ||
@@ -171,10 +185,11 @@ namespace UnityMicroEditor
                 || Path.GetDirectoryName(controlDirectory) != Path.GetDirectoryName(reportPath)))
                 throw new FormatException("--unity-cli-control requires an interactive raw run and a directory beside its report.");
             if (controlDirectory != null)
-                foreach (string file in new[] { reportPath, readyPath, screenshotPath, contentManifestPath, rawManifestPath, rawReloadRequestPath, rawReloadRequestPath == null ? null : rawReloadRequestPath + ".ack.json", rawContentRoutesPath })
+                foreach (string file in new[] { reportPath, readyPath, screenshotPath, contentManifestPath, rawManifestPath, rawReloadRequestPath, rawReloadRequestPath == null ? null : rawReloadRequestPath + ".ack.json", rawContentRoutesPath,
+                    codeReloadRequestPath, codeReloadRequestPath == null ? null : codeReloadRequestPath + ".ack.json" })
                     if (file != null && file == controlDirectory)
                         throw new FormatException("Agent control directory and source/report destinations must use distinct paths.");
-            result = new CliPlayArguments(reportPath, readyPath, screenshotPath, contentManifestPath, rawManifestPath, rawReloadRequestPath, rawContentRoutesPath, frames, scene, targetFrameRate, noVsync, interactive, controlDirectory);
+            result = new CliPlayArguments(reportPath, readyPath, screenshotPath, contentManifestPath, rawManifestPath, rawReloadRequestPath, rawContentRoutesPath, frames, scene, targetFrameRate, noVsync, interactive, controlDirectory, codeReloadRequestPath);
             return true;
         }
 

@@ -161,6 +161,12 @@ pub(crate) struct Inner {
     pub jobs: Mutex<Jobs>,
     pub job_wait: (Mutex<usize>, Condvar),
     pub progress: Mutex<progress::Progress>,
+    /// The session is being stopped and started on another preparation: a
+    /// wait that sees it stopped in between is told to ask again.
+    pub swapping: std::sync::atomic::AtomicBool,
+    /// The preparations the configuration recovery continued on for one
+    /// state of the sources, by its revision.
+    pub continued: Mutex<(String, Vec<String>)>,
     /// The publish command of remote sessions that name none.
     pub remote_publish: String,
     /// The remote session of this service's Player, while one is served.
@@ -191,6 +197,8 @@ impl Service {
             jobs: Mutex::default(),
             job_wait: (Mutex::new(0), Condvar::new()),
             progress: Mutex::default(),
+            swapping: Default::default(),
+            continued: Mutex::default(),
             remote_publish: options.remote_publish,
             remote: Mutex::default(),
         }))

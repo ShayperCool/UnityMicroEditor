@@ -1505,12 +1505,15 @@ fn native_ui_runtime_sdk() {
             String::from_utf8_lossy(&output.stderr)
         );
     };
+    // Without build servers: one would outlive the test.
     run(&[
         "build",
         "Tests.csproj",
         "--nologo",
         "-v:q",
         "-p:NuGetAudit=false",
+        crate::compiler::BUILD_WITHOUT_SERVERS[0],
+        crate::compiler::BUILD_WITHOUT_SERVERS[1],
     ]);
     run(&[&root.path("bin/Debug/net8.0/Tests.dll")]);
 }

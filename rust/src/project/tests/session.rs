@@ -103,6 +103,87 @@ Transform:
     );
 }
 
+/// A preparation whose manifest would equal the one published before but
+/// for its id publishes nothing: a patched C# edit wrote a scene manifest
+/// and an fsync per edit (caches6-3). A change of what the manifest holds
+/// publishes a new revision, and the one before stays as it was.
+#[test]
+fn an_unchanged_preparation_is_the_revision_before_it() {
+    let f = fixture_session();
+    let first = f.session.prepare(&f.output).unwrap();
+    let revisions = || {
+        fs::read_dir(format!("{}/revisions", f.output))
+            .unwrap()
+            .count()
+    };
+    let again = f.session.prepare(&f.output).unwrap();
+    assert_eq!(
+        (
+            again.revision.as_str(),
+            again.manifest.as_str(),
+            revisions()
+        ),
+        (first.revision.as_str(), first.manifest.as_str(), 1)
+    );
+    // A revision that is gone is published again.
+    fs::remove_dir_all(crate::sysutil::dir(&first.manifest)).unwrap();
+    let republished = f.session.prepare(&f.output).unwrap();
+    assert!(republished.revision != first.revision && revisions() == 1);
+    let old_bytes = fs::read(&republished.manifest).unwrap();
+    write_fixture_file(
+        &f.scene,
+        FIXTURE_SCENE.replacen("m_Name: Original", "m_Name: Modified", 1),
+    );
+    let changed = f.session.prepare(&f.output).unwrap();
+    assert!(changed.revision != republished.revision && revisions() == 2);
+    assert_eq!(old_bytes, fs::read(&republished.manifest).unwrap());
+    let unchanged = f.session.prepare(&f.output).unwrap();
+    assert_eq!(unchanged.revision, changed.revision);
+    assert_eq!(revisions(), 2);
+}
+
+/// A prefab instance's override of a script's field that the prefab's
+/// document lacks (a field added after the prefab was saved, by a patch for
+/// one) is the value Unity takes; the parents of a nested path are made. On
+/// an engine component an absent key stays refused (mcp6-2).
+#[test]
+fn an_override_of_a_script_field_the_prefab_lacks_is_applied() {
+    use crate::project::expand::apply_override;
+    let reference = value::map([("fileID", Value::Int(0))]);
+    let mut data = value::map([("level", Value::Int(1))]);
+    apply_override(
+        &mut data,
+        "power",
+        &Value::String("7".into()),
+        &reference,
+        true,
+    )
+    .unwrap();
+    apply_override(
+        &mut data,
+        "tuning.armor",
+        &Value::String("2".into()),
+        &reference,
+        true,
+    )
+    .unwrap();
+    assert_eq!(number(data.get("power").unwrap()), 7);
+    assert_eq!(number(data.get("tuning").unwrap().field("armor")), 2);
+    let mut transform = value::map([("m_LocalPosition", Value::Null)]);
+    let error = apply_override(
+        &mut transform,
+        "m_Missing",
+        &Value::String("1".into()),
+        &reference,
+        false,
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("field m_Missing does not exist"),
+        "{error}"
+    );
+}
+
 #[test]
 fn session_rejects_dangling_and_cyclic_scene() {
     let f = fixture_session();

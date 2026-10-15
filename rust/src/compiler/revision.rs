@@ -4,8 +4,8 @@
 //! project content: it names an immutable Player and verifies every file
 //! before that Player is selected again.
 use super::{
-    CompileManifest, CompileUpdate, Compiler, LifecycleProof, NilMap, NilVec,
-    compile::{lifecycle_sources_match, valid_lifecycle_proof, verify_cache_files},
+    CompileManifest, CompileUpdate, Compiler, LifecycleProof, NilMap, NilVec, PlayerMap,
+    compile::{lifecycle_sources_match, valid_lifecycle_proof},
     join,
     netcode::needs_netcode,
     nilable::nz,
@@ -19,7 +19,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
-use std::{fs, os::unix::fs::PermissionsExt};
+use std::{fs, os::unix::fs::PermissionsExt, sync::Arc};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -88,7 +88,8 @@ impl Compiler {
         } else {
             self.baseline_player.clone()
         };
-        let files = player_files(&sysutil::dir(&player))?;
+        let baseline = self.baseline_player_map(&sysutil::dir(&player))?;
+        let files = &baseline.files;
         let helper = self.prepare_lifecycle_helper(ctx)?;
         let helper_directory = sysutil::dir(&helper);
         let helper_files =
@@ -96,7 +97,7 @@ impl Compiler {
                 .ok()
                 .filter(|files| {
                     !files.at("LifecycleCompiler.dll").is_empty()
-                        && verify_cache_files(&helper_directory, files)
+                        && self.hashes.verify_files(&helper_directory, files)
                 })
                 .ok_or_else(|| anyhow!("lifecycle revision helper payload is not verified"))?;
         let mut paths = vec![self.dotnet.clone()];
@@ -110,7 +111,7 @@ impl Compiler {
         let mut tool_files = NilMap::make();
         for path in paths {
             if !tool_files.contains_key(&path) {
-                let hash = file_hash(&path)?;
+                let hash = self.hashes.file_hash(&path)?;
                 tool_files.insert(path, hash);
             }
         }
@@ -121,7 +122,7 @@ impl Compiler {
         let encoded = marshal(&RevisionIdentity {
             mode: "code-revision-v1",
             player_name: sysutil::base(&player),
-            player_files: &files,
+            player_files: files,
             plan: &self.manifest,
             sources,
             configuration: &self.configuration,
@@ -134,20 +135,65 @@ impl Compiler {
         Ok(sha256(&encoded))
     }
 
+    /// The map of the baseline Player directory: hashed once, then checked
+    /// by `stat` at every use and hashed again when anything moved.
+    pub fn baseline_player_map(&self, directory: &str) -> Result<Arc<PlayerMap>> {
+        // `UME_COMPILER_COLD=1` (the hash cache off) reads it in full every
+        // time, as before the session kept anything (caches6-4).
+        if !self.hashes.is_on() {
+            return Ok(Arc::new(PlayerMap::read(directory)?));
+        }
+        let mut kept = self.baseline_map.lock().unwrap();
+        if let Some(map) = kept.as_ref()
+            && map.directory == directory
+            && map.still()
+        {
+            return Ok(map.clone());
+        }
+        let map = Arc::new(PlayerMap::read(directory)?);
+        *kept = Some(map.clone());
+        Ok(map)
+    }
+
+    /// The map of `directory` this process holds and can still vouch for
+    /// by `stat`: that of the current Player directory or of the baseline.
+    pub fn known_player_map(&self, directory: &str) -> Option<Arc<PlayerMap>> {
+        if !self.hashes.is_on() {
+            return None;
+        }
+        if let Some(map) = &self.player_map
+            && map.directory == directory
+        {
+            return Some(map.clone());
+        }
+        self.baseline_map
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|map| map.directory == directory)
+            .cloned()
+    }
+
     pub fn code_revision_path(&self, key: &str) -> String {
         join(&[&self.cache, "code-revisions", &format!("{key}.json")])
     }
 
+    /// Writes the entry of a complete Player directory whose files `map`
+    /// names.
     pub fn save_code_revision(
         &self,
         key: &str,
         update: &CompileUpdate,
         proofs: &NilMap<LifecycleProof>,
+        map: &PlayerMap,
     ) -> Result<()> {
         let player = sysutil::rel(&self.cache, &update.player)
             .filter(|_| within_directory(&update.player, &self.cache))
             .ok_or_else(|| anyhow!("compiled revision Player is outside owned compiler cache"))?;
-        let files = player_files(&sysutil::dir(&update.player))?;
+        if map.directory != sysutil::dir(&update.player) || map.files.is_empty() {
+            bail!("compiled revision map does not describe its Player directory");
+        }
+        let files = map.files.clone();
         let entry = CodeRevision {
             schema_version: 1,
             key: key.into(),
@@ -196,7 +242,10 @@ impl Compiler {
             return None;
         }
         let directory = sysutil::dir(&player);
-        if player_files(&directory).ok()? != entry.files {
+        // The whole directory by content: an entry is used only for the
+        // bytes it names.
+        let map = PlayerMap::read(&directory).ok()?;
+        if map.files != entry.files {
             return None;
         }
         let managed = player_managed(&player);
@@ -231,6 +280,7 @@ impl Compiler {
         }
         // Assignment waits until the complete descriptor and Player have passed.
         self.proofs = entry.proofs;
+        self.player_map = Some(Arc::new(map));
         Some(update)
     }
 

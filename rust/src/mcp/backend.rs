@@ -95,6 +95,19 @@ impl From<sysutil::Error> for HandlerError {
         }
     }
 }
+impl From<agentcontrol::Failure> for HandlerError {
+    /// A controller failure with a code keeps it, with its details.
+    fn from(failure: agentcontrol::Failure) -> Self {
+        match failure.typed {
+            Some(typed) => HandlerError::Typed(AuthoringError {
+                code: typed.code.into(),
+                message: failure.error.message().into(),
+                details: Some(typed.details),
+            }),
+            None => failure.error.into(),
+        }
+    }
+}
 
 /// `func(ctx, name, raw) (any, error)`. `Options::runtime` and
 /// `Options::project_actions` both have this type. `raw` is the JSON encoding of
@@ -125,7 +138,7 @@ impl RuntimeHandler for Controller {
         match Controller::handle(self, ctx, name, raw) {
             Ok(reply) => encode(&reply),
             // The state returned next to an error is never read by the server.
-            Err(failure) => Err(failure.error.into()),
+            Err(failure) => Err(failure.into()),
         }
     }
 }

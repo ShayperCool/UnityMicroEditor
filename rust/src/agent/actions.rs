@@ -7,6 +7,7 @@ use super::{
 };
 use crate::{
     agentcontrol::{self, Reply},
+    authoring::AuthoringError,
     cancel::{Context, Source, select},
     compiler::{self, CompileManifest},
     editorbridge::{self, Client, Request, Response},
@@ -360,7 +361,17 @@ impl RuntimeOutcome {
                 value: failure
                     .reply
                     .map_or(RuntimeValue::Nil, RuntimeValue::Controller),
-                error: Some(failure.error.into()),
+                // A failure with a code, such as `full_recompile_required`,
+                // reaches the agent as a typed error with its details.
+                error: Some(match failure.typed {
+                    Some(typed) => AuthoringError {
+                        code: typed.code.into(),
+                        message: failure.error.message().into(),
+                        details: Some(typed.details),
+                    }
+                    .into(),
+                    None => failure.error.into(),
+                }),
             },
         }
     }
@@ -585,18 +596,53 @@ impl Service {
             let _end = End(self);
             match action {
                 "project_prepare" => {
-                    let result = self.prepare(ctx, &args)?;
-                    let activate = !matches!(args.get("activate"), Some(Any::Bool(false)));
+                    // A request of the configuration recovery names the
+                    // sources it was made for. When they have changed since
+                    // (the edit was taken back while the job ran), the job
+                    // answers a rejection the session no longer has: a
+                    // failure is then no word about the sources of its name,
+                    // and a preparation is published and replaces no Player.
+                    let recovery = id.starts_with("config-");
+                    let scene = text(&args, "scene");
+                    let result = match self.prepare(ctx, &args) {
+                        Ok(result) => result,
+                        Err(error)
+                            if recovery
+                                && !super::context_error(&error)
+                                && !self.recovery_current(&id, &scene) =>
+                        {
+                            return Err(fail(
+                                super::configuration::SUPERSEDED,
+                                format!(
+                                    "the sources changed while they were prepared: {}",
+                                    super::error_text(&error)
+                                ),
+                            ));
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    let activate = !matches!(args.get("activate"), Some(Any::Bool(false)))
+                        && (!recovery || self.recovery_current(&id, &result.scene));
                     if activate && let Some(controller) = &self.0.controller {
                         let running = controller.status().phase != "stopped";
-                        if running {
-                            controller.stop(ctx).map_err(|failure| failure.error)?;
-                        }
-                        controller.configure_prepared(&result.baseline, &result.scene)?;
-                        self.select(&result.baseline, &result.scene);
-                        if running {
-                            controller.start()?;
-                        }
+                        self.0
+                            .swapping
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                        let swapped = (|| -> Result<()> {
+                            if running {
+                                controller.stop(ctx).map_err(|failure| failure.error)?;
+                            }
+                            controller.configure_prepared(&result.baseline, &result.scene)?;
+                            self.select(&result.baseline, &result.scene);
+                            if running {
+                                controller.start()?;
+                            }
+                            Ok(())
+                        })();
+                        self.0
+                            .swapping
+                            .store(false, std::sync::atomic::Ordering::SeqCst);
+                        swapped?;
                     }
                     json_reply(&result)
                 }

@@ -17,7 +17,53 @@ using Reflection = System.Reflection;
 internal sealed record SourceInput(string Path, string OriginalPath, string OutputPath);
 internal sealed record Request(string AssemblyName, string[] References, string[] Defines,
     SourceInput[] Sources, string MarkerPath, bool AllowUnsafe = false,
-    Dictionary<string, int>? ExecutionOrders = null, string[]? NativeBaseAssemblies = null);
+    Dictionary<string, int>? ExecutionOrders = null, string[]? NativeBaseAssemblies = null,
+    Dictionary<string, string>? ReferenceHashes = null);
+
+/// <summary>The errors of the sources themselves: the one failure of a served request that is
+/// reported as it stands (see <see cref="Program.Serve"/>).</summary>
+internal sealed class CompilationErrors : InvalidOperationException
+{
+    public CompilationErrors(string message) : base(message) { }
+}
+
+/// <summary>
+/// The references of the requests a served helper ran, by path and by the SHA-256 the driver checked
+/// before it sent the request. A reference read for the first time is hashed here and must have that
+/// content; one that a later request names with other content is read again. Entries no request of the
+/// last four used are dropped. Nothing else outlives a request.
+/// </summary>
+internal sealed class References
+{
+    readonly Dictionary<(string Path, string Hash), (MetadataReference Reference, long Used)> entries = new();
+    long request;
+
+    public void Begin() => request++;
+
+    public MetadataReference Get(string path, IReadOnlyDictionary<string, string>? hashes)
+    {
+        if (hashes is null || !hashes.TryGetValue(path, out var hash) || hash.Length != 64)
+            return MetadataReference.CreateFromFile(path);
+        if (entries.TryGetValue((path, hash), out var entry))
+        {
+            entries[(path, hash)] = (entry.Reference, request);
+            return entry.Reference;
+        }
+        var bytes = File.ReadAllBytes(path);
+        var actual = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        if (actual != hash)
+            throw new InvalidOperationException($"The reference {path} does not have the content the request names.");
+        var reference = MetadataReference.CreateFromImage(bytes, filePath: path);
+        entries[(path, hash)] = (reference, request);
+        return reference;
+    }
+
+    public void Trim()
+    {
+        foreach (var key in entries.Where(entry => entry.Value.Used < request - 3).Select(entry => entry.Key).ToList())
+            entries.Remove(key);
+    }
+}
 internal sealed record CallbackInfo(string Type, string Phase, string Source, int Order, bool Synthetic = false);
 internal sealed record RuntimeInitializerInfo(string Assembly, string TypeName, string MethodName, int Phase);
 internal sealed record SourceDeclarationRequest(string AssemblyName, string[] Defines, string[] EditorDefines, SourceInput[] Sources);
@@ -1191,31 +1237,110 @@ internal static class Program
 
     public static int Main(string[] args)
     {
+        if (args.Length == 1 && args[0] == "--serve") return Serve();
+        return Run(args, Console.Out, Console.Error, null, out _);
+    }
+
+    /// <summary>
+    /// The helper for the life of a watched session: one JSON request per line on standard input, one
+    /// answer per line on standard output, each what the one-shot run of its arguments would exit with
+    /// and print. Only the rewrite of an assembly, <c>--type-definitions</c> and
+    /// <c>--declaration-hashes</c> are served; everything else is answered with exit 64 and never run
+    /// (<c>--behaviour-objects</c> runs game code, which a process that lives on must not). The answer's
+    /// <c>kind</c> is <c>diagnostics</c> for errors of the sources, the one failure the driver reports as
+    /// it stands. The end of standard input ends the process.
+    /// </summary>
+    internal static int Serve()
+    {
+        using var frames = Console.OpenStandardOutput();
+        using var input = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false));
+        TextWriter console = Console.Out, consoleError = Console.Error;
+        var references = new References();
+        void Frame(object value)
+        {
+            frames.Write(JsonSerializer.SerializeToUtf8Bytes(value));
+            frames.WriteByte((byte)'\n');
+            frames.Flush();
+        }
+        Frame(new Dictionary<string, object> { ["ready"] = true, ["protocol"] = 1 });
+        string? line;
+        while ((line = input.ReadLine()) != null)
+        {
+            if (line.Length == 0) continue;
+            ServeRequest? request = null;
+            try { request = JsonSerializer.Deserialize<ServeRequest>(line); } catch (JsonException) { }
+            var output = new StringWriter();
+            var error = new StringWriter();
+            int exit;
+            string kind = "";
+            string[] arguments = request?.arguments ?? Array.Empty<string>();
+            bool served = arguments.Length == 1 && !arguments[0].StartsWith("--", StringComparison.Ordinal)
+                || arguments.Length >= 2 && (arguments[0] == "--type-definitions" || arguments[0] == "--declaration-hashes");
+            if (request is null || !served)
+            {
+                exit = 64;
+                kind = "refused";
+                error.WriteLine(request is null ? "Unreadable request" : "Not served: " + string.Join(" ", arguments));
+            }
+            else
+            {
+                // A stray write of any code goes into the answer, never between two frames.
+                Console.SetOut(output);
+                Console.SetError(error);
+                try
+                {
+                    if (!string.IsNullOrEmpty(request.directory)) Directory.SetCurrentDirectory(request.directory);
+                    references.Begin();
+                    exit = Run(arguments, output, error, references, out kind);
+                    references.Trim();
+                }
+                finally
+                {
+                    Console.SetOut(console);
+                    Console.SetError(consoleError);
+                }
+            }
+            Frame(new Dictionary<string, object>
+            {
+                ["id"] = request?.id ?? 0, ["exit"] = exit, ["output"] = output.ToString(),
+                ["error"] = error.ToString(), ["kind"] = kind,
+            });
+        }
+        return 0;
+    }
+
+    internal sealed record ServeRequest(long id, string? directory, string[]? arguments);
+
+    /// <summary>One run of the helper. <paramref name="references"/> keeps reference metadata between
+    /// the requests of a served helper; a one-shot run has none and reads every reference.</summary>
+    internal static int Run(string[] args, TextWriter stdout, TextWriter stderr, References? references, out string failure)
+    {
+        failure = "";
         try
         {
             if (args.Length >= 2 && args[0] == "--declaration-hashes")
             {
-                Console.WriteLine(JsonSerializer.Serialize(DeclarationHash.Read(args.Skip(1).ToArray())));
+                stdout.WriteLine(JsonSerializer.Serialize(DeclarationHash.Read(args.Skip(1).ToArray())));
                 return 0;
             }
             if (args.Length >= 2 && (args[0] == "--type-definitions" || args[0] == "--public-type-definitions"))
             {
-                Console.WriteLine(JsonSerializer.Serialize(DeclarationHash.TypeDefinitions(args.Skip(1).ToArray(), args[0] == "--public-type-definitions")));
+                stdout.WriteLine(JsonSerializer.Serialize(DeclarationHash.TypeDefinitions(args.Skip(1).ToArray(), args[0] == "--public-type-definitions")));
                 return 0;
             }
             if (args.Length == 2 && args[0] == "--behaviour-layouts")
             {
-                Console.WriteLine(JsonSerializer.Serialize(BehaviourLayouts.Read(args[1])));
+                stdout.WriteLine(JsonSerializer.Serialize(BehaviourLayouts.Read(args[1])));
                 return 0;
             }
             if (args.Length == 2 && args[0] == "--behaviour-objects")
             {
-                Console.WriteLine(JsonSerializer.Serialize(BehaviourObjects.Run(args[1])));
+                stdout.WriteLine(JsonSerializer.Serialize(BehaviourObjects.Run(args[1])));
                 return 0;
             }
             if (args.Length == 2 && args[0] == "--source-type-declarations")
             {
-                Console.WriteLine(JsonSerializer.Serialize(ReadSourceDeclarations(args[1])));
+                stdout.WriteLine(JsonSerializer.Serialize(ReadSourceDeclarations(args[1])));
                 return 0;
             }
             if (args.Length != 1) throw new InvalidOperationException("Expected one request JSON path");
@@ -1225,11 +1350,12 @@ internal static class Program
             var trees = request.Sources.Select(source => CSharpSyntaxTree.ParseText(
                 File.ReadAllText(source.Path), options, source.OriginalPath)).ToArray();
             var compilation = CSharpCompilation.Create(request.AssemblyName, trees,
-                request.References.Distinct().Select(path => MetadataReference.CreateFromFile(path)),
+                request.References.Distinct().Select(path => references is null
+                    ? MetadataReference.CreateFromFile(path) : references.Get(path, request.ReferenceHashes)),
                 new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, allowUnsafe: request.AllowUnsafe)
                     .WithMetadataImportOptions(MetadataImportOptions.All));
             var errors = compilation.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error).ToArray();
-            if (errors.Length != 0) throw new InvalidOperationException(string.Join("\n", errors.Select(d => d.ToString())));
+            if (errors.Length != 0) throw new CompilationErrors(string.Join("\n", errors.Select(d => d.ToString())));
             var mono = compilation.GetTypeByMetadataName("UnityEngine.MonoBehaviour");
             var callbacks = new List<CallbackInfo>();
             var runtimeInitializers = new List<RuntimeInitializerInfo>();
@@ -1252,8 +1378,24 @@ internal static class Program
                 if (primaryTypes.Length > 1)
                     throw new InvalidOperationException("Ambiguous primary MonoScript class in " + request.Sources[index].OriginalPath);
                 if (primaryTypes.Length == 1) scriptTypes.Add(request.Sources[index].OriginalPath, primaryTypes[0]);
+                int callbackCount = callbacks.Count, initializerCount = runtimeInitializers.Count;
                 var rewriter = new LifecycleRewriter(model, mono, callbacks, runtimeInitializers, request);
-                var rewritten = rewriter.Visit(trees[index].GetRoot())!.ToFullString();
+                var visited = rewriter.Visit(trees[index].GetRoot())!;
+                // Every statement and member must stand on the line it has in the source. A
+                // rewrite that moved one would make frames, breakpoints and caller line numbers
+                // name the authored file with a wrong line, which is worse than naming the
+                // copy: such a file is written again without directives, like a source that
+                // sets its own lines.
+                if (rewriter.LineDirectives && !rewriter.LinesKept(visited))
+                {
+                    callbacks.RemoveRange(callbackCount, callbacks.Count - callbackCount);
+                    runtimeInitializers.RemoveRange(initializerCount, runtimeInitializers.Count - initializerCount);
+                    rewriter = new LifecycleRewriter(model, mono, callbacks, runtimeInitializers, request, lineDirectives: false);
+                    visited = rewriter.Visit(trees[index].GetRoot())!;
+                }
+                var rewritten = visited.ToFullString();
+                // The compiler reads the copy; errors, traces and caller information name the source.
+                if (rewriter.LineDirectives) rewritten = $"#line 1 \"{trees[index].FilePath}\"\n" + rewritten;
                 activeAndEnabledReads += rewriter.ActiveAndEnabledReads;
                 setActiveCalls += rewriter.SetActiveCalls;
                 transformRootReads += rewriter.TransformRootReads;
@@ -1306,7 +1448,7 @@ internal static class Program
                 Directory.CreateDirectory(System.IO.Path.GetDirectoryName(output.Source.OutputPath)!);
                 File.WriteAllText(output.Source.OutputPath, output.Text);
             }
-            Console.WriteLine(JsonSerializer.Serialize(new { SchemaVersion = 1, Verified = true,
+            stdout.WriteLine(JsonSerializer.Serialize(new { SchemaVersion = 1, Verified = true,
                 Callbacks = callbacks, Phases, ScriptableObjectBarrier = scriptableObjectBarrier, RuntimeInitializers = runtimeInitializers,
                 ScriptTypes = scriptTypes,
                 ActiveAndEnabledReads = activeAndEnabledReads, SetActiveCalls = setActiveCalls,
@@ -1315,7 +1457,8 @@ internal static class Program
         }
         catch (Exception error)
         {
-            Console.Error.WriteLine(error.Message);
+            failure = error is CompilationErrors ? "diagnostics" : "error";
+            stderr.WriteLine(error.Message);
             return 1;
         }
     }
@@ -1362,6 +1505,10 @@ internal static class Program
         private readonly Request request;
         private readonly Dictionary<int, IdentifierNameSyntax> conditionalReceivers = new();
         private readonly HashSet<string> usedIdentifiers;
+        /// Whether the output names the lines of its source with `#line`. A source that sets
+        /// its own lines, or whose path a directive cannot hold, is left to say what it says.
+        private readonly bool lineDirectives;
+        public bool LineDirectives => lineDirectives;
         private int nextReceiver;
         public int ActiveAndEnabledReads { get; private set; }
         public int SetActiveCalls { get; private set; }
@@ -1369,12 +1516,57 @@ internal static class Program
         public int GetComponentInChildrenCalls { get; private set; }
         public int ScriptableObjectCallbacks { get; private set; }
 
+        /// `lineDirectives: false` writes a copy that names itself, whatever the source allows.
         public LifecycleRewriter(SemanticModel model, INamedTypeSymbol? mono, List<CallbackInfo> callbacks,
-            List<RuntimeInitializerInfo> runtimeInitializers, Request request)
+            List<RuntimeInitializerInfo> runtimeInitializers, Request request, bool lineDirectives = true)
         { this.model = model; this.mono = mono; this.callbacks = callbacks;
           this.runtimeInitializers = runtimeInitializers; this.request = request;
           usedIdentifiers = model.SyntaxTree.GetRoot().DescendantTokens()
-              .Where(token => token.IsKind(SyntaxKind.IdentifierToken)).Select(token => token.ValueText).ToHashSet(); }
+              .Where(token => token.IsKind(SyntaxKind.IdentifierToken)).Select(token => token.ValueText).ToHashSet();
+          string path = model.SyntaxTree.FilePath;
+          // A directive ends at any line terminator of the language, also the three Unicode
+          // ones. Only a `#line` the compiler obeys sets lines: one in a branch that is
+          // switched off is text.
+          this.lineDirectives = lineDirectives && path.Length != 0 && path.IndexOfAny(new[] { '"', '\n', '\r', '\u0085', '\u2028', '\u2029' }) < 0
+              && !model.SyntaxTree.GetRoot().DescendantTrivia(descendIntoTrivia: true).Any(trivia =>
+                  (trivia.IsKind(SyntaxKind.LineDirectiveTrivia) || trivia.IsKind(SyntaxKind.LineSpanDirectiveTrivia))
+                  && trivia.GetStructure() is DirectiveTriviaSyntax { IsActive: true }); }
+
+        private const string LineAnchor = "UnityMicroEditor.Line";
+
+        /// Statements and members carry the line they start on in the source, so that
+        /// `LinesKept` can compare it with the line they have after the rewrite.
+        public override SyntaxNode? Visit(SyntaxNode? node)
+        {
+            var visited = base.Visit(node);
+            if (!lineDirectives || visited is null || node is not (StatementSyntax or MemberDeclarationSyntax)
+                || node is BlockSyntax or BaseTypeDeclarationSyntax or BaseNamespaceDeclarationSyntax) return visited;
+            int line = node.SyntaxTree.GetLineSpan(new Microsoft.CodeAnalysis.Text.TextSpan(node.SpanStart, 0)).StartLinePosition.Line + 1;
+            return visited.WithAdditionalAnnotations(new SyntaxAnnotation(LineAnchor, line.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        }
+
+        /// Whether every statement and member of the rewritten tree that came from the source
+        /// stands on the line the source has it on, as the directives of the tree map it.
+        public bool LinesKept(SyntaxNode rewritten)
+        {
+            var tree = CSharpSyntaxTree.Create((CSharpSyntaxNode)rewritten, (CSharpParseOptions)model.SyntaxTree.Options, model.SyntaxTree.FilePath);
+            foreach (var node in tree.GetRoot().GetAnnotatedNodes(LineAnchor))
+            {
+                int mapped = tree.GetMappedLineSpan(new Microsoft.CodeAnalysis.Text.TextSpan(node.SpanStart, 0)).StartLinePosition.Line + 1;
+                if (node.GetAnnotations(LineAnchor).First().Data != mapped.ToString(System.Globalization.CultureInfo.InvariantCulture)) return false;
+            }
+            return true;
+        }
+
+        /// What stands around tokens that a replacement leaves out: line breaks, comments and
+        /// directives. It goes behind the receiver, which every replacement keeps, so that the
+        /// output has the lines of the source and no directive is lost.
+        private static T After<T>(T receiver, params SyntaxTriviaList[] dropped) where T : SyntaxNode
+        {
+            var all = dropped.SelectMany(list => list).ToList();
+            if (all.All(trivia => trivia.IsKind(SyntaxKind.WhitespaceTrivia))) return receiver;
+            return receiver.WithTrailingTrivia(receiver.GetTrailingTrivia().AddRange(all));
+        }
 
         private bool IsMonoBehaviour(INamedTypeSymbol? type)
         {
@@ -1415,9 +1607,17 @@ internal static class Program
             node.Ancestors().OfType<ConditionalAccessExpressionSyntax>()
                 .FirstOrDefault(conditional => conditional.WhenNotNull.Span.Contains(node.Span));
 
+        /// `original` is `receiver.root` or the `.root` of a null-conditional chain. Its first
+        /// and last trivia stay where they are; what stood around the operator and in front of
+        /// the name goes behind the receiver.
         private ExpressionSyntax RootCall(ExpressionSyntax receiver, SyntaxNode original)
         {
             TransformRootReads++;
+            var (operatorToken, name) = original is MemberAccessExpressionSyntax member ? (member.OperatorToken, member.Name)
+                : (((MemberBindingExpressionSyntax)original).OperatorToken, ((MemberBindingExpressionSyntax)original).Name);
+            receiver = original is MemberAccessExpressionSyntax
+                ? After(receiver.WithoutLeadingTrivia(), operatorToken.LeadingTrivia, operatorToken.TrailingTrivia, name.GetLeadingTrivia())
+                : After(receiver, operatorToken.TrailingTrivia, name.GetLeadingTrivia());
             return SyntaxFactory.InvocationExpression(SyntaxFactory.ParseExpression(PrefabTransforms + ".Root"),
                 SyntaxFactory.ArgumentList(SyntaxFactory.SingletonSeparatedList(SyntaxFactory.Argument(receiver))))
                 .WithTriviaFrom(original);
@@ -1445,8 +1645,11 @@ internal static class Program
             ExpressionSyntax whenNotNull;
             try { whenNotNull = (ExpressionSyntax)Visit(node.WhenNotNull)!; }
             finally { conditionalReceivers.Remove(node.SpanStart); }
-            return SyntaxFactory.ParseExpression("(" + receiver.WithoutTrivia().ToFullString() + " is { } " + name
-                + " ? " + whenNotNull.WithoutTrivia().ToFullString() + " : ("
+            // The chain may run over several lines. What stands behind the receiver and around
+            // the `?` stays between the two parts, so every line of it keeps its number.
+            string between = string.Concat(node.OperatorToken.LeadingTrivia.Concat(node.OperatorToken.TrailingTrivia).Select(trivia => trivia.ToFullString()));
+            return SyntaxFactory.ParseExpression("(" + receiver.WithoutLeadingTrivia().ToFullString() + " is { } " + name
+                + " ? " + between + whenNotNull.WithoutTrailingTrivia().ToFullString() + " : ("
                 + resultType!.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) + ")null)").WithTriviaFrom(node);
         }
 
@@ -1489,7 +1692,13 @@ internal static class Program
                 SimpleNameSyntax name;
                 if (node.Expression is MemberAccessExpressionSyntax member)
                 {
-                    receiver = member.Expression is BaseExpressionSyntax ? SyntaxFactory.ThisExpression() : (ExpressionSyntax)Visit(member.Expression)!;
+                    // The receiver moves behind the name. What stood in front of it stands in
+                    // front of the whole call, which gets it back below; what stood around the
+                    // operator follows the receiver.
+                    receiver = member.Expression is BaseExpressionSyntax
+                        ? SyntaxFactory.ThisExpression().WithTrailingTrivia(member.Expression.GetTrailingTrivia())
+                        : ((ExpressionSyntax)Visit(member.Expression)!).WithoutLeadingTrivia();
+                    receiver = After(receiver, member.OperatorToken.LeadingTrivia, member.OperatorToken.TrailingTrivia);
                     name = member.Name;
                 }
                 else if (node.Expression is MemberBindingExpressionSyntax binding
@@ -1508,19 +1717,29 @@ internal static class Program
                     string bridgeName = parameter.Type.SpecialType == SpecialType.System_Boolean ? "includeInactive" : "type";
                     return argument.WithNameColon(argument.NameColon.WithName(SyntaxFactory.IdentifierName(bridgeName)
                         .WithTriviaFrom(argument.NameColon.Name)));
-                })));
+                }), arguments.Arguments.GetSeparators()));
                 GetComponentInChildrenCalls++;
                 // Preserve argument order and evaluation. Unity's Component uses
                 // "t" where GameObject uses "type"; the bridge normalizes names.
+                // The name is not the first token any more: a simple call had the trivia of the
+                // whole expression in front of it.
+                var visitedName = (SimpleNameSyntax)Visit(name)!;
+                if (node.Expression is SimpleNameSyntax) visitedName = visitedName.WithoutLeadingTrivia();
                 return SyntaxFactory.InvocationExpression(SyntaxFactory.MemberAccessExpression(SyntaxKind.SimpleMemberAccessExpression,
-                    SyntaxFactory.ParseExpression(PrefabTransforms), (SimpleNameSyntax)Visit(name)!),
+                    SyntaxFactory.ParseExpression(PrefabTransforms), visitedName),
                     arguments.WithArguments(arguments.Arguments.Insert(0, SyntaxFactory.Argument(receiver)))).WithTriviaFrom(node);
             }
             if (IsSetActive(node))
             {
                 if (node.Expression is not MemberAccessExpressionSyntax member)
                     Reject(node, "Null-conditional GameObject.SetActive calls are unsupported by the initialization barrier; use an explicit null check");
-                var receiver = (ExpressionSyntax)Visit(((MemberAccessExpressionSyntax)node.Expression).Expression)!;
+                // The receiver becomes the first argument. What stands in front of it (a blank
+                // line, a comment, `#endif`) stands in front of the statement and comes back
+                // with the trivia of the call: left on the receiver it would be in the output
+                // twice, a directive of it inside the argument list.
+                var call = (MemberAccessExpressionSyntax)node.Expression;
+                var receiver = After(((ExpressionSyntax)Visit(call.Expression)!).WithoutLeadingTrivia(),
+                    call.OperatorToken.LeadingTrivia, call.OperatorToken.TrailingTrivia, call.Name.GetLeadingTrivia(), call.Name.GetTrailingTrivia());
                 var arguments = (ArgumentListSyntax)Visit(node.ArgumentList)!;
                 SetActiveCalls++;
                 return SyntaxFactory.InvocationExpression(SyntaxFactory.ParseExpression(Lifecycle + ".SetActive"),
@@ -1542,8 +1761,9 @@ internal static class Program
             if (owner is not null && conditionalReceivers.TryGetValue(owner.SpanStart, out var receiver))
             {
                 if (IsTransformRootRead(node)) return RootCall(receiver, node);
+                var bound = (SimpleNameSyntax)Visit(node.Name)!;
                 return SyntaxFactory.MemberAccessExpression(SyntaxKind.SimpleMemberAccessExpression, receiver,
-                    (SimpleNameSyntax)Visit(node.Name)!).WithTriviaFrom(node);
+                    bound.WithLeadingTrivia(node.OperatorToken.TrailingTrivia.AddRange(bound.GetLeadingTrivia()))).WithTriviaFrom(node);
             }
             return base.VisitMemberBindingExpression(node);
         }
@@ -1558,8 +1778,9 @@ internal static class Program
             if (IsTransformRootRead(node)) return RootCall((ExpressionSyntax)Visit(node.Expression)!, node);
             if (!IsActiveAndEnabledRead(node)) return base.VisitMemberAccessExpression(node);
             ActiveAndEnabledReads++;
-            var receiver = node.Expression is BaseExpressionSyntax ? SyntaxFactory.ThisExpression()
-                : (ExpressionSyntax)Visit(node.Expression)!;
+            var receiver = node.Expression is BaseExpressionSyntax ? SyntaxFactory.ThisExpression().WithTrailingTrivia(node.Expression.GetTrailingTrivia())
+                : ((ExpressionSyntax)Visit(node.Expression)!).WithoutLeadingTrivia();
+            receiver = After(receiver, node.OperatorToken.LeadingTrivia, node.OperatorToken.TrailingTrivia, node.Name.GetLeadingTrivia());
             return SyntaxFactory.InvocationExpression(SyntaxFactory.ParseExpression(Lifecycle + ".IsActiveAndEnabled"),
                 SyntaxFactory.ArgumentList(SyntaxFactory.SingletonSeparatedList(SyntaxFactory.Argument(receiver))))
                 .WithTriviaFrom(node);
@@ -1653,7 +1874,7 @@ internal static class Program
                 var ordinary = (ClassDeclarationSyntax)base.VisitClassDeclaration(node)!;
                 var ordinaryMembers = ordinary.Members.ToList();
                 AddRuntimeInitializers(node, type, ordinaryMembers);
-                return ordinary.WithMembers(SyntaxFactory.List(ordinaryMembers));
+                return Appended(ordinary, ordinaryMembers, ordinary.Members.Count);
             }
             var nativeBaseCallbacks = new Dictionary<string, IMethodSymbol>();
             var seenBasePhases = new HashSet<string>();
@@ -1687,22 +1908,38 @@ internal static class Program
                 var phase = method.Identifier.ValueText;
                 var helperName = HelperName(type, phase);
                 var visitedMethod = (MethodDeclarationSyntax)base.VisitMethodDeclaration(method)!;
+                // What stands in front of the method stays with the entry. Without a modifier it
+                // hangs on the return type, and a directive there (#region, #if, #endif) would
+                // end up behind the helper's `private`, in the middle of a line.
+                // The body moves into the helper with what it needs to compile: `unsafe` is the
+                // one modifier that says something about the body.
+                var helperModifiers = new List<SyntaxToken> { SyntaxFactory.Token(SyntaxKind.PrivateKeyword).WithTrailingTrivia(SyntaxFactory.Space) };
+                if (method.Modifiers.Any(SyntaxKind.UnsafeKeyword))
+                    helperModifiers.Add(SyntaxFactory.Token(SyntaxKind.UnsafeKeyword).WithTrailingTrivia(SyntaxFactory.Space));
                 var helper = visitedMethod.WithIdentifier(SyntaxFactory.Identifier(helperName))
                     .WithAttributeLists(default)
-                    .WithModifiers(SyntaxFactory.TokenList(SyntaxFactory.Token(SyntaxKind.PrivateKeyword)
-                        .WithTrailingTrivia(SyntaxFactory.Space)))
+                    .WithReturnType(visitedMethod.ReturnType.WithLeadingTrivia(default(SyntaxTriviaList)))
+                    .WithModifiers(SyntaxFactory.TokenList(helperModifiers))
                     .WithLeadingTrivia(default(SyntaxTriviaList));
                 var location = method.GetLocation().GetLineSpan();
-                string escapedPath = location.Path.Replace("\\", "\\\\").Replace("\"", "\\\"");
-                if (helper.Body is not null)
-                    helper = helper.WithBody(helper.Body.WithOpenBraceToken(helper.Body.OpenBraceToken.WithTrailingTrivia(
-                        SyntaxFactory.ParseTrailingTrivia($"\n#line {helper.Body.OpenBraceToken.GetLocation().GetLineSpan().StartLinePosition.Line + 1} \"{escapedPath}\"\n"))));
-                helper = helper.WithTrailingTrivia(SyntaxFactory.ParseTrailingTrivia("\n#line default\n"));
+                // The entry and the head of the helper stand where the head of the method stood,
+                // and the body follows on a line of its own. The directive in front of it gives
+                // that line the number it has in the source, for the body and all that follows.
+                if (lineDirectives)
+                {
+                    if (helper.Body is not null)
+                        helper = helper.WithBody(helper.Body.WithOpenBraceToken(helper.Body.OpenBraceToken.WithLeadingTrivia(
+                            Resume(method.Body!.OpenBraceToken).AddRange(helper.Body.OpenBraceToken.LeadingTrivia))));
+                    else if (helper.ExpressionBody is not null)
+                        helper = helper.WithExpressionBody(helper.ExpressionBody.WithArrowToken(helper.ExpressionBody.ArrowToken.WithLeadingTrivia(
+                            Resume(method.ExpressionBody!.ArrowToken).AddRange(helper.ExpressionBody.ArrowToken.LeadingTrivia))));
+                }
                 members.Add(method.WithBody(Wrapper(phase, helperName, order)).WithExpressionBody(null).WithSemicolonToken(default));
                 members.Add(helper);
                 callbacks.Add(new CallbackInfo(type.ToDisplayString(), phase, location.Path, order));
                 if (IsScriptableObject(type)) ScriptableObjectCallbacks++;
             }
+            int authored = members.Count;
             // An explicitly approved host package base cannot be transformed.
             // Wrap an accessible inherited message in the source subclass and
             // call its original implementation only after graph hydration.
@@ -1744,7 +1981,32 @@ internal static class Program
                 callbacks.Add(new CallbackInfo(type.ToDisplayString(), "Awake", node.SyntaxTree.FilePath, order, true));
             }
             AddRuntimeInitializers(node, type, members);
+            return Appended(node, members, authored);
+        }
+
+        /// The class with the members the rewrite adds behind the authored ones. They stand on
+        /// the line of the closing brace, so no line of the file moves. What stood in front of
+        /// that brace (`#endregion`, `#endif`, a comment) stays in front of them: a directive
+        /// needs a line of its own, and an added member must not fall into a conditional block.
+        private static ClassDeclarationSyntax Appended(ClassDeclarationSyntax node, List<MemberDeclarationSyntax> members, int authored)
+        {
+            if (members.Count > authored)
+            {
+                members[authored] = members[authored].WithLeadingTrivia(node.CloseBraceToken.LeadingTrivia);
+                node = node.WithCloseBraceToken(node.CloseBraceToken.WithLeadingTrivia(default(SyntaxTriviaList)));
+            }
             return node.WithMembers(SyntaxFactory.List(members));
+        }
+
+        /// A `#line` directive that gives the line of `token` its number in the source file.
+        /// `token` belongs to the tree as it was read.
+        /// The line after the directive begins with as many spaces as stand in front of the
+        /// token in the source, so what shares its line (`void OnEnable() { Fire(); }`) also
+        /// keeps its column.
+        private SyntaxTriviaList Resume(SyntaxToken token)
+        {
+            var start = token.SyntaxTree!.GetLineSpan(new Microsoft.CodeAnalysis.Text.TextSpan(token.FullSpan.Start, 0)).StartLinePosition;
+            return SyntaxFactory.ParseLeadingTrivia($"\n#line {start.Line + 1} \"{token.SyntaxTree.FilePath}\"\n{new string(' ', start.Character)}");
         }
 
         private static void Reject(SyntaxNode node, string message)

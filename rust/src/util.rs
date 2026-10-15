@@ -131,6 +131,44 @@ pub fn lock_session(output: &str) -> Result<File> {
     Ok(file)
 }
 
+/// Whether another process holds the session lock of `output`, with its
+/// PID when /proc/locks names it. Read from /proc/locks, so that the check
+/// takes no lock itself: a lock taken here for a moment could be inherited
+/// by a child that another thread forks meanwhile, and a runner started
+/// next would find it held. Without /proc/locks the lock is tried.
+pub fn session_lock_holder(output: &str) -> Option<Option<i32>> {
+    use std::os::unix::fs::MetadataExt;
+    let path = sysutil::join(&[output, ".session.lock"]);
+    let info = fs::metadata(&path).ok()?;
+    let (major, minor) = (libc::major(info.dev()), libc::minor(info.dev()));
+    let Ok(locks) = fs::read_to_string("/proc/locks") else {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path)
+            .ok()?;
+        return matches!(file.try_lock(), Err(fs::TryLockError::WouldBlock)).then_some(None);
+    };
+    locks.lines().find_map(|line| {
+        // `1: FLOCK  ADVISORY  WRITE 4242 fd:01:1234 0 EOF`; a waiter's
+        // line has `->` after the number.
+        let fields: Vec<&str> = line
+            .split_whitespace()
+            .filter(|field| *field != "->")
+            .collect();
+        if fields.get(1) != Some(&"FLOCK") {
+            return None;
+        }
+        let (pid, at) = (fields.get(4)?, fields.get(5)?);
+        let mut parts = at.split(':');
+        let (lock_major, lock_minor, lock_inode) = (parts.next()?, parts.next()?, parts.next()?);
+        let same = u32::from_str_radix(lock_major, 16).ok()? == major
+            && u32::from_str_radix(lock_minor, 16).ok()? == minor
+            && lock_inode.parse::<u64>().ok()? == info.ino();
+        same.then(|| pid.parse::<i32>().ok())
+    })
+}
+
 /// An OS error carrying operation, path and cause in its text; whether the path
 /// was missing stays answerable through `downcast_ref::<sysutil::Error>()`.
 fn os_error(operation: &str, path: &str, error: &io::Error) -> anyhow::Error {

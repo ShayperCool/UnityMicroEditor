@@ -208,6 +208,10 @@ pub struct Session {
 }
 
 pub(crate) struct Inner {
+    /// The revision this session published last and the text of its
+    /// manifest: a preparation whose manifest would equal it but for the
+    /// revision id is that revision again, and nothing is written.
+    pub published: Option<(String, Prepared)>,
     pub project: String,
     pub baseline: Map,
     pub catalog: Catalog,
@@ -329,6 +333,7 @@ impl Manifest<'_> {
 impl Inner {
     fn empty(project: String) -> Self {
         Self {
+            published: None,
             project,
             baseline: Map::new(),
             catalog: Catalog::default(),
@@ -661,8 +666,37 @@ impl Inner {
             value::raw(&self.sorted_ignored_diagnostics())?,
         );
         self.validate_observed("source changed during preparation, retry")?;
-        let revision = random_hex(16)?;
         let output = lexpath::abs(output_root)?;
+        over.insert("projectRoot".into(), self.project.as_str().into());
+        over.insert("requiresEditor".into(), false.into());
+        over.insert("requiresLibrary".into(), false.into());
+        // A window whose sources do not change what the manifest holds (a
+        // C# edit that was patched, for one) publishes no revision: the one
+        // before is the same text but for its id. Writing it cost a file of
+        // the size of the scene and an fsync per edit (caches6-3).
+        if let Some((payload, prepared)) = &self.published
+            && lexpath::dir(&lexpath::dir(&prepared.manifest))
+                == lexpath::join(&[&output, "revisions"])
+        {
+            over.insert("revision".into(), prepared.revision.as_str().into());
+            let again = Manifest {
+                base: &self.baseline,
+                over: std::mem::take(&mut over),
+            };
+            let same = again.encode().is_ok_and(|text| text == *payload);
+            over = again.over;
+            if same && fs::metadata(&prepared.manifest).is_ok_and(|info| info.is_file()) {
+                return Ok(Prepared {
+                    scene,
+                    objects: object_count,
+                    assets: asset_count,
+                    elapsed_seconds: started.elapsed().as_secs_f64(),
+                    cache: self.cache.stats,
+                    ..prepared.clone()
+                });
+            }
+        }
+        let revision = random_hex(16)?;
         let directory = lexpath::join(&[&output, "revisions", &revision]);
         fs::DirBuilder::new()
             .recursive(true)
@@ -670,22 +704,22 @@ impl Inner {
             .create(lexpath::dir(&directory))?;
         fs::DirBuilder::new().mode(0o755).create(&directory)?;
         over.insert("revision".into(), revision.as_str().into());
-        over.insert("projectRoot".into(), self.project.as_str().into());
-        over.insert("requiresEditor".into(), false.into());
-        over.insert("requiresLibrary".into(), false.into());
         let path = lexpath::join(&[&directory, "scene.json"]);
         let manifest = Manifest {
             base: &self.baseline,
             over,
         };
-        let written = manifest
-            .encode()
+        let payload = manifest.encode();
+        let written = payload
+            .as_ref()
+            .map_err(|error| anyhow::anyhow!("{error:#}"))
             .and_then(|payload| write_new_file(&path, payload.as_bytes()));
         if let Err(error) = written {
             let _ = fs::remove_dir_all(&directory);
+            self.published = None;
             return Err(error);
         }
-        Ok(Prepared {
+        let prepared = Prepared {
             manifest: path,
             revision,
             project: self.project.clone(),
@@ -694,7 +728,9 @@ impl Inner {
             assets: asset_count,
             elapsed_seconds: started.elapsed().as_secs_f64(),
             cache: self.cache.stats,
-        })
+        };
+        self.published = payload.ok().map(|payload| (payload, prepared.clone()));
+        Ok(prepared)
     }
 }
 

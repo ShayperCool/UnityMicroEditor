@@ -428,7 +428,7 @@ namespace UnityMicroEditor
         {
             RawSceneLoader.LiveSession live = session();
             return new Dictionary<string, object> { ["pid"] = pid, ["revision"] = live == null ? string.Empty : live.Revision,
-                ["frame"] = Time.frameCount, ["timeScale"] = Time.timeScale, ["pausedScaledTime"] = paused,
+                ["codeGeneration"] = CodeReload.Generation, ["frame"] = Time.frameCount, ["timeScale"] = Time.timeScale, ["pausedScaledTime"] = paused,
                 ["pauseSemantics"] = simulation.Paused ? "gated_game_player_loop" : "scaled_time_only", ["graphicsDevice"] = SystemInfo.graphicsDeviceName,
                 ["simulation"] = simulation.Status(), ["input"] = input.Capabilities(), ["stream"] = stream.Status(),
                 ["viewport"] = new Dictionary<string, object> { ["width"] = Screen.width, ["height"] = Screen.height },
