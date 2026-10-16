@@ -360,6 +360,29 @@ pub struct CompilerGraphExport {
     pub host_assemblies: NilVec<CompilerHostAssembly>,
     #[serde(rename = "sourceRoots", skip_serializing_if = "NilVec::skip")]
     pub source_roots: NilVec<CompilerSourceRoot>,
+    /// The IL post-processor assemblies (`*.CodeGen`) of packages nobody
+    /// edits, which the Editor runs over every assembly it compiles.
+    #[serde(rename = "codegenAssemblies", skip_serializing_if = "Vec::is_empty")]
+    pub codegen_assemblies: Vec<CodegenAssembly>,
+}
+
+/// One IL post-processor assembly of a package, compiled for the runner.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CodegenAssembly {
+    pub name: String,
+    pub sources: Vec<String>,
+    /// The assemblies it names that a Player has: its runtime counterparts.
+    pub references: Vec<String>,
+    /// The precompiled assemblies it names, where the packages hold them.
+    pub precompiled: Vec<String>,
+    #[serde(rename = "allowUnsafe")]
+    pub allow_unsafe: bool,
+    /// Those of a Player assembly with the Editor's, as the Editor compiles
+    /// post-processors.
+    pub defines: Vec<String>,
+    #[serde(rename = "compilerOptions")]
+    pub compiler_options: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

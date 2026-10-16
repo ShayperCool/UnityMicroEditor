@@ -1346,12 +1346,9 @@ fn build_package_assemblies(
             script.host_provided = true;
         }
     }
-    let mut post = super::packages::PostProcessors::new(
-        &compiler.editor.clone(),
-        &join(&[staging_path, "ilpp"]),
-    )?;
-    let mut built: BTreeMap<String, String> = BTreeMap::new();
-    let mut rows = Vec::new();
+    // 1. Each package assembly compiled from its sources as they are.
+    let mut compiled: BTreeMap<String, String> = BTreeMap::new();
+    let mut references: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for assembly in &packages {
         let config = compiler.configs.value(&assembly.name);
         let exported = graph
@@ -1374,7 +1371,7 @@ fn build_package_assemblies(
             refs.push(reference.clone());
         }
         for dependency in &assembly.references {
-            match built.get(dependency) {
+            match compiled.get(dependency) {
                 Some(dll) => refs.push(dll.clone()),
                 None => {
                     let dll = join(&[managed, &format!("{dependency}.dll")]);
@@ -1388,23 +1385,125 @@ fn build_package_assemblies(
                 }
             }
         }
-        let refs = deduplicate_references(&refs);
-        let mut hashes = NilMap::make();
+        let refs = deduplicate_references(&refs).to_vec();
         for source in &assembly.sources {
             let hash = file_hash(source)?;
-            compiler
-                .manifest
-                .compiler_inputs
-                .insert(source, hash.clone());
-            hashes.insert(source, hash);
+            compiler.manifest.compiler_inputs.insert(source, hash);
         }
-        let build = compiler.compile_package_assembly(
+        let dll = compiler
+            .compile_plain(
+                ctx,
+                staging_path,
+                &super::packages::PlainCompile {
+                    name: &assembly.name,
+                    sources: &assembly.sources,
+                    defines: &config.defines,
+                    compiler_options: &config.compiler_options,
+                    allow_unsafe: config.config.allow_unsafe,
+                    references: &refs,
+                    kind: "package-compiles",
+                },
+            )
+            .map_err(|error| error.context(format!("{HOST_LACKS_PACKAGE}{}", assembly.name)))?;
+        compiled.insert(assembly.name.clone(), dll);
+        references.insert(assembly.name.clone(), refs);
+    }
+    // 2. The post-processor assemblies of the packages, against those or
+    // the host's assemblies they name.
+    let editor = compiler.editor.clone();
+    let data = join(&[&sysutil::dir(&editor), "Data"]);
+    let pipeline = join(&[&data, "Managed/Unity.CompilationPipeline.Common.dll"]);
+    let builtin = join(&[&data, "Tools/BuildPipeline/BuiltinILPPs"]);
+    let mut codegen = Vec::new();
+    let mut helpers = Vec::new();
+    'codegen: for assembly in graph.codegen_assemblies.clone() {
+        // Post-processors are Editor code: the Editor's engine and Editor
+        // modules stand for the Player's.
+        let mut refs: Vec<String> = compiler.base_references.to_vec();
+        for pattern in [
+            "UnityEngine.dll",
+            "UnityEditor.dll",
+            "UnityEngine.*.dll",
+            "UnityEditor.*.dll",
+        ] {
+            refs.extend(sys::glob_lossy(&join(&[
+                &data,
+                "Managed/UnityEngine",
+                pattern,
+            ])));
+        }
+        refs.push(pipeline.clone());
+        for precompiled in &assembly.precompiled {
+            refs.push(precompiled.clone());
+        }
+        // Cecil comes with the installation's own post-processors when no
+        // package of the project brings it.
+        for name in [
+            "Mono.Cecil.dll",
+            "Mono.Cecil.Rocks.dll",
+            "Mono.Cecil.Pdb.dll",
+            "Mono.Cecil.Mdb.dll",
+        ] {
+            if !refs
+                .iter()
+                .any(|reference| sysutil::base(reference) == name)
+            {
+                refs.push(join(&[&builtin, name]));
+            }
+        }
+        for reference in &assembly.references {
+            let dll = match compiled.get(reference) {
+                Some(dll) => dll.clone(),
+                None => join(&[managed, &format!("{reference}.dll")]),
+            };
+            if file_hash(&dll).is_err() {
+                eprintln!(
+                    "[unity-micro-editor] post-processor {} is left out: it names {reference}, which the Player lacks",
+                    assembly.name
+                );
+                continue 'codegen;
+            }
+            refs.push(dll);
+        }
+        let refs = deduplicate_references(&refs).to_vec();
+        let dll = compiler.compile_plain(
+            ctx,
+            staging_path,
+            &super::packages::PlainCompile {
+                name: &assembly.name,
+                sources: &assembly.sources,
+                defines: &assembly.defines,
+                compiler_options: &assembly.compiler_options,
+                allow_unsafe: assembly.allow_unsafe,
+                references: &refs,
+                kind: "package-codegen",
+            },
+        )?;
+        codegen.push(dll);
+        for reference in refs {
+            if !reference.contains("/NetStandard/") && !helpers.contains(&reference) {
+                helpers.push(reference);
+            }
+        }
+    }
+    // 3. Every package assembly post-processed by all of them.
+    let mut post = super::packages::PostProcessors::new(
+        &editor,
+        &join(&[staging_path, "ilpp"]),
+        &codegen,
+        &helpers,
+    )?;
+    let mut rows = Vec::new();
+    for assembly in &packages {
+        let config = compiler.configs.value(&assembly.name);
+        let build = compiler.post_process_package(
             ctx,
             staging_path,
             helper,
-            assembly,
-            &refs,
-            &hashes,
+            &assembly.name,
+            &compiled[&assembly.name],
+            &config.defines,
+            &references[&assembly.name],
             &mut post,
         )?;
         let target = join(&[managed, &format!("{}.dll", assembly.name)]);
@@ -1436,7 +1535,6 @@ fn build_package_assemblies(
                 false => format!(", post-processed by {}", ran.join(", ")),
             }
         );
-        built.insert(assembly.name.clone(), target.clone());
         compiler.current_dlls.remove(&assembly.name);
         // The host's own DLL of that name, where it had one, is replaced.
         let library = format!("{}.dll", assembly.name);
@@ -1453,6 +1551,12 @@ fn build_package_assemblies(
             compiler.manifest.compiler_inputs.remove(&path);
         }
         rows.extend(build.initializers);
+        let exported = graph
+            .assemblies
+            .iter()
+            .find(|exported| exported.config.name == assembly.name)
+            .cloned()
+            .unwrap_or_default();
         let mut editor_defines = config.defines.clone();
         editor_defines.push("UNITY_EDITOR".into());
         editor_defines.push("UNITY_EDITOR_LINUX".into());

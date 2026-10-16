@@ -475,6 +475,10 @@ pub fn build_source_graph(
     let mut asmrefs: BTreeMap<String, String> = BTreeMap::new();
     let mut sources: BTreeMap<String, String> = BTreeMap::new();
     let mut plugins: BTreeMap<String, SourcePlugin> = BTreeMap::new();
+    // Every managed DLL of a package by file name, whatever platform it is
+    // for: the post-processor assemblies name the Editor's.
+    let mut all_plugins: BTreeMap<String, String> = BTreeMap::new();
+    let mut codegen_sources: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut metadata_index = MetadataGuidIndex::new();
     let mut metadata_owners: BTreeMap<String, String> = BTreeMap::new();
     for (_, physical, package) in &trees {
@@ -586,6 +590,11 @@ pub fn build_source_graph(
                     asmrefs.insert(directory, reference);
                 }
                 ".dll" => {
+                    if managed_plugin(path) {
+                        all_plugins
+                            .entry(sysutil::base(path))
+                            .or_insert_with(|| path.to_string());
+                    }
                     let plugin = read_source_plugin(path, &base)?;
                     if plugin.enabled && managed_plugin(path) {
                         let name = sysutil::base(path);
@@ -757,12 +766,59 @@ pub fn build_source_graph(
                 active.insert(name.clone(), true);
             }
         }
+        if name.ends_with(".CodeGen")
+            && definitions.get(&name).is_some_and(|definition| {
+                definition.define_constraints.is_empty()
+                    && package_map
+                        .get(definition.package.as_str())
+                        .is_some_and(|package| {
+                            matches!(package.source.as_str(), "registry" | "builtin" | "git")
+                        })
+            })
+        {
+            codegen_sources
+                .entry(name.clone())
+                .or_default()
+                .push(path.clone());
+        }
         if !on(&active, &name) {
             continue;
         }
         if let Some(config) = configs.get_mut(&name) {
             config.sources.push(path.clone());
         }
+    }
+    for (name, mut sources) in codegen_sources {
+        let definition = &definitions[&name];
+        sources.sort();
+        let mut defines: Vec<String> = configs
+            .get(&name)
+            .map(|config| config.defines.to_vec())
+            .unwrap_or_else(|| base.to_vec());
+        for define in ["UNITY_EDITOR", "UNITY_EDITOR_64", "UNITY_EDITOR_LINUX"] {
+            if !defines.iter().any(|known| known == define) {
+                defines.push(define.into());
+            }
+        }
+        let mut assembly = crate::compiler::CodegenAssembly {
+            name: name.clone(),
+            sources,
+            allow_unsafe: definition.allow_unsafe,
+            defines,
+            compiler_options: base_compiler_options.to_vec(),
+            ..Default::default()
+        };
+        for reference in &definition.references {
+            if let Ok(reference) = resolve(&definitions, reference) {
+                assembly.references.push(reference);
+            }
+        }
+        for precompiled in &definition.precompiled_references {
+            if let Some(path) = all_plugins.get(precompiled) {
+                assembly.precompiled.push(path.clone());
+            }
+        }
+        graph.codegen_assemblies.push(assembly);
     }
     let names: Vec<String> = configs.keys().cloned().collect();
     for name in &names {
