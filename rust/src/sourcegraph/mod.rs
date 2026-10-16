@@ -673,6 +673,17 @@ pub fn build_source_graph(
                 Ok(dependency) => dependency,
                 Err(error) => {
                     let package = package_map.get(definition.package.as_str());
+                    // The Editor leaves out a reference to an assembly the
+                    // project does not have; an assembly of a package nobody
+                    // edits (registry, built-in, Git) is compiled the same
+                    // way, and code that needs the missing one fails to
+                    // compile. Built-in packages of 6000.6 still name
+                    // `Unity.Mathematics`, which is now an engine module.
+                    if package.is_some_and(|package| {
+                        matches!(package.source.as_str(), "registry" | "builtin" | "git")
+                    }) {
+                        continue;
+                    }
                     if profile.native_assemblies.get(name).is_some_and(|fact| {
                         !fact.package.is_empty()
                             && package.is_some_and(|package| {

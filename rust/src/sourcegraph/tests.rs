@@ -529,7 +529,7 @@ fn source_semver_prerelease_numeric_parts() {
 }
 
 #[test]
-fn source_profile_rejects_native_body_drift_and_wrong_public_backend() {
+fn source_profile_unproves_native_body_drift_and_rejects_wrong_public_backend() {
     let (_directory, project) = temp();
     let ctx = background();
     write_graph_file(&project, "Assets/Keep.txt", "fixture");
@@ -656,16 +656,17 @@ fn source_profile_rejects_native_body_drift_and_wrong_public_backend() {
     )
     .unwrap();
     let snapshot = snapshot();
-    let failed = sysutil::join(&[&project, "Temp/profiles/drift.json"]);
-    let error = capture(&graph_path, &failed, &snapshot).unwrap_err();
+    // A changed body is no longer the host's: the profile keeps the DLL
+    // without a source proof, so the graph compiles the assembly instead.
+    let drift = sysutil::join(&[&project, "Temp/profiles/drift.json"]);
+    capture(&graph_path, &drift, &snapshot).unwrap();
+    let profile = load_engine_profile(&ctx, &drift, &editor, &player).unwrap();
+    let fact = profile.native_assemblies.value("Native");
     assert!(
-        error.to_string().contains("source-body proof differs"),
-        "same type/name changed native method body accepted: {error}"
+        fact.package.is_empty() && fact.source_hashes.is_empty(),
+        "same type/name changed native method body still proven by the host: {fact:?}"
     );
-    assert!(
-        fs::metadata(&failed).is_err(),
-        "rejected native body published profile"
-    );
+    let failed = sysutil::join(&[&project, "Temp/profiles/relabeled.json"]);
     graph.backend = "authored_source".into();
     atomic_json(&graph_path, &graph).unwrap();
     let error = capture(&graph_path, &failed, &snapshot).unwrap_err();

@@ -248,10 +248,32 @@ pub fn capture_engine_profile(
     {
         bail!("public profile lacks pinned Linux Mono compilation symbols");
     }
-    for exported in &graph.host_assemblies {
+    // A package assembly the host does not prove for this project (absent,
+    // built from other sources, references or configuration) is compiled
+    // from source like one the host lacks. Only the bridge must match.
+    let engine_managed = sysutil::join(&[
+        &sysutil::dir(editor),
+        "Data/PlaybackEngines/LinuxStandaloneSupport/Variations/mono/Managed",
+    ]);
+    'host: for exported in &graph.host_assemblies {
+        macro_rules! unproven {
+            ($($reason:tt)*) => {{
+                if exported.name == "UnityMicroEditor" {
+                    bail!($($reason)*);
+                }
+                eprintln!(
+                    "[unity-micro-editor] host assembly {} is compiled from source: {}",
+                    exported.name,
+                    format!($($reason)*)
+                );
+                continue 'host;
+            }};
+        }
         let path = sysutil::join(&[&managed, &format!("{}.dll", exported.name)]);
-        let hash = file_hash(&path)
-            .map_err(|error| anyhow!("host engine profile lacks {}: {error}", exported.name))?;
+        let hash = match file_hash(&path) {
+            Ok(hash) => hash,
+            Err(error) => unproven!("host engine profile lacks {}: {error}", exported.name),
+        };
         let mut fact = SourceNativeAssembly {
             name: exported.name.clone(),
             sha256: hash.clone(),
@@ -270,7 +292,7 @@ pub fn capture_engine_profile(
         let Some(built) = build_proof.assemblies.get(&exported.name).filter(|built| {
             built.name == exported.name && built.dll_sha256 == hash && !built.references.is_empty()
         }) else {
-            bail!(
+            unproven!(
                 "native host lacks exact compiled-source proof: {}",
                 exported.name
             );
@@ -288,7 +310,7 @@ pub fn capture_engine_profile(
                 }
             }
             if logical.is_empty() {
-                bail!("public native package source is outside resolved roots: {source}");
+                unproven!("public native package source is outside resolved roots: {source}");
             }
             fact.configuration.sources[index] = logical.clone();
             for package in snapshot.packages.iter() {
@@ -301,7 +323,7 @@ pub fn capture_engine_profile(
                     let current = sysutil::join(&[&package.path, relative]);
                     match (file_hash(&source), file_hash(&current)) {
                         (Ok(old), Ok(current)) if old == current => {}
-                        _ => bail!(
+                        _ => unproven!(
                             "public native source differs from resolved package content: {logical}"
                         ),
                     }
@@ -316,7 +338,7 @@ pub fn capture_engine_profile(
                             key.push_str(".meta");
                         }
                         if built.sources.at(&key) != hash {
-                            bail!(
+                            unproven!(
                                 "native host source-body proof differs from current public source: {key}"
                             );
                         }
@@ -331,10 +353,12 @@ pub fn capture_engine_profile(
         for (logical, expected) in &built.sources {
             let path = physical_path(project, snapshot, logical);
             if path.is_empty() {
-                bail!("native source-build proof path is outside explicit source roots: {logical}");
+                unproven!(
+                    "native source-build proof path is outside explicit source roots: {logical}"
+                );
             }
             if !file_hash(&path).is_ok_and(|actual| actual == *expected) {
-                bail!("native host source/config proof differs: {logical}");
+                unproven!("native host source/config proof differs: {logical}");
             }
             fact.source_hashes.insert(logical, expected.clone());
         }
@@ -347,7 +371,7 @@ pub fn capture_engine_profile(
                 path = logical.clone();
             }
             if !file_hash(&path).is_ok_and(|actual| actual == *expected) {
-                bail!("native host compilation reference differs: {logical}");
+                unproven!("native host compilation reference differs: {logical}");
             }
         }
         for path in &exported.compiled_references {
@@ -355,22 +379,35 @@ pub fn capture_engine_profile(
             if logical.is_empty() {
                 logical = path.clone();
             }
-            if !file_hash(path).is_ok_and(|actual| built.references.at(&logical) == actual) {
-                bail!("public native reference is missing/different in source-build proof: {path}");
+            // The bridge is compiled again for every session against the
+            // staged Player, with the references of this project. An engine
+            // module the project enables after the host was built is a
+            // reference the host's assembly compiled without, so did not need.
+            let added_module = built.references.at(&logical).is_empty()
+                && within_directory(path, &sysutil::join(&[&engine_managed, ""]))
+                && sysutil::base(path).starts_with("UnityEngine.")
+                && sysutil::base(path).ends_with("Module.dll");
+            if !file_hash(path).is_ok_and(|actual| built.references.at(&logical) == actual)
+                && exported.name != "UnityMicroEditor"
+                && !added_module
+            {
+                unproven!(
+                    "public native reference is missing/different in source-build proof: {path}"
+                );
             }
         }
         for index in 0..fact.configuration.response_files.len() {
             let logical =
                 logical_path(project, snapshot, &fact.configuration.response_files[index]);
             if logical.is_empty() {
-                bail!("native response path outside declared package/source roots");
+                unproven!("native response path outside declared package/source roots");
             }
             fact.configuration.response_files[index] = logical;
         }
         if canonical_configuration(&fact.configuration)?
             != canonical_configuration(&built.configuration)?
         {
-            bail!(
+            unproven!(
                 "native host compiled configuration differs from public graph: {}",
                 exported.name
             );
@@ -481,8 +518,14 @@ pub fn validate_source_output(project: &str, output: &str) -> Result<()> {
 fn capture_profile_references(profile: &mut SourceEngineProfile, editor: &str, paths: &[String]) {
     let data = sysutil::join(&[&sysutil::dir(editor), "Data"]);
     for path in paths {
+        // The BCL extensions (`System.Runtime.CompilerServices.Unsafe` and the
+        // like) are given to every assembly the Editor compiles.
         if within_directory(path, &sysutil::join(&[&data, "NetStandard"]))
             || within_directory(path, &sysutil::join(&[&data, "MonoBleedingEdge/lib/mono"]))
+            || within_directory(
+                path,
+                &sysutil::join(&[&data, "BCLExtensions/TargetingPacks/netstandard2.1/ref"]),
+            )
         {
             profile.base_references.push(path.clone());
         } else if within_directory(

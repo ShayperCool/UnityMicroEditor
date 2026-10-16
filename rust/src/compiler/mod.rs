@@ -36,8 +36,9 @@ pub use netcode::{HOST_CODEGEN_DIRECTORY, NetcodeProcessor, needs_netcode};
 pub use nilable::{NilMap, NilVec};
 pub use phases::{COMPILE_PHASES, PATCH_PHASES, Phases};
 pub use prepare::{
-    PublishBaseline, canonical_configuration, order_compiler_assemblies, prepare_compiler_graph,
-    prepare_compiler_graph_with, publish_baseline, register_compiler_assembly_slots,
+    HOST_LACKS_PACKAGE, PublishBaseline, canonical_configuration, order_compiler_assemblies,
+    prepare_compiler_graph, prepare_compiler_graph_with, publish_baseline,
+    register_compiler_assembly_slots,
 };
 pub use revision::{CodeRevision, player_files};
 pub use server::{Client as CompilerClient, CompilerServer, analyzer_failure, csc_command};
