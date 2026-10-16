@@ -1,12 +1,15 @@
 # Toward a Player without a host build
 
-Status, 2026-10-16. Two steps are live:
+Status, 2026-10-16. Three steps are live:
 
 - **Settings.** Preparation and watched sessions write the Player's settings
   managers from the project's `ProjectSettings` (see "In preparation and
   sessions" below).
 - **Packages.** A module package adds its engine module assembly to the
-  compile references (see "Packages" below).
+  compile references, and a package assembly the host lacks is built as the
+  Editor builds it, post-processed by Unity's runner (see "Packages" below).
+- **Render pipelines.** A URP project ran on a host built without URP (see
+  "A URP project on a foreign host").
 
 A host is still built once per project; this document tracks what it is still
 needed for.
@@ -133,21 +136,60 @@ method body edit was patched in 0.32 s.
 
 ## Packages
 
-The source graph already derives the compile configuration of every assembly,
+The source graph derives the compile configuration of every assembly,
 package assemblies included, from `.asmdef` files. It takes a package assembly
-from the host only when the host's build proof matches it; otherwise the SDK
-Roslyn compiles it like game code. The one missing piece was the engine module
-references. They were frozen at the host build, from the modules the Editor
-had enabled then. `package_module_references` now adds
-`UnityEngine.<Module>Module.dll` for each resolved `com.unity.modules.*`
-package. The mapping comes from the platform's `modules.asset`, which lists the
-modules a built-in package controls.
+from the host only when the host's build proof matches it.
 
-Verified on the same sample copy, with no host rebuild. `com.unity.ai.navigation`
-2.0.14 was added to the manifest. It was compiled by the tool, and in the Player
-its `NavMeshSurface` built a NavMesh that `NavMesh.SamplePosition` found.
-`com.unity.mathematics` 1.4.0 also loaded, but in 6000.6 that package is only a
-small forwarding assembly.
+**Engine module references.** These were frozen at the host build, from the
+modules the Editor had enabled then. `package_module_references` adds
+`UnityEngine.<Module>Module.dll` for each resolved `com.unity.modules.*`
+package. The mapping comes from the platform's `modules.asset`, which lists
+the modules a built-in package controls.
+
+**Package assemblies the host lacks** (`packageBuild` in the graph, from
+registry, built-in and Git packages) are built as the Editor builds them,
+before game code (`compiler/packages.rs`, `build_package_assemblies` in
+`compiler/prepare.rs`):
+
+1. Roslyn compiles the package's sources as they are. There is no lifecycle
+   rewrite, which a host build never applied to packages either.
+2. The packages' IL post-processor assemblies (`*.CodeGen`, such as
+   `Unity.Collections.CodeGen`) are compiled as the Editor compiles them:
+   - with the Player defines plus `UNITY_EDITOR`;
+   - against the Editor's engine and Editor modules;
+   - against `Unity.CompilationPipeline.Common`;
+   - against the Cecil DLLs of the packages or of `BuiltinILPPs`.
+3. Unity's own runner post-processes every package assembly: `Unity.ILPP.Runner`
+   with `Unity.ILPP.Trigger`, driven as Bee drives them. It runs those
+   post-processors together with the installation's
+   `Tools/BuildPipeline/BuiltinILPPs` (Burst), in the runner's own order.
+4. The `LifecycleCompiler` helper reads each DLL's
+   `[RuntimeInitializeOnLoadMethod]` methods (`--runtime-initializers`). They
+   go into the staged Player's `RuntimeInitializeOnLoads.json`, where the
+   engine runs them.
+5. The DLL goes into `Managed` and `ScriptingAssemblies.json`. From then on the
+   preparation treats it as a host assembly: game code compiles against it
+   and its scripts are the host's.
+
+Each step is kept for the project under the hash of what it is made from, in
+`Library/UnityMicroEditor/package-compiles`, `package-codegen` and
+`package-builds`. Embedded and local `file:` packages stay game code, with
+the lifecycle rewrite and hot reload.
+
+Verified on 2026-10-16:
+
+- **The runner.** Driven with Bee's own inputs (Dungeon's `Library/Bee`),
+  the runner wrote a post-processed `Unity.Collections.dll` equal byte for
+  byte to the one Bee wrote.
+- **The sample.** On the sample with `com.unity.ai.navigation` and
+  `com.unity.mathematics` added, the host no longer proved Collections and
+  the render pipeline core. They were built as above, post-processed by
+  `JobsILPostProcessor` and `BurstILPostProcessor`. Their
+  `RuntimeInitializeOnLoads.json` rows equal those of the Editor-built host
+  row for row, including the generated `__JobReflectionRegistrationOutput__…`
+  and `$BurstDirectCallInitializer` classes with the same names. The
+  navigation package's rows equal those an Editor build of Dungeon has. The
+  probes passed, and a method body edit in a watched session was patched.
 
 ## A URP project on a foreign host (2026-10-16)
 
@@ -179,23 +221,31 @@ reach a Player. What stood in the way, in order:
    `Data/BCLExtensions/TargetingPacks/netstandard2.1/ref`, where
    `System.Runtime.CompilerServices.Unsafe` lives. The engine profile now
    takes them into the base references.
-4. **Package code through the lifecycle rewrite (open).** Compiled from
-   source, a package assembly goes through the lifecycle rewrite of game
-   code. SRP Core's `DisallowGPUDrivenRendering` calls a lifecycle method
-   directly, which the rewrite refuses. A host build never rewrote package
-   assemblies. The preparation now fails with `host_reuse_failed` naming
-   the assembly.
-5. **IL post-processing (open).** The host's `Unity.Collections` holds code
-   that the Burst and job IL post-processors generate:
+4. **Package code through the lifecycle rewrite.** Compiled from source, a
+   package assembly went through the lifecycle rewrite of game code, which
+   refuses SRP Core's `DisallowGPUDrivenRendering`. A host build never
+   rewrote package assemblies. They are now built as described under
+   "Packages".
+5. **IL post-processing.** The host's `Unity.Collections` holds code that the
+   Burst and job IL post-processors generate:
    `__JobReflectionRegistrationOutput__…` and `$BurstDirectCallInitializer`,
-   both registered in `RuntimeInitializeOnLoads.json`. A plain compile
-   produces neither.
+   registered in `RuntimeInitializeOnLoads.json`. Package builds now run
+   those post-processors.
 
-The two open items have to be solved together for any package that a host
-does not provide: compile it as the Editor does, without the lifecycle
-rewrite, run the packages' IL post-processors on it (generalising
-`tools/NetcodePostProcessor`), and register its runtime initializers in
-`RuntimeInitializeOnLoads.json`. Shaders were not reached.
+With all five resolved, the copy prepared on the sample's host in 88 s. The
+eleven assemblies of URP, SRP Core and Shader Graph that the host lacked
+were built for it. The session built URP's `Lit` for the project's material
+in the import worker, which took 130 s on a cold cache. In the Player the
+probe saw:
+
+- `UniversalRenderPipelineAsset` active and `Universal Render Pipeline/Lit`
+  supported;
+- no magenta pixel, 1,031 pixels of the cube and the centre pixel
+  `RGBA(29, 120, 128, 255)`.
+
+The same copy prepared with its own host, which the Editor built with URP,
+gave the same probe line and the same three engine errors about URP's probe
+volume debug shaders on this GPU.
 
 Even with `--host-player`, preparing a new project ran the Editor in its
 staging copy for about 7 minutes. That run exports the engine graph and
@@ -209,11 +259,16 @@ the Editor's compilation of the project's Editor assemblies.
   serialized versions are missing: such a manager keeps the host's values,
   and only `settings-managers.json` says so. Binary-serialized settings files
   are not read.
-- **Packages.** Compiling package assemblies without a host proof works only
-  for packages without IL post-processors or source generators that matter at
-  runtime (Netcode, Entities, Burst-compiled jobs). Native plugins, Burst AOT
-  output and Addressables catalogs still come from the host.
-- **Render pipelines.** A scriptable render pipeline still needs its compiled
-  shaders and resources from a host build. Compiling them with
-  `UnityShaderCompiler`, including variant enumeration and stripping, is the
-  largest remaining part of a Player without a host build.
+- **Packages.** Post-processor assemblies that name an Editor-only assembly
+  of a package are left out with a note. Game code is still post-processed
+  only by Netcode's processors, not by every package's. Native plugins, Burst
+  AOT output and Addressables catalogs still come from the host. A package
+  build is not redone within a watched session: packages nobody edits do not
+  change there.
+- **The Editor in preparation.** A new project still runs the Editor once in
+  its staging copy, to export the engine graph and to import native content.
+- **Render pipelines.** URP's shaders are built per project in the import
+  worker with URP's own Editor code, and its runtime assemblies are package
+  builds. A host without URP therefore runs a URP project. Shaders of a
+  package that only a script finds by name (`Shader.Find`) stay those of the
+  host, and a host without the pipeline has none of them.

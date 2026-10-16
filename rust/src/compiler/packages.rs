@@ -8,7 +8,7 @@
 //! `RuntimeInitializeOnLoads.json`, where the engine runs them, as it does for
 //! the package assemblies a host build made.
 use super::{
-    CompileAssembly, Compiler, NilMap, NilVec,
+    Compiler, NilMap,
     compile::verify_cache_files,
     sys::{self, compiler_command},
 };
@@ -196,11 +196,24 @@ pub struct PostProcessors {
 }
 
 impl PostProcessors {
-    pub fn new(editor: &str, directory: &str) -> Result<Self> {
-        let (processors, helpers) = builtin_post_processors(editor);
+    /// The installation's post-processors and `codegen`, the ones the
+    /// project's packages bring, with what those load (`helpers`).
+    pub fn new(
+        editor: &str,
+        directory: &str,
+        codegen: &[String],
+        helpers: &[String],
+    ) -> Result<Self> {
+        let (mut processors, mut all_helpers) = builtin_post_processors(editor);
+        processors.extend(codegen.iter().cloned());
+        for helper in helpers {
+            if !all_helpers.contains(helper) {
+                all_helpers.push(helper.clone());
+            }
+        }
         let tools = compilation_tools(editor);
         let mut identity = BTreeMap::new();
-        for path in processors.iter().chain(&helpers).cloned().chain([
+        for path in processors.iter().chain(&all_helpers).cloned().chain([
             sysutil::join(&[&tools, "Unity.ILPP.Runner/Unity.ILPP.Runner.dll"]),
             sysutil::join(&[&tools, "Unity.ILPP.Trigger/Unity.ILPP.Trigger"]),
         ]) {
@@ -208,7 +221,7 @@ impl PostProcessors {
         }
         Ok(Self {
             processors,
-            helpers,
+            helpers: all_helpers,
             key: sha256(&marshal(&identity)?),
             runner: None,
             directory: directory.to_string(),
@@ -225,73 +238,77 @@ impl PostProcessors {
     }
 }
 
+/// What one Roslyn compile of a package's sources is made of.
+pub struct PlainCompile<'a> {
+    pub name: &'a str,
+    pub sources: &'a [String],
+    pub defines: &'a [String],
+    pub compiler_options: &'a [String],
+    pub allow_unsafe: bool,
+    pub references: &'a [String],
+    /// `package-compiles` or `package-codegen`.
+    pub kind: &'a str,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct CompileCache {
+    key: String,
+    name: String,
+    files: NilMap<String>,
+}
+
 impl Compiler {
-    /// Builds one package assembly: compiled from the package's sources as
-    /// they are, post-processed, its runtime initializers read. Kept for the
-    /// project under the hash of everything it is made from.
-    #[allow(clippy::too_many_arguments)]
-    pub fn compile_package_assembly(
+    fn kept(&self, kind: &str, key: &str) -> String {
+        sysutil::join(&[&self.project, "Library/UnityMicroEditor", kind, key])
+    }
+
+    /// Compiles sources of a package as they are, kept for the project
+    /// under the hash of everything the compile is made of.
+    pub fn compile_plain(
         &mut self,
         ctx: &Context,
         staging: &str,
-        helper: &str,
-        assembly: &CompileAssembly,
-        refs: &NilVec<String>,
-        hashes: &NilMap<String>,
-        post: &mut PostProcessors,
-    ) -> Result<PackageBuild> {
-        let config = self.configs.value(&assembly.name);
+        compile: &PlainCompile<'_>,
+    ) -> Result<String> {
         let mut identity: BTreeMap<String, String> = BTreeMap::new();
-        identity.insert("mode".into(), "package-build-v1".into());
-        identity.insert(
-            "configuration".into(),
-            self.configuration_hashes.at(&assembly.name).to_string(),
-        );
-        identity.insert("postProcessors".into(), post.key.clone());
-        for source in &assembly.sources {
-            identity.insert(source.clone(), hashes.at(source).to_string());
+        identity.insert("mode".into(), format!("{}-v1", compile.kind));
+        identity.insert("defines".into(), compile.defines.join(";"));
+        identity.insert("options".into(), compile.compiler_options.join(" "));
+        identity.insert("unsafe".into(), compile.allow_unsafe.to_string());
+        for source in compile.sources {
+            identity.insert(source.clone(), self.hashes.file_hash(source)?);
         }
-        for reference in refs {
+        for reference in compile.references {
             identity.insert(
                 format!("reference:{}", sysutil::base(reference)),
                 self.hashes.file_hash(reference)?,
             );
         }
-        for executable in [helper.to_string(), self.csc.clone()]
-            .into_iter()
-            .chain(self.generators.iter().cloned())
-        {
+        for executable in std::iter::once(self.csc.clone()).chain(self.generators.iter().cloned()) {
             let hash = self.hashes.file_hash(&executable)?;
             identity.insert(executable, hash);
         }
         let key = sha256(&marshal(&identity)?);
-        let library = format!("{}.dll", assembly.name);
-        let entry = sysutil::join(&[
-            &self.project,
-            "Library/UnityMicroEditor/package-builds",
-            &key,
-        ]);
+        let library = format!("{}.dll", compile.name);
+        let entry = self.kept(compile.kind, &key);
         let cached = || {
-            read_json_file::<Option<PackageCache>>(&sysutil::join(&[&entry, "package-build.json"]))
+            read_json_file::<Option<CompileCache>>(&sysutil::join(&[&entry, "compile.json"]))
                 .ok()
                 .flatten()
                 .filter(|cached| {
                     cached.key == key
-                        && cached.name == assembly.name
+                        && cached.name == compile.name
                         && verify_cache_files(&entry, &cached.files)
                         && !cached.files.at(&library).is_empty()
                 })
         };
-        if let Some(cached) = cached() {
-            return Ok(PackageBuild {
-                dll: sysutil::join(&[&entry, &library]),
-                initializers: cached.initializers,
-                post_processors: cached.post_processors,
-            });
+        if cached().is_some() {
+            return Ok(sysutil::join(&[&entry, &library]));
         }
-        let folder = sysutil::join(&[staging, "PackageBuild", &assembly.name]);
+        let folder = sysutil::join(&[staging, compile.kind, compile.name]);
         sys::mkdir_all(&folder)?;
-        let compiled = sysutil::join(&[&folder, &library]);
+        let dll = sysutil::join(&[&folder, &library]);
         let mut arguments: Vec<String> = [
             "-nologo",
             "-target:library",
@@ -300,7 +317,7 @@ impl Compiler {
             "-deterministic+",
             "-debug:portable",
             "-optimize-",
-            if config.config.allow_unsafe {
+            if compile.allow_unsafe {
                 "-unsafe+"
             } else {
                 "-unsafe-"
@@ -308,11 +325,13 @@ impl Compiler {
         ]
         .map(String::from)
         .to_vec();
-        arguments.push(format!("-out:{compiled}"));
-        arguments.push(format!("-define:{}", config.defines.join(";")));
-        arguments.extend(config.compiler_options.iter().cloned());
+        arguments.push(format!("-out:{dll}"));
+        arguments.push(format!("-define:{}", compile.defines.join(";")));
+        arguments.extend(compile.compiler_options.iter().cloned());
         arguments.extend(
-            refs.iter()
+            compile
+                .references
+                .iter()
                 .map(|reference| format!("-reference:{reference}")),
         );
         arguments.extend(
@@ -324,13 +343,13 @@ impl Compiler {
         sys::mkdir_all(&generated)?;
         let additional = sysutil::join(&[
             &folder,
-            &format!("{}.UnityAdditionalFile.txt", assembly.name),
+            &format!("{}.UnityAdditionalFile.txt", compile.name),
         ]);
         sys::write(&additional, self.project.as_bytes())?;
         arguments.push(format!("-generatedfilesout:{generated}"));
         arguments.push(format!("-additionalfile:{additional}"));
-        arguments.extend(assembly.sources.iter().cloned());
-        let response = sysutil::join(&[&folder, &format!("{}.rsp", assembly.name)]);
+        arguments.extend(compile.sources.iter().cloned());
+        let response = sysutil::join(&[&folder, &format!("{}.rsp", compile.name)]);
         let mut text = String::new();
         for argument in &arguments {
             text.push('"');
@@ -346,20 +365,81 @@ impl Compiler {
         )
         .map_err(|error| {
             anyhow!(
-                "compile package assembly {}: {}",
-                assembly.name,
+                "compile {} {}: {}",
+                compile.kind,
+                compile.name,
                 error.message
             )
         })?;
-        let processed = sysutil::join(&[&folder, "post-processed"]);
-        let editor = self.editor.clone();
-        let post_processors = post.runner(ctx, &editor)?.process(
-            ctx,
-            &compiled,
-            &processed,
-            &config.defines,
-            refs,
+        publish_files(
+            &entry,
+            &[
+                dll.clone(),
+                format!("{}.pdb", dll.strip_suffix(".dll").unwrap_or(&dll)),
+            ],
+            "compile.json",
+            |files| CompileCache {
+                key: key.clone(),
+                name: compile.name.to_string(),
+                files,
+            },
+            || cached().is_some(),
         )?;
+        Ok(sysutil::join(&[&entry, &library]))
+    }
+
+    /// Post-processes a compiled package assembly and reads its runtime
+    /// initializers, kept like its compile.
+    #[allow(clippy::too_many_arguments)]
+    pub fn post_process_package(
+        &mut self,
+        ctx: &Context,
+        staging: &str,
+        helper: &str,
+        name: &str,
+        compiled: &str,
+        defines: &[String],
+        refs: &[String],
+        post: &mut PostProcessors,
+    ) -> Result<PackageBuild> {
+        let mut identity: BTreeMap<String, String> = BTreeMap::new();
+        identity.insert("mode".into(), "package-build-v2".into());
+        identity.insert("compiled".into(), self.hashes.file_hash(compiled)?);
+        identity.insert("postProcessors".into(), post.key.clone());
+        identity.insert("helper".into(), self.hashes.file_hash(helper)?);
+        identity.insert("defines".into(), defines.join(";"));
+        for reference in refs {
+            identity.insert(
+                format!("reference:{}", sysutil::base(reference)),
+                self.hashes.file_hash(reference)?,
+            );
+        }
+        let key = sha256(&marshal(&identity)?);
+        let library = format!("{name}.dll");
+        let entry = self.kept("package-builds", &key);
+        let cached = || {
+            read_json_file::<Option<PackageCache>>(&sysutil::join(&[&entry, "package-build.json"]))
+                .ok()
+                .flatten()
+                .filter(|cached| {
+                    cached.key == key
+                        && cached.name == name
+                        && verify_cache_files(&entry, &cached.files)
+                        && !cached.files.at(&library).is_empty()
+                })
+        };
+        if let Some(cached) = cached() {
+            return Ok(PackageBuild {
+                dll: sysutil::join(&[&entry, &library]),
+                initializers: cached.initializers,
+                post_processors: cached.post_processors,
+            });
+        }
+        let processed = sysutil::join(&[staging, "package-builds", name]);
+        let editor = self.editor.clone();
+        let post_processors = post
+            .runner(ctx, &editor)?
+            .process(ctx, compiled, &processed, defines, refs)?;
         let dll = sysutil::join(&[&processed, &library]);
         let output = compiler_command(
             ctx,
@@ -367,42 +447,52 @@ impl Compiler {
             &self.dotnet,
             &[helper, "--runtime-initializers", &dll],
         )
-        .map_err(|error| {
-            anyhow!(
-                "runtime initializers of {}: {}",
-                assembly.name,
-                error.message
-            )
-        })?;
+        .map_err(|error| anyhow!("runtime initializers of {name}: {}", error.message))?;
         let initializers: Vec<InitializerRow> = serde_json::from_slice(&output)
-            .map_err(|error| anyhow!("runtime initializers of {}: {error}", assembly.name))?;
-        sys::mkdir_all(&sysutil::dir(&entry))?;
-        let payload = sys::mkdir_temp(&sysutil::dir(&entry), ".package-")?;
-        let mut files = NilMap::make();
-        let stem = dll.strip_suffix(".dll").unwrap_or(&dll).to_string();
-        for filename in [dll.clone(), format!("{stem}.pdb")] {
-            let data = sys::read(&filename)?;
-            let name = sysutil::base(&filename);
-            sys::write(&sysutil::join(&[&payload, &name]), &data)?;
-            files.insert(name, sha256(&data));
-        }
-        atomic_json(
-            &sysutil::join(&[&payload, "package-build.json"]),
-            &PackageCache {
+            .map_err(|error| anyhow!("runtime initializers of {name}: {error}"))?;
+        publish_files(
+            &entry,
+            &[
+                dll.clone(),
+                format!("{}.pdb", dll.strip_suffix(".dll").unwrap_or(&dll)),
+            ],
+            "package-build.json",
+            |files| PackageCache {
                 key: key.clone(),
-                name: assembly.name.clone(),
+                name: name.to_string(),
                 files,
                 initializers: initializers.clone(),
                 post_processors: post_processors.clone(),
             },
+            || cached().is_some(),
         )?;
-        sys::publish(&payload, &entry, || cached().is_some())?;
         Ok(PackageBuild {
             dll: sysutil::join(&[&entry, &library]),
             initializers,
             post_processors,
         })
     }
+}
+
+/// Publishes `files` and a record of them as the kept entry `entry`.
+fn publish_files<T: Serialize>(
+    entry: &str,
+    files: &[String],
+    record: &str,
+    make: impl FnOnce(NilMap<String>) -> T,
+    valid: impl Fn() -> bool,
+) -> Result<()> {
+    sys::mkdir_all(&sysutil::dir(entry))?;
+    let payload = sys::mkdir_temp(&sysutil::dir(entry), ".kept-")?;
+    let mut hashes = NilMap::make();
+    for filename in files {
+        let data = sys::read(filename)?;
+        let name = sysutil::base(filename);
+        sys::write(&sysutil::join(&[&payload, &name]), &data)?;
+        hashes.insert(name, sha256(&data));
+    }
+    atomic_json(&sysutil::join(&[&payload, record]), &make(hashes))?;
+    sys::publish(&payload, entry, valid)
 }
 
 /// Puts the rows of the assemblies in `rows` into the staged Player's
