@@ -8,6 +8,7 @@ mod host;
 mod metadata;
 mod netcode;
 mod nilable;
+mod packages;
 mod phases;
 mod prepare;
 mod revision;
@@ -402,6 +403,10 @@ pub struct CompilerGraphAssembly {
     pub sha256: String,
     pub references: NilVec<String>,
     pub compiled_references: NilVec<String>,
+    /// An assembly of a package nobody edits (registry, built-in, Git) that
+    /// the host does not provide: built as the Editor builds it, without the
+    /// lifecycle rewrite, post-processed and added to the staged host.
+    pub package_build: bool,
 }
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -428,6 +433,12 @@ struct GraphAssemblyWire {
     references: NilVec<String>,
     #[serde(rename = "compiledReferences")]
     compiled_references: NilVec<String>,
+    #[serde(
+        rename = "packageBuild",
+        deserialize_with = "nz",
+        skip_serializing_if = "is_false"
+    )]
+    package_build: bool,
 }
 impl From<GraphAssemblyWire> for CompilerGraphAssembly {
     fn from(wire: GraphAssemblyWire) -> Self {
@@ -448,6 +459,7 @@ impl From<GraphAssemblyWire> for CompilerGraphAssembly {
             sha256: wire.sha256,
             references: wire.references,
             compiled_references: wire.compiled_references,
+            package_build: wire.package_build,
         }
     }
 }
@@ -467,6 +479,7 @@ impl From<CompilerGraphAssembly> for GraphAssemblyWire {
             sha256: assembly.sha256,
             references: assembly.references,
             compiled_references: assembly.compiled_references,
+            package_build: assembly.package_build,
         }
     }
 }
