@@ -4,12 +4,9 @@ use super::{
     operation_id, read_json, store_error, text, to_serde, unmarshal_map,
 };
 use crate::{
-    authoring::{
-        NativeDefaultsTemplate, PrefabEditRequest, PublicationInput, StagedPublicationRequest,
-        Store,
-    },
+    authoring::{NativeDefaultsTemplate, PrefabEditRequest, StagedPublicationRequest, Store},
     cancel::Context,
-    compiler::{NilMap, NilVec, Walk, WalkEntry, compiler_command, walk_dir},
+    compiler::{NilMap, Walk, WalkEntry, compiler_command, walk_dir},
     jsondoc,
     mcp::HandlerValue,
     project::{is_owned_cache_path, lexpath, value},
@@ -25,48 +22,23 @@ use std::{collections::BTreeMap, fs, path::Path};
 pub struct SourceSnapshot {
     #[serde(deserialize_with = "nz")]
     pub project: String,
-    pub inputs: NilVec<SnapshotInput>,
     pub files: NilMap<String>,
 }
-/// A `PublicationInput` as the snapshot stores it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct SnapshotInput {
-    #[serde(deserialize_with = "nz")]
-    pub path: String,
-    #[serde(deserialize_with = "nz")]
-    pub expected_revision: String,
-}
-impl From<&SnapshotInput> for PublicationInput {
-    fn from(input: &SnapshotInput) -> Self {
-        PublicationInput {
-            path: input.path.clone(),
-            expected_revision: input.expected_revision.clone(),
-        }
-    }
-}
 
-/// Most non-metadata sources a snapshot records. With every file hashed and
-/// every source's revision, a snapshot of this many stays below
-/// `SNAPSHOT_MAXIMUM` even with long paths.
-const SOURCE_MAXIMUM: usize = 32768;
-/// Largest stored snapshot that is read back.
+/// Largest stored snapshot that is read back. A snapshot holds one path and
+/// hash per authored file, so this bounds a project to some 200 000 files.
 pub(crate) const SNAPSHOT_MAXIMUM: u64 = 64 << 20;
 
 pub(crate) fn phase_id(id: &str, phase: &str) -> String {
     format!("{}-{phase}", &sha256(id.as_bytes())[..32])
 }
 
-/// Every authored file with its hash, and the
-/// dependency revision of every non-metadata source.
+/// Every authored file with its hash.
 pub fn snapshot_source(ctx: &Context, project: &str) -> Result<SourceSnapshot> {
     let mut result = SourceSnapshot {
         project: project.into(),
-        inputs: NilVec::nil(),
         files: NilMap::make(),
     };
-    let store = Store::new(Path::new(project)).map_err(store_error)?;
-    let mut sources: Vec<String> = Vec::new();
     for folder in ["Assets", "Packages", "ProjectSettings"] {
         walk_dir(&join(&[project, folder]), &mut |entry: &WalkEntry| {
             ctx.err()?;
@@ -87,30 +59,9 @@ pub fn snapshot_source(ctx: &Context, project: &str) -> Result<SourceSnapshot> {
             }
             let logical = sysutil::rel(project, entry.path)
                 .ok_or_else(|| anyhow!("Rel: can't make {} relative to {project}", entry.path))?;
-            result.files.insert(logical.clone(), file_hash(entry.path)?);
-            if !logical.ends_with(".meta") {
-                sources.push(logical);
-            }
+            result.files.insert(logical, file_hash(entry.path)?);
             Ok(Walk::Continue)
         })?;
-    }
-    if sources.len() > SOURCE_MAXIMUM {
-        return Err(fail(
-            "project_too_large",
-            format!(
-                "staging supports at most {SOURCE_MAXIMUM} authored sources, the project has {}",
-                sources.len()
-            ),
-        ));
-    }
-    sources.sort();
-    for path in sources {
-        ctx.err()?;
-        let revision = store.dependency_revision(&path).map_err(store_error)?;
-        result.inputs.push(SnapshotInput {
-            path,
-            expected_revision: revision,
-        });
     }
     Ok(result)
 }

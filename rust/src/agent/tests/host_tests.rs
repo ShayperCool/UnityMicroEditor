@@ -72,7 +72,7 @@ fn snapshot_records_projects_above_four_thousand_sources() {
         );
     }
     let snapshot = snapshot_source(&ctx(), &project).unwrap();
-    assert!(snapshot.inputs.len() > 5000);
+    assert!(snapshot.files.len() > 10000);
 }
 
 #[test]
