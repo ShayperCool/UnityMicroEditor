@@ -95,9 +95,12 @@ together with its engine profile and, for the same scene, its native catalog;
 a new `requestId` alone never rebuilds the host. The result records this as
 `backends.hostSource: reused:<requestId>`. Only a project without such a host
 builds one. A reused host is verified against the current sources where it is
-used; when it no longer fits (changed packages or Player settings), the
+used; when it no longer fits (changed packages), the
 preparation fails with `host_reuse_failed`, and `rebuildHost: true` with a new
-`requestId` builds a new one. `--editor` selects the matching Unity installation;
+`requestId` builds a new one. Settings do not tie a project to its host: a
+preparation writes the Player's settings managers from the project's
+`ProjectSettings` over the host's own ([HOSTLESS_PLAYER.md](HOSTLESS_PLAYER.md)).
+`--editor` selects the matching Unity installation;
 the default is `UNITY_EDITOR`, then the pinned installation under `$HOME/Unity`.
 `--engine-profile` selects a captured engine/host profile. Add `--no-editor` to
 `mcp` or `auto-prepare` to forbid main Editor bootstrap and build calls; missing
