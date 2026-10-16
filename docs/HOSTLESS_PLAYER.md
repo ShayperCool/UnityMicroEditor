@@ -1,8 +1,15 @@
 # Toward a Player without a host build
 
-Status: experiment, 2026-10-16. Nothing here changes how `auto-prepare` builds
-or picks a host. One change is live: a module package now adds its engine
-module assembly to the compile references (see "Packages" below).
+Status, 2026-10-16. Two steps are live:
+
+- **Settings.** Preparation and watched sessions write the Player's settings
+  managers from the project's `ProjectSettings` (see "In preparation and
+  sessions" below).
+- **Packages.** A module package adds its engine module assembly to the
+  compile references (see "Packages" below).
+
+A host is still built once per project; this document tracks what it is still
+needed for.
 
 ## What a host build produces
 
@@ -82,6 +89,48 @@ kept and why. `--compare` lists the fields that differ from another file.
   - `PlayerSettings.AID`.
   - The build-derived managers.
 
+### In preparation and sessions
+
+- **Preparation.** Compiler preparation copies the host Player and keeps the
+  host's own `globalgamemanagers` beside it as `UnityMicroEditorHostManagers`.
+  It then writes the project's settings over that file. What each manager
+  kept of the host is recorded in `settings-managers.json` of the preparation.
+- **Watched sessions.** Some settings files are read only by the Player's
+  settings managers:
+  - `AudioManager`, `ClusterInputManager`, `DynamicsManager`, `InputManager`;
+  - `MultiplayerManager`, `NavMeshAreas`, `Physics2DSettings`,
+    `PhysicsCoreProjectSettings2D`;
+  - `QualitySettings`, `TagManager`, `TimeManager`, `VFXManager`.
+
+  These are no longer part of the compiled graph's configuration. A save of
+  one of them makes a new code revision whose Player holds the new managers,
+  with no assemblies compiled. The runner restarts the Player on it
+  (`code-updated` with `settingsChanged: true`); hot reload is not tried.
+  The code revision key includes the managers, so a cached revision never
+  brings back old settings.
+- **What still needs a fresh preparation.** `ProjectSettings.asset` (defines,
+  API level, input handling) and `GraphicsSettings.asset` (the render
+  pipeline) stay configuration, as before.
+- **Older preparations.** A Player prepared before this change has no
+  `UnityMicroEditorHostManagers` and keeps the host's settings.
+
+Verified on 2026-10-16 on the sample copy:
+
+- `auto-prepare --host-player` pointed at the first host, which was built
+  with the sample's original settings and without `com.unity.ai.navigation`.
+  The Player reported the project's tags, layers, physics, time and quality,
+  and the package worked. The host's own files were unchanged.
+- A `run --watch` started on that preparation after further settings edits,
+  and the first Player had them.
+- A save of gravity, a layer name and the fixed timestep while it ran gave
+  `code-updated` with `settingsChanged: true`. The revision itself took 0.07 s,
+  and the restarted Player reported the new values.
+- A method body edited after that was still patched into the same process.
+
+The watched sessions ran with `-- -batchmode` as a game argument, because the
+display of the test machine did not let a Player window create its GL
+context that day. The same hang happened with the build before these changes.
+
 ## Packages
 
 The source graph already derives the compile configuration of every assembly,
@@ -104,8 +153,9 @@ small forwarding assembly.
 
 - **Settings.** Writing the managers needs a base `globalgamemanagers` of the
   same engine for the build-derived managers. Per-class upgrades of older
-  serialized versions are missing. Nothing wires the writer into session
-  staging yet.
+  serialized versions are missing: such a manager keeps the host's values,
+  and only `settings-managers.json` says so. Binary-serialized settings files
+  are not read.
 - **Packages.** Compiling package assemblies without a host proof works only
   for packages without IL post-processors or source generators that matter at
   runtime (Netcode, Entities, Burst-compiled jobs). Native plugins, Burst AOT

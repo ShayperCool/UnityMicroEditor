@@ -919,6 +919,11 @@ impl Compiler {
             {
                 configuration = true;
             }
+            // A settings file only the Player reads reaches it through
+            // `settings`, not through the compiled graph.
+            if super::settings::player_only_settings(&self.project, filename) {
+                configuration = false;
+            }
             if configuration
                 && (source_backend || dll_reference || within_directory(filename, &self.project))
             {
@@ -1211,10 +1216,45 @@ impl Compiler {
                 dirty.insert(assembly.name.clone());
             }
         }
-        if dirty.is_empty() {
+        // What the project's settings give the Player, when a settings file
+        // changed or the whole graph is checked; else the running Player's.
+        let settings_paths = join(&[&self.project, "ProjectSettings"]);
+        let settings_checked = changed_paths.is_none_or(|changed| {
+            changed
+                .iter()
+                .any(|path| within_directory(&self.absolute(path), &settings_paths))
+        });
+        let managers = match settings_checked {
+            true => super::settings::project_managers(&self.project, &self.player)?
+                .map(|(file, _)| file),
+            false => None,
+        };
+        // A Player prepared before settings were written cannot take an edit
+        // of one; it would silently keep the host's.
+        if managers.is_none()
+            && let Some(edited) = changed_paths.and_then(|changed| {
+                changed.iter().find(|path| {
+                    super::settings::player_only_settings(&self.project, &self.absolute(path))
+                })
+            })
+        {
+            bail!(
+                "this Player was prepared before settings were written into it; prepare again to apply {edited}"
+            );
+        }
+        let running_settings = super::settings::player_managers_hash(&self.player)?;
+        let settings_changed = managers
+            .as_ref()
+            .is_some_and(|file| sha256(file) != running_settings);
+        lap = self.last_phases.lap("settings", lap);
+        if dirty.is_empty() && !settings_changed {
             self.startup_complete = true;
             return Ok(None);
         }
+        self.settings_key = match &managers {
+            Some(file) => sha256(file),
+            None => running_settings,
+        };
         let revision_key = self.code_revision_key(ctx, &current_sources)?;
         lap = self.last_phases.lap("revision_key", lap);
         let restored = match self.startup_complete {
@@ -1339,6 +1379,10 @@ impl Compiler {
         let mut map =
             PlayerMap::after_copy(self.known_player_map(&source_directory), &player_folder)?;
         let player = join(&[&player_folder, &sysutil::base(&self.player)]);
+        if let Some(file) = managers.as_ref().filter(|_| settings_changed) {
+            let written = super::settings::replace_managers(&player, file)?;
+            map.wrote(&written, sha256(file))?;
+        }
         let managed = super::player_managed(&player);
         let mut update = CompileUpdate {
             player,
@@ -1346,6 +1390,7 @@ impl Compiler {
             source_hashes: current_sources,
             runtime_initializers: NilVec::make(),
             dll_hashes: NilMap::make(),
+            settings_changed,
             ..Default::default()
         };
         for assembly in &assemblies {

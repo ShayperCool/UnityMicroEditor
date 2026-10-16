@@ -609,6 +609,10 @@ pub fn prepare_compiler_graph_with(
         )?;
     }
     register_compiler_assembly_slots(&slots_file, &ordered)?;
+    // The Player reads the project's settings, not those the host was built
+    // with; what each manager kept of the host is recorded beside it.
+    let managers = super::settings::prepare_managers(&project, &staged_player)?;
+    atomic_json(&join(&[&staging_path, "settings-managers.json"]), &managers)?;
     if own_graph {
         remove_source_native_initializers(
             &join(&[&sysutil::dir(&managed), "RuntimeInitializeOnLoads.json"]),

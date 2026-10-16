@@ -815,8 +815,12 @@ impl Steps for Live<'_> {
         self.times.compile = Some(started.elapsed());
         Ok(match compiled? {
             Some(update) => {
+                let restart = update.settings_changed;
                 self.pending_compile = Some(update);
-                Compiled::Updated
+                match restart {
+                    true => Compiled::Restart,
+                    false => Compiled::Updated,
+                }
             }
             None if affected => Compiled::Unchanged,
             None => Compiled::Unaffected,

@@ -40,6 +40,9 @@ pub(crate) enum Compiled {
     Unchanged,
     /// A new compile, which no Player process has loaded yet.
     Updated,
+    /// A new compile whose Player holds other settings managers, which only
+    /// a new Player process reads.
+    Restart,
 }
 
 /// A new Player process that became ready.
@@ -390,6 +393,9 @@ pub(crate) fn restart_event(
             .with("compiledAssemblies", &compile.compiled_assemblies)
             .with("declarationChanged", &compile.declaration_changed)
             .with("compileSeconds", &compile.elapsed_seconds);
+        if compile.settings_changed {
+            event = event.with("settingsChanged", &true);
+        }
     }
     match (request, cause) {
         // A requested restart is answered as one, whatever else caused it.
@@ -729,6 +735,9 @@ impl Loop {
         let seconds = started.elapsed().as_secs_f64();
         self.managed_rejected = false;
         match compiled {
+            Compiled::Restart => {
+                self.restart.get_or_insert(Cause::Plain);
+            }
             // A window that restarts anyway needs no patch.
             Compiled::Updated if self.hot_reload && request.is_none() && self.restart.is_none() => {
                 let patch_started = Instant::now();

@@ -5,12 +5,14 @@ use std::time::{Duration, Instant};
 
 /// The phases of `Compiler::compile`, in the order they run. A phase that
 /// did not run in a compile counts 0.
-pub const COMPILE_PHASES: [&str; 18] = [
+pub const COMPILE_PHASES: [&str; 19] = [
     // The candidate graph: the configuration inputs by content and the walk of `Assets`.
     "graph_candidate",
     // The same check again at the start of `compile_graph`.
     "configuration_check",
     "source_hashes",
+    // The settings managers the project's settings give the Player.
+    "settings",
     // The identity of the revision: baseline Player directory, tools, helper payload.
     "revision_key",
     "revision_restore",

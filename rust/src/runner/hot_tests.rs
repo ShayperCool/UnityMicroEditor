@@ -569,7 +569,7 @@ impl Steps for Script {
             .pop_front()
             .unwrap_or(Ok(Compiled::Unaffected))
             .map_err(|error| anyhow!(error))?;
-        self.pending |= matches!(compiled, Compiled::Updated);
+        self.pending |= matches!(compiled, Compiled::Updated | Compiled::Restart);
         Ok(compiled)
     }
     fn compile_pending(&self) -> bool {
@@ -2899,4 +2899,43 @@ fn a_position_override_is_no_value_of_an_added_field() {
         events.iter().any(|event| event.get("newNotes").is_some()),
         "{events:?}"
     );
+}
+
+#[test]
+fn changed_settings_restart_without_a_patch() {
+    for fallback in [Fallback::Restart, Fallback::Report] {
+        let mut state = Loop::new(true, fallback);
+        let mut steps = Script::new().compiled(Compiled::Restart);
+        run(
+            &mut state,
+            &mut steps,
+            &window(&["/p/ProjectSettings/TagManager.asset"]),
+        );
+        assert_eq!(
+            steps.take(),
+            (
+                calls(&["compile", "bind", "prepare-newest", "restart"]),
+                calls(&["code-updated"])
+            )
+        );
+        assert!(state.refused().is_none() && state.restart().is_none());
+    }
+}
+
+#[test]
+fn a_restart_on_new_settings_says_so() {
+    let restarted = |settings_changed| Restarted {
+        event: Event::new("content-updated").with("pid", &7),
+        compile: Some(CompileUpdate {
+            settings_changed,
+            ..CompileUpdate::default()
+        }),
+    };
+    let event = event_json(&restart_event(restarted(true), Some(Cause::Plain), None));
+    assert_eq!(
+        (&event["event"], &event["settingsChanged"]),
+        (&json!("code-updated"), &json!(true))
+    );
+    let event = event_json(&restart_event(restarted(false), Some(Cause::Plain), None));
+    assert!(event.get("settingsChanged").is_none());
 }

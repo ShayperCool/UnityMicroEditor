@@ -14,6 +14,7 @@ mod revision;
 mod script_types;
 mod server;
 mod service;
+mod settings;
 mod source_graph;
 mod stamp;
 mod sys;
@@ -111,6 +112,14 @@ pub struct CompileUpdate {
     pub cache_reused: bool,
     #[serde(rename = "dllHashes", skip_serializing_if = "NilMap::skip")]
     pub dll_hashes: NilMap<String>,
+    /// The Player holds other settings managers than the one before it, which
+    /// only a new Player process reads.
+    #[serde(
+        rename = "settingsChanged",
+        deserialize_with = "nz",
+        skip_serializing_if = "is_false"
+    )]
+    pub settings_changed: bool,
 }
 impl Default for CompileUpdate {
     fn default() -> Self {
@@ -124,6 +133,7 @@ impl Default for CompileUpdate {
             declaration_changed: NilVec::nil(),
             cache_reused: false,
             dll_hashes: NilMap::nil(),
+            settings_changed: false,
         }
     }
 }
@@ -545,6 +555,9 @@ pub struct Compiler {
     /// The content hashes of inputs that do not change during a session:
     /// configuration inputs, references, tools. Off, every check reads.
     pub hashes: HashCache,
+    /// The hash of the settings managers the next code revision's Player
+    /// holds (`settings::player_managers_hash`), set by each compile.
+    pub settings_key: String,
 }
 
 /// `UME_COMPILER_COLD=1`: a session starts no process that outlives one

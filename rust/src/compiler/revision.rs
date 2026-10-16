@@ -76,6 +76,10 @@ struct RevisionIdentity<'a> {
     tools: &'a NilMap<String>,
     lifecycle: &'a NilMap<String>,
     netcode_postprocessor: &'a str,
+    /// The hash of the settings managers the revision's Player holds; empty
+    /// for a Player prepared without them.
+    #[serde(skip_serializing_if = "str::is_empty")]
+    settings: &'a str,
 }
 
 impl Compiler {
@@ -131,6 +135,7 @@ impl Compiler {
             tools: &tool_files,
             lifecycle: &helper_files,
             netcode_postprocessor: &netcode_key,
+            settings: &self.settings_key,
         })?;
         Ok(sha256(&encoded))
     }
