@@ -454,6 +454,21 @@ pub fn build_source_graph(
             source: package.path.clone(),
         });
     }
+    // A module package enables an engine module the host's own compile may
+    // not have referenced; its assembly ships with every Player.
+    for path in package_module_references(
+        &options.editor,
+        packages
+            .packages
+            .iter()
+            .map(|package| package.name.as_str()),
+    )? {
+        if !graph.engine_references.contains(&path) {
+            graph.compiler_inputs.insert(&path, file_hash(&path)?);
+            graph.engine_references.push(path);
+        }
+    }
+    graph.engine_references = sorted_strings(&graph.engine_references);
     let mut definitions: BTreeMap<String, SourceAsmdef> = BTreeMap::new();
     let mut by_guid: BTreeMap<String, String> = BTreeMap::new();
     let mut roots: BTreeMap<String, String> = BTreeMap::new();
@@ -905,6 +920,54 @@ pub fn build_source_graph(
 /// participate in Unity's default engine reference set. Infer the pinned table
 /// from complete public build configs, rather than turning arbitrary
 /// autoReferenced user asmdefs into engine refs.
+/// The engine module assemblies of the module packages (`com.unity.modules.*`)
+/// among `packages`, as the platform's module setup names them: a module
+/// controlled by a built-in package is that package's name in lower case,
+/// and its assembly is `UnityEngine.<Module>Module.dll`.
+pub fn package_module_references<'a>(
+    editor: &str,
+    packages: impl Iterator<Item = &'a str>,
+) -> Result<Vec<String>> {
+    let support = sysutil::join(&[
+        &sysutil::dir(editor),
+        "Data/PlaybackEngines/LinuxStandaloneSupport",
+    ]);
+    let setup = sysutil::join(&[&support, "modules.asset"]);
+    let text = match std::fs::read_to_string(&setup) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(anyhow!("read {setup}: {error}")),
+    };
+    let mut modules = BTreeMap::new();
+    let mut current: Option<&str> = None;
+    for line in text.lines() {
+        if let Some(name) = line.strip_prefix("  - name: ") {
+            current = Some(name.trim());
+        } else if line.trim() == "controlledByBuiltinPackage: 1"
+            && let Some(name) = current
+        {
+            modules.insert(name.to_ascii_lowercase(), name.to_string());
+        }
+    }
+    let mut result = Vec::new();
+    for package in packages {
+        let Some(module) = package
+            .strip_prefix("com.unity.modules.")
+            .and_then(|key| modules.get(key))
+        else {
+            continue;
+        };
+        let path = sysutil::join(&[
+            &support,
+            &format!("Variations/mono/Managed/UnityEngine.{module}Module.dll"),
+        ]);
+        if std::path::Path::new(&path).is_file() {
+            result.push(path);
+        }
+    }
+    Ok(result)
+}
+
 pub fn automatic_engine_assemblies(profile: &SourceEngineProfile) -> Vec<String> {
     let mut result = Vec::new();
     for (name, candidate) in &profile.native_assemblies {

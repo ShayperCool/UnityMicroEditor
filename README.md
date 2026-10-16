@@ -58,6 +58,7 @@ Guides:
 - [docs/HOT_RELOAD.md](docs/HOT_RELOAD.md): C# hot reload: what is applied live and what is refused, the API for game code, the agent flow, measured timings and limits.
 - [docs/AGENT_MCP.md](docs/AGENT_MCP.md): MCP configuration, tools, source edits, project tools, simulation and input.
 - [docs/NATIVE_IMPORT.md](docs/NATIVE_IMPORT.md): the import worker coordinator and its commands.
+- [docs/HOSTLESS_PLAYER.md](docs/HOSTLESS_PLAYER.md): what a host build produces, and the experiment toward a Player without one.
 
 ## Commands
 

@@ -902,3 +902,42 @@ public static void Enqueue(ScriptableObject value,Phase phase,Action callback,in
         "own preparation relied on Editor-produced assembly directory"
     );
 }
+
+#[test]
+fn module_packages_reference_their_engine_module_assemblies() {
+    let (_directory, root) = temp();
+    let support = format!("{root}/Editor/Data/PlaybackEngines/LinuxStandaloneSupport");
+    let managed = format!("{support}/Variations/mono/Managed");
+    fs::create_dir_all(&managed).unwrap();
+    fs::write(
+        format!("{support}/modules.asset"),
+        "PlatformModuleSetup:\n  modules:\n  - name: Core\n    dependencies: []\n    controlledByBuiltinPackage: 0\n  - name: AI\n    dependencies:\n      - Core\n    controlledByBuiltinPackage: 1\n  - name: ParticleSystem\n    dependencies: []\n    controlledByBuiltinPackage: 1\n",
+    )
+    .unwrap();
+    for module in ["Core", "AI"] {
+        fs::write(format!("{managed}/UnityEngine.{module}Module.dll"), b"").unwrap();
+    }
+    let editor = format!("{root}/Editor/Unity");
+    let found = package_module_references(
+        &editor,
+        [
+            "com.unity.modules.ai",
+            "com.unity.modules.core",
+            "com.unity.modules.particlesystem",
+            "com.unity.ai.navigation",
+        ]
+        .into_iter(),
+    )
+    .unwrap();
+    // Core is not controlled by a package; the particle system module has no
+    // assembly in this installation.
+    assert_eq!(found, vec![format!("{managed}/UnityEngine.AIModule.dll")]);
+    assert!(
+        package_module_references(
+            &format!("{root}/Missing/Unity"),
+            ["com.unity.modules.ai"].into_iter()
+        )
+        .unwrap()
+        .is_empty()
+    );
+}
