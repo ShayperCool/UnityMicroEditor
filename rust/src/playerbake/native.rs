@@ -312,7 +312,7 @@ pub(super) fn scalar(type_name: &str, source: &str, path: &str) -> Result<Val> {
 /// The Editor writes a sequence of integers as one run of hexadecimal
 /// digits, each item in little-endian byte order; a sequence of unsigned
 /// 32-bit integers ends with `u`.
-fn hex_items(type_name: &str, dump: &str, path: &str) -> Result<Vec<Val>> {
+pub(super) fn hex_items(type_name: &str, dump: &str, path: &str) -> Result<Vec<Val>> {
     let (size, signed, suffix) = match type_name {
         "UInt8" => (1, false, ""),
         "SInt8" => (1, true, ""),

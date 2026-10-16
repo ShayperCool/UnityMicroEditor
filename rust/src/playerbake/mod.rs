@@ -10,6 +10,7 @@ mod flat_material;
 mod freeform;
 mod humanoid;
 mod managed;
+mod managers;
 mod mask;
 mod material;
 mod mixer;
@@ -36,6 +37,9 @@ pub use freeform::{Freeform, precompute as precompute_freeform};
 pub use managed::{
     DeferredBinding, DeferredReference, Encoded, Field, FieldType, ManagedLayout, ManagedType,
     ObjectReference, Pointer, References, Resolution, ScriptLayout, ScriptType,
+};
+pub use managers::{
+    ManagerReport, PlainFile, compare_managers, manager_trees, write_project_managers,
 };
 pub use mask::{Mask, bake_mask, bake_mask_object, read_mask};
 pub use material::{

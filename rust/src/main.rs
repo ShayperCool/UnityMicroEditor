@@ -83,6 +83,7 @@ fn execute() -> Result<()> {
             }
         }
         "run" => unity_micro_editor::runner::run_cli(&args.collect::<Vec<_>>())?,
+        "game-managers" => run_game_managers(args.collect())?,
         "shader-extract" => {
             unity_micro_editor::runtimeartifact::shader_extract_command(&args.collect::<Vec<_>>())?
         }
@@ -128,4 +129,38 @@ fn read_text(path: &Path) -> Result<Vec<u8>> {
         "text source grew while reading"
     );
     Ok(data)
+}
+
+/// `game-managers --project P --base globalgamemanagers --output F [--compare F]`:
+/// writes the managers authored in the project's `ProjectSettings` over a
+/// Player's `globalgamemanagers` (experimental, see `playerbake::managers`).
+fn run_game_managers(args: Vec<String>) -> Result<()> {
+    let mut flags = std::collections::BTreeMap::new();
+    let mut args = args.into_iter();
+    while let Some(flag) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("{flag} requires a value"))?;
+        flags.insert(flag, value);
+    }
+    let flag = |name: &str| {
+        flags
+            .get(name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("game-managers requires {name}"))
+    };
+    use unity_micro_editor::playerbake;
+    let trees = playerbake::manager_trees()?;
+    let base = fs::read(flag("--base")?)?;
+    let (file, reports) =
+        playerbake::write_project_managers(Path::new(&flag("--project")?), &base, &trees)?;
+    if let Some(other) = flags.get("--compare") {
+        for line in playerbake::compare_managers(&file, &fs::read(other)?, &trees)? {
+            eprintln!("{line}");
+        }
+    }
+    fs::write(flag("--output")?, file)?;
+    serde_json::to_writer_pretty(io::stdout().lock(), &reports)?;
+    println!();
+    Ok(())
 }

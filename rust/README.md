@@ -42,9 +42,11 @@ line and exits with status 2.
 
 Not listed in the usage line: `prepare` (one scene revision through `Session`),
 `mcp-standalone` (source tools only, no runtime session), `shader-extract`,
-`builtin-shader`, the `parity-*` clients, and the diagnostics `parse-yaml` and
-`authored-graph`, which print the parsed documents and the authored graph as
-JSON.
+`builtin-shader`, the `parity-*` clients, the experimental `game-managers`
+(a Player's settings managers written from `ProjectSettings`, see
+[docs/HOSTLESS_PLAYER.md](../docs/HOSTLESS_PLAYER.md)), and the diagnostics
+`parse-yaml` and `authored-graph`, which print the parsed documents and the
+authored graph as JSON.
 
 ## Formats
 
