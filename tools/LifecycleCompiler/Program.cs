@@ -1229,6 +1229,98 @@ internal static class BehaviourLayouts
     }
 }
 
+/// <summary>
+/// The rows a build writes into <c>RuntimeInitializeOnLoads.json</c> for an assembly the engine
+/// runs as it is: one per static method marked <c>[RuntimeInitializeOnLoadMethod]</c>, with the
+/// load type the attribute names (<c>AfterSceneLoad</c> when it names none). A nested type is
+/// named after the type that declares it, separated by '/'.
+/// </summary>
+internal static class RuntimeInitializerTable
+{
+    const string AttributeNamespace = "UnityEngine", AttributeName = "RuntimeInitializeOnLoadMethodAttribute";
+
+    internal sealed record Row(string assemblyName, string nameSpace, string className, string methodName,
+        int loadTypes, bool isUnityClass);
+
+    public static List<Row> Read(string path)
+    {
+        using var stream = File.OpenRead(path);
+        using var pe = new PEReader(stream);
+        var reader = pe.GetMetadataReader();
+        string assembly = reader.GetString(reader.GetAssemblyDefinition().Name);
+        var rows = new List<Row>();
+        foreach (var typeHandle in reader.TypeDefinitions)
+        {
+            var type = reader.GetTypeDefinition(typeHandle);
+            foreach (var methodHandle in type.GetMethods())
+            {
+                var method = reader.GetMethodDefinition(methodHandle);
+                foreach (var attributeHandle in method.GetCustomAttributes())
+                {
+                    var attribute = reader.GetCustomAttribute(attributeHandle);
+                    var (ns, name, parameters) = Constructor(reader, attribute.Constructor);
+                    if (ns != AttributeNamespace || name != AttributeName) continue;
+                    if ((method.Attributes & MethodAttributes.Static) == 0)
+                        throw new InvalidOperationException($"runtime initializer is not static: {reader.GetString(method.Name)}");
+                    int load = 0;
+                    if (parameters == 1)
+                    {
+                        var value = reader.GetBlobReader(attribute.Value);
+                        if (value.ReadUInt16() != 1) throw new InvalidOperationException("custom attribute blob has no prolog");
+                        load = value.ReadInt32();
+                    }
+                    var (typeNamespace, typeName) = Names(reader, typeHandle);
+                    rows.Add(new Row(assembly, typeNamespace, typeName, reader.GetString(method.Name), load,
+                        assembly.StartsWith("Unity", StringComparison.Ordinal)));
+                }
+            }
+        }
+        return rows;
+    }
+
+    static (string Namespace, string Name) Names(MetadataReader reader, TypeDefinitionHandle handle)
+    {
+        var type = reader.GetTypeDefinition(handle);
+        var declaring = type.GetDeclaringType();
+        if (declaring.IsNil) return (reader.GetString(type.Namespace), reader.GetString(type.Name));
+        var (ns, outer) = Names(reader, declaring);
+        return (ns, outer + "/" + reader.GetString(type.Name));
+    }
+
+    static (string Namespace, string Name, int Parameters) Constructor(MetadataReader reader, EntityHandle constructor)
+    {
+        BlobHandle signature;
+        EntityHandle owner;
+        if (constructor.Kind == HandleKind.MemberReference)
+        {
+            var member = reader.GetMemberReference((MemberReferenceHandle)constructor);
+            signature = member.Signature;
+            owner = member.Parent;
+        }
+        else if (constructor.Kind == HandleKind.MethodDefinition)
+        {
+            var definition = reader.GetMethodDefinition((MethodDefinitionHandle)constructor);
+            signature = definition.Signature;
+            owner = definition.GetDeclaringType();
+        }
+        else return ("", "", 0);
+        var blob = reader.GetBlobReader(signature);
+        blob.ReadSignatureHeader();
+        int parameters = blob.ReadCompressedInteger();
+        switch (owner.Kind)
+        {
+            case HandleKind.TypeReference:
+                var reference = reader.GetTypeReference((TypeReferenceHandle)owner);
+                return (reader.GetString(reference.Namespace), reader.GetString(reference.Name), parameters);
+            case HandleKind.TypeDefinition:
+                var definition = reader.GetTypeDefinition((TypeDefinitionHandle)owner);
+                return (reader.GetString(definition.Namespace), reader.GetString(definition.Name), parameters);
+            default:
+                return ("", "", parameters);
+        }
+    }
+}
+
 internal static class Program
 {
     internal static readonly string[] Phases = { "Awake", "OnEnable", "OnDisable", "OnDestroy" };
@@ -1326,6 +1418,11 @@ internal static class Program
             if (args.Length >= 2 && (args[0] == "--type-definitions" || args[0] == "--public-type-definitions"))
             {
                 stdout.WriteLine(JsonSerializer.Serialize(DeclarationHash.TypeDefinitions(args.Skip(1).ToArray(), args[0] == "--public-type-definitions")));
+                return 0;
+            }
+            if (args.Length == 2 && args[0] == "--runtime-initializers")
+            {
+                stdout.WriteLine(JsonSerializer.Serialize(RuntimeInitializerTable.Read(args[1])));
                 return 0;
             }
             if (args.Length == 2 && args[0] == "--behaviour-layouts")

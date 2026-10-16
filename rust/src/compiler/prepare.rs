@@ -157,7 +157,8 @@ pub fn prepare_compiler_graph_with(
     {
         bail!("compiler preparation requires the verified Unity {UNITY_VERSION} project profile");
     }
-    let graph: CompilerGraphExport = read_json_file::<Option<_>>(graph_file)?.unwrap_or_default();
+    let mut graph: CompilerGraphExport =
+        read_json_file::<Option<_>>(graph_file)?.unwrap_or_default();
     let total = graph.assemblies.len() + graph.host_assemblies.len();
     if graph.schema_version != 1
         || graph.project != project
@@ -355,6 +356,21 @@ pub fn prepare_compiler_graph_with(
         });
         compiler.configs.insert(config.name.clone(), config);
     }
+    // Package assemblies the host does not provide are built first, as the
+    // Editor builds them, and join the staged host before game code is
+    // compiled against it.
+    let helper = compiler.prepare_lifecycle_helper(ctx)?;
+    if own_graph {
+        build_package_assemblies(
+            ctx,
+            &mut compiler,
+            &mut graph,
+            &staging_path,
+            &helper,
+            &managed,
+            &slots_file,
+        )?;
+    }
     let mut ordered = order_compiler_assemblies(&compiler.manifest.assemblies)?;
     compiler.manifest.assemblies = ordered.clone();
     // Snapshot all baseline Assets scripts, including deliberately excluded
@@ -437,7 +453,6 @@ pub fn prepare_compiler_graph_with(
             compiler.expect_script_type(&script.assembly, &script.type_name, &script.guid);
         }
     }
-    let helper = compiler.prepare_lifecycle_helper(ctx)?;
     if own_graph {
         compiler.derive_source_host_script_types(ctx, &helper, &graph, &managed)?;
     } else {
@@ -1285,4 +1300,177 @@ pub fn register_compiler_assembly_slots(
     doc.insert("names".into(), raw_value(marshal(&names)?)?);
     doc.insert("types".into(), raw_value(marshal(&types)?)?);
     write_raw_map(filename, &doc)
+}
+
+/// Builds the package assemblies of the graph that the host does not
+/// provide (`packageBuild`) into the staged Player, in dependency order, and
+/// hands them on as host assemblies: game code is compiled against them and
+/// their scripts are the host's.
+fn build_package_assemblies(
+    ctx: &Context,
+    compiler: &mut Compiler,
+    graph: &mut CompilerGraphExport,
+    staging_path: &str,
+    helper: &str,
+    managed: &str,
+    slots_file: &str,
+) -> Result<()> {
+    let names: BTreeSet<String> = graph
+        .assemblies
+        .iter()
+        .filter(|assembly| assembly.package_build)
+        .map(|assembly| assembly.config.name.clone())
+        .collect();
+    if names.is_empty() {
+        return Ok(());
+    }
+    let packages = order_compiler_assemblies(
+        &compiler
+            .manifest
+            .assemblies
+            .iter()
+            .filter(|assembly| names.contains(&assembly.name))
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
+    let games: Vec<CompileAssembly> = compiler
+        .manifest
+        .assemblies
+        .iter()
+        .filter(|assembly| !names.contains(&assembly.name))
+        .cloned()
+        .collect();
+    compiler.manifest.assemblies = NilVec::from(games);
+    for script in compiler.manifest.scripts.iter_mut() {
+        if names.contains(&script.assembly) {
+            script.host_provided = true;
+        }
+    }
+    let mut post = super::packages::PostProcessors::new(
+        &compiler.editor.clone(),
+        &join(&[staging_path, "ilpp"]),
+    )?;
+    let mut built: BTreeMap<String, String> = BTreeMap::new();
+    let mut rows = Vec::new();
+    for assembly in &packages {
+        let config = compiler.configs.value(&assembly.name);
+        let exported = graph
+            .assemblies
+            .iter()
+            .find(|exported| exported.config.name == assembly.name)
+            .cloned()
+            .unwrap_or_default();
+        let mut refs: Vec<String> = compiler.base_references.to_vec();
+        if !config.config.no_engine_references {
+            refs.extend(compiler.engine_references.iter().cloned());
+        }
+        for reference in &exported.compiled_references {
+            if sysutil::base(reference).starts_with("UnityEditor") {
+                bail!(
+                    "Editor-only reference in package assembly {}: {reference}",
+                    assembly.name
+                );
+            }
+            refs.push(reference.clone());
+        }
+        for dependency in &assembly.references {
+            match built.get(dependency) {
+                Some(dll) => refs.push(dll.clone()),
+                None => {
+                    let dll = join(&[managed, &format!("{dependency}.dll")]);
+                    if file_hash(&dll).is_err() {
+                        bail!(
+                            "package assembly {} needs {dependency}, which neither the host nor a package build provides",
+                            assembly.name
+                        );
+                    }
+                    refs.push(dll);
+                }
+            }
+        }
+        let refs = deduplicate_references(&refs);
+        let mut hashes = NilMap::make();
+        for source in &assembly.sources {
+            let hash = file_hash(source)?;
+            compiler
+                .manifest
+                .compiler_inputs
+                .insert(source, hash.clone());
+            hashes.insert(source, hash);
+        }
+        let build = compiler.compile_package_assembly(
+            ctx,
+            staging_path,
+            helper,
+            assembly,
+            &refs,
+            &hashes,
+            &mut post,
+        )?;
+        let target = join(&[managed, &format!("{}.dll", assembly.name)]);
+        let stem = build
+            .dll
+            .strip_suffix(".dll")
+            .unwrap_or(&build.dll)
+            .to_string();
+        for (from, to) in [
+            (build.dll.clone(), target.clone()),
+            (
+                format!("{stem}.pdb"),
+                format!("{}.pdb", target.strip_suffix(".dll").unwrap_or(&target)),
+            ),
+        ] {
+            let _ = fs::remove_file(&to);
+            sys::write(&to, &sys::read(&from)?)?;
+        }
+        let ran: Vec<&str> = build
+            .post_processors
+            .lines()
+            .filter_map(|line| line.strip_prefix("running "))
+            .collect();
+        eprintln!(
+            "[unity-micro-editor] package assembly {} built for the host{}",
+            assembly.name,
+            match ran.is_empty() {
+                true => String::new(),
+                false => format!(", post-processed by {}", ran.join(", ")),
+            }
+        );
+        built.insert(assembly.name.clone(), target.clone());
+        compiler.current_dlls.remove(&assembly.name);
+        // The host's own DLL of that name, where it had one, is replaced.
+        let library = format!("{}.dll", assembly.name);
+        let replaced: Vec<String> = compiler
+            .manifest
+            .compiler_inputs
+            .keys()
+            .filter(|path| {
+                sysutil::base(path) == library && sysutil::base(&sysutil::dir(path)) == "Managed"
+            })
+            .cloned()
+            .collect();
+        for path in replaced {
+            compiler.manifest.compiler_inputs.remove(&path);
+        }
+        rows.extend(build.initializers);
+        let mut editor_defines = config.defines.clone();
+        editor_defines.push("UNITY_EDITOR".into());
+        editor_defines.push("UNITY_EDITOR_LINUX".into());
+        graph.host_assemblies.push(CompilerHostAssembly {
+            name: assembly.name.clone(),
+            path: target.clone(),
+            sha256: file_hash(&target)?,
+            sources: assembly.sources.clone(),
+            defines: config.defines.clone(),
+            editor_defines,
+            configuration: Some(Box::new(config.clone())),
+            compiled_references: exported.compiled_references.clone(),
+            response_files: exported.response_files.clone(),
+        });
+    }
+    register_compiler_assembly_slots(slots_file, &packages)?;
+    super::packages::add_native_initializers(
+        &join(&[&sysutil::dir(managed), "RuntimeInitializeOnLoads.json"]),
+        &rows,
+    )
 }

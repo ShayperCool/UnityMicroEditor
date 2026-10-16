@@ -917,6 +917,9 @@ pub fn build_source_graph(
                 sha256: String::new(),
                 references: config.dependencies.clone(),
                 compiled_references: config.compiler_references.clone(),
+                package_build: package.is_some_and(|package| {
+                    matches!(package.source.as_str(), "registry" | "builtin" | "git")
+                }),
             });
         }
     }
