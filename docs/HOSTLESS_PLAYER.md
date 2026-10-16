@@ -149,6 +149,59 @@ its `NavMeshSurface` built a NavMesh that `NavMesh.SamplePosition` found.
 `com.unity.mathematics` 1.4.0 also loaded, but in 6000.6 that package is only a
 small forwarding assembly.
 
+## A URP project on a foreign host (2026-10-16)
+
+The experiment: a copy of the sample with URP 17.6.0 was prepared with
+`--host-player` set to the sample's host, which was built without URP. The
+copy had the pipeline assets and settings of `Temp/e2e/asm-merge/RefP`, a URP
+`Lit` material on the cube and a probe that renders the camera. It did not
+reach a Player. What stood in the way, in order:
+
+1. **Host proofs are exact per assembly.** A package assembly is taken from
+   the host only when its sources, references and configuration equal those
+   the Editor would use for this project. Enabling one more engine module
+   (Terrain here, AI in the sample after the navigation package) or adding a
+   package another asmdef names (`com.unity.mathematics`) changed them for
+   every package assembly of the host, although the host's DLLs stayed
+   valid.
+   - Now an assembly the host does not prove is compiled from source instead
+     of failing the preparation.
+   - An engine module reference the host's build lacks no longer counts as a
+     difference.
+   - A changed dependency list still does.
+2. **Missing asmdef references.** The built-in packages of 6000.6 still name
+   `Unity.Mathematics`, which became the engine module
+   `UnityEngine.MathematicsModule`. The Editor leaves out a reference to an
+   assembly the project lacks. The source graph now does the same for
+   registry, built-in and Git packages; code that needs the missing assembly
+   fails to compile.
+3. **BCL extensions.** The Editor gives every assembly
+   `Data/BCLExtensions/TargetingPacks/netstandard2.1/ref`, where
+   `System.Runtime.CompilerServices.Unsafe` lives. The engine profile now
+   takes them into the base references.
+4. **Package code through the lifecycle rewrite (open).** Compiled from
+   source, a package assembly goes through the lifecycle rewrite of game
+   code. SRP Core's `DisallowGPUDrivenRendering` calls a lifecycle method
+   directly, which the rewrite refuses. A host build never rewrote package
+   assemblies. The preparation now fails with `host_reuse_failed` naming
+   the assembly.
+5. **IL post-processing (open).** The host's `Unity.Collections` holds code
+   that the Burst and job IL post-processors generate:
+   `__JobReflectionRegistrationOutput__…` and `$BurstDirectCallInitializer`,
+   both registered in `RuntimeInitializeOnLoads.json`. A plain compile
+   produces neither.
+
+The two open items have to be solved together for any package that a host
+does not provide: compile it as the Editor does, without the lifecycle
+rewrite, run the packages' IL post-processors on it (generalising
+`tools/NetcodePostProcessor`), and register its runtime initializers in
+`RuntimeInitializeOnLoads.json`. Shaders were not reached.
+
+Even with `--host-player`, preparing a new project ran the Editor in its
+staging copy for about 7 minutes. That run exports the engine graph and
+imports the native content; the URP shader builds in the import worker use
+the Editor's compilation of the project's Editor assemblies.
+
 ## Limits and what remains
 
 - **Settings.** Writing the managers needs a base `globalgamemanagers` of the

@@ -3,6 +3,10 @@
 //! CompilationPipeline APIs (or built by our source graph). Preparation
 //! verifies the explicit project inputs and instruments sources with the
 //! installed SDK; it does not execute an Editor or game code.
+/// Begins the error of a package assembly the host does not provide and
+/// the compiler could not build as game code.
+pub const HOST_LACKS_PACKAGE: &str = "the host does not provide package assembly ";
+
 use super::{
     AssemblyConfig, CompileAssembly, CompileManifest, CompileScript, Compiler, CompilerGraphExport,
     CompilerHostAssembly, CompilerPreparationResult, NilMap, NilVec, UNITY_VERSION,
@@ -550,15 +554,29 @@ pub fn prepare_compiler_graph_with(
                 compiler.manifest.compiler_inputs.insert(reference, hash);
             }
         }
-        let (dll, proof) = compiler.compile_assembly(
-            ctx,
-            &staging_path,
-            &helper,
-            &assembly,
-            &refs,
-            &snapshots,
-            &source_hashes,
-        )?;
+        let (dll, proof) = compiler
+            .compile_assembly(
+                ctx,
+                &staging_path,
+                &helper,
+                &assembly,
+                &refs,
+                &snapshots,
+                &source_hashes,
+            )
+            .map_err(|error| {
+                // A package assembly the host does not provide is compiled
+                // like game code, which not every package supports yet.
+                let package = !assembly.sources.is_empty()
+                    && assembly
+                        .sources
+                        .iter()
+                        .all(|source| !within_directory(source, &join(&[&project, "Assets"])));
+                match package {
+                    true => error.context(format!("{HOST_LACKS_PACKAGE}{}", assembly.name)),
+                    false => error,
+                }
+            })?;
         let mut previous_dll = compiler.current_dlls.at(&assembly.name).to_string();
         if own_graph {
             previous_dll.clear();

@@ -270,15 +270,17 @@ impl Service {
         // A host found by discovery was built for earlier sources. When the
         // stages that bind the host to the current project reject it, say how
         // to get a new one instead of only why it failed. Later failures, such
-        // as a C# compile error, are the project's own.
+        // as a C# compile error, are the project's own, except a package
+        // assembly the host lacks that could not be compiled as game code.
         let stage = self.0.progress.lock().unwrap().stage.clone();
         match outcome {
             Err(error)
                 if !seed.reused_preparation.is_empty()
-                    && matches!(
+                    && (matches!(
                         stage.as_str(),
                         "capture_engine_profile" | "build_source_graph"
-                    )
+                    ) || (stage == "compile_scripts"
+                        && format!("{error:#}").contains(crate::compiler::HOST_LACKS_PACKAGE)))
                     && super::typed(&error).is_none()
                     && !super::context_error(&error) =>
             {
