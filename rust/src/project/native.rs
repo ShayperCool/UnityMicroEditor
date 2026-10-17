@@ -50,7 +50,9 @@ pub(crate) fn native_content_class(type_name: &str) -> i32 {
         "UnityEngine.Audio.AudioMixer" => 241,
         "UnityEngine.Audio.AudioMixerGroup" => 243,
         "UnityEngine.Audio.AudioMixerSnapshot" => 245,
-        "UnityEngine.UIElements.StyleSheet" | "UnityEngine.UIElements.VisualTreeAsset" => 114,
+        "UnityEngine.UIElements.StyleSheet"
+        | "UnityEngine.UIElements.ThemeStyleSheet"
+        | "UnityEngine.UIElements.VisualTreeAsset" => 114,
         _ => 0,
     }
 }
@@ -87,6 +89,19 @@ fn validate_native_ui_objects(profile: &str, r: &NativeReplacement) -> Result<()
         ".uss" => {
             if r.content.objects.len() != 1 || count("UnityEngine.UIElements.StyleSheet") != 1 {
                 bail!("native USS content requires exactly one StyleSheet");
+            }
+        }
+        ".tss" => {
+            let theme = count("UnityEngine.UIElements.ThemeStyleSheet");
+            if theme == 0
+                || theme
+                    + count("UnityEngine.UIElements.StyleSheet")
+                    + count("UnityEngine.Texture2D")
+                    != r.content.objects.len()
+            {
+                bail!(
+                    "native TSS content requires a ThemeStyleSheet with only the style sheets and textures of the themes it imports"
+                );
             }
         }
         ".uxml" => {
@@ -413,7 +428,10 @@ impl Inner {
         let texture = crate::runtimeartifact::texture_profile(profile.trim_start_matches('.'));
         let audio = crate::runtimeartifact::audio_profile(profile.trim_start_matches('.'));
         let text = crate::runtimeartifact::text_profile(profile.trim_start_matches('.'));
-        let ui = matches!(profile.as_str(), ".uss" | ".uxml" | ".ttf" | ".otf");
+        let ui = matches!(
+            profile.as_str(),
+            ".uss" | ".tss" | ".uxml" | ".ttf" | ".otf"
+        );
         // Packed by the importer; its textures are sources of their own.
         let atlas = profile == ".spriteatlasv2";
         let shader = profile == ".shader";

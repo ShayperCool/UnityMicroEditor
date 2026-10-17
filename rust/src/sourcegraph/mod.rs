@@ -728,8 +728,12 @@ pub fn build_source_graph(
                     // way, and code that needs the missing one fails to
                     // compile. Built-in packages of 6000.6 still name
                     // `Unity.Mathematics`, which is now an engine module.
+                    // The tool's runtime package is the tool's, like those, and
+                    // guards the code that needs an optional package with
+                    // version defines.
                     if package.is_some_and(|package| {
                         matches!(package.source.as_str(), "registry" | "builtin" | "git")
+                            || package.name == crate::packages::RUNTIME_PACKAGE
                     }) {
                         continue;
                     }

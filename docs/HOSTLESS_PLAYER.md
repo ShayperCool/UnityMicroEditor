@@ -375,6 +375,17 @@ needs one Editor run, or a project `Library` an Editor already filled.
     a watched session.
   - `Unity.Collections.CodeGen` is left out, because it names an Editor
     assembly of the package that the compilation lacks.
+- **The runtime bridge.** A supplied host carries the tool's compiled bridge
+  (`UnityMicroEditor.dll`), and the source graph accepts it only while the
+  bridge's sources match the host's proof. After a tool update that changes
+  `Packages/com.unitymicroeditor.runtime/Runtime`, a host has to be built
+  again, which runs the Editor once. The bridge is not yet compiled with the
+  SDK for a preparation, as it is for a session.
+- **Shader build time.** Every preparation builds each shader in its own
+  worker run, about 20 s each. `Library/UnityMicroEditor/shader-cache` keeps
+  the compiled variants, but not the built Player objects. The URP copy spends
+  about 35 minutes on 85 shaders and compute shaders in every preparation,
+  although the package shaders do not change.
 - **Render pipelines.** URP's shaders are built per project in the import
   worker with URP's own Editor code, and its runtime assemblies are package
   builds. A host without URP therefore runs a URP project. Shaders of a

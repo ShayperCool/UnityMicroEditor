@@ -944,3 +944,51 @@ fn module_packages_reference_their_engine_module_assemblies() {
         .is_empty()
     );
 }
+
+#[test]
+fn the_runtime_package_leaves_out_a_reference_the_project_lacks() {
+    for (name, accepted) in [
+        (crate::packages::RUNTIME_PACKAGE, true),
+        ("com.test.embedded", false),
+    ] {
+        let (_directory, project) = temp();
+        fs::create_dir(sysutil::join(&[&project, "Assets"])).unwrap();
+        write_graph_file(&project, "Packages/manifest.json", r#"{"dependencies":{}}"#);
+        write_graph_file(
+            &project,
+            &format!("Packages/{name}/package.json"),
+            &format!(r#"{{"name":"{name}","version":"1.0.0"}}"#),
+        );
+        write_graph_file(
+            &project,
+            &format!("Packages/{name}/Runtime.asmdef"),
+            r#"{"name":"Runtime","references":["Unity.Addressables"]}"#,
+        );
+        write_graph_file(
+            &project,
+            &format!("Packages/{name}/Runtime.asmdef.meta"),
+            "guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+        );
+        write_graph_file(
+            &project,
+            &format!("Packages/{name}/Runtime.cs"),
+            "public class Runtime {}",
+        );
+        write_graph_file(
+            &project,
+            &format!("Packages/{name}/Runtime.cs.meta"),
+            "guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+        );
+        let options = SourceGraphOptions {
+            project: project.clone(),
+            profile: Some(signed(fixture_profile(&[
+                "ENABLE_MONO",
+                "UNITY_STANDALONE_LINUX",
+            ]))),
+            packages: Some(resolve(&project, "")),
+            ..Default::default()
+        };
+        let result = build_source_graph(&background(), &options);
+        assert_eq!(result.is_ok(), accepted, "{name}: {:?}", result.err());
+    }
+}

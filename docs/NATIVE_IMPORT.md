@@ -58,7 +58,7 @@ Each cache entry records an `environmentSha256`. The fingerprint covers the pinn
 ## How an import works
 
 1. The coordinator creates an isolated context with its own `Assets`, `ProjectSettings`, `Packages`, `Library` and `Logs`, and copies the exact source and `.meta` bytes into it.
-2. The coordinator writes a minimal `SourceAssetDB` directly: GUIDs, paths, importer settings, the children of every folder and XXH3-128 file hashes taken from the sources. Nothing is copied from an Editor, except for the two kinds of import that need a piece of one: [models that make their own material](#obj-and-collada-models) and [scripted importers](#scripted-importers). Those run in batches of their own, so what an asset is imported with does not depend on what changed along with it.
+2. The coordinator writes a minimal `SourceAssetDB` directly: GUIDs, paths, importer settings, the children of every folder and XXH3-128 file hashes taken from the sources. It also holds the register of the engine's scripts, read from the installed Editor's `unity default resources` ([UI and fonts](#ui-and-fonts)). Nothing is copied from an Editor run, except for the two kinds of import that need a piece of one: [models that make their own material](#obj-and-collada-models) and [scripted importers](#scripted-importers). Those run in batches of their own, so what an asset is imported with does not depend on what changed along with it.
 3. It starts a DataStore with a unique namespace, accepts the worker's local TCP connection, and sends `Initialize`, `Prepare` and `ImportRequest`.
 4. Requests use the primary importer ID `-1`, so the native pipeline picks the importer and reads its settings from `.meta`. Explicit importer IDs run an extra importer with default settings and are rejected by content validation.
 5. The worker is stopped through the protocol, then the DataStore, whose shared memory segments in `/dev/shm` are removed: the service is ended by a signal and leaves about 180 MB a run there. It reads only the stopped store, following `ImportResponse.ArtifactBlobs[1]` → `ArtifactMetaInfo.Files[].Hash` → the stored file.
@@ -676,7 +676,7 @@ A baked source is kept with the hashes of the project's files it was built from:
 
 ## UI and fonts
 
-Unchanged UXML, USS and font assets are extracted from an existing Unity import cache rather than imported cold. See [UI_IMPORTS.md](UI_IMPORTS.md).
+UXML, USS and font assets are extracted from the Editor's import cache while it is current. Otherwise the worker imports them. The coordinator writes the register of the engine's scripts (`mem://Library/MonoManager.asset`) into every source database, because UI Toolkit's importers add objects of the engine's script classes. See [UI_IMPORTS.md](UI_IMPORTS.md).
 
 ## Limits
 

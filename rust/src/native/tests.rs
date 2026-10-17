@@ -2218,7 +2218,7 @@ fn script_register_lists_the_ui_scripts_of_the_installed_editor() {
     let text = std::str::from_utf8(&register).unwrap();
     assert!(
         text.starts_with(
-            "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!116 &1\nMonoManager:\n"
+            "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!116 &1\nMonoManager:\n  m_ObjectHideFlags: 0\n  serializedVersion: 3\n"
         )
     );
     // VisualTreeAsset and StyleSheet.
@@ -2227,4 +2227,156 @@ fn script_register_lists_the_ui_scripts_of_the_installed_editor() {
             "  - {{fileID: {id}, guid: 0000000000000000e000000000000000, type: 0}}\n"
         )));
     }
+}
+
+#[test]
+fn ui_source_references_follow_guids_and_relative_urls() {
+    let known = |path: &str| match path {
+        "Packages/p/UI/Window.uss" => Some("aa".repeat(16)),
+        "Packages/p/Common.uss" => Some("bb".repeat(16)),
+        "Assets/Art/My Icon.png" => Some("cc".repeat(16)),
+        _ => None,
+    };
+    let theme = br#"@import url("unity-theme://default");
+@import url("Window.uss");
+@import url('../Common.uss');
+.a { background-image: url("project://database/Assets/Art/My%20Icon.png?fileID=2800000&type=3#My Icon"); }
+.b { background-image: url("/Assets/Art/My Icon.png"); }
+.c { -unity-font: url("project://database/Assets/F.ttf?fileID=1&guid=DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD&type=3#F"); }
+.d { background-image: url("Missing.png"); }"#;
+    let mut expected = vec![
+        "aa".repeat(16),
+        "bb".repeat(16),
+        "cc".repeat(16),
+        "dd".repeat(16),
+    ];
+    expected.sort();
+    assert_eq!(
+        super::warm::ui_source_references("Packages/p/UI/Theme.tss", theme, &known),
+        expected
+    );
+    // Nothing above the project root.
+    assert!(
+        super::warm::ui_source_references("A.uss", br#"url("../../x.uss")"#, &known).is_empty()
+    );
+}
+
+#[test]
+fn ui_import_order_puts_each_source_after_what_it_names() {
+    // The theme names both sheets; Window.uss names Common.uss, which names
+    // Window.uss back.
+    let files = |path: &str| -> anyhow::Result<Vec<u8>> {
+        Ok(match path {
+            "P/Theme.tss" => b"@import url(\"Common.uss\"); @import url(\"Window.uss\");".to_vec(),
+            "P/Window.uss" => {
+                b"@import url(\"Common.uss\"); .a { background-image: url(\"Icon.png\"); }".to_vec()
+            }
+            "P/Common.uss" => b"@import url(\"Window.uss\");".to_vec(),
+            _ => Vec::new(),
+        })
+    };
+    let guid_of = |path: &str| Some(format!("{:0>32}", path.len() + path.as_bytes()[2] as usize));
+    let paths = ["P/Theme.tss", "P/Window.uss", "P/Common.uss", "P/Icon.png"];
+    let path_of = |guid: &str| {
+        paths
+            .iter()
+            .find(|path| guid_of(path).as_deref() == Some(guid))
+            .map(|path| path.to_string())
+    };
+    let order =
+        super::warm::ui_import_order("P/Theme.tss", &files, &guid_of, &path_of, &|_| true).unwrap();
+    let at = |path: &str| order.iter().position(|item| item == path).unwrap();
+    assert_eq!(order.len(), 4);
+    assert_eq!(at("P/Theme.tss"), 3);
+    assert!(at("P/Icon.png") < at("P/Window.uss"));
+    assert!(at("P/Window.uss") < at("P/Theme.tss") && at("P/Common.uss") < at("P/Theme.tss"));
+    // Not importable: not followed.
+    let order = super::warm::ui_import_order("P/Theme.tss", &files, &guid_of, &path_of, &|path| {
+        !path.ends_with(".png")
+    })
+    .unwrap();
+    assert!(!order.iter().any(|path| path.ends_with(".png")));
+}
+
+#[test]
+fn a_real_theme_projects_and_binds_its_imports() {
+    // Optional: UNITY_WORKER_UI_FIXTURES holds the worker's artifact of SRP
+    // Core's RuntimeDebugWindow.tss, named by its GUID plus `.bin`, and
+    // UNITY_EDITOR names the Editor whose binary2text reads it.
+    let (Some(root), Some(editor)) = (
+        std::env::var("UNITY_WORKER_UI_FIXTURES")
+            .ok()
+            .filter(|v| !v.is_empty()),
+        std::env::var("UNITY_EDITOR").ok().filter(|v| !v.is_empty()),
+    ) else {
+        return;
+    };
+    const THEME: &str = "76404632120e0ae4885fc7be8197097c";
+    let Ok(input) = fs::read(format!("{root}/{THEME}.bin")) else {
+        return;
+    };
+    let (output, metadata) = crate::runtimeartifact::adapt_ui(&input, "tss").unwrap();
+    let count = |name: &str| {
+        metadata
+            .objects
+            .iter()
+            .filter(|object| object.type_name == name)
+            .count()
+    };
+    assert_eq!(count("UnityEngine.UIElements.ThemeStyleSheet"), 2);
+    assert_eq!(count("UnityEngine.Texture2D") + 2, metadata.objects.len());
+    let temp = tempfile::tempdir().unwrap();
+    let (file, dump) = (temp.path().join("theme.bin"), temp.path().join("theme.txt"));
+    fs::write(&file, &output).unwrap();
+    let reader = format!("{}/Data/Tools/binary2text", crate::sysutil::dir(&editor));
+    assert!(
+        std::process::Command::new(reader)
+            .arg(&file)
+            .arg(&dump)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let content = NativeContentFile {
+        guid: THEME.into(),
+        objects: metadata
+            .objects
+            .iter()
+            .map(|object| NativeContentObject {
+                file_id: object.file_id.clone(),
+                type_name: object.type_name.clone(),
+            })
+            .collect::<Vec<_>>()
+            .into(),
+        dependencies: metadata
+            .external_references
+            .iter()
+            .map(|reference| NativeContentDependency {
+                guid: reference.guid.clone(),
+                global: reference.guid == "0000000000000000e000000000000000",
+            })
+            .collect::<Vec<_>>()
+            .into(),
+        ..Default::default()
+    };
+    let bindings = parse_native_ui_bindings(&fs::read(&dump).unwrap(), &content).unwrap();
+    // The theme imports the default theme, which it holds, and the
+    // package's style sheet.
+    let main = bindings
+        .iter()
+        .filter(|binding| binding.owner_file_id == "-4733365628477956816")
+        .map(|binding| {
+            (
+                binding.property_path.as_str(),
+                binding.target_guid.as_str(),
+                binding.target_file_id.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(main.contains(&("imports[0].styleSheet", THEME, "4413694071827464959")));
+    assert!(main.contains(&(
+        "imports[1].styleSheet",
+        "3a8aa4d508da46d4dace18b280f064aa",
+        "7433441132597879392"
+    )));
 }

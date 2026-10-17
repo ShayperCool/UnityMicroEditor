@@ -177,7 +177,7 @@ pub fn script_register(editor: &str) -> Result<Arc<Vec<u8>>> {
         bail!("{path} holds no scripts");
     }
     let mut text = String::from(
-        "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!116 &1\nMonoManager:\n  m_ObjectHideFlags: 0\n  m_Scripts:\n",
+        "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!116 &1\nMonoManager:\n  m_ObjectHideFlags: 0\n  serializedVersion: 3\n  m_ScriptHashes: {}\n  m_RuntimeClassHashes: {}\n  m_Scripts:\n",
     );
     for script in &scripts {
         text.push_str(&format!(

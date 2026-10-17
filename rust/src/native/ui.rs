@@ -30,7 +30,7 @@ static UI_DUMP_EXTERNAL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^path\(([0-9]+)\): .* GUID: ([0-9a-f]{32}) Type: ([0-9]+)$").unwrap()
 });
 static UI_DUMP_OBJECT: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^ID: (-?[0-9]+) \(ClassID: 114\) ").unwrap());
+    LazyLock::new(|| Regex::new(r"^ID: (-?[0-9]+) \(ClassID: (114|28)\) ").unwrap());
 static UI_DUMP_MANAGED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^rid (-?[0-9]+) \(class: ").unwrap());
 
@@ -46,6 +46,12 @@ struct UiDumpFrame {
 }
 
 const STYLE_SHEET: &str = "UnityEngine.UIElements.StyleSheet";
+const THEME_STYLE_SHEET: &str = "UnityEngine.UIElements.ThemeStyleSheet";
+
+/// A style sheet, a theme's included.
+fn style_sheet(kind: &str) -> bool {
+    kind == STYLE_SHEET || kind == THEME_STYLE_SHEET
+}
 
 /// Reads a `binary2text` dump of one native UI artifact against its descriptor.
 pub fn parse_native_ui_bindings(
@@ -60,7 +66,7 @@ pub fn parse_native_ui_bindings(
     for object in file.objects.iter() {
         owners.insert(
             &object.file_id,
-            object.type_name == STYLE_SHEET
+            style_sheet(&object.type_name)
                 || object.type_name == "UnityEngine.UIElements.VisualTreeAsset",
         );
         kinds.insert(&object.file_id, &object.type_name);
@@ -102,8 +108,15 @@ pub fn parse_native_ui_bindings(
                 bail!("native UI dump has a non-UI object");
             };
             owner = m[1].to_string();
-            if !owners.get(owner.as_str()).copied().unwrap_or(false) {
-                bail!("native UI dump owner identity differs from descriptor");
+            match (&m[2], owners.get(owner.as_str())) {
+                ("114", Some(true)) => {}
+                // A theme holds the textures of the themes it imports.
+                ("28", Some(false))
+                    if kinds.get(owner.as_str()) == Some(&"UnityEngine.Texture2D") =>
+                {
+                    owner.clear();
+                }
+                _ => bail!("native UI dump owner identity differs from descriptor"),
             }
             frames.clear();
             managed_index = 0;
@@ -187,7 +200,10 @@ pub fn parse_native_ui_bindings(
             }
             let target = id.to_string();
             if parent.file_index == 0 {
-                if kinds.get(target.as_str()) == Some(&STYLE_SHEET) {
+                if kinds
+                    .get(target.as_str())
+                    .is_some_and(|kind| style_sheet(kind))
+                {
                     result.push(NativeUIBinding {
                         owner_file_id: owner.clone(),
                         property_path: parent.path.clone(),
@@ -326,7 +342,7 @@ pub(crate) fn bind_native_ui_references(
     mut entry: NativeReplacement,
 ) -> Result<NativeReplacement> {
     let profile = lower_ext(&entry.source_path);
-    if profile != ".uxml" && profile != ".uss" {
+    if !matches!(profile.as_str(), ".uxml" | ".uss" | ".tss") {
         return Ok(entry);
     }
     let project = &opts.project;

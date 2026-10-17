@@ -62,6 +62,19 @@ pub struct WarmNativeArtifact {
 
 const MAXIMUM_WARM_SOURCE_BYTES: usize = 64 << 20;
 
+/// The databases of an Editor's imports in the project's `Library`.
+const WARM_DATABASES: [&str; 3] = ["SourceAssetDB", "ArtifactDB", "DataStore/uds.db"];
+
+/// Whether the project's `Library` holds the databases an Editor's imports
+/// leave, which the warm route takes its UI imports from. A project no
+/// Editor opened has none; its UI sources are imported by the worker.
+pub(crate) fn warm_database_available(project: &str) -> bool {
+    WARM_DATABASES.iter().all(|name| {
+        sysutil::stat(&sysutil::join(&[project, "Library", name]))
+            .is_ok_and(|info| info.is_regular())
+    })
+}
+
 pub fn extract_warm_native_ui(
     ctx: &Context,
     project: &str,
@@ -78,7 +91,7 @@ pub fn extract_warm_native_ui(
     let source = resolve_project_import_source(project, logical)?;
     resolve_project_import_source(project, &format!("{logical}.meta"))?;
     let mut snapshots = Vec::new();
-    for name in ["SourceAssetDB", "ArtifactDB", "DataStore/uds.db"] {
+    for name in WARM_DATABASES {
         let path = sysutil::join(&[project, "Library", name]);
         match sysutil::stat(&path) {
             Ok(info) if info.is_regular() => snapshots.push((path, info)),
@@ -463,6 +476,165 @@ impl NativeProjectImporter {
             .emit();
         Ok(())
     }
+}
+
+impl NativeProjectImporter {
+    /// Imports a UI source in the standalone worker, after the sources it
+    /// names by GUID that are not imported yet, so that its importer finds
+    /// them as the Editor's does.
+    pub(crate) fn import_cold_ui(&mut self, ctx: &Context, logical: &str) -> Result<()> {
+        let sources = super::player_objects::open_sources(&self.opts.project)?;
+        let batch = ui_import_order(
+            logical,
+            &|path| sources.read(path),
+            &|path| sources.guid_of(path).map(str::to_string),
+            &|guid| sources.path_of(guid).map(str::to_string),
+            // The importers load what a source names, which the worker has
+            // only among the imports of its own batch: an import done before
+            // is done again. Without it the source names an
+            // import-in-progress proxy (class 41386430).
+            &|path| super::batch::cold_ui_profile(path) || super::cold_native_profile(path),
+        )?;
+        if batch.len() > super::NATIVE_IMPORT_BATCH_SIZE {
+            bail!("the UI source {logical} names more sources than one import holds");
+        }
+        self.import_cold_batch(ctx, &batch)
+    }
+}
+
+/// `logical` after the sources it names, transitively, each after the ones
+/// it names: the order one batch imports them in. Only sources `importable`
+/// accepts are followed; a cycle is cut where it closes.
+pub(crate) fn ui_import_order(
+    logical: &str,
+    read: &dyn Fn(&str) -> Result<Vec<u8>>,
+    guid_of: &dyn Fn(&str) -> Option<String>,
+    path_of: &dyn Fn(&str) -> Option<String>,
+    importable: &dyn Fn(&str) -> bool,
+) -> Result<Vec<String>> {
+    struct Walk<'a> {
+        read: &'a dyn Fn(&str) -> Result<Vec<u8>>,
+        guid_of: &'a dyn Fn(&str) -> Option<String>,
+        path_of: &'a dyn Fn(&str) -> Option<String>,
+        importable: &'a dyn Fn(&str) -> bool,
+        order: Vec<String>,
+        visiting: HashSet<String>,
+    }
+    impl Walk<'_> {
+        fn visit(&mut self, path: &str) -> Result<()> {
+            if self.order.iter().any(|done| done == path) || !self.visiting.insert(path.to_string())
+            {
+                return Ok(());
+            }
+            if self.order.len() > 4096 {
+                bail!("UI sources name too many sources");
+            }
+            if matches!(lower_ext(path).as_str(), ".uxml" | ".uss" | ".tss") {
+                for guid in ui_source_references(path, &(self.read)(path)?, self.guid_of) {
+                    if let Some(named) =
+                        (self.path_of)(&guid).filter(|named| (self.importable)(named))
+                    {
+                        self.visit(&named)?;
+                    }
+                }
+            }
+            self.visiting.remove(path);
+            self.order.push(path.to_string());
+            Ok(())
+        }
+    }
+    let mut walk = Walk {
+        read,
+        guid_of,
+        path_of,
+        importable,
+        order: Vec::new(),
+        visiting: HashSet::new(),
+    };
+    walk.visit(logical)?;
+    Ok(walk.order)
+}
+
+/// The GUIDs of the sources a UI source names: by GUID, as the Editor writes
+/// a reference (`project://database/...?guid=`, a UXML `src` with its GUID),
+/// or by path in a `url()`, relative to the source, to the project (`/`), or
+/// as a `project://database/` URL. A theme (`unity-theme://`) and other
+/// schemes name no source. `guid_of` finds the GUID of a logical path.
+pub(crate) fn ui_source_references(
+    logical: &str,
+    text: &[u8],
+    guid_of: &dyn Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    static GUID: std::sync::LazyLock<regex::bytes::Regex> =
+        std::sync::LazyLock::new(|| regex::bytes::Regex::new(r"guid=([0-9a-fA-F]{32})").unwrap());
+    static URL: std::sync::LazyLock<regex::bytes::Regex> = std::sync::LazyLock::new(|| {
+        regex::bytes::Regex::new(r#"url\(\s*["']?([^"')]+?)["']?\s*\)"#).unwrap()
+    });
+    let mut found = Vec::new();
+    for capture in GUID.captures_iter(text) {
+        found.push(String::from_utf8_lossy(&capture[1]).to_ascii_lowercase());
+    }
+    for capture in URL.captures_iter(text) {
+        let url = String::from_utf8_lossy(&capture[1]);
+        if url.contains("guid=") {
+            continue;
+        }
+        let url = url.split(['?', '#']).next().unwrap_or_default();
+        let url = percent_decoded(url);
+        let joined = if let Some(rest) = url.strip_prefix("project://database/") {
+            rest.to_string()
+        } else if url.contains("://") {
+            continue;
+        } else if let Some(rest) = url.strip_prefix('/') {
+            rest.to_string()
+        } else {
+            format!("{}/{url}", sysutil::dir(logical))
+        };
+        let Some(path) = normalized(&joined) else {
+            continue;
+        };
+        if let Some(guid) = guid_of(&path) {
+            found.push(guid);
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+fn percent_decoded(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%'
+            && let Some(value) = text
+                .get(at + 1..at + 3)
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+        {
+            out.push(value);
+            at += 3;
+            continue;
+        }
+        out.push(bytes[at]);
+        at += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A logical path with its `.` and `..` parts resolved; `None` above the root.
+fn normalized(path: &str) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
 }
 
 fn warm_native_guid_path(project: &str, guid: &str) -> Result<String> {

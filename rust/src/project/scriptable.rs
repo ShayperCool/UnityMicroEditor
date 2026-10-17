@@ -59,10 +59,14 @@ impl Inner {
         let script_guid = value::text(script, "guid").into_owned();
         let mut type_name = self.script_type(&script_guid).to_string();
         if script_guid == "0000000000000000e000000000000000" {
-            // Pinned Unity 6 serialized PanelSettings identity.
+            // Pinned Unity 6 serialized PanelSettings identity: script 19101
+            // of the Editor's `unity default resources`. An asset saved
+            // before the Editor wrote class identifiers has an empty one.
             if map_file_id(script) != "19101"
-                || value::text(&data, "m_EditorClassIdentifier")
-                    != "UnityEngine.dll::UnityEngine.UIElements.PanelSettings"
+                || !matches!(
+                    value::text(&data, "m_EditorClassIdentifier").as_ref(),
+                    "" | "UnityEngine.dll::UnityEngine.UIElements.PanelSettings"
+                )
             {
                 bail!("raw ScriptableObject {path} has an unverified built-in MonoScript identity");
             }
