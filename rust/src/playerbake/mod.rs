@@ -44,6 +44,7 @@ pub use managers::{
 pub use mask::{Mask, bake_mask, bake_mask_object, read_mask};
 pub use material::{
     PropertyKind, ShaderFacts, ShaderProperty, read_imported_shader_facts, read_shader_facts,
+    read_shader_names,
 };
 pub use mixer::mixer_undefined_values;
 pub use native::{

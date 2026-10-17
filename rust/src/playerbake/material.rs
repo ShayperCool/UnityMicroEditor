@@ -11,7 +11,7 @@ use super::{
     typetree::{TypeTree, Val},
     unsupported,
 };
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use serde_json::{Map, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -119,6 +119,29 @@ pub fn read_imported_shader_facts(artifact: &[u8]) -> Result<ShaderFacts> {
         bail!("import artifact holds {} shaders, not one", shaders.len());
     };
     parsed_facts(field(&shader.tree.decode(&shader.data)?, "m_ParsedForm")?)
+}
+
+/// The names of the shaders of a file that carries type trees, such as the
+/// Editor's `unity_builtin_extra`, whose shaders lead with the fields of an
+/// Editor object. Only the fields up to the parsed form are read.
+pub fn read_shader_names(file: &[u8]) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    for shader in super::serialized::read_of_class(file, 48)? {
+        let tree = &shader.tree;
+        let Some(fields) = tree
+            .children(0)
+            .iter()
+            .position(|child| tree.nodes[*child].name == "m_ParsedForm")
+        else {
+            bail!("shader {} has no parsed form", shader.local_id);
+        };
+        let value = tree.decode_leading(&shader.data, fields + 1)?;
+        names.push(
+            string(field(&value, "m_ParsedForm")?, "m_Name")
+                .with_context(|| format!("shader {}", shader.local_id))?,
+        );
+    }
+    Ok(names)
 }
 
 fn parsed_facts(parsed: &Val) -> Result<ShaderFacts> {

@@ -365,14 +365,25 @@ pub struct Plan {
 /// The files that state which packages a project has.
 const PACKAGE_FILES: [&str; 2] = ["Packages/manifest.json", "Packages/packages-lock.json"];
 
+/// Whether a shader name stands for a shader built into the Editor.
+type Builtin<'a> = &'a dyn Fn(&str) -> Result<bool>;
+
 /// The shader sources a shader text names, each once, those they name in
-/// turn included.
-fn linked_shaders(sources: &Sources, target: &str, text: &[u8]) -> Result<Vec<String>> {
+/// turn included. A shader built into the Editor whose passes alone a text
+/// uses is left to the worker, which finds it by name and copies the
+/// passes in: nothing built from the text needs it.
+fn linked_shaders(
+    sources: &Sources,
+    builtin: Builtin<'_>,
+    target: &str,
+    text: &[u8],
+) -> Result<Vec<String>> {
     let mut linked: Vec<String> = Vec::new();
     let mut pending = vec![(target.to_string(), text.to_vec())];
     while let Some((from, text)) = pending.pop() {
-        for name in super::baked::linked_shader_names(&text) {
+        for (name, only_passes) in super::baked::linked_shader_links(&text) {
             let path = match &sources.shaders_named(&name)?[..] {
+                [] if only_passes && builtin(&name)? => continue,
                 [] => bail!(Unsupported(format!(
                     "the shader {name:?} that {from} names, which no source of the project or its packages declares"
                 ))),
@@ -410,6 +421,7 @@ pub(super) fn authored(sources: &Sources, project: &str, logical: &str) -> bool 
 /// Plans the build of `target`. `texts` are the shader texts it stands for,
 /// each with the file its relative includes start from: its own source for
 /// a `.shader` or `.compute`, the generated shader for a graph.
+#[allow(clippy::too_many_arguments)]
 pub fn plan(
     sources: &Sources,
     project: &str,
@@ -418,6 +430,7 @@ pub fn plan(
     users: &[String],
     texts: &[(&str, &[u8])],
     graph: &[String],
+    builtin: Builtin<'_>,
 ) -> Result<Plan> {
     let mut plan = Plan {
         scripts: settings.scripts.clone(),
@@ -444,7 +457,7 @@ pub fn plan(
         .map(|(from, text)| (from.to_string(), text.to_vec()))
         .collect();
     for (from, text) in texts {
-        for path in linked_shaders(sources, from, text)? {
+        for path in linked_shaders(sources, builtin, from, text)? {
             if !plan.linked.contains(&path) && path != target {
                 owned.push((path.clone(), sources.read(&path)?));
                 plan.linked.push(path);
@@ -803,9 +816,11 @@ pub fn open_sources(project: &str) -> Result<Sources> {
 
 /// The plan of the build of a `.shader` or `.compute` source, whose text
 /// is its own. `None` for a shader graph, whose text only an import gives.
+/// `editor` is the Editor whose workers build it.
 pub fn plan_source(
     sources: &Sources,
     project: &str,
+    editor: &str,
     reload_list: &str,
     target: &str,
     users: &[String],
@@ -819,7 +834,16 @@ pub fn plan_source(
     } else {
         vec![(target, &text[..])]
     };
-    plan(sources, project, &settings, target, users, &texts, &graph)
+    plan(
+        sources,
+        project,
+        &settings,
+        target,
+        users,
+        &texts,
+        &graph,
+        &|name| Ok(super::host_shaders::editor_builtin_shader_names(editor)?.contains(name)),
+    )
 }
 
 /// The text of the shader a graph is written out as, found by importing
@@ -943,6 +967,9 @@ pub fn write_player_objects(ctx: &Context, build: &Build) -> Result<PlayerObject
             &build.users,
             &texts,
             &graph,
+            &|name| {
+                Ok(super::host_shaders::editor_builtin_shader_names(&build.editor)?.contains(name))
+            },
         )?;
         let request = plan.request.encode()?;
         let identity = sha256(format!("{}\0{request}", importer_identity()).as_bytes());
@@ -1386,6 +1413,7 @@ mod tests {
             &users,
             &[("Assets/S/Lit.shader", shader.as_bytes())],
             &[],
+            &|_| Ok(false),
         )
         .unwrap();
         // Included files first, then the shaders it names, itself, the
@@ -1440,10 +1468,35 @@ mod tests {
             &[],
             &[("Assets/S/Lit.shader", builtin.as_bytes())],
             &[],
+            &|name| Ok(name == "VertexLit"),
         )
         .unwrap_err();
         assert!(refused.is::<Unsupported>());
         assert!(format!("{refused:#}").contains("VertexLit"));
+
+        // A built-in shader whose passes alone are used is left to the
+        // worker; one that is not built in is refused.
+        let passes = "Shader \"Game/B\" { SubShader { UsePass \"Hidden/Nature/Terrain/Utilities/PICKING\" } }";
+        let texts = [("Assets/S/Lit.shader", passes.as_bytes())];
+        let used = |known: &'static str| {
+            plan(
+                &sources,
+                project,
+                &settings,
+                "Assets/S/Lit.shader",
+                &[],
+                &texts,
+                &[],
+                &move |name| Ok(name == known),
+            )
+        };
+        assert!(
+            used("Hidden/Nature/Terrain/Utilities")
+                .unwrap()
+                .linked
+                .is_empty()
+        );
+        assert!(used("VertexLit").unwrap_err().is::<Unsupported>());
     }
 
     #[test]
