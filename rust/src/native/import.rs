@@ -434,6 +434,16 @@ fn import(
             Err(error) => return (None, Some(error)),
         };
     }
+    // As the main Editor does, so that an importer may add objects of the
+    // engine's script classes.
+    match super::scripted::script_register(&opts.editor) {
+        Ok(register) => {
+            input
+                .singletons
+                .insert("Library/MonoManager.asset".into(), register.to_vec());
+        }
+        Err(error) => return (None, Some(error)),
+    }
     if player {
         // The worker reads these managers from the database, as text. With
         // them it has the project's colour space, its quality levels and
