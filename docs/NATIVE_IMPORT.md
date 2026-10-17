@@ -619,7 +619,17 @@ Every importer keeps what it built beneath its own output: the scene's importer,
 
 - The key of a kept build is the SHA-256 of everything the build is made from: the hash of the tool's build importer, the import environment (engine version and project settings), the identity of the project's compiled Editor code, the source and its `.meta`, the materials it is built for, the request sent to the worker, the assets the worker imports in order, the scripts whose assemblies it loads, and the hash of every authored file among them with `Packages/manifest.json` and `Packages/packages-lock.json` standing for the immutable packages. A build is found under its key only, and used only while its file has the hash recorded with it; anything else is a build.
 - The identity of the compiled Editor code changes whenever the Editor compiles the project's scripts, so after a script change the first importer builds again (with the compiled variants of the shader cache) and the others reuse that.
-- The 48 most recently used builds are kept; the directory can be deleted at any time.
+- The most recently used builds are kept, up to 4 GiB of files and 1024 builds; the directory can be deleted at any time.
+
+The store used to keep 48 builds. URP and SRP Core resources are about 85 shaders and compute shaders, so every preparation dropped each build before the next one asked for it again, and none was ever reused.
+
+A pipeline's resources are found one by one: the session stops at the first one it lacks, the importer builds it, and the session tries again. So the first time the importer builds a shader of a pipeline project, it builds the rest side by side beforehand (`native-prebuild`, then `native-prebuilt`). These are the shader sources that the graphics and quality settings reach through settings assets. Sources in an `Editor` folder are skipped. One worker runs for every three cores, between one and six workers, and each result goes into the store under the key of its inputs. A source built for nothing costs time, not correctness. A prebuild that fails is reported (`native-prebuild-failed`), and the importer builds that source again when it asks for it.
+
+A build changes two things that every build reads, and builds running side by side write both safely:
+- the list of assets the pipeline loads by path, which each build merges into and replaces whole;
+- the shader cache, which gets each copied file under a name of its own before the rename.
+
+Measured on the URP copy with a fresh host: a preparation built 85 sources one after another in about 36 minutes. With the store and five workers, the whole preparation took 11 minutes: 54 sources were prebuilt in about 4.5 minutes and 82 builds were reused.
 
 - Cost: `Lit` with one material took 372 s the first time and 35 to 55 s with the compiled variants kept in `Library/UnityMicroEditor/shader-cache`. A project with many materials on `Lit` compiles every combination they enable. The materials are among what the object is built from, so any saved change of a material that uses the shader, not only of its keywords, is one more worker run before the scene is rebuilt.
 - Only shaders that materials reached from the scene (and from registered content scenes and prefabs) name are built. A package shader a script finds by name (`Shader.Find`) stays the prepared one.

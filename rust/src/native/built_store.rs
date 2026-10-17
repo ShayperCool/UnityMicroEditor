@@ -17,9 +17,13 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// How many builds the store keeps; the least recently used go first. One of
-/// a pipeline's lit shader is some 13 MB.
-const KEPT: usize = 48;
+/// How many builds the store keeps, and how many bytes of files; the least
+/// recently used go first. A pipeline's resources are some 90 shaders and
+/// compute shaders, of a few kilobytes to 13 MB (a lit shader); a store
+/// smaller than that set would drop each build before the next preparation
+/// asks for it again.
+const KEPT: usize = 1024;
+const KEPT_BYTES: u64 = 4 << 30;
 
 /// Everything a build of a source depends on. Two builds with equal inputs
 /// run the same code on the same files.
@@ -137,13 +141,13 @@ pub(super) fn store(project: &str, key: &str, target: &str, built: &Built) -> Re
             built: built.clone(),
         },
     )?;
-    prune(&directory, KEPT);
+    prune(&directory, KEPT, KEPT_BYTES);
     Ok(())
 }
 
-/// Removes all but the `kept` most recently written entries. A reader that
-/// loses a file to it builds again.
-fn prune(directory: &str, kept: usize) {
+/// Removes all but the most recently written entries, at most `kept` of them
+/// and `bytes` of their files. A reader that loses a file to it builds again.
+fn prune(directory: &str, kept: usize, bytes: u64) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
@@ -156,9 +160,18 @@ fn prune(directory: &str, kept: usize) {
             valid_key(&key).then_some((written, key))
         })
         .collect();
-    records.sort();
-    let excess = records.len().saturating_sub(kept);
-    for (_, key) in records.into_iter().take(excess) {
+    // Newest first: an entry is kept while both budgets hold.
+    records.sort_by(|a, b| b.cmp(a));
+    let mut total = 0u64;
+    let mut dropped = Vec::new();
+    for (index, (_, key)) in records.into_iter().enumerate() {
+        total += std::fs::metadata(sysutil::join(&[directory, &format!("{key}.bin")]))
+            .map_or(0, |info| info.len());
+        if index >= kept || total > bytes {
+            dropped.push(key);
+        }
+    }
+    for key in dropped {
         for extension in ["json", "bin"] {
             let _ =
                 std::fs::remove_file(sysutil::join(&[directory, &format!("{key}.{extension}")]));
@@ -320,12 +333,31 @@ mod tests {
                 )
                 .unwrap();
         }
-        prune(&directory, 2);
+        prune(&directory, 2, u64::MAX);
         let left: Vec<bool> = keys
             .iter()
             .map(|key| load(&project, key).is_some())
             .collect();
         assert_eq!(left, [false, false, true, true]);
         assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 4);
+        // By size: of the two left, only the newest file fits.
+        for (index, key) in keys.iter().enumerate().skip(2) {
+            std::fs::File::options()
+                .write(true)
+                .open(sysutil::join(&[&directory, &format!("{key}.json")]))
+                .unwrap()
+                .set_modified(
+                    std::time::SystemTime::UNIX_EPOCH
+                        + std::time::Duration::from_secs(2_000 + index as u64),
+                )
+                .unwrap();
+        }
+        let size = built.file.len() as u64;
+        prune(&directory, usize::MAX, size);
+        let left: Vec<bool> = keys
+            .iter()
+            .map(|key| load(&project, key).is_some())
+            .collect();
+        assert_eq!(left, [false, false, false, true]);
     }
 }

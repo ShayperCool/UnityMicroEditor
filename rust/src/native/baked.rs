@@ -737,6 +737,7 @@ impl NativeProjectImporter {
                 self.bake_shader_source(ctx, logical, &guid, &mut ingredients)
             }
             ".shader" | ".shadergraph" | ".compute" => {
+                self.prebuild_pipeline_shaders(ctx);
                 self.build_player_source(ctx, logical, &guid, &mut ingredients, &mut built_paths)
             }
             _ => bail!("no baker for {logical}"),
@@ -1351,15 +1352,6 @@ impl NativeProjectImporter {
     ) -> Result<Baked> {
         let (users, plan) = self.built_plan(logical, guid)?;
         *ingredients = plan.ingredients.clone();
-        let (class, local_id, type_name) = if lower_ext(logical) == ".compute" {
-            (
-                playerbake::COMPUTE_SHADER_CLASS,
-                playerbake::COMPUTE_SHADER_LOCAL_ID,
-                "UnityEngine.ComputeShader",
-            )
-        } else {
-            (48, playerbake::SHADER_LOCAL_ID, "UnityEngine.Shader")
-        };
         // Another importer of the project may have built the same already:
         // that of a content scene builds the shaders of the scene's own.
         let key = self.built_key(logical, guid, &users, &plan)?;
@@ -1379,134 +1371,44 @@ impl NativeProjectImporter {
                     .collect(),
             });
         }
-        let built = write_player_objects(
-            ctx,
-            &Build {
-                project: self.opts.project.clone(),
-                editor: self.opts.editor.clone(),
-                output: sysutil::join(&[&self.opts.output, "native/imports", &random_id()]),
-                target: logical.to_string(),
-                users,
-                timeout: Duration::from_secs(1800),
-                reload_list: self.reload_list(),
-                // Kept for the project, not for the session: a shader of
-                // a thousand variants takes minutes to compile again.
-                shader_cache: sysutil::join(&[
-                    &self.opts.project,
-                    "Library/UnityMicroEditor/shader-cache",
-                ]),
-            },
-        )?;
-        let own = built.objects_of(guid);
-        let [main] = &own[..] else {
-            return Err(Unsupported(format!(
-                "a source whose build writes {} objects of its own, not one",
-                own.len()
-            ))
-            .into());
-        };
-        // A graph's shader has the local ID its importer gave it.
-        let local_id = if lower_ext(logical) == ".shadergraph" {
-            main.local_id
-        } else {
-            local_id
-        };
-        if main.tree.class_id != class || main.local_id != local_id {
-            bail!("the build of {logical} wrote another object than its {type_name}");
-        }
-        for object in &built.objects {
-            match object.tree.class_id {
-                48 => {
-                    playerbake::verify_shader_programs(&object.tree, &object.data)?;
-                }
-                playerbake::COMPUTE_SHADER_CLASS if object.local_id == main.local_id => {}
-                class => {
-                    return Err(Unsupported(format!(
-                        "a source whose build writes an object of class {class} beside it"
-                    ))
-                    .into());
-                }
-            }
-        }
-        // What the objects refer to in other files: the shaders of the
-        // project a shader names, each published as a file of its own.
-        let mut externals = Vec::with_capacity(built.externals.len());
-        let mut external_paths = BTreeMap::new();
-        for external in &built.externals {
-            let path = built
-                .external_paths
-                .get(&external.guid)
-                .cloned()
-                .unwrap_or_default();
-            if external.file_type != 3
-                || external.class_name != "UnityEngine.Shader"
-                || external.local_id != playerbake::SHADER_LOCAL_ID
-                || external.index != playerbake::SHADER_LOCAL_ID
-                || !path.starts_with("Assets/")
-                || lower_ext(&path) != ".shader"
-            {
-                return Err(Unsupported(format!(
-                    "a reference to {} {} of {}, which is not a shader source of the project",
-                    external.class_name,
-                    external.local_id,
-                    if path.is_empty() {
-                        &external.guid
-                    } else {
-                        &path
-                    }
-                ))
-                .into());
-            }
-            external_paths.insert(external.guid.clone(), path);
-            externals.push(playerbake::External {
-                guid: external.guid.clone(),
-            });
-        }
-        // The object itself and the shaders of packages it names, under the
-        // local IDs the build gave them.
-        let mut objects = vec![playerbake::Object {
-            local_id: main.local_id,
-            tree: &main.tree,
-            data: main.data.clone(),
-            script: None,
-        }];
-        for object in &built.objects {
-            if object.local_id != main.local_id {
-                objects.push(playerbake::Object {
-                    local_id: object.local_id,
-                    tree: &object.tree,
-                    data: object.data.clone(),
-                    script: None,
-                });
-            }
-        }
-        objects.sort_by_key(|object| object.local_id);
-        let file = playerbake::write(&objects, &externals)?;
-        Event::new("native-built")
-            .with("path", logical)
-            .with("imports", &built.imports)
-            .with("objects", &built.objects.len())
-            .seconds("artifactDatabaseSeconds", built.database_seconds)
-            .seconds("elapsedSeconds", built.seconds)
-            .emit();
-        let baked = Baked {
-            file,
-            objects: vec![(local_id.to_string(), type_name.into())],
-            externals,
-        };
+        let kept = build_source(ctx, &self.build_of(logical, users), guid)?;
         // Kept under what the build was planned from, and under what a
         // plan says now when the build itself added to the list of assets
         // the pipeline loads by path: the next plan is made with that list.
-        let kept = built_store::Built {
-            file: baked.file.clone(),
-            objects: baked.objects.clone(),
-            externals: baked
+        self.keep_built(logical, guid, key, &kept);
+        paths.extend(kept.external_paths.clone());
+        Ok(Baked {
+            file: kept.file,
+            objects: kept.objects,
+            externals: kept
                 .externals
-                .iter()
-                .map(|external| external.guid.clone())
+                .into_iter()
+                .map(|guid| playerbake::External { guid })
                 .collect(),
-            external_paths: external_paths.clone(),
-        };
+        })
+    }
+
+    /// The build of a source for the materials `users`.
+    fn build_of(&self, logical: &str, users: Vec<String>) -> Build {
+        Build {
+            project: self.opts.project.clone(),
+            editor: self.opts.editor.clone(),
+            output: sysutil::join(&[&self.opts.output, "native/imports", &random_id()]),
+            target: logical.to_string(),
+            users,
+            timeout: Duration::from_secs(1800),
+            reload_list: self.reload_list(),
+            // Kept for the project, not for the session: a shader of
+            // a thousand variants takes minutes to compile again.
+            shader_cache: sysutil::join(&[
+                &self.opts.project,
+                "Library/UnityMicroEditor/shader-cache",
+            ]),
+        }
+    }
+
+    /// Stores a build under `key` and under the key a plan gives now.
+    fn keep_built(&self, logical: &str, guid: &str, key: String, kept: &built_store::Built) {
         let mut keys = vec![key];
         if let Ok((users, plan)) = self.built_plan(logical, guid)
             && let Ok(now) = self.built_key(logical, guid, &users, &plan)
@@ -1516,16 +1418,132 @@ impl NativeProjectImporter {
         }
         for key in keys {
             // Only a store: without it the next importer builds again.
-            if let Err(error) = built_store::store(&self.opts.project, &key, logical, &kept) {
+            if let Err(error) = built_store::store(&self.opts.project, &key, logical, kept) {
                 Event::new("native-build-not-kept")
                     .with("path", logical)
                     .with("reason", &format!("{error:#}"))
                     .emit();
             }
         }
-        paths.extend(external_paths);
-        Ok(baked)
     }
+}
+
+/// Has the Editor's own build code write the Player object of a shader, a
+/// shader graph or a compute shader in a standalone worker, and checks what
+/// it wrote.
+fn build_source(ctx: &Context, build: &Build, guid: &str) -> Result<built_store::Built> {
+    let logical = build.target.as_str();
+    let (class, local_id, type_name) = if lower_ext(logical) == ".compute" {
+        (
+            playerbake::COMPUTE_SHADER_CLASS,
+            playerbake::COMPUTE_SHADER_LOCAL_ID,
+            "UnityEngine.ComputeShader",
+        )
+    } else {
+        (48, playerbake::SHADER_LOCAL_ID, "UnityEngine.Shader")
+    };
+    let built = write_player_objects(ctx, build)?;
+    let own = built.objects_of(guid);
+    let [main] = &own[..] else {
+        return Err(Unsupported(format!(
+            "a source whose build writes {} objects of its own, not one",
+            own.len()
+        ))
+        .into());
+    };
+    // A graph's shader has the local ID its importer gave it.
+    let local_id = if lower_ext(logical) == ".shadergraph" {
+        main.local_id
+    } else {
+        local_id
+    };
+    if main.tree.class_id != class || main.local_id != local_id {
+        bail!("the build of {logical} wrote another object than its {type_name}");
+    }
+    for object in &built.objects {
+        match object.tree.class_id {
+            48 => {
+                playerbake::verify_shader_programs(&object.tree, &object.data)?;
+            }
+            playerbake::COMPUTE_SHADER_CLASS if object.local_id == main.local_id => {}
+            class => {
+                return Err(Unsupported(format!(
+                    "a source whose build writes an object of class {class} beside it"
+                ))
+                .into());
+            }
+        }
+    }
+    // What the objects refer to in other files: the shaders of the
+    // project a shader names, each published as a file of its own.
+    let mut externals = Vec::with_capacity(built.externals.len());
+    let mut external_paths = BTreeMap::new();
+    for external in &built.externals {
+        let path = built
+            .external_paths
+            .get(&external.guid)
+            .cloned()
+            .unwrap_or_default();
+        if external.file_type != 3
+            || external.class_name != "UnityEngine.Shader"
+            || external.local_id != playerbake::SHADER_LOCAL_ID
+            || external.index != playerbake::SHADER_LOCAL_ID
+            || !path.starts_with("Assets/")
+            || lower_ext(&path) != ".shader"
+        {
+            return Err(Unsupported(format!(
+                "a reference to {} {} of {}, which is not a shader source of the project",
+                external.class_name,
+                external.local_id,
+                if path.is_empty() {
+                    &external.guid
+                } else {
+                    &path
+                }
+            ))
+            .into());
+        }
+        external_paths.insert(external.guid.clone(), path);
+        externals.push(playerbake::External {
+            guid: external.guid.clone(),
+        });
+    }
+    // The object itself and the shaders of packages it names, under the
+    // local IDs the build gave them.
+    let mut objects = vec![playerbake::Object {
+        local_id: main.local_id,
+        tree: &main.tree,
+        data: main.data.clone(),
+        script: None,
+    }];
+    for object in &built.objects {
+        if object.local_id != main.local_id {
+            objects.push(playerbake::Object {
+                local_id: object.local_id,
+                tree: &object.tree,
+                data: object.data.clone(),
+                script: None,
+            });
+        }
+    }
+    objects.sort_by_key(|object| object.local_id);
+    let file = playerbake::write(&objects, &externals)?;
+    Event::new("native-built")
+        .with("path", logical)
+        .with("imports", &built.imports)
+        .with("objects", &built.objects.len())
+        .seconds("artifactDatabaseSeconds", built.database_seconds)
+        .seconds("elapsedSeconds", built.seconds)
+        .emit();
+    Ok(built_store::Built {
+        file,
+        objects: vec![(local_id.to_string(), type_name.into())],
+        externals: externals
+            .into_iter()
+            .map(|external| external.guid)
+            .collect(),
+        external_paths,
+    })
 }
 
 /// The GUID of the clip an authored clip takes its additive reference pose
@@ -1548,4 +1566,163 @@ fn file_sha(path: &str) -> Result<String> {
 
 fn contains(data: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty() && data.windows(needle.len()).any(|window| window == needle)
+}
+
+impl NativeProjectImporter {
+    /// The shader sources the project's render pipeline names through its
+    /// settings: the shaders, compute shaders and graphs the graphics and
+    /// quality settings reach over settings assets (`.asset`), as the
+    /// pipeline's global settings and resources hold them.
+    fn pipeline_shader_sources(&self) -> Result<Vec<(String, String)>> {
+        static GUID: std::sync::LazyLock<regex::bytes::Regex> =
+            std::sync::LazyLock::new(|| regex::bytes::Regex::new(r"guid: ([0-9a-f]{32})").unwrap());
+        let sources = open_sources(&self.opts.project)?;
+        let mut pending: Vec<String> = Vec::new();
+        for settings in &SHADER_SETTINGS[..2] {
+            match resolve_project_import_source(&self.opts.project, settings) {
+                Ok(source) => pending.push(source),
+                Err(error) if is_not_exist(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let mut seen = BTreeSet::new();
+        let mut found = BTreeMap::new();
+        let mut read = 0;
+        while let Some(file) = pending.pop() {
+            read += 1;
+            if read > 512 {
+                break;
+            }
+            let data = read_file(&file)?;
+            if data.len() > 16 << 20 {
+                continue;
+            }
+            for capture in GUID.captures_iter(&data) {
+                let guid = String::from_utf8_lossy(&capture[1]).into_owned();
+                if !seen.insert(guid.clone()) {
+                    continue;
+                }
+                let Some(path) = sources.path_of(&guid) else {
+                    continue;
+                };
+                // An Editor folder holds the Editor's own resources, which no
+                // Player build holds.
+                if path.contains("/Editor/") {
+                    continue;
+                }
+                if shader_source(path) {
+                    found.insert(path.to_string(), guid);
+                } else if lower_ext(path) == ".asset"
+                    && let Some(physical) = sources.physical(path)
+                {
+                    pending.push(physical);
+                }
+            }
+        }
+        Ok(found.into_iter().collect())
+    }
+
+    /// Builds side by side, once per project and import environment in a
+    /// process, the shader sources of the pipeline that are neither
+    /// published nor kept in the project's store, and keeps them there. The
+    /// importer asks for them one by one as it meets them; each then finds
+    /// its build in the store. A build is found only under the hash of all
+    /// its inputs, so one made for nothing costs time, not correctness.
+    fn prebuild_pipeline_shaders(&self, ctx: &Context) {
+        static DONE: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSet::new());
+        let once = format!("{}\0{}", self.opts.project, self.environment_sha256);
+        if !DONE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(once)
+        {
+            return;
+        }
+        let started = std::time::Instant::now();
+        let sources = match self.pipeline_shader_sources() {
+            Ok(sources) => sources,
+            Err(error) => {
+                Event::new("native-prebuild-skipped")
+                    .with("reason", &format!("{error:#}"))
+                    .emit();
+                return;
+            }
+        };
+        let mut jobs = Vec::new();
+        for (logical, guid) in sources {
+            if self.entries.contains_key(&guid) {
+                continue;
+            }
+            let Ok((users, plan)) = self.built_plan(&logical, &guid) else {
+                continue;
+            };
+            let Ok(key) = self.built_key(&logical, &guid, &users, &plan) else {
+                continue;
+            };
+            if built_store::load(&self.opts.project, &key).is_some() {
+                continue;
+            }
+            jobs.push((guid, key, self.build_of(&logical, users)));
+        }
+        if jobs.is_empty() {
+            return;
+        }
+        // A worker run starts a whole Editor process and keeps few cores
+        // busy for most of it.
+        let workers = std::thread::available_parallelism()
+            .map_or(2, |count| count.get() / 3)
+            .clamp(1, 6)
+            .min(jobs.len());
+        Event::new("native-prebuild")
+            .with("sources", &jobs.len())
+            .with("workers", &workers)
+            .emit();
+        let queue = std::sync::Mutex::new(jobs.into_iter());
+        let results = std::sync::Mutex::new(Vec::new());
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        let next = queue
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .next();
+                        let Some((guid, key, build)) = next else {
+                            break;
+                        };
+                        if ctx.err().is_err() {
+                            break;
+                        }
+                        let result = build_source(ctx, &build, &guid);
+                        results
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .push((guid, key, build.target, result));
+                    }
+                });
+            }
+        });
+        let results = results
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut failed = 0;
+        for (guid, key, logical, result) in results {
+            match result {
+                Ok(kept) => self.keep_built(&logical, &guid, key, &kept),
+                // The importer builds it again when it asks for it, and
+                // reports what fails then.
+                Err(error) => {
+                    failed += 1;
+                    Event::new("native-prebuild-failed")
+                        .with("path", &logical)
+                        .with("reason", &format!("{error:#}"))
+                        .emit();
+                }
+            }
+        }
+        Event::new("native-prebuilt")
+            .with("failed", &failed)
+            .seconds("elapsedSeconds", started.elapsed().as_secs_f64())
+            .emit();
+    }
 }
