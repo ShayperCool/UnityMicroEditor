@@ -893,17 +893,28 @@ fn material_use(path: &str, source: &[u8]) -> Result<playerbake::ShaderMaterialU
 /// The shaders a shader source names as its fallback or as the owner of a
 /// pass it uses.
 pub(super) fn linked_shader_names(source: &[u8]) -> Vec<String> {
+    linked_shader_links(source)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// The same, each with whether the source names it only for passes it
+/// uses, which the compiler copies in: such a shader is not needed by what
+/// is built from the source.
+pub(super) fn linked_shader_links(source: &[u8]) -> Vec<(String, bool)> {
     static PATTERN: std::sync::LazyLock<regex::bytes::Regex> = std::sync::LazyLock::new(|| {
         regex::bytes::Regex::new(r#"(?i-u)\b(fallback|usepass)\s*"([^"\r\n]+)""#).unwrap()
     });
     let Ok(text) = crate::project::shader_without_comments(source) else {
         return Vec::new();
     };
-    let mut names = Vec::new();
+    let mut names: Vec<(String, bool)> = Vec::new();
     for found in PATTERN.captures_iter(&text) {
         let name = String::from_utf8_lossy(&found[2]).into_owned();
         // A used pass is named after its shader.
-        let name = if found[1].eq_ignore_ascii_case(b"usepass") {
+        let pass = found[1].eq_ignore_ascii_case(b"usepass");
+        let name = if pass {
             match name.rsplit_once('/') {
                 Some((shader, _)) => shader.to_string(),
                 None => continue,
@@ -911,8 +922,9 @@ pub(super) fn linked_shader_names(source: &[u8]) -> Vec<String> {
         } else {
             name
         };
-        if !names.contains(&name) {
-            names.push(name);
+        match names.iter_mut().find(|(known, _)| *known == name) {
+            Some((_, only_passes)) => *only_passes &= pass,
+            None => names.push((name, pass)),
         }
     }
     names
@@ -1292,6 +1304,7 @@ impl NativeProjectImporter {
         let plan = plan_source(
             &sources,
             &self.opts.project,
+            &self.opts.editor,
             &self.reload_list(),
             logical,
             &users,
