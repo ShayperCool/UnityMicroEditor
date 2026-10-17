@@ -41,6 +41,11 @@ pub(crate) fn mesh_hex(value: &str) -> Result<usize> {
     hex_len(value).map_err(|e| anyhow!("invalid source Mesh hex bytes: {e}"))
 }
 
+/// The serialization of a Mesh the session and the Player read from its
+/// text. 12 added the levels of detail (`m_MeshLodInfo`); the engine
+/// upgrades an older Mesh when it loads it.
+pub const MESH_VERSION: i64 = 12;
+
 /// FBX remains imported by the native worker. The Player verifies the actual
 /// public Mesh buffer/submesh/bounds readback before publishing the asset.
 pub(crate) fn validate_authored_mesh(data: &Map) -> Result<()> {

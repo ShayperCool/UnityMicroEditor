@@ -180,7 +180,8 @@ namespace UnityMicroEditor.Raw
                     foreach (var entry in nativeCache.Assets) assets.Add(entry.Key, entry.Value);
                     if (manifest.renderPipelineGlobalSettings != null)
                         foreach (RawRenderPipelineGlobalSettings settings in manifest.renderPipelineGlobalSettings)
-                            RegisterPipelineGlobalSettings(settings, (RenderPipelineGlobalSettings)assets[AssetKey(settings.guid, settings.fileId)]);
+                            if (!RawGlobalSettings(settings))
+                                RegisterPipelineGlobalSettings(settings, (RenderPipelineGlobalSettings)assets[AssetKey(settings.guid, settings.fileId)]);
                     LoadNativeContentFiles();
                     ValidateRequestedImportedAssets();
                     return;
@@ -245,11 +246,22 @@ namespace UnityMicroEditor.Raw
                 }
             }
 
+            // Global settings published from their authored fields, as a Player
+            // build serializes them, are a raw ScriptableObject: the pipeline
+            // registers them once the raw objects exist (ConfigurePipeline).
+            private bool RawGlobalSettings(RawRenderPipelineGlobalSettings settings)
+            {
+                foreach (RawSceneAsset asset in manifest.assets ?? Array.Empty<RawSceneAsset>())
+                    if (asset.guid == settings.guid && asset.fileId == settings.fileId) return asset.kind == "scriptableObject";
+                return false;
+            }
+
             private void LoadImportedPipelineGlobalSettings()
             {
                 if (manifest.renderPipelineGlobalSettings == null) return;
                 foreach (RawRenderPipelineGlobalSettings settings in manifest.renderPipelineGlobalSettings)
                 {
+                    if (RawGlobalSettings(settings)) continue;
                     RawSceneAsset descriptor = null;
                     foreach (RawSceneAsset asset in manifest.assets)
                         if (asset.guid == settings.guid && asset.fileId == settings.fileId) { descriptor = asset; break; }

@@ -182,6 +182,36 @@ fn authored_mesh_keeps_unity_identity_and_bytes_in_manifest() {
 }
 
 #[test]
+fn a_mesh_file_is_an_authored_mesh() {
+    let fixture = fixture_session();
+    let mut s = fixture.session.lock();
+    let path = "Assets/Meshes/Shape.mesh";
+    write_fixture_file(format!("{}/{path}", fixture.project), SIMPLE_AUTHORED_MESH);
+    let mut mesh = asset(serde_json::json!({
+        "kind": "mesh", "guid": "22222222222222222222222222222222", "path": path,
+    }));
+    s.refresh_asset(&mut mesh).unwrap();
+    assert_eq!(value::text(&mesh, "typeName"), "UnityEngine.Mesh");
+    // Optional: SRP Core's sky mesh, of the Editor at UNITY_EDITOR, which the
+    // session reads as the engine saves it.
+    if let Some(editor) = std::env::var("UNITY_EDITOR").ok().filter(|v| !v.is_empty()) {
+        let sky = format!(
+            "{}/Data/Resources/PackageManager/BuiltInPackages/com.unity.render-pipelines.core/Runtime/PathTracing/Meshes/SkyboxMesh.mesh",
+            crate::sysutil::dir(&editor)
+        );
+        if let Ok(data) = fs::read(&sky) {
+            // Of an older serialization: the engine upgrades it.
+            let documents = parse_unity_yaml(&data).unwrap();
+            assert!(documents.len() == 1 && documents[0].class_id == 43);
+            assert!(
+                number(value::get(documents[0].fields(), "serializedVersion"))
+                    < crate::project::MESH_VERSION
+            );
+        }
+    }
+}
+
+#[test]
 #[allow(clippy::type_complexity)]
 fn authored_mesh_rejects_unsupported_content() {
     let documents = parse_unity_yaml(SIMPLE_AUTHORED_MESH.as_bytes()).unwrap();
@@ -345,6 +375,68 @@ fn authored_material_keeps_properties_and_native_references() {
 /// A material of an older serialization is the engine's to upgrade: the
 /// session asks for it and takes the fields the importer supplies while the
 /// files they were made from are unchanged.
+#[test]
+fn an_older_mesh_takes_the_fields_the_engine_saves() {
+    let fixture = fixture_session();
+    let path = "Assets/Meshes/Old.mesh";
+    let physical = format!("{}/{path}", fixture.project);
+    let outdated =
+        SIMPLE_AUTHORED_MESH.replacen("serializedVersion: 12", "serializedVersion: 11", 1);
+    write_fixture_file(&physical, &outdated);
+    let guid = "33333333333333333333333333333333";
+    write_fixture_file(format!("{physical}.meta"), format!("guid: {guid}\n"));
+    {
+        let mut session = fixture.session.lock();
+        session.by_guid.insert(guid.into(), path.into());
+        session.by_path.insert(path.into(), guid.into());
+    }
+    let refresh = || {
+        let mut mesh = asset(serde_json::json!({"path": path, "kind": "mesh", "guid": guid}));
+        fixture
+            .session
+            .lock()
+            .refresh_asset(&mut mesh)
+            .map(|()| mesh)
+    };
+    let asked = refresh().unwrap_err();
+    assert!(
+        asked
+            .downcast_ref::<crate::project::session::NeedsImportError>()
+            .is_some_and(|error| error.path == path),
+        "{asked:#}"
+    );
+    let upgraded = parse_unity_yaml(SIMPLE_AUTHORED_MESH.as_bytes()).unwrap();
+    let data_json = value::compact_map(upgraded[0].fields()).unwrap();
+    let hash = |file: &str| crate::util::file_hash(file).unwrap();
+    let mut source = crate::project::UpgradedSource {
+        guid: guid.into(),
+        source_path: path.into(),
+        file_id: "4300000".into(),
+        ingredient_sha256: [
+            (path.to_string(), hash(&physical)),
+            (format!("{path}.meta"), hash(&format!("{physical}.meta"))),
+        ]
+        .into(),
+        data_json: data_json.clone(),
+    };
+    // Fields of another object are not taken.
+    source.file_id = "4300001".into();
+    fixture.session.set_upgraded_source(&source).unwrap();
+    assert!(refresh().is_err());
+    source.file_id = "4300000".into();
+    fixture.session.set_upgraded_source(&source).unwrap();
+    let mesh = refresh().unwrap();
+    assert_eq!(
+        value::get(&mesh, "dataJson").as_str(),
+        Some(data_json.as_str())
+    );
+    assert_eq!(value::text(&mesh, "typeName"), "UnityEngine.Mesh");
+    // A changed source asks the importer again.
+    fixture.session.lock().cache.files.clear();
+    write_fixture_file(&physical, outdated.replacen("AuthoredMesh", "Edited", 1));
+    assert!(refresh().is_err());
+}
+
 #[test]
 fn outdated_material_takes_the_fields_the_engine_upgrades_it_to() {
     let fixture = fixture_session();
@@ -905,6 +997,116 @@ fn scriptable_object_preserves_external_reference_identity() {
         str(array(value::get(&data, "components"))[0].field("guid")),
         MULTI_SCRIPTABLE_GUID
     );
+}
+
+const GLOBAL_SETTINGS_FIXTURE: &str = "%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_Name: Global
+  m_Script: {fileID: 11500000, guid: 33333333333333333333333333333333, type: 3}
+  m_Settings:
+    m_SettingsList:
+      m_List:
+      - rid: 1
+      - rid: 2
+      - rid: 3
+    m_RuntimeSettings:
+      m_List:
+      - rid: 2
+  references:
+    version: 2
+    RefIds:
+    - rid: 1
+      type: {class: Kept, ns: Fixture, asm: Fixture}
+      data:
+        shader: {fileID: 4800000, guid: 44444444444444444444444444444444, type: 3}
+    - rid: 2
+      type: {class: EditorOnly, ns: Fixture, asm: Fixture}
+      data:
+        profile: {fileID: 11400000, guid: 55555555555555555555555555555555, type: 2}
+    - rid: 3
+      type: {class: AlsoKept, ns: Fixture, asm: Fixture}
+      data:
+        value: 1
+";
+
+#[test]
+fn global_settings_are_published_as_a_player_build_keeps_them() {
+    let fixture = fixture_session();
+    let path = "Assets/Settings/Global.asset";
+    let physical = format!("{}/{path}", fixture.project);
+    write_fixture_file(&physical, GLOBAL_SETTINGS_FIXTURE);
+    write_fixture_file(
+        format!("{physical}.meta"),
+        format!("guid: {MULTI_SCRIPTABLE_GUID}\n"),
+    );
+    {
+        let mut s = fixture.session.lock();
+        s.script_types
+            .insert(MULTI_SCRIPTABLE_SCRIPT_GUID.into(), "Fixture.Global".into());
+        s.by_guid.insert(MULTI_SCRIPTABLE_GUID.into(), path.into());
+        s.by_path.insert(path.into(), MULTI_SCRIPTABLE_GUID.into());
+    }
+    let refresh = || {
+        let documents = parse_unity_yaml(GLOBAL_SETTINGS_FIXTURE.as_bytes()).unwrap();
+        let mut global = asset(serde_json::json!({
+            "path": path, "guid": MULTI_SCRIPTABLE_GUID, "fileId": "11400000",
+        }));
+        fixture
+            .session
+            .lock()
+            .refresh_scriptable_object(&mut global, &documents)
+            .map(|()| global)
+    };
+    let asked = refresh().unwrap_err();
+    assert!(
+        asked
+            .downcast_ref::<crate::project::session::NeedsImportError>()
+            .is_some_and(|error| error.path == path),
+        "{asked:#}"
+    );
+    let mut settings = crate::project::PlayerGraphicsSettings {
+        guid: MULTI_SCRIPTABLE_GUID.into(),
+        source_path: path.into(),
+        ingredient_sha256: [(path.to_string(), crate::util::file_hash(&physical).unwrap())].into(),
+        kept: [1, 3].into(),
+        stripped: [2].into(),
+    };
+    fixture
+        .session
+        .set_player_graphics_settings(&settings)
+        .unwrap();
+    let global = refresh().unwrap();
+    let data: Value = value::decode_use_number(&value::text(&global, "dataJson")).unwrap();
+    let container = object(value::get(object(&data), "m_Settings"));
+    assert!(container.get("m_SettingsList").is_none());
+    let runtime: Vec<i64> = array(
+        object(value::get(container, "m_RuntimeSettings"))
+            .get("m_List")
+            .unwrap(),
+    )
+    .iter()
+    .map(|item| number(item.field("rid")))
+    .collect();
+    assert_eq!(runtime, [1, 3]);
+    let registry = array(
+        object(value::get(object(&data), "references"))
+            .get("RefIds")
+            .unwrap(),
+    );
+    assert_eq!(registry.len(), 2);
+    // The stripped entry's reference is not followed.
+    let references = value::sprint(value::get(&global, "references"));
+    assert!(references.contains("44444444444444444444444444444444"));
+    assert!(!references.contains("55555555555555555555555555555555"));
+    // An entry the decision did not see asks again.
+    settings.kept = [1].into();
+    fixture
+        .session
+        .set_player_graphics_settings(&settings)
+        .unwrap();
+    assert!(refresh().is_err());
 }
 
 #[test]

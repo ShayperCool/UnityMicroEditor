@@ -3,7 +3,7 @@ use super::{
     expand::{Expanded, builtin_guid, transform, visit_map, visit_references},
     imported_bindings::AssetPreparation,
     lexpath,
-    session::{Inner, asset_key, needs_import},
+    session::{Inner, NeedsImportError, asset_key},
     value::{self, Map, Value, array, compact_map, file_id, get, map_file_id, number, object, str},
     worklist::AssetReferenceWorklist,
 };
@@ -44,6 +44,53 @@ pub(crate) fn supported_class(class: i64) -> bool {
             | 196
             | 1660057539
     )
+}
+
+/// Removes the references to `missing` GUIDs of an asset and of the objects
+/// it holds.
+fn drop_missing_references(asset: &mut Map, missing: &std::collections::BTreeSet<String>) {
+    if let Some(Value::Array(references)) = asset.get_mut("references") {
+        references
+            .retain(|reference| !missing.contains(reference.field("guid").as_str().unwrap_or("")));
+    }
+    // A raw ScriptableObject's data holds its references; the Player reads
+    // a missing one as no object.
+    fn empty(value: &mut Value, missing: &std::collections::BTreeSet<String>) {
+        match value {
+            Value::Object(map)
+                if map.contains_key("fileID")
+                    && map
+                        .get("guid")
+                        .and_then(Value::as_str)
+                        .is_some_and(|guid| missing.contains(guid)) =>
+            {
+                *map = value::map([("fileID", Value::Int(0))]);
+            }
+            Value::Object(map) => map.values_mut().for_each(|item| empty(item, missing)),
+            Value::Array(items) => items.iter_mut().for_each(|item| empty(item, missing)),
+            _ => {}
+        }
+    }
+    let named = asset
+        .get("dataJson")
+        .and_then(Value::as_str)
+        .is_some_and(|json| missing.iter().any(|guid| json.contains(guid.as_str())));
+    if named
+        && let Some(json) = asset.get("dataJson").and_then(Value::as_str)
+        && let Ok(mut data) = value::parse_use_number(json)
+    {
+        empty(&mut data, missing);
+        if let Ok(json) = data.to_json() {
+            asset.insert("dataJson".into(), json.into());
+        }
+    }
+    if let Some(Value::Array(objects)) = asset.get_mut("objects") {
+        for object in objects {
+            if let Value::Object(object) = object {
+                drop_missing_references(object, missing);
+            }
+        }
+    }
 }
 
 pub(crate) fn reference_list(data: &Map) -> Value {
@@ -362,6 +409,8 @@ impl Inner {
             })
             .collect();
         let mut pending = AssetReferenceWorklist::new();
+        let mut missing = std::collections::BTreeSet::new();
+        let mut needed: Vec<String> = Vec::new();
         for collection in ["preloadedAssets", "renderPipelineGlobalSettings"] {
             for item in array(get(&self.baseline, collection)) {
                 pending.add_identity(&str(item.field("guid")), &str(item.field("fileId")))?;
@@ -468,13 +517,7 @@ impl Inner {
                 // No asset of the project or its packages has this GUID:
                 // Unity reads such a reference as missing, and so does the
                 // Player here.
-                continue;
-            }
-            // The authored text keeps fields that exist in the Editor only,
-            // such as those of a pipeline's global settings that name its
-            // Editor tooling in Editor folders. The Player's serialization
-            // has no such field, so the reference is not followed.
-            if path.split('/').any(|part| part == "Editor") {
+                missing.insert(guid);
                 continue;
             }
             let extension = lexpath::lower_ext(&path);
@@ -513,6 +556,11 @@ impl Inner {
                 ".asset" => {
                     a.insert("kind".into(), "scriptableObject".into());
                 }
+                // A mesh saved on its own, as the Editor writes it from a
+                // script (`AssetDatabase.CreateAsset` of a Mesh).
+                ".mesh" => {
+                    a.insert("kind".into(), "mesh".into());
+                }
                 ".mat" => {
                     a.insert("kind".into(), "authoredMaterial".into());
                 }
@@ -522,9 +570,26 @@ impl Inner {
                 ".cubemap" => {
                     a.insert("kind".into(), "cubemap".into());
                 }
-                _ => return Err(needs_import(&path)),
+                _ => {
+                    needed.push(path);
+                    continue;
+                }
             }
-            self.refresh_asset(&mut a)?;
+            // A source the importer has to supply is noted and the walk goes
+            // on, so that one pass names all it lacks.
+            if let Err(error) = self.refresh_asset(&mut a) {
+                match error
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<NeedsImportError>())
+                {
+                    Some(lacking) => {
+                        needed.push(lacking.path.clone());
+                        needed.extend(lacking.also.iter().cloned());
+                        continue;
+                    }
+                    None => return Err(error),
+                }
+            }
             let valid = value::text(&a, "fileId") == id
                 || value::text(&a, "kind") == "prefab" && prefab_objects_contain(&a, &id);
             if !valid {
@@ -533,8 +598,29 @@ impl Inner {
             queue_descriptor_references(&a, &mut pending)?;
             assets.insert(asset_key(&guid, &value::text(&a, "fileId")), a);
         }
+        if let Some((path, also)) = needed.split_first() {
+            let mut also: Vec<String> = also
+                .iter()
+                .filter(|other| *other != path)
+                .cloned()
+                .collect();
+            also.sort();
+            also.dedup();
+            return Err(NeedsImportError {
+                path: path.clone(),
+                also,
+            }
+            .into());
+        }
         let imported_bindings = bindings.result(&assets)?;
         let mut list: Vec<Map> = assets.into_values().collect();
+        // A missing reference is no reference the Player resolves: its field
+        // stays empty, as Unity leaves it.
+        if !missing.is_empty() {
+            for asset in &mut list {
+                drop_missing_references(asset, &missing);
+            }
+        }
         list.sort_by(|a, b| {
             (value::text(a, "guid"), value::text(a, "fileId"))
                 .cmp(&(value::text(b, "guid"), value::text(b, "fileId")))
@@ -614,7 +700,13 @@ impl Inner {
                 self.depend(&path)?;
                 let documents = self.parse(&physical)?;
                 if documents.len() == 1 && documents[0].class_id == 43 {
-                    let data = documents[0].fields();
+                    let mut data = documents[0].fields();
+                    // A Mesh of an older serialization, as the engine saves it.
+                    let upgraded;
+                    if number(get(data, "serializedVersion")) < super::mesh::MESH_VERSION {
+                        upgraded = self.upgraded_source_fields(&path, &documents[0].file_id)?;
+                        data = &upgraded;
+                    }
                     super::mesh::validate_authored_mesh(data)
                         .map_err(|e| e.context(format!("raw Mesh {path}")))?;
                     a.insert("kind".into(), "mesh".into());

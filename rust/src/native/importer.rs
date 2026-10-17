@@ -296,7 +296,14 @@ impl NativeProjectImporter {
                 ));
             }
             attempted.insert(source.clone());
-            self.import_asset(ctx, &source)?;
+            let mut lacking = vec![source];
+            for other in &needed.also {
+                let other = other.strip_suffix(".meta").unwrap_or(other).to_string();
+                if !lacking.contains(&other) && attempted.insert(other.clone()) {
+                    lacking.push(other);
+                }
+            }
+            self.import_needed(ctx, &lacking)?;
         }
     }
 
@@ -327,6 +334,11 @@ impl NativeProjectImporter {
         if profile == "mat" {
             return self.import_material_variant(ctx, logical);
         }
+        // A Mesh is loaded from its authored fields; the session asks only
+        // for one of an older serialization.
+        if profile == "mesh" {
+            return self.upgrade_mesh(ctx, logical);
+        }
         if matches!(
             profile,
             "anim"
@@ -343,6 +355,14 @@ impl NativeProjectImporter {
         ) {
             return self.import_baked(ctx, logical);
         }
+        // A pipeline's global settings are loaded from their authored fields;
+        // the session asks which entries a Player build keeps.
+        if profile == "asset"
+            && let Ok(source) = resolve_project_import_source(&self.opts.project, logical)
+            && super::graphics_settings::holds_graphics_settings(&read_file(&source)?)
+        {
+            return self.import_player_graphics_settings(ctx, logical);
+        }
         if !cold_native_profile(logical) {
             bail!(
                 "native update for {logical} requires an unsupported importer runtime profile ({profile})"
@@ -352,6 +372,15 @@ impl NativeProjectImporter {
         if let Some(batch) = self.atlas_batch.get(logical).cloned() {
             return self.import_cold_batch(ctx, &batch);
         }
+        if self.take_cold_cache(logical)? {
+            return Ok(());
+        }
+        self.import_cold_batch(ctx, &[logical.to_string()])
+    }
+
+    /// Publishes a source's import from the cache when the cache holds one
+    /// made from the source and environment as they are now.
+    pub(crate) fn take_cold_cache(&mut self, logical: &str) -> Result<bool> {
         let input = self.cold_input(logical)?;
         if let Ok(cached) = read_json_verbatim::<NativeReplacement>(&input.cache_path)
             && cached.source_path == logical
@@ -370,10 +399,10 @@ impl NativeProjectImporter {
                     .with("path", logical)
                     .with("guid", &guid)
                     .emit();
-                return Ok(());
+                return Ok(true);
             }
         }
-        self.import_cold_batch(ctx, &[logical.to_string()])
+        Ok(false)
     }
 
     pub(crate) fn require_current_environment(&self) -> Result<()> {

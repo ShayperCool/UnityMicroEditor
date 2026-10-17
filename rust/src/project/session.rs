@@ -35,6 +35,9 @@ pub struct Options {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NeedsImportError {
     pub path: String,
+    /// Other sources the same pass found it needs imported, so that an
+    /// importer can take them together.
+    pub also: Vec<String>,
 }
 impl std::fmt::Display for NeedsImportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -47,7 +50,11 @@ impl std::fmt::Display for NeedsImportError {
 }
 impl std::error::Error for NeedsImportError {}
 pub(crate) fn needs_import(path: &str) -> anyhow::Error {
-    NeedsImportError { path: path.into() }.into()
+    NeedsImportError {
+        path: path.into(),
+        also: Vec::new(),
+    }
+    .into()
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -233,6 +240,10 @@ pub(crate) struct Inner {
     /// The material variants of shaders with an inspector as a build
     /// writes them, by GUID, each with its fields.
     pub inspected_materials: BTreeMap<String, (super::InspectedMaterial, Map)>,
+    /// Sources of an older serialization as the engine saved them, by GUID.
+    pub upgraded_sources: BTreeMap<String, (super::UpgradedSource, Map)>,
+    /// Which entries of global settings assets a Player build keeps, by GUID.
+    pub player_graphics_settings: BTreeMap<String, super::PlayerGraphicsSettings>,
     /// Content derived from part of a source, such as the baked clips of a
     /// model, published under a GUID that no source owns.
     pub derived_native: BTreeMap<String, super::NativeContentFile>,
@@ -353,6 +364,8 @@ impl Inner {
             explicit_sources: HashMap::new(),
             native_overlays: BTreeMap::new(),
             inspected_materials: BTreeMap::new(),
+            upgraded_sources: BTreeMap::new(),
+            player_graphics_settings: BTreeMap::new(),
             derived_native: BTreeMap::new(),
             changed_clip_models: Vec::new(),
             controller_masks: Vec::new(),

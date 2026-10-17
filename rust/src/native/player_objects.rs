@@ -66,6 +66,9 @@ pub struct Request {
     /// The assets whose objects are saved as the Editor writes them as
     /// text, once the engine has loaded them.
     pub save: Vec<String>,
+    /// Render pipeline global settings whose entries a Player build keeps
+    /// are reported.
+    pub settings: Vec<String>,
 }
 
 impl Request {
@@ -80,6 +83,7 @@ impl Request {
             ("write", &self.write),
             ("embed", &self.embed),
             ("save", &self.save),
+            ("settings", &self.settings),
         ] {
             for path in paths {
                 if path.contains(['\n', '\r']) {
@@ -139,6 +143,18 @@ pub struct Report {
     pub volume_profiles: Vec<String>,
     /// The text the Editor writes of each saved asset, by path.
     pub saved: Vec<(String, Vec<u8>)>,
+    /// The entries of global settings a Player build keeps or strips.
+    pub settings: Vec<SettingsEntry>,
+}
+
+/// One entry of a render pipeline's global settings, by its managed
+/// reference ID, and whether a Player build keeps it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettingsEntry {
+    pub path: String,
+    pub rid: i64,
+    pub type_name: String,
+    pub kept: bool,
 }
 
 fn external(statement: &str) -> Option<ExternalObject> {
@@ -218,6 +234,25 @@ pub fn parse_report(text: &str) -> Result<Report> {
                     .decode(text)
                     .map_err(|_| malformed())?;
                 report.saved.push((path.to_string(), text));
+            }
+            "settings" => {
+                let mut fields = rest.splitn(4, ' ');
+                let kept = match fields.next() {
+                    Some("kept") => true,
+                    Some("stripped") => false,
+                    _ => return Err(malformed()),
+                };
+                let rid = fields.next().and_then(|rid| rid.parse().ok());
+                let (Some(rid), Some(type_name), Some(path)) = (rid, fields.next(), fields.next())
+                else {
+                    return Err(malformed());
+                };
+                report.settings.push(SettingsEntry {
+                    path: path.to_string(),
+                    rid,
+                    type_name: type_name.to_string(),
+                    kept,
+                });
             }
             "done" => done = true,
             // What was named and found, and what a later revision adds.
@@ -561,6 +596,7 @@ pub fn plan(
             .cloned()
             .collect(),
         save: Vec::new(),
+        settings: Vec::new(),
     };
     if plan.batch.len() >= 4000 {
         bail!(Unsupported(format!(
@@ -1127,11 +1163,53 @@ pub fn save_materials(ctx: &Context, build: &Build) -> Result<Vec<(String, Vec<u
             build.target
         )));
     }
+    let mut plan = shader_plan(build)?;
+    plan.request = Request {
+        save: build.users.clone(),
+        ..Default::default()
+    };
+    saved_texts(build, save_run(ctx, build, &plan)?)
+}
+
+/// The entries of a render pipeline's global settings (`settings`) that a
+/// Player build keeps, as the pipeline's own build code decides in a worker
+/// whose batch is that of a build of the pipeline's shader `build.target`:
+/// it holds the pipeline's assets, settings and scripts. Also the hash of
+/// every file the decision was made from.
+pub fn player_settings(
+    ctx: &Context,
+    build: &Build,
+    settings: &[String],
+) -> Result<(Vec<SettingsEntry>, BTreeMap<String, String>)> {
+    let mut plan = shader_plan(build)?;
+    for path in settings {
+        if !plan.batch.contains(path) {
+            bail!(
+                "the batch of a build of {} does not hold {path}",
+                build.target
+            );
+        }
+    }
+    plan.request = Request {
+        settings: settings.to_vec(),
+        ..Default::default()
+    };
+    let report = save_run(ctx, build, &plan)?;
+    for path in settings {
+        if !report.settings.iter().any(|entry| entry.path == *path) {
+            bail!("the worker reported no entry of {path}");
+        }
+    }
+    Ok((report.settings, plan.ingredients))
+}
+
+/// The plan of a build of the `.shader` source `build.target`.
+fn shader_plan(build: &Build) -> Result<Plan> {
     let sources = open_sources(&build.project)?;
     let reloaded = read_reload_list(&sources, &build.reload_list);
     let settings = build_settings(&sources, &reloaded)?;
     let text = sources.read(&build.target)?;
-    let mut plan = plan(
+    plan(
         &sources,
         &build.project,
         &settings,
@@ -1140,11 +1218,38 @@ pub fn save_materials(ctx: &Context, build: &Build) -> Result<Vec<(String, Vec<u
         &[(build.target.as_str(), &text[..])],
         &[],
         &|name| Ok(super::host_shaders::editor_builtin_shader_names(&build.editor)?.contains(name)),
-    )?;
-    plan.request = Request {
-        save: build.users.clone(),
+    )
+}
+
+/// Has the engine load and save, as the Editor writes them as text, sources
+/// (`build.users`) that need no other source to load, such as a Mesh of an
+/// older serialization. `build.target` is not used.
+pub fn save_sources(ctx: &Context, build: &Build) -> Result<Vec<(String, Vec<u8>)>> {
+    let mut batch = build.users.clone();
+    batch.push(REQUEST_PATH.to_string());
+    let plan = Plan {
+        batch,
+        request: Request {
+            save: build.users.clone(),
+            ..Default::default()
+        },
         ..Default::default()
     };
+    saved_texts(build, save_run(ctx, build, &plan)?)
+}
+
+/// The texts of a report, each of the sources `build.users` asked for.
+fn saved_texts(build: &Build, report: Report) -> Result<Vec<(String, Vec<u8>)>> {
+    for user in &build.users {
+        if !report.saved.iter().any(|(path, _)| path == user) {
+            bail!("the worker saved no text of {user}");
+        }
+    }
+    Ok(report.saved)
+}
+
+/// One worker run of a plan whose request writes no Player objects.
+fn save_run(ctx: &Context, build: &Build, plan: &Plan) -> Result<Report> {
     let request = plan.request.encode()?;
     let identity = sha256(format!("{}\0{request}", importer_identity()).as_bytes());
     let files = BuildFiles {
@@ -1170,13 +1275,7 @@ pub fn save_materials(ctx: &Context, build: &Build) -> Result<Vec<(String, Vec<u
     let Some((_, primary)) = run.files.iter().find(|(name, _)| name.is_empty()) else {
         bail!("the worker's run left no report");
     };
-    let report = read_report(primary)?;
-    for user in &build.users {
-        if !report.saved.iter().any(|(path, _)| path == user) {
-            bail!("the worker saved no text of {user}");
-        }
-    }
-    Ok(report.saved)
+    read_report(primary)
 }
 
 /// The sources of the shaders a text names itself.
@@ -1203,10 +1302,11 @@ mod tests {
             embed: vec!["Packages/p/F.shader".into()],
             only: "UnityEngine.Shader".into(),
             save: Vec::new(),
+            settings: vec!["Assets/Settings/Global.asset".into()],
         };
         assert_eq!(
             request.encode().unwrap(),
-            "only UnityEngine.Shader\nneed Assets/Settings/Pipeline.asset\nuse Assets/M.mat\nwrite Assets/A.shader\nembed Packages/p/F.shader\n"
+            "only UnityEngine.Shader\nneed Assets/Settings/Pipeline.asset\nuse Assets/M.mat\nwrite Assets/A.shader\nembed Packages/p/F.shader\nsettings Assets/Settings/Global.asset\n"
         );
         let broken = Request {
             write: vec!["Assets/A\n.shader".into()],

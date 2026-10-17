@@ -16,6 +16,9 @@
 //   save <asset path>    an asset whose objects are saved as the Editor writes them as text, after the engine
 //                        loaded them and so upgraded an older serialization; reported as "saved <base64> <path>".
 //                        A request that only saves writes no Player objects.
+//   settings <asset path> a render pipeline's global settings, whose entries a Player build keeps or strips is
+//                        reported as "settings kept|stripped <managed reference ID> <type> <path>". A request
+//                        that only asks this writes no Player objects.
 // The artifact holds the serialized file under the extension "player" and a
 // report (the main object, a TextAsset) that lists what the file refers to.
 // Every object keeps the local ID it has in its asset, in the written file
@@ -243,6 +246,73 @@ namespace UnityMicroEditor.Worker
             }
         }
 
+        // The entries of a pipeline's global settings that a Player build keeps.
+        // A build fills the runtime list of the settings container from the
+        // Editor's list as SRP Core's RenderPipelineGraphicsSettingsStripper
+        // decides: an entry whose type has active strippers is kept unless
+        // every one of them can remove it, any other entry when it says it is
+        // available in a Player build. The strippers are found and made as
+        // SRP Core finds them (public types implementing
+        // IRenderPipelineGraphicsSettingsStripper<T> with a public constructor),
+        // and asked through that public interface. The entries are read with
+        // the public serialization API.
+        static void Settings(List<string> paths, StringBuilder report)
+        {
+            if (paths.Count == 0) return;
+            Type generic = null, stripper = null;
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                generic = generic ?? assembly.GetType("UnityEngine.Rendering.IRenderPipelineGraphicsSettingsStripper`1", false);
+                stripper = stripper ?? assembly.GetType("UnityEngine.Rendering.IStripper", false);
+            }
+            var active = stripper?.GetProperty("active");
+            var strippers = new Dictionary<Type, List<object>>();
+            if (generic != null && active != null)
+            {
+                foreach (var type in TypeCache.GetTypesDerivedFrom(generic))
+                {
+                    if (type.IsAbstract || type.GetConstructor(BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null) == null)
+                        continue;
+                    foreach (var face in type.GetInterfaces())
+                    {
+                        if (!face.IsGenericType || face.GetGenericTypeDefinition() != generic) continue;
+                        var instance = Activator.CreateInstance(type);
+                        if (!(bool)active.GetValue(instance)) continue;
+                        var settingsType = face.GetGenericArguments()[0];
+                        if (!strippers.TryGetValue(settingsType, out var list)) strippers[settingsType] = list = new List<object>();
+                        list.Add(instance);
+                    }
+                }
+            }
+            foreach (var path in paths)
+            {
+                var asset = AssetDatabase.LoadAssetAtPath<RenderPipelineGlobalSettings>(path);
+                if (asset == null) throw new InvalidOperationException("no render pipeline global settings at " + path);
+                var list = new SerializedObject(asset).FindProperty("m_Settings.m_SettingsList.m_List");
+                if (list == null || !list.isArray)
+                    throw new InvalidOperationException("the global settings at " + path + " keep their entries otherwise");
+                for (int index = 0; index < list.arraySize; index++)
+                {
+                    var element = list.GetArrayElementAtIndex(index);
+                    var settings = element.managedReferenceValue as IRenderPipelineGraphicsSettings;
+                    if (settings == null) continue;
+                    var type = settings.GetType();
+                    bool kept;
+                    if (strippers.TryGetValue(type, out var found))
+                    {
+                        var method = generic.MakeGenericType(type).GetMethod("CanRemoveSettings");
+                        bool remove = true;
+                        foreach (var instance in found) remove &= (bool)method.Invoke(instance, new object[] { settings });
+                        kept = !remove;
+                    }
+                    else
+                        kept = settings.isAvailableInPlayerBuild;
+                    report.Append("settings ").Append(kept ? "kept " : "stripped ").Append(element.managedReferenceId)
+                        .Append(' ').Append(type.FullName).Append(' ').Append(path).Append('\n');
+                }
+            }
+        }
+
         static ObjectIdentifier[] Identifiers(AssetImportContext ctx, string path, StringBuilder report, string role)
         {
             ctx.DependsOnArtifact(path);
@@ -264,6 +334,7 @@ namespace UnityMicroEditor.Worker
             string only = null;
             var users = new List<ObjectIdentifier>();
             var saved = new List<string>();
+            var settings = new List<string>();
             foreach (var raw in File.ReadAllLines(ctx.assetPath))
             {
                 string line = raw.TrimEnd('\r');
@@ -287,11 +358,16 @@ namespace UnityMicroEditor.Worker
                         Identifiers(ctx, value, report, "saved-source");
                         saved.Add(value);
                         break;
+                    case "settings":
+                        Identifiers(ctx, value, report, "settings-source");
+                        settings.Add(value);
+                        break;
                     default: throw new InvalidOperationException("unknown request statement " + verb);
                 }
             }
             Save(saved, report);
-            if (saved.Count != 0 && written.Count == 0)
+            Settings(settings, report);
+            if ((saved.Count != 0 || settings.Count != 0) && written.Count == 0)
             {
                 report.Append("done\n");
                 return;
