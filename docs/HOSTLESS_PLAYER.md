@@ -405,12 +405,16 @@ then at each of these in turn.
     a watched session.
   - `Unity.Collections.CodeGen` is left out, because it names an Editor
     assembly of the package that the compilation lacks.
-- **The runtime bridge.** A supplied host carries the tool's compiled bridge
-  (`UnityMicroEditor.dll`), and the source graph accepts it only while the
-  bridge's sources match the host's proof. After a tool update that changes
-  `Packages/com.unitymicroeditor.runtime/Runtime`, a host has to be built
-  again, which runs the Editor once. The bridge is not yet compiled with the
-  SDK for a preparation, as it is for a session.
+- **The runtime bridge.** A preparation compiles the tool's bridge
+  (`UnityMicroEditor.dll`) from the installation's sources with the SDK, as
+  a session does. It puts the bridge in place of the host's, with its
+  `RuntimeInitializeOnLoad` methods in place of the host's rows for it. A
+  host has to hold an assembly of that name only, so a tool update or a
+  change to `Packages/com.unitymicroeditor.runtime/Runtime` needs no new
+  host. Checked on 2026-10-17: a host built several bridge revisions earlier
+  prepared and ran the URP copy (200 frames, no error). A session prepared
+  before such a change still refuses it ("regenerate source graph"), and a
+  new preparation takes it.
 - **Shader build time.** Each shader is built in its own worker run, about
   20 s each. Since 2026-10-17, a pipeline project's resources are prebuilt
   side by side and kept for the project

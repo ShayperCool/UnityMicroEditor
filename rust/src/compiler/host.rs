@@ -34,8 +34,6 @@ pub fn stage_host(
     editor: &str,
     baseline_player: &str,
 ) -> Result<String> {
-    let tool_root = micro_editor_root()?;
-    let runtime_root = join(&[&tool_root, "Packages/com.unitymicroeditor.runtime/Runtime"]);
     let destination = join(&[output, "players", &random_id()]);
     sys::mkdir_all(&sysutil::dir(&destination))?;
     let (copied, error) = plain(
@@ -60,6 +58,26 @@ pub fn stage_host(
         &sysutil::base(&player_data(baseline_player)),
         "Managed",
     ]);
+    let dll = compile_bridge(ctx, output, editor, &managed)?;
+    sys::write(
+        &join(&[&managed, "UnityMicroEditor.dll"]),
+        &sys::read(&dll)?,
+    )?;
+    Ok(join(&[&destination, &sysutil::base(baseline_player)]))
+}
+
+/// Compiles the tool's runtime bridge from the installation's sources with
+/// the SDK compiler against the Player's `managed` assemblies, and returns
+/// the DLL, kept under `cache_root/bridge` by the hash of what it is made
+/// from.
+pub fn compile_bridge(
+    ctx: &Context,
+    cache_root: &str,
+    editor: &str,
+    managed: &str,
+) -> Result<String> {
+    let tool_root = micro_editor_root()?;
+    let runtime_root = join(&[&tool_root, "Packages/com.unitymicroeditor.runtime/Runtime"]);
     let data = join(&[&sysutil::dir(editor), "Data"]);
     let mut sources = Vec::new();
     sys::walk_dir(&runtime_root, &mut |entry| {
@@ -72,7 +90,7 @@ pub fn stage_host(
     // The bridge serves Addressables keys only where the host has the package.
     let addressables = ["Unity.Addressables.dll", "Unity.ResourceManager.dll"]
         .iter()
-        .all(|name| !sys::absent(&join(&[&managed, name])));
+        .all(|name| !sys::absent(&join(&[managed, name])));
     let mut input =
         format!("unity-play-managed-bridge-v2\0{editor}\0{addressables}\0").into_bytes();
     let mut snapshots = Vec::new();
@@ -82,7 +100,7 @@ pub fn stage_host(
         input.extend_from_slice(&contents);
         snapshots.push(contents);
     }
-    let cache = join(&[output, "bridge", &sha256(&input)]);
+    let cache = join(&[cache_root, "bridge", &sha256(&input)]);
     let dll = join(&[&cache, "UnityMicroEditor.dll"]);
     #[derive(Serialize, Deserialize, Default)]
     #[serde(default)]
@@ -138,7 +156,7 @@ pub fn stage_host(
                 &data,
                 "MonoBleedingEdge/lib/mono/unityaot-linux/Facades/*.dll",
             ]),
-            join(&[&managed, "*.dll"]),
+            join(&[managed, "*.dll"]),
         ] {
             for file in sys::glob_lossy(&pattern) {
                 let base = sysutil::base(&file);
@@ -176,11 +194,7 @@ pub fn stage_host(
             },
         )?;
     }
-    sys::write(
-        &join(&[&managed, "UnityMicroEditor.dll"]),
-        &sys::read(&dll)?,
-    )?;
-    Ok(join(&[&destination, &sysutil::base(baseline_player)]))
+    Ok(dll)
 }
 
 /// The manifest's assemblies relocated into a Player.
