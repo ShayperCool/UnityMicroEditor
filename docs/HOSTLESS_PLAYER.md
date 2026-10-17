@@ -317,6 +317,16 @@ For a 3D project, a Player build would strip `Renderer2DResources` with
 URP's own stripper and never need these materials. That stripping API is
 internal.
 
+### Verified on 2026-10-17
+
+The check used a fresh copy of `Samples/RawProject` with no `Library`,
+prepared with `--host-player` set to the sample's host:
+
+- **Preparation.** It finished in 56 s and started no Editor: no staging
+  copy was made.
+- **Player.** `run --frames 200` played 200 frames with no error and no
+  exception, and exited with code 0.
+
 ### Where it stops (2026-10-17)
 
 A cold preparation of the URP copy on the sample's host gets through:
