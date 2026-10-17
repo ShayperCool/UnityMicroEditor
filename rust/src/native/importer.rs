@@ -304,8 +304,20 @@ impl NativeProjectImporter {
         self.require_current_environment()?;
         let extension = lower_ext(logical);
         let profile = extension.strip_prefix('.').unwrap_or(&extension);
-        if matches!(profile, "uxml" | "uss" | "ttf" | "otf") {
-            return self.import_warm_ui(ctx, logical, &mut HashSet::new());
+        if matches!(profile, "uxml" | "uss" | "tss" | "ttf" | "otf") {
+            // The Editor's import is taken while it is current; a source
+            // changed since, or one the Editor never imported, is imported
+            // by the worker.
+            if super::warm::warm_database_available(&self.opts.project) {
+                match self.import_warm_ui(ctx, logical, &mut HashSet::new()) {
+                    Ok(()) => return Ok(()),
+                    Err(error) => Event::new("native-warm-ui-unavailable")
+                        .with("path", logical)
+                        .with("reason", &format!("{error:#}"))
+                        .emit(),
+                }
+            }
+            return self.import_cold_ui(ctx, logical);
         }
         if native_texture_needs_warm(&self.opts.project, logical)? {
             return self.import_warm_ui(ctx, logical, &mut HashSet::new());

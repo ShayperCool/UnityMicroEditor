@@ -1,9 +1,16 @@
-# Native UI and font cache
+# Native UI and font imports
 
-The runner can extract unchanged UXML, USS and TTF/OTF assets from the pinned
-Unity 6000.6.3f1 (45d8eee7de74) import cache without launching Editor. This is a
-cache adapter, not a replacement UI importer. A newly added or changed source
-fails if no exact current native artifact exists.
+UXML, USS, TSS (themes) and TTF/OTF assets reach the runner in one of two ways:
+
+- **Warm.** An unchanged source is extracted from the import cache the pinned
+  Unity 6000.6.3f1 (45d8eee7de74) Editor left in the project's `Library`.
+- **Cold.** A new or changed source, or one in a project no Editor opened, is
+  imported by the standalone AssetImportWorker with UI Toolkit's own importers
+  (see [Cold imports](#cold-imports)).
+
+The warm route is tried first when the project has the Editor's databases. If
+its exact checks fail, the source is imported cold and the event
+`native-warm-ui-unavailable` gives the reason.
 
 Before publishing an independent runtime file, the adapter verifies:
 
@@ -53,10 +60,51 @@ root, and elements carrying a `display: none` class resolved to
 `DisplayStyle.None`. It does not establish cold import support for changed
 UXML/USS sources.
 
-The standalone worker already reaches the real StyleSheetImporter, but its
-`AssetImportContext.AddObjectToAsset(StyleSheet)` currently fails because the
-worker does not have the required builtin scripting-class registration. The
-exact-cache route preserves existing import results without hiding that gap.
+## Cold imports
+
+The worker runs `UIElementsViewImporter`, `StyleSheetImporter`,
+`ThemeStyleSheetImporter` and the font importer as the Editor does. Their
+outputs pass through the same projection, `binary2text` binding list and
+runtime restoration as warm artifacts.
+
+A UI source is imported in one batch with the sources it names that are not
+imported yet, the sources they name, and so on. A source names another:
+
+- by GUID, as the Editor writes a reference;
+- by a `url()` path relative to the source;
+- by a path relative to the project (`/Assets/...` or `project://database/...`).
+
+`unity-theme://` and other schemes name no source. Such a batch records each
+import in the worker's ArtifactDB, because the importers load the style sheets
+a source imports. Without that record, a theme's `@import` of a USS stayed
+empty.
+
+A theme holds the themes it imports, `unity-theme://default` included, with
+their textures. The artifact therefore keeps `ThemeStyleSheet` objects (script
+19202) and `Texture2D` objects with their pixels. The runtime prepares each
+style sheet after the local sheets it links: an imported theme comes before
+the theme that imports it.
+
+These importers add objects of the engine's script classes (`VisualTreeAsset`,
+`StyleSheet`). `AddObjectToAsset` takes such an object only when its
+`MonoScript` is in the register of scripts. The main Editor keeps that
+register in the source database as `mem://Library/MonoManager.asset` under
+`SerializedSingletons`, and a worker reads it from there. Without it, every
+script-backed object is refused with "Failed to add object of type
+`VisualTreeAsset`. Check that the definition is in a file of the same name",
+the engine's own classes included.
+
+The coordinator therefore writes the register into every source database it
+makes. It lists the `MonoScript` objects of the installed Editor's
+`Data/Resources/unity default resources` (30 in 6000.6.3f1, for example
+`VisualTreeAsset` 11995 and `StyleSheet` 11998) as references into
+`Library/unity default resources`. The Editor's own register also lists the
+project's scripts. A worker finds those through the source registry, so they
+are left out. With the register:
+
+- `RuntimeDebugWindow.uxml` of SRP Core imports with the same import result
+  as with the register a real Editor wrote.
+- An `.inputactions` import keeps the same result ID as without it.
 
 Run the optional real-project check of a stopped batch import with:
 

@@ -396,7 +396,13 @@ fn import(
     if player && let Err(error) = stage_importer(ctx, &opts.editor, &prepared.project) {
         return (None, Some(error));
     }
-    if build.is_some() {
+    // UI Toolkit's importers load the style sheets a source imports, which
+    // the worker finds only among the imports recorded before.
+    if build.is_some()
+        || assets
+            .iter()
+            .any(|asset| matches!(lower_ext(asset).as_str(), ".uss" | ".tss" | ".uxml"))
+    {
         opts.artifact_database = true;
     }
     if let Some(cache) = build.map(|build| build.shader_cache)

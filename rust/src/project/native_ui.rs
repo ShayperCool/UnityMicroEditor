@@ -58,6 +58,7 @@ pub(crate) fn validate_native_ui_bindings(
             .copied()
             .unwrap_or("");
         if kind != "UnityEngine.UIElements.StyleSheet"
+            && kind != "UnityEngine.UIElements.ThemeStyleSheet"
             && kind != "UnityEngine.UIElements.VisualTreeAsset"
         {
             bail!("native UI binding owner is not a published UI asset");
@@ -97,7 +98,10 @@ pub(crate) fn validate_native_ui_bindings(
         let mut found = false;
         for object in target.objects.iter() {
             if object.file_id == binding.target_file_id {
-                if local && object.type_name != "UnityEngine.UIElements.StyleSheet" {
+                if local
+                    && object.type_name != "UnityEngine.UIElements.StyleSheet"
+                    && object.type_name != "UnityEngine.UIElements.ThemeStyleSheet"
+                {
                     bail!("native UI local target must identify a stylesheet");
                 }
                 found = true;

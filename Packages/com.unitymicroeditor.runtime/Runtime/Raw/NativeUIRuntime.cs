@@ -48,7 +48,7 @@ namespace UnityMicroEditor.Raw
                     || !CanonicalGUID(binding.targetGuid)) throw new InvalidDataException("Native UI binding identity/path is invalid.");
                 if (binding.targetGuid == descriptor.guid)
                 {
-                    if (!owners.TryGetValue(binding.targetFileId, out string localType) || localType != typeof(StyleSheet).FullName)
+                    if (!owners.TryGetValue(binding.targetFileId, out string localType) || !SheetType(localType))
                         throw new InvalidDataException("Local native UI bindings must identify a published StyleSheet.");
                 }
                 else if (!dependencies.Contains(binding.targetGuid))
@@ -71,52 +71,79 @@ namespace UnityMicroEditor.Raw
             Func<string, string, Object> resolve, List<Object> owned)
         {
             Validate(descriptor);
-            // Local inline StyleSheets must be initialized before their VTA clone
-            // is linked. External dependencies have already completed this step.
-            for (int pass = 0; pass < 2; pass++)
-                foreach (NativeContentObjectDescriptor entry in descriptor.objects)
+            // Local StyleSheets must be initialized before the assets that link
+            // them: an inline sheet before its VTA clone, the themes a theme
+            // imports, which it holds, before that theme. External dependencies
+            // have already completed this step.
+            foreach (NativeContentObjectDescriptor entry in Order(descriptor))
+            {
+                string key = Key(descriptor.guid, entry.fileId);
+                Object original = objects[key];
+                Object intermediate = Object.Instantiate(original);
+                if (intermediate == null || intermediate.GetType() != original.GetType())
+                    throw new InvalidDataException("Unity failed to clone a native UI asset.");
+                owned.Add(intermediate);
+                intermediate.name = original.name;
+                Dictionary<string, object> map = Snapshot(intermediate);
+                var expected = new List<KeyValuePair<NativeUIBindingDescriptor, object>>();
+                foreach (NativeUIBindingDescriptor binding in descriptor.uiBindings ?? Array.Empty<NativeUIBindingDescriptor>())
                 {
-                    bool sheet = entry.typeName == typeof(StyleSheet).FullName;
-                    bool tree = entry.typeName == typeof(VisualTreeAsset).FullName;
-                    if (pass == 0 ? !sheet : !tree) continue;
-                    string key = Key(descriptor.guid, entry.fileId);
-                    Object original = objects[key];
-                    Object intermediate = Object.Instantiate(original);
-                    if (intermediate == null || intermediate.GetType() != original.GetType())
-                        throw new InvalidDataException("Unity failed to clone a native UI asset.");
-                    owned.Add(intermediate);
-                    intermediate.name = original.name;
-                    Dictionary<string, object> map = Snapshot(intermediate);
-                    var expected = new List<KeyValuePair<NativeUIBindingDescriptor, object>>();
-                    foreach (NativeUIBindingDescriptor binding in descriptor.uiBindings ?? Array.Empty<NativeUIBindingDescriptor>())
-                    {
-                        if (binding.ownerFileId != entry.fileId) continue;
-                        Object target = resolve(binding.targetGuid, binding.targetFileId);
-                        if (target == null) throw new InvalidDataException("Native UI binding target was not loaded: " + binding.targetGuid + "/" + binding.targetFileId);
-                        object reference = Reference(target);
-                        string path = ResolvePath(map, binding);
-                        RequireReference(Get(map, path), reference, binding.propertyPath);
-                        ImportedAssetRuntimePaths.Set(map, path, reference);
-                        expected.Add(new KeyValuePair<NativeUIBindingDescriptor, object>(binding, reference));
-                    }
-                    if (expected.Count != 0)
-                    {
-                        JsonUtility.FromJsonOverwrite(RawJson.Write(map), intermediate);
-                        Verify(Snapshot(intermediate), expected);
-                    }
-                    // FromJsonOverwrite can replace managed VTA nodes and remove
-                    // their nonserialized owner links. Cloning the final data
-                    // invokes Unity's normal Awake/OnEnable initialization.
-                    Object final = Object.Instantiate(intermediate);
-                    if (final == null || final.GetType() != original.GetType())
-                        throw new InvalidDataException("Unity failed to initialize a native UI asset clone.");
-                    owned.Add(final);
-                    final.name = original.name;
-                    Verify(Snapshot(final), expected);
-                    objects[key] = final;
-                    Object.DestroyImmediate(intermediate);
-                    owned.Remove(intermediate);
+                    if (binding.ownerFileId != entry.fileId) continue;
+                    Object target = resolve(binding.targetGuid, binding.targetFileId);
+                    if (target == null) throw new InvalidDataException("Native UI binding target was not loaded: " + binding.targetGuid + "/" + binding.targetFileId);
+                    object reference = Reference(target);
+                    string path = ResolvePath(map, binding);
+                    RequireReference(Get(map, path), reference, binding.propertyPath);
+                    ImportedAssetRuntimePaths.Set(map, path, reference);
+                    expected.Add(new KeyValuePair<NativeUIBindingDescriptor, object>(binding, reference));
                 }
+                if (expected.Count != 0)
+                {
+                    JsonUtility.FromJsonOverwrite(RawJson.Write(map), intermediate);
+                    Verify(Snapshot(intermediate), expected);
+                }
+                // FromJsonOverwrite can replace managed VTA nodes and remove
+                // their nonserialized owner links. Cloning the final data
+                // invokes Unity's normal Awake/OnEnable initialization.
+                Object final = Object.Instantiate(intermediate);
+                if (final == null || final.GetType() != original.GetType())
+                    throw new InvalidDataException("Unity failed to initialize a native UI asset clone.");
+                owned.Add(final);
+                final.name = original.name;
+                Verify(Snapshot(final), expected);
+                objects[key] = final;
+                Object.DestroyImmediate(intermediate);
+                owned.Remove(intermediate);
+            }
+        }
+
+        // The style sheets, each after the local sheets it links, then the trees.
+        private static List<NativeContentObjectDescriptor> Order(NativeContentFileDescriptor descriptor)
+        {
+            var pending = new List<NativeContentObjectDescriptor>();
+            var trees = new List<NativeContentObjectDescriptor>();
+            foreach (NativeContentObjectDescriptor entry in descriptor.objects)
+                if (SheetType(entry.typeName)) pending.Add(entry);
+                else if (entry.typeName == typeof(VisualTreeAsset).FullName) trees.Add(entry);
+            var waiting = new HashSet<string>(StringComparer.Ordinal);
+            foreach (NativeContentObjectDescriptor entry in pending) waiting.Add(entry.fileId);
+            var result = new List<NativeContentObjectDescriptor>();
+            while (pending.Count != 0)
+            {
+                int ready = pending.FindIndex(entry =>
+                {
+                    foreach (NativeUIBindingDescriptor binding in descriptor.uiBindings ?? Array.Empty<NativeUIBindingDescriptor>())
+                        if (binding.ownerFileId == entry.fileId && binding.targetGuid == descriptor.guid
+                            && binding.targetFileId != entry.fileId && waiting.Contains(binding.targetFileId)) return false;
+                    return true;
+                });
+                if (ready < 0) throw new InvalidDataException("Native UI style sheets link one another in a cycle.");
+                waiting.Remove(pending[ready].fileId);
+                result.Add(pending[ready]);
+                pending.RemoveAt(ready);
+            }
+            result.AddRange(trees);
+            return result;
         }
 
         internal static void Release(List<Object> owned)
@@ -207,7 +234,8 @@ namespace UnityMicroEditor.Raw
         }
 
         private static bool ValidPath(string path) { return path != null && path.Length <= 1024 && PathPattern.IsMatch(path); }
-        private static bool UIType(string name) { return name == typeof(StyleSheet).FullName || name == typeof(VisualTreeAsset).FullName; }
+        private static bool UIType(string name) { return SheetType(name) || name == typeof(VisualTreeAsset).FullName; }
+        private static bool SheetType(string name) { return name == typeof(StyleSheet).FullName || name == typeof(ThemeStyleSheet).FullName; }
         private static bool CanonicalID(string id)
         {
             return long.TryParse(id, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out long value)

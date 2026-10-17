@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 /// the known importer object entries and the Editor target are changed.
 /// Runtime compatibility is checked through ContentFile.GetObject by the caller.
 pub fn adapt_ui(input: &[u8], profile: &str) -> Result<(Vec<u8>, Metadata)> {
-    if !matches!(profile, "uxml" | "uss" | "ttf" | "otf") {
+    if !matches!(profile, "uxml" | "uss" | "tss" | "ttf" | "otf") {
         bail!("unsupported UI runtime profile {profile:?}");
     }
     adapt_warm_builtin(input, profile)
@@ -201,7 +201,7 @@ fn adapt_warm_builtin(input: &[u8], profile: &str) -> Result<(Vec<u8>, Metadata)
             continue;
         }
         let mut type_name = "";
-        if class_id == 114 && (profile == "uxml" || profile == "uss") {
+        if class_id == 114 && matches!(profile, "uxml" | "uss" | "tss") {
             if data.len() < 80 || le32(&data[60..64]) != 1 {
                 bail!("UI object has no verified builtin MonoScript reference");
             }
@@ -210,6 +210,8 @@ fn adapt_warm_builtin(input: &[u8], profile: &str) -> Result<(Vec<u8>, Metadata)
                 type_name = "UnityEngine.UIElements.StyleSheet";
             } else if script == 11995 && profile == "uxml" {
                 type_name = "UnityEngine.UIElements.VisualTreeAsset";
+            } else if script == 19202 && profile == "tss" {
+                type_name = "UnityEngine.UIElements.ThemeStyleSheet";
             } else {
                 bail!("unsupported UI builtin MonoScript {script}");
             }
@@ -248,6 +250,9 @@ fn adapt_warm_builtin(input: &[u8], profile: &str) -> Result<(Vec<u8>, Metadata)
                 (213, _) => type_name = "UnityEngine.Sprite",
                 _ => {}
             }
+        } else if profile == "tss" && class_id == 28 {
+            // The textures of the themes a theme imports, held with their pixels.
+            type_name = "UnityEngine.Texture2D";
         } else if font {
             type_name = match class_id {
                 128 => "UnityEngine.Font",

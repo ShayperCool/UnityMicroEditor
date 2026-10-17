@@ -34,6 +34,16 @@ pub fn cold_native_profile(logical: &str) -> bool {
     cold_runtime_profile(logical).is_some()
 }
 
+/// A UI source the standalone worker imports when the project has no
+/// database of an Editor's imports to take it from: UI Toolkit's importers
+/// run in the worker as they run in the Editor.
+pub(crate) fn cold_ui_profile(logical: &str) -> bool {
+    matches!(
+        lower_ext(logical).as_str(),
+        ".uxml" | ".uss" | ".tss" | ".ttf" | ".otf"
+    )
+}
+
 /// The runtime adapter profile of a source a standalone worker imports.
 fn cold_runtime_profile(logical: &str) -> Option<&'static str> {
     match lower_ext(logical).as_str() {
@@ -84,7 +94,7 @@ pub(crate) fn cold_input(
     logical: &str,
     binding: &str,
 ) -> Result<NativeColdInput> {
-    if !cold_native_profile(logical) {
+    if !cold_native_profile(logical) && !cold_ui_profile(logical) {
         bail!("unsupported native cold profile: {logical}");
     }
     let source = resolve_project_import_source(&opts.project, logical)?;
@@ -331,14 +341,18 @@ impl NativeProjectImporter {
             }
             let filename = sysutil::join(&[root, "runtime", &format!("{}.bin", asset.guid)]);
             let binding = atlas.as_ref().map(|(atlas, packed)| (atlas, packed));
-            replacements.push(adapt_cold_asset(
+            let replacement = adapt_cold_asset(
                 &self.opts,
                 &self.environment_sha256,
                 asset,
                 &input,
                 &filename,
                 binding,
-            )?);
+            )?;
+            replacements.push(match cold_ui_profile(&asset.path) {
+                true => self.bind_native_ui_references(ctx, replacement)?,
+                false => replacement,
+            });
         }
         if !inputs.is_empty() {
             bail!("native cold batch omitted an input asset");
@@ -532,6 +546,9 @@ pub(crate) fn adapt_cold_asset(
     let extension = lower_ext(&input.path);
     let mut source_resource = false;
     let adapted = match cold_runtime_profile(&input.path) {
+        None if cold_ui_profile(&input.path) => {
+            runtimeartifact::adapt_ui(&data, extension.strip_prefix('.').unwrap_or(&extension))
+        }
         Some("video") => {
             runtimeartifact::adapt_video(&data, &asset.guid).map(|(output, metadata, source)| {
                 source_resource = source;

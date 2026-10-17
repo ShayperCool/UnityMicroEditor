@@ -918,6 +918,14 @@ MonoBehaviour:
     for (name, source) in [
         ("valid", PANEL_FIXTURE.to_string()),
         (
+            "valid without class identifier",
+            PANEL_FIXTURE.replacen(
+                "UnityEngine.dll::UnityEngine.UIElements.PanelSettings",
+                "",
+                1,
+            ),
+        ),
+        (
             "wrong script ID",
             PANEL_FIXTURE.replacen("19101", "19102", 1),
         ),
@@ -939,7 +947,7 @@ MonoBehaviour:
             .session
             .lock()
             .refresh_scriptable_object(&mut panel, &documents);
-        if name == "valid" {
+        if name.starts_with("valid") {
             assert!(
                 result.is_ok()
                     && value::text(&panel, "typeName") == "UnityEngine.UIElements.PanelSettings",

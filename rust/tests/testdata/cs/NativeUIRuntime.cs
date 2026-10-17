@@ -117,6 +117,29 @@ internal static class Program
         Object.DropFinalReferences = false; NativeUIRuntime.Release(failedOwned);
         NativeUIRuntime.Release(owned); NativeUIRuntime.Release(cssOwned);
         Assert(final.Destroyed && cssFinal.Destroyed && !font.Destroyed && !sheet.Destroyed && !originalInline.Destroyed, "owned asset cleanup must destroy only clones");
+
+        // A theme holds the themes it imports and is prepared after them.
+        const string THEME = "44444444444444444444444444444444";
+        var imported = new ThemeStyleSheet { name = "default", Json = Map("{\"colors\":[0.2]}") };
+        var theme = new ThemeStyleSheet { name = "Debug", Json = Map("{\"imports\":[{\"styleSheet\":{\"instanceID\":" + imported.ID + "}}]}") };
+        var themeObjects = new Dictionary<string, Object> { [THEME + ":5"] = theme, [THEME + ":6"] = imported };
+        var themeDescriptor = new NativeContentFileDescriptor
+        {
+            guid = THEME,
+            objects = new[] { Entry("5", typeof(ThemeStyleSheet).FullName), Entry("6", typeof(ThemeStyleSheet).FullName), Entry("7", "UnityEngine.Texture2D") },
+            uiBindings = new[] { Binding(owner: "5", path: "imports[0].styleSheet", guid: THEME, id: "6", rid: null) }
+        };
+        var themeOwned = new List<Object>();
+        NativeUIRuntime.Prepare(themeDescriptor, themeObjects, (g, i) => themeObjects[g + ":" + i], themeOwned);
+        Assert(themeOwned.Count == 2 && themeObjects[THEME + ":6"] != imported, "every theme needs one owned final clone");
+        Assert((long)NativeUIRuntime.Get(themeObjects[THEME + ":5"].Json, "imports[0].styleSheet.instanceID") == themeObjects[THEME + ":6"].ID, "a theme must link the initialized clone of the theme it imports");
+        var cycle = new NativeContentFileDescriptor
+        {
+            guid = THEME, objects = themeDescriptor.objects,
+            uiBindings = new[] { themeDescriptor.uiBindings[0], Binding(owner: "6", path: "imports[0].styleSheet", guid: THEME, id: "5", rid: null) }
+        };
+        Reject(() => NativeUIRuntime.Prepare(cycle, themeObjects, (g, i) => themeObjects[g + ":" + i], new List<Object>()), "style sheets that link one another in a cycle must fail");
+        NativeUIRuntime.Release(themeOwned);
         Console.WriteLine("Native UI runtime assertions: " + assertions);
     }
 }
@@ -185,6 +208,7 @@ namespace UnityEngine
 }
 namespace UnityEngine.UIElements
 {
-    public sealed class StyleSheet : Object { }
+    public class StyleSheet : Object { }
+    public sealed class ThemeStyleSheet : StyleSheet { }
     public sealed class VisualTreeAsset : Object { }
 }
