@@ -465,7 +465,17 @@ impl Inner {
             }
             let path = self.path_of(&guid).to_string();
             if path.is_empty() {
-                bail!("asset GUID {guid} is outside known closure");
+                // No asset of the project or its packages has this GUID:
+                // Unity reads such a reference as missing, and so does the
+                // Player here.
+                continue;
+            }
+            // The authored text keeps fields that exist in the Editor only,
+            // such as those of a pipeline's global settings that name its
+            // Editor tooling in Editor folders. The Player's serialization
+            // has no such field, so the reference is not followed.
+            if path.split('/').any(|part| part == "Editor") {
+                continue;
             }
             let extension = lexpath::lower_ext(&path);
             for existing in assets.values() {

@@ -442,18 +442,22 @@ impl Service {
             }
         }
         let mut defaults_profile = String::new();
-        if !bootstrap.reference_graph.is_empty() {
+        // Component defaults serve the component tools, not the baseline:
+        // they are warmed only when an Editor runs anyway, for a host build.
+        if !bootstrap.reference_graph.is_empty() && !bootstrap.host_evidence.is_empty() {
             // Initial native bootstrap also warms defaults once. Ordinary source-only
             // preparations never start an Editor merely to satisfy component tools.
             self.stage("capture_component_defaults", "", "");
             defaults_profile = self.capture_component_defaults(ctx)?.profile_sha256;
         }
+        let editor_profile = profile.clone();
         let options = SourceGraphOptions {
             project: project.into(),
             editor: editor.into(),
             player: host.clone(),
             profile: Some(profile),
             packages: Some(resolved),
+            editor_domain: false,
         };
         self.stage("build_source_graph", "", "");
         let graph = build_source_graph(ctx, &options)?;
@@ -471,7 +475,10 @@ impl Service {
             prepare_source_compiler_graph(ctx, &options, &compiler_path)?;
         }
         if native.is_empty() {
-            if super::native::may_need_native(project)? {
+            // The import worker brings native content while the baseline is
+            // published; a catalog the Editor imports is used only when the
+            // host was built here, where the Editor runs anyway.
+            if !bootstrap.host_evidence.is_empty() && super::native::may_need_native(project)? {
                 if self.0.no_editor {
                     return Err(fail(
                         "native_catalog_missing",
@@ -483,6 +490,21 @@ impl Service {
             } else {
                 native = super::native::identity_catalog(project, &graph_path, &directory)?;
             }
+        }
+        // The import worker runs the Editor code of packages from an Editor
+        // compilation; without a staging Editor the tool makes one.
+        if bootstrap.host_evidence.is_empty()
+            && std::env::var_os("UME_EDITOR_COMPILATION").is_none_or(|value| value != "0")
+        {
+            self.stage("compile_editor_assemblies", "", "");
+            crate::native::editor_compilation::ensure(
+                ctx,
+                project,
+                editor,
+                &host,
+                &editor_profile,
+                options.packages.as_ref().expect("resolved packages"),
+            )?;
         }
         let native = super::freeze_source_catalog(ctx, project, &directory, &native)?;
         let baseline = join(&[&directory, "current.json"]);
@@ -541,9 +563,13 @@ impl Service {
             result.reference_graph = seed.reference_graph.clone();
         }
         if !bootstrap.reference_graph.is_empty() {
+            let how = bootstrap.backends.at("nativeBootstrap");
             result.backends.insert(
                 "nativeBootstrap",
-                "unity_editor_public_api_once".to_string(),
+                match how.is_empty() {
+                    true => "unity_editor_public_api_once".to_string(),
+                    false => how.to_string(),
+                },
             );
         }
         if !seed.reused_preparation.is_empty() {

@@ -278,6 +278,7 @@ fn source_graph_actual_comparison() {
         player,
         profile: Some(profile),
         packages: Some(snapshot),
+        editor_domain: false,
     };
     let graph = build_source_graph(&ctx, &options).unwrap();
     atomic_json(&sysutil::join(&[&output, "graph.json"]), &graph).unwrap();
@@ -824,6 +825,7 @@ public static void Enqueue(ScriptableObject value,Phase phase,Action callback,in
         player,
         profile: Some(profile),
         packages: Some(resolve(&project, &editor)),
+        editor_domain: false,
     };
     let output = sysutil::join(&[&project, "Temp/own/first.json"]);
     // The publication seam is exercised with a counting wrapper of the default.

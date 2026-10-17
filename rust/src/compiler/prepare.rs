@@ -1402,6 +1402,7 @@ fn build_package_assemblies(
                     allow_unsafe: config.config.allow_unsafe,
                     references: &refs,
                     kind: "package-compiles",
+                    project_view: "",
                 },
             )
             .map_err(|error| error.context(format!("{HOST_LACKS_PACKAGE}{}", assembly.name)))?;
@@ -1477,6 +1478,7 @@ fn build_package_assemblies(
                 allow_unsafe: assembly.allow_unsafe,
                 references: &refs,
                 kind: "package-codegen",
+                project_view: "",
             },
         )?;
         codegen.push(dll);

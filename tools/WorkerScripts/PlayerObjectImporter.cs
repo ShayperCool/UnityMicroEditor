@@ -194,6 +194,28 @@ namespace UnityMicroEditor.Worker
             }
         }
 
+        // What the worker knows of an asset it cannot load: the type it
+        // expects and the script that would be its class.
+        static string Diagnose(string path)
+        {
+            var text = new StringBuilder();
+            text.Append(" (main type ").Append(AssetDatabase.GetMainAssetTypeAtPath(path)?.FullName ?? "none");
+            text.Append(", ").Append(AssetDatabase.LoadAllAssetsAtPath(path).Length).Append(" objects");
+            foreach (string line in System.IO.File.ReadAllLines(path))
+            {
+                string trimmed = line.Trim();
+                int start = trimmed.IndexOf("guid: ");
+                if (!trimmed.StartsWith("m_Script:") || start < 0 || trimmed.Length < start + 38) continue;
+                string guid = trimmed.Substring(start + 6, 32);
+                string scriptPath = AssetDatabase.GUIDToAssetPath(guid);
+                var script = string.IsNullOrEmpty(scriptPath) ? null : AssetDatabase.LoadAssetAtPath<MonoScript>(scriptPath);
+                text.Append(", script ").Append(guid).Append(" at '").Append(scriptPath).Append("' ")
+                    .Append(script == null ? "not loaded" : script.GetClass() == null ? "without a class" : script.GetClass().FullName);
+                break;
+            }
+            return text.Append(')').ToString();
+        }
+
         static ObjectIdentifier[] Identifiers(AssetImportContext ctx, string path, StringBuilder report, string role)
         {
             ctx.DependsOnArtifact(path);
@@ -201,7 +223,7 @@ namespace UnityMicroEditor.Worker
             if (string.IsNullOrEmpty(guid))
                 throw new InvalidOperationException("the worker does not know " + path);
             if (AssetDatabase.LoadMainAssetAtPath(path) == null)
-                throw new InvalidOperationException("the worker cannot load " + path);
+                throw new InvalidOperationException("the worker cannot load " + path + Diagnose(path));
             var ids = ContentBuildInterface.GetPlayerObjectIdentifiersInAsset(new GUID(guid), Target);
             report.Append(role).Append(' ').Append(guid).Append(' ').Append(ids.Length).Append(' ').Append(path).Append('\n');
             return ids;

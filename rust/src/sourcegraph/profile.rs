@@ -100,6 +100,9 @@ pub struct SourceGraphOptions {
     pub player: String,
     pub profile: Option<SourceEngineProfile>,
     pub packages: Option<Snapshot>,
+    /// The graph the Editor compiles for itself (`Library/ScriptAssemblies`):
+    /// Editor platform and defines, Editor folders, nothing from the host.
+    pub editor_domain: bool,
 }
 
 /// The digest of the profile without its own digest.

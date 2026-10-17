@@ -12,6 +12,7 @@ mod built_store;
 mod builtin_shader;
 mod context;
 mod datastore;
+pub mod editor_compilation;
 mod environment;
 mod host_shaders;
 mod import;
@@ -75,3 +76,10 @@ pub use warm::{WarmNativeArtifact, extract_warm_native_ui};
 
 #[cfg(test)]
 mod tests;
+
+/// Diagnostics: the environment a build of Player objects runs in, for the
+/// scripts with the given GUIDs.
+pub fn debug_build_environment(project: &str, scripts: &[String]) -> anyhow::Result<String> {
+    let environment = scripted::build_environment(project, &scripts.iter().cloned().collect())?;
+    Ok(format!("{environment:#?}"))
+}

@@ -316,6 +316,9 @@ pub fn resolve_project_import_source(project: &str, logical: &str) -> Result<Str
         return Err(error);
     }
     let mut filename = sysutil::join(&[project, logical]);
+    // The root of a package placed by a link where the resolver keeps it,
+    // which bounds its files instead of the project.
+    let mut package_root = None;
     if sysutil::lstat(&filename).is_err_and(|e| e.raw_os_error() == Some(libc::ENOENT))
         && logical.starts_with("Packages/")
     {
@@ -327,9 +330,28 @@ pub fn resolve_project_import_source(project: &str, logical: &str) -> Result<Str
                 "PackageCache",
                 &format!("{}@*", parts[1]),
             ]);
-            match glob(&pattern, 0) {
-                Ok(candidates) if candidates.len() == 1 => {
-                    filename = sysutil::join(&[&candidates[0], &parts[2..].join("/")]);
+            // Without an Editor run of its own, the project's packages lie
+            // where the tool's Editor compilation placed them.
+            let compiled = sysutil::join(&[
+                project,
+                super::editor_compilation::DIRECTORY,
+                "Library/PackageCache",
+            ]);
+            let mut candidates = glob(&pattern, 0).unwrap_or_default();
+            if candidates.is_empty() {
+                candidates = glob(&sysutil::join(&[&compiled, &format!("{}@*", parts[1])]), 0)
+                    .unwrap_or_default();
+                let module = sysutil::join(&[&compiled, parts[1]]);
+                if candidates.is_empty() && sysutil::lstat(&module).is_ok() {
+                    candidates.push(module);
+                }
+                if let [entry] = candidates.as_slice() {
+                    package_root = eval_symlinks(entry).ok();
+                }
+            }
+            match candidates.as_slice() {
+                [entry] => {
+                    filename = sysutil::join(&[entry, &parts[2..].join("/")]);
                 }
                 _ => bail!("package source {} is unresolved or ambiguous", parts[1]),
             }
@@ -337,7 +359,9 @@ pub fn resolve_project_import_source(project: &str, logical: &str) -> Result<Str
     }
     let canonical =
         eval_symlinks(&filename).map_err(|e| wrap(&format!("resolve source {logical}"), e))?;
-    if !within_directory(&canonical, project) {
+    if !within_directory(&canonical, project)
+        && !package_root.is_some_and(|root| within_directory(&canonical, &root))
+    {
         bail!("source file resolves outside source project: {logical}");
     }
     if !sysutil::stat(&canonical).is_ok_and(|info| info.is_regular() && info.size <= SOURCE_LIMIT) {
@@ -516,7 +540,18 @@ pub fn create_build_import_context(
 fn resolve_script_source(library: &str, relative: &str) -> Result<String> {
     let canonical = eval_symlinks(&sysutil::join(&[library, relative]))
         .map_err(|e| wrap(&format!("resolve importer source {relative}"), e))?;
-    if !within_directory(&canonical, library) {
+    // A package the compilation placed by a link to where the resolver
+    // keeps it is bounded by that package's root instead.
+    let package_root = relative
+        .strip_prefix("Library/PackageCache/")
+        .and_then(|rest| rest.split('/').next())
+        .filter(|entry| !entry.is_empty() && *entry != "." && *entry != "..")
+        .and_then(|entry| {
+            eval_symlinks(&sysutil::join(&[library, "Library/PackageCache", entry])).ok()
+        });
+    if !within_directory(&canonical, library)
+        && !package_root.is_some_and(|root| within_directory(&canonical, &root))
+    {
         bail!("importer source resolves outside its project: {relative}");
     }
     if !sysutil::stat(&canonical).is_ok_and(|info| info.is_regular() && info.size <= SOURCE_LIMIT) {

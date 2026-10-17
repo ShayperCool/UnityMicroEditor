@@ -411,3 +411,54 @@ pub fn match_constraints(constraints: &[String], defines: &[String]) -> Result<b
     }
     Ok(true)
 }
+
+/// The Editor's state of one managed plugin: enabled for the Editor
+/// platform, or for any platform the Editor is not excluded from.
+pub fn read_editor_plugin(path: &str, defines: &[String]) -> Result<SourcePlugin> {
+    let mut result = SourcePlugin {
+        path: path.to_string(),
+        ..Default::default()
+    };
+    let content = match read_agent_file(&format!("{path}.meta"), 32 << 20) {
+        Ok(content) => content,
+        Err(error) if is_not_exist(&error) => return Ok(result),
+        Err(error) => return Err(error),
+    };
+    let Some(metadata) = plugin_yaml::decode(&content)
+        .map_err(|error| anyhow!("plugin metadata {path}: {error}"))?
+    else {
+        // GUID-only metadata keeps the default importer: every platform.
+        result.enabled = true;
+        return Ok(result);
+    };
+    result.explicit = metadata.explicit != 0;
+    result.constraints = metadata.constraints;
+    let (mut any_enabled, mut explicit_editor, mut editor_enabled) = (false, false, false);
+    for platform in &metadata.platforms {
+        for (group, target) in &platform.first {
+            if target == "Any" || group == "Any" {
+                any_enabled = platform.enabled != 0;
+                if platform
+                    .settings
+                    .get("Exclude Editor")
+                    .is_some_and(|value| value == "1")
+                {
+                    any_enabled = false;
+                }
+            }
+            if group == "Editor" && target == "Editor" {
+                explicit_editor = true;
+                editor_enabled = platform.enabled != 0;
+            }
+        }
+    }
+    // With "Any Platform" on, a platform is left out only by its exclusion;
+    // its own entry counts when "Any Platform" is off.
+    result.enabled = match any_enabled {
+        true => true,
+        false => explicit_editor && editor_enabled,
+    };
+    let constraints = match_constraints(&result.constraints, defines)?;
+    result.enabled = result.enabled && constraints;
+    Ok(result)
+}

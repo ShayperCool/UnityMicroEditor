@@ -19,8 +19,8 @@ pub use compile::{
 };
 pub use options::{
     SourcePlugin, SourceVersion, apply_response_files, compare_versions, lossy_runes,
-    match_constraints, match_version, parse_version, plugin_references, read_source_plugin,
-    split_arguments,
+    match_constraints, match_version, parse_version, plugin_references, read_editor_plugin,
+    read_source_plugin, split_arguments,
 };
 pub use profile::{
     SourceBuildProof, SourceBuildProofAssembly, SourceEngineProfile, SourceGraphOptions,
@@ -115,6 +115,20 @@ pub struct SourceAsmdef {
 }
 
 const ASMDEF: &str = "sourceAsmdef";
+
+/// The defines the pinned Editor compiles its own assemblies with beyond
+/// those of a development Player, which it leaves out (`DEVELOPMENT_BUILD`).
+pub const EDITOR_DEFINES: [&str; 9] = [
+    "ENABLE_BURST_AOT",
+    "ENABLE_UNITY_COLLECTIONS_CHECKS",
+    "UNITY_EDITOR",
+    "UNITY_EDITOR_64",
+    "UNITY_EDITOR_LINUX",
+    "UNITY_ENABLE_CHECKS",
+    "UNITY_INCLUDE_INSTRUMENTATION",
+    "UNITY_INCLUDE_TESTS",
+    "UNITY_TEAM_LICENSE",
+];
 
 fn set_strings(target: &mut NilVec<String>, value: &Json, field: &str) -> Result<(), String> {
     let at = Target {
@@ -395,6 +409,12 @@ pub fn build_source_graph(
     if settings.input_handler == 0 || settings.input_handler == 2 {
         base.push("ENABLE_LEGACY_INPUT_MANAGER".into());
     }
+    if options.editor_domain {
+        // What the Editor defines beyond a development Player of the pinned
+        // engine (compared with its own `Library/Bee` record of a project).
+        base = retain(&base, |define| define != "DEVELOPMENT_BUILD");
+        base.append(EDITOR_DEFINES.iter().map(|define| define.to_string()));
+    }
     let base = sorted_strings(&base);
     let automatic_engine_assemblies = automatic_engine_assemblies(profile);
     let base_compiler_options = base_compiler_options(profile);
@@ -595,7 +615,10 @@ pub fn build_source_graph(
                             .entry(sysutil::base(path))
                             .or_insert_with(|| path.to_string());
                     }
-                    let plugin = read_source_plugin(path, &base)?;
+                    let plugin = match options.editor_domain {
+                        true => read_editor_plugin(path, &base)?,
+                        false => read_source_plugin(path, &base)?,
+                    };
                     if plugin.enabled && managed_plugin(path) {
                         let name = sysutil::base(path);
                         if plugins.contains_key(&name) {
@@ -655,14 +678,31 @@ pub fn build_source_graph(
         let defines = sorted_strings(&defines);
         let constraints = match_constraints(&definition.define_constraints, &defines)
             .map_err(|error| anyhow!("{name} constraints: {error}"))?;
-        let included = definition.include_platforms.is_empty()
-            || has(&definition.include_platforms, "LinuxStandalone64")
-            || has(&definition.include_platforms, "Standalone");
-        let enabled = included
-            && !has(&definition.exclude_platforms, "LinuxStandalone64")
-            && !has(&definition.exclude_platforms, "Standalone")
-            && constraints
-            && !test_assembly(definition);
+        let included = match options.editor_domain {
+            true => {
+                (definition.include_platforms.is_empty()
+                    || has(&definition.include_platforms, "Editor"))
+                    && !has(&definition.exclude_platforms, "Editor")
+            }
+            false => {
+                (definition.include_platforms.is_empty()
+                    || has(&definition.include_platforms, "LinuxStandalone64")
+                    || has(&definition.include_platforms, "Standalone"))
+                    && !has(&definition.exclude_platforms, "LinuxStandalone64")
+                    && !has(&definition.exclude_platforms, "Standalone")
+            }
+        };
+        // The Editor compiles the test framework and what refers to it, but
+        // not the tests of packages, which only build with UNITY_INCLUDE_TESTS
+        // when the project lists the package as testable.
+        let tests = match options.editor_domain {
+            true => {
+                !definition.package.is_empty()
+                    && has(&definition.define_constraints, "UNITY_INCLUDE_TESTS")
+            }
+            false => test_assembly(definition),
+        };
+        let enabled = included && constraints && !tests;
         active.insert(name.clone(), enabled);
         let mut config = AssemblyConfig {
             name: name.clone(),
@@ -737,7 +777,8 @@ pub fn build_source_graph(
         }
         if name.is_empty() {
             let logical = logical_path(&project, packages, path);
-            if editor_source(path) {
+            let editor = editor_source(path);
+            if editor && !options.editor_domain {
                 continue;
             }
             name = "Assembly-CSharp".into();
@@ -750,6 +791,12 @@ pub fn build_source_graph(
             .any(|prefix| logical.starts_with(prefix))
             {
                 name = "Assembly-CSharp-firstpass".into();
+            }
+            if editor {
+                name = match name.as_str() {
+                    "Assembly-CSharp-firstpass" => "Assembly-CSharp-Editor-firstpass".into(),
+                    _ => "Assembly-CSharp-Editor".into(),
+                };
             }
             if configs
                 .get(&name)
@@ -836,7 +883,7 @@ pub fn build_source_graph(
                 }
             }
         }
-        if name == "Assembly-CSharp" || name == "Assembly-CSharp-firstpass" {
+        if name.starts_with("Assembly-CSharp") {
             for (dependency, definition) in &definitions {
                 if on(&active, dependency)
                     && source_count(&configs, dependency) > 0
@@ -845,11 +892,22 @@ pub fn build_source_graph(
                     config.dependencies.push(dependency.clone());
                 }
             }
-            if name == "Assembly-CSharp" && source_count(&configs, "Assembly-CSharp-firstpass") > 0
-            {
-                config
-                    .dependencies
-                    .push("Assembly-CSharp-firstpass".to_string());
+            // Each predefined assembly sees the ones the Editor compiles
+            // before it.
+            let earlier: &[&str] = match name.as_str() {
+                "Assembly-CSharp" => &["Assembly-CSharp-firstpass"],
+                "Assembly-CSharp-Editor-firstpass" => &["Assembly-CSharp-firstpass"],
+                "Assembly-CSharp-Editor" => &[
+                    "Assembly-CSharp-firstpass",
+                    "Assembly-CSharp",
+                    "Assembly-CSharp-Editor-firstpass",
+                ],
+                _ => &[],
+            };
+            for dependency in earlier {
+                if source_count(&configs, dependency) > 0 {
+                    config.dependencies.push(dependency.to_string());
+                }
             }
         }
         for dependency in &config.dependencies {
@@ -870,7 +928,10 @@ pub fn build_source_graph(
             &plugins,
             &mut graph.compiler_inputs,
         )?;
-        config.compiler_references = plugin_references(&config, &plugins)?;
+        config.compiler_references = match options.editor_domain {
+            true => editor_plugin_references(&config, &plugins, &options.editor),
+            false => plugin_references(&config, &plugins)?,
+        };
         configs.insert(name.clone(), config);
     }
     for (name, config) in &configs {
@@ -895,23 +956,24 @@ pub fn build_source_graph(
                 && fact.source_hashes.at(&format!("{logical}.meta"))
                     == graph.compiler_inputs.at(&format!("{source}.meta"))
         };
-        let mut native = match (package, fact) {
-            (Some(package), Some(fact)) => {
-                !package.name.is_empty()
-                    && !fact.name.is_empty()
-                    && fact.package == package.name
-                    && fact.package_content_hash == package.content_hash
-                    && fact_defines(fact)
-            }
-            _ => false,
-        };
+        let mut native = !options.editor_domain
+            && match (package, fact) {
+                (Some(package), Some(fact)) => {
+                    !package.name.is_empty()
+                        && !fact.name.is_empty()
+                        && fact.package == package.name
+                        && fact.package_content_hash == package.content_hash
+                        && fact_defines(fact)
+                }
+                _ => false,
+            };
         if native && let Some(fact) = fact {
             native = config
                 .sources
                 .iter()
                 .all(|source| source_proof(fact, source, true));
         }
-        if name == "UnityMicroEditor" {
+        if name == "UnityMicroEditor" && !options.editor_domain {
             // Editor-only adapters may change independently. The bridge's exact
             // runtime source and asmdef/config proof must still match its DLL.
             native = fact.is_some_and(|fact| {
@@ -973,13 +1035,20 @@ pub fn build_source_graph(
                 sha256: String::new(),
                 references: config.dependencies.clone(),
                 compiled_references: config.compiler_references.clone(),
-                package_build: package.is_some_and(|package| {
-                    matches!(package.source.as_str(), "registry" | "builtin" | "git")
-                }),
+                package_build: !options.editor_domain
+                    && package.is_some_and(|package| {
+                        matches!(package.source.as_str(), "registry" | "builtin" | "git")
+                    }),
+                editor_only: options.editor_domain
+                    && (editor_source(name)
+                        || definitions.get(name).is_some_and(|definition| {
+                            definition.include_platforms.len() == 1
+                                && has(&definition.include_platforms, "Editor")
+                        })),
             });
         }
     }
-    if graph.assemblies.len() + graph.host_assemblies.len() > 256 {
+    if graph.assemblies.len() + graph.host_assemblies.len() > 256 && !options.editor_domain {
         bail!("Source graph exceeds256 runtime assemblies");
     }
     packages.validate(ctx)?;
@@ -1112,4 +1181,47 @@ pub fn test_assembly(definition: &SourceAsmdef) -> bool {
             )
         })
     })
+}
+
+/// The precompiled assemblies an Editor-domain assembly compiles against:
+/// as for a Player, except that an assembly named explicitly may be one the
+/// Editor ships (IL2CPP's, Cecil's), and one found nowhere is left out, as
+/// the Editor leaves it out.
+fn editor_plugin_references(
+    config: &AssemblyConfig,
+    plugins: &BTreeMap<String, SourcePlugin>,
+    editor: &str,
+) -> NilVec<String> {
+    let mut result = config.compiler_references.clone();
+    if config.config.override_references {
+        let data = sysutil::join(&[&sysutil::dir(editor), "Data"]);
+        for name in &config.config.precompiled {
+            if let Some(plugin) = plugins.get(name) {
+                result.push(plugin.path.clone());
+                continue;
+            }
+            let file = match name.ends_with(".dll") {
+                true => name.clone(),
+                false => format!("{name}.dll"),
+            };
+            for directory in [
+                "il2cpp/build/deploy",
+                "Tools/BuildPipeline/BuiltinILPPs",
+                "Managed",
+            ] {
+                let path = sysutil::join(&[&data, directory, &file]);
+                if std::path::Path::new(&path).is_file() {
+                    result.push(path);
+                    break;
+                }
+            }
+        }
+    } else {
+        for plugin in plugins.values() {
+            if !plugin.explicit {
+                result.push(plugin.path.clone());
+            }
+        }
+    }
+    sorted_strings(&result)
 }

@@ -248,6 +248,9 @@ pub struct PlainCompile<'a> {
     pub references: &'a [String],
     /// `package-compiles` or `package-codegen`.
     pub kind: &'a str,
+    /// The directory Unity's source generators take for the project, which
+    /// the paths they record are relative to; the project when empty.
+    pub project_view: &'a str,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -276,8 +279,17 @@ impl Compiler {
         identity.insert("defines".into(), compile.defines.join(";"));
         identity.insert("options".into(), compile.compiler_options.join(" "));
         identity.insert("unsafe".into(), compile.allow_unsafe.to_string());
+        identity.insert("view".into(), compile.project_view.to_string());
+        let view = match compile.project_view.is_empty() {
+            true => self.project.clone(),
+            false => compile.project_view.to_string(),
+        };
         for source in compile.sources {
-            identity.insert(source.clone(), self.hashes.file_hash(source)?);
+            let path = match sysutil::is_abs(source) {
+                true => source.clone(),
+                false => sysutil::join(&[&view, source]),
+            };
+            identity.insert(source.clone(), self.hashes.file_hash(&path)?);
         }
         for reference in compile.references {
             identity.insert(
@@ -345,7 +357,8 @@ impl Compiler {
             &folder,
             &format!("{}.UnityAdditionalFile.txt", compile.name),
         ]);
-        sys::write(&additional, self.project.as_bytes())?;
+        let view = view.as_str();
+        sys::write(&additional, view.as_bytes())?;
         arguments.push(format!("-generatedfilesout:{generated}"));
         arguments.push(format!("-additionalfile:{additional}"));
         arguments.extend(compile.sources.iter().cloned());
@@ -359,7 +372,7 @@ impl Compiler {
         sys::write(&response, text.as_bytes())?;
         compiler_command(
             ctx,
-            &self.project,
+            view,
             &self.dotnet,
             &[&self.csc, &format!("@{response}")],
         )

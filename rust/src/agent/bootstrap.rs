@@ -62,6 +62,9 @@ impl Service {
         // Every Editor of a bootstrap runs in an owned staging copy. The target
         // project is only read: its manifest and Library stay as authored.
         let mut host_evidence = String::new();
+        // A supplied host brings the build proof its graph is read from; only
+        // a host built here needs the Editor that builds it.
+        let supplied = !host.is_empty();
         let stage_directory = if host.is_empty() {
             let (player, evidence) = super::host::prepare_agent_host(ctx, self, &id)?;
             host = player;
@@ -73,19 +76,23 @@ impl Service {
         };
         let graph_path = join(&[&directory, "graph.json"]);
         if !super::regular(&graph_path) {
-            let (stage, staged) = super::host::stage_graph(ctx, self, &id, &stage_directory)?;
             let resolved = packages::resolve(
                 ctx,
                 project,
                 &self.0.editor,
                 packages::Options::default().with_runtime_package()?,
             )?;
-            let graph = super::host::retarget_stage_graph(
-                &unmarshal_any(&read_agent_file(&staged, 80 << 20)?)?,
-                &stage,
-                project,
-                &resolved,
-            )?;
+            let graph = if supplied {
+                super::host::proof_graph(project, &self.0.editor, &host, &resolved)?
+            } else {
+                let (stage, staged) = super::host::stage_graph(ctx, self, &id, &stage_directory)?;
+                super::host::retarget_stage_graph(
+                    &unmarshal_any(&read_agent_file(&staged, 80 << 20)?)?,
+                    &stage,
+                    project,
+                    &resolved,
+                )?
+            };
             agent_immutable_json(&graph_path, &graph)?;
         }
         let mut native = text(args, "nativeCatalog");
@@ -95,7 +102,10 @@ impl Service {
                 Ok(_) => native = candidate,
                 Err(error) if !not_exist(&error) => return Err(error),
                 Err(_) => {
-                    native = if super::native::may_need_native(project)? {
+                    // With a supplied host nothing here runs an Editor: the
+                    // import worker brings native content when the baseline
+                    // is published.
+                    native = if !supplied && super::native::may_need_native(project)? {
                         self.prepare_native(ctx, &scene, &id, &directory)?
                     } else {
                         super::native::identity_catalog(project, &graph_path, &directory)?
@@ -119,7 +129,13 @@ impl Service {
             artifact_receipt: artifacts,
             backends: [
                 ("preparation", "native_engine_bootstrap"),
-                ("nativeBootstrap", "unity_editor_public_api_once"),
+                (
+                    "nativeBootstrap",
+                    match supplied {
+                        true => "host_build_proof",
+                        false => "unity_editor_public_api_once",
+                    },
+                ),
             ]
             .map(|(key, value)| (key, value.to_string()))
             .into(),
