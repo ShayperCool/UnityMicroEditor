@@ -114,6 +114,7 @@ pub fn run_source_graph_cli(mode: &str, arguments: Vec<String>) -> Result<()> {
         player,
         profile: Some(profile),
         packages: Some(snapshot),
+        editor_domain: false,
     };
     if mode == "compiler-source-prepare" {
         return emit(&prepare_source_compiler_graph(&ctx, &options, &output)?);

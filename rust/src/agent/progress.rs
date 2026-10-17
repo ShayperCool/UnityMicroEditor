@@ -5,7 +5,7 @@ use std::time::Instant;
 
 /// The stages of `project_prepare` in execution order. A preparation that
 /// reuses cached results skips the stages it does not need.
-pub(crate) const PREPARE_STAGES: [&str; 11] = [
+pub(crate) const PREPARE_STAGES: [&str; 12] = [
     "validate_sources",
     "resolve_packages",
     "build_host",
@@ -16,6 +16,7 @@ pub(crate) const PREPARE_STAGES: [&str; 11] = [
     "build_source_graph",
     "prove_scene",
     "compile_scripts",
+    "compile_editor_assemblies",
     "publish_baseline",
 ];
 

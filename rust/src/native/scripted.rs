@@ -149,10 +149,12 @@ pub fn scripted_profile(extension: &str) -> bool {
     extension == ".inputactions"
 }
 
-/// The projects whose `Library` may hold an Editor compilation of `project`,
-/// the tool's own staging clone first.
-fn libraries(project: &str) -> [String; 2] {
+/// The projects whose `Library` may hold an Editor compilation of `project`:
+/// the one the tool compiled without an Editor, the tool's own staging clone,
+/// the project itself.
+fn libraries(project: &str) -> [String; 3] {
     [
+        sysutil::join(&[project, super::editor_compilation::DIRECTORY]),
         sysutil::join(&[project, "Library/UnityMicroEditor/stage/project"]),
         project.to_string(),
     ]

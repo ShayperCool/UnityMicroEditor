@@ -252,6 +252,68 @@ staging copy for about 7 minutes. That run exports the engine graph and
 imports the native content; the URP shader builds in the import worker use
 the Editor's compilation of the project's Editor assemblies.
 
+## Preparing without the Editor (in progress)
+
+With `--host-player`, a cold preparation now runs no Editor:
+
+- **Graph.** The engine graph comes from the host's build proof
+  (`agent/host.rs`, `proof_graph`) instead of an `export_graph` run.
+- **Native catalog.** The native catalog is the identity catalog of the
+  sources. Every native asset is imported in the standalone import worker on
+  demand; there is no `native_prepare` run.
+- **Component defaults.** These are taken only when the host was built here
+  (`host_evidence`).
+- **Editor assemblies.** A new stage, `compile_editor_assemblies`
+  (`native/editor_compilation.rs`), compiles the assemblies the Editor would
+  compile for itself. It uses the Editor platform, defines and references,
+  and Unity's analyzers. It lays the result out as the Editor does
+  (`Library/ScriptAssemblies`, `Library/PackageCache/<name>@<hash>`, a Bee
+  `E-inputdata.json` record) under
+  `Library/UnityMicroEditor/editor-compilation`. The import worker runs the
+  Editor code of packages from there: shader build callbacks, scripted
+  importers and material inspectors. `UME_EDITOR_COMPILATION=0` turns the
+  stage off.
+
+What the worker needs from such a compilation:
+
+- package cache directories named as the Editor names them, with the first
+  12 characters of `BuiltInPackages/<name>.sha1` for a built-in package;
+- Unity's `Unity.Analyzers.Common` and `LongLiving` analyzers;
+- sources compiled from the compilation's directory with
+  `-pathmap:<dir>=.`, so that the generated `MonoScript` tables record
+  `./Library/PackageCache/...` paths.
+
+A shader that names an Editor built-in shader only for `UsePass` (URP's
+`TerrainLit` names `Hidden/Nature/Terrain/Utilities`) is left to the worker.
+The names come from the Editor's `Data/Resources/unity_builtin_extra`. A
+built-in `Fallback` is still refused, because the host Player may not hold
+that shader.
+
+The authored closure follows references found in the authored text,
+including fields that exist only in the Editor:
+
+- A reference to an asset in an `Editor` folder is not followed.
+- A GUID that no asset has is read as missing, as Unity reads it.
+
+On 2026-10-17 a cold preparation of the URP copy on the sample's host got
+through package builds, the Editor compilation and 52 shader builds. It
+then stopped:
+
+- **What stopped it.** URP's global settings name
+  `Sprite-Unlit-Default.mat` and three other materials of the package. These
+  are still `serializedVersion: 6`.
+- **Why the Editor route had no such problem.** The Editor upgrades such a
+  material when it loads it, and the Editor-made catalog delivered it
+  already imported.
+- **Why this route does.** Here it is read as authored text, which needs
+  version 8. The upgrade depends on the shader: keywords split into valid and
+  invalid ones, and int properties move to `m_Ints`. It is to be done by a
+  worker that loads the material and saves it as the engine writes it, not
+  restated here.
+- **What a real build would do instead.** For a 3D project, a Player build
+  would strip `Renderer2DResources` with URP's own stripper and never need
+  these materials. The stripping API is internal.
+
 ## Limits and what remains
 
 - **Settings.** Writing the managers needs a base `globalgamemanagers` of the
@@ -265,8 +327,14 @@ the Editor's compilation of the project's Editor assemblies.
   AOT output and Addressables catalogs still come from the host. A package
   build is not redone within a watched session: packages nobody edits do not
   change there.
-- **The Editor in preparation.** A new project still runs the Editor once in
-  its staging copy, to export the engine graph and to import native content.
+- **The Editor in preparation.** Without `--host-player`, a new project still
+  runs the Editor once in its staging copy, to build its host, export the
+  engine graph and import native content. With it, preparation runs no
+  Editor, but it does not reach a Player yet; see above. In that route:
+  - The Editor compilation is made once per preparation. It is not redone in
+    a watched session.
+  - `Unity.Collections.CodeGen` is left out, because it names an Editor
+    assembly of the package that the compilation lacks.
 - **Render pipelines.** URP's shaders are built per project in the import
   worker with URP's own Editor code, and its runtime assemblies are package
   builds. A host without URP therefore runs a URP project. Shaders of a

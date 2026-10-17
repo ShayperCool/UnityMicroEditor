@@ -387,13 +387,11 @@ impl Inner {
             bail!("native replacement source identity is invalid");
         }
         let path = r.source_path.as_str();
-        // A shader of a package is built again with the materials that use it.
-        let package_shader = path.starts_with("Packages/")
-            && matches!(
-                lexpath::lower_ext(path).as_str(),
-                ".shader" | ".shadergraph"
-            );
-        if !(path.starts_with("Assets/") || package_shader) || lexpath::clean(path) != path {
+        // A shader of a package is built again with the materials that use
+        // it; without an Editor catalog, any asset of a package is imported
+        // where the resolver keeps the package.
+        let package_asset = path.starts_with("Packages/");
+        if !(path.starts_with("Assets/") || package_asset) || lexpath::clean(path) != path {
             bail!("native replacement source path is invalid: {path}");
         }
         let profile = lexpath::lower_ext(path);

@@ -9,6 +9,7 @@ mod metadata;
 mod netcode;
 mod nilable;
 mod packages;
+pub use packages::PlainCompile;
 mod phases;
 mod prepare;
 mod revision;
@@ -430,6 +431,9 @@ pub struct CompilerGraphAssembly {
     /// the host does not provide: built as the Editor builds it, without the
     /// lifecycle rewrite, post-processed and added to the staged host.
     pub package_build: bool,
+    /// In an Editor-domain graph: an assembly for the Editor platform alone,
+    /// which the Editor compiles against the .NET Framework API.
+    pub editor_only: bool,
 }
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -462,6 +466,12 @@ struct GraphAssemblyWire {
         skip_serializing_if = "is_false"
     )]
     package_build: bool,
+    #[serde(
+        rename = "editorOnly",
+        deserialize_with = "nz",
+        skip_serializing_if = "is_false"
+    )]
+    editor_only: bool,
 }
 impl From<GraphAssemblyWire> for CompilerGraphAssembly {
     fn from(wire: GraphAssemblyWire) -> Self {
@@ -483,6 +493,7 @@ impl From<GraphAssemblyWire> for CompilerGraphAssembly {
             references: wire.references,
             compiled_references: wire.compiled_references,
             package_build: wire.package_build,
+            editor_only: wire.editor_only,
         }
     }
 }
@@ -503,6 +514,7 @@ impl From<CompilerGraphAssembly> for GraphAssemblyWire {
             references: assembly.references,
             compiled_references: assembly.compiled_references,
             package_build: assembly.package_build,
+            editor_only: assembly.editor_only,
         }
     }
 }
@@ -651,4 +663,9 @@ pub(crate) fn player_managed(player: &str) -> String {
 }
 pub(crate) fn join(parts: &[&str]) -> String {
     crate::sysutil::join(parts)
+}
+
+/// The paths a glob pattern matches, in name order.
+pub fn sys_glob(pattern: &str) -> Vec<String> {
+    sys::glob_lossy(pattern)
 }

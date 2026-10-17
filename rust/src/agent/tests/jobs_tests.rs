@@ -827,7 +827,7 @@ fn pending_preparation_reports_its_stage_to_start_status_and_wait() {
     assert!(
         progress["stage"] == "build_host"
             && progress["stageIndex"] == 3
-            && progress["stageCount"] == 11
+            && progress["stageCount"] == 12
             && progress["logPath"] == "/stage/editor.log"
             && progress["elapsedSeconds"].is_number(),
         "pending reply lacks the running stage and its log: {polled}"

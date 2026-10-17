@@ -605,3 +605,128 @@ pub(crate) fn snapshot_host_artifacts(
         "staged host has no registered native runtime bridge slot"
     ))
 }
+
+/// The public Player graph of a supplied host, without an Editor: the build
+/// proof the host build left beside the Player (`UnityMicroEditorSourceProfile.json`)
+/// holds, per host assembly, the configuration, sources, defines and compiled
+/// references that an Editor export of the graph would report. Its logical
+/// paths are placed where our resolver put the packages of `project`; an
+/// assembly of a package the project does not resolve keeps its logical
+/// path, and the engine profile then does not prove it. The graph has no
+/// game assemblies: the profile takes its defines and references from the
+/// host assemblies alone.
+pub(crate) fn proof_graph(
+    project: &str,
+    editor: &str,
+    host: &str,
+    resolved: &packages::Snapshot,
+) -> Result<Any> {
+    let data = crate::compiler::player_data(host);
+    let proof_path = join(&[&data, "UnityMicroEditorSourceProfile.json"]);
+    let proof: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&proof_path)
+            .map_err(|error| anyhow!("host build proof {proof_path}: {error}"))?,
+    )?;
+    for (field, expected) in [
+        ("backend", "unity_editor_build_sources"),
+        ("unityVersion", UNITY_VERSION),
+        ("target", "StandaloneLinux64"),
+        ("scriptingBackend", "Mono2x"),
+    ] {
+        if proof.get(field).and_then(|value| value.as_str()) != Some(expected) {
+            return Err(anyhow!(
+                "host build proof is not a Linux Mono build of {UNITY_VERSION}: {field}"
+            ));
+        }
+    }
+    let physical = |logical: &str| -> String {
+        if sysutil::is_abs(logical) {
+            return logical.to_string();
+        }
+        if let Some(rest) = logical.strip_prefix("Assets/") {
+            return join(&[project, "Assets", rest]);
+        }
+        resolved
+            .packages
+            .iter()
+            .filter_map(|package| {
+                let rest = logical.strip_prefix(&format!("{}/", package.logical_root))?;
+                Some(join(&[&package.path, rest]))
+            })
+            .next()
+            .unwrap_or_else(|| logical.to_string())
+    };
+    let paths = |value: Option<&serde_json::Value>| -> Vec<serde_json::Value> {
+        value
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .map(|item| physical(item).into())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let managed = join(&[&data, "Managed"]);
+    let mut hosts = Vec::new();
+    if let Some(assemblies) = proof.get("assemblies").and_then(|value| value.as_object()) {
+        for (name, assembly) in assemblies {
+            let mut configuration = assembly
+                .get("configuration")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let sources = paths(configuration.get("sources"));
+            let responses = paths(configuration.get("responseFiles"));
+            let defines = configuration
+                .get("defines")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([]));
+            if let Some(object) = configuration.as_object_mut() {
+                object.insert("sources".into(), sources.clone().into());
+                object.insert("responseFiles".into(), responses.clone().into());
+            }
+            let references: Vec<serde_json::Value> = assembly
+                .get("references")
+                .and_then(|value| value.as_object())
+                .map(|references| references.keys().map(|key| physical(key).into()).collect())
+                .unwrap_or_default();
+            let mut editor_defines = defines.as_array().cloned().unwrap_or_default();
+            for define in ["UNITY_EDITOR", "UNITY_EDITOR_64", "UNITY_EDITOR_LINUX"] {
+                editor_defines.push(define.into());
+            }
+            hosts.push(serde_json::json!({
+                "name": name,
+                "path": join(&[&managed, &format!("{name}.dll")]),
+                "sha256": assembly.get("dllSha256").cloned().unwrap_or_default(),
+                "sources": sources,
+                "defines": defines,
+                "editorDefines": editor_defines,
+                "configuration": configuration,
+                "compiledReferences": references,
+                "responseFiles": responses,
+            }));
+        }
+    }
+    let roots: Vec<serde_json::Value> = resolved
+        .packages
+        .iter()
+        .map(|package| serde_json::json!({"path": package.logical_root, "source": package.path}))
+        .collect();
+    let graph = serde_json::json!({
+        "schemaVersion": 1,
+        "backend": "unity_editor",
+        "development": true,
+        "unityVersion": UNITY_VERSION,
+        "target": "StandaloneLinux64",
+        "scriptingBackend": "Mono2x",
+        "project": project,
+        "unity": editor,
+        "assemblies": [],
+        "scripts": [],
+        "compilerInputs": {},
+        "hostAssemblies": hosts,
+        "sourceRoots": roots,
+    });
+    unmarshal_any(&serde_json::to_vec(&graph)?)
+}

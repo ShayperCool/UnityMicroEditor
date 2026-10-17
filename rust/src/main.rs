@@ -84,6 +84,16 @@ fn execute() -> Result<()> {
         }
         "run" => unity_micro_editor::runner::run_cli(&args.collect::<Vec<_>>())?,
         "game-managers" => run_game_managers(args.collect())?,
+        "debug-build-environment" => {
+            let args: Vec<String> = args.collect();
+            let (project, scripts) = args.split_first().ok_or_else(|| {
+                anyhow::anyhow!("debug-build-environment <project> <script guid>...")
+            })?;
+            println!(
+                "{}",
+                unity_micro_editor::native::debug_build_environment(project, scripts)?
+            );
+        }
         "shader-extract" => {
             unity_micro_editor::runtimeartifact::shader_extract_command(&args.collect::<Vec<_>>())?
         }
