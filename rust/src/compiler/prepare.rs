@@ -361,6 +361,7 @@ pub fn prepare_compiler_graph_with(
     // compiled against it.
     let helper = compiler.prepare_lifecycle_helper(ctx)?;
     if own_graph {
+        refresh_bridge(ctx, &compiler, &helper, &managed)?;
         build_package_assemblies(
             ctx,
             &mut compiler,
@@ -1575,6 +1576,40 @@ fn build_package_assemblies(
         });
     }
     register_compiler_assembly_slots(slots_file, &packages)?;
+    super::packages::add_native_initializers(
+        &join(&[&sysutil::dir(managed), "RuntimeInitializeOnLoads.json"]),
+        &rows,
+    )
+}
+
+/// Puts the tool's runtime bridge, compiled from the installation's sources
+/// with the SDK, in place of the one the host was built with, and its
+/// `RuntimeInitializeOnLoad` methods in place of the host's rows for it. A
+/// host then serves every revision of the tool; it only has to hold an
+/// assembly of that name, which `ScriptingAssemblies.json` registers.
+fn refresh_bridge(ctx: &Context, compiler: &Compiler, helper: &str, managed: &str) -> Result<()> {
+    let target = join(&[managed, "UnityMicroEditor.dll"]);
+    if sys::absent(&target) {
+        bail!("the host Player holds no runtime bridge (UnityMicroEditor.dll)");
+    }
+    let dll = super::host::compile_bridge(
+        ctx,
+        &join(&[&compiler.project, "Library/UnityMicroEditor"]),
+        &compiler.editor,
+        managed,
+    )?;
+    // A staged copy of the host may be read-only.
+    let _ = fs::remove_file(&target);
+    sys::write(&target, &sys::read(&dll)?)?;
+    let output = compiler_command(
+        ctx,
+        &compiler.cache,
+        &compiler.dotnet,
+        &[helper, "--runtime-initializers", &target],
+    )
+    .map_err(|error| anyhow!("runtime initializers of the bridge: {}", error.message))?;
+    let rows: Vec<super::packages::InitializerRow> = serde_json::from_slice(&output)
+        .map_err(|error| anyhow!("runtime initializers of the bridge: {error}"))?;
     super::packages::add_native_initializers(
         &join(&[&sysutil::dir(managed), "RuntimeInitializeOnLoads.json"]),
         &rows,

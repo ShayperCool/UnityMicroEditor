@@ -978,32 +978,15 @@ pub fn build_source_graph(
                 .all(|source| source_proof(fact, source, true));
         }
         if name == "UnityMicroEditor" && !options.editor_domain {
-            // Editor-only adapters may change independently. The bridge's exact
-            // runtime source and asmdef/config proof must still match its DLL.
-            native = fact.is_some_and(|fact| {
-                let proven = &fact.configuration;
-                fact.name == *name
-                    && fact_defines(fact)
-                    && proven.config.allow_unsafe == config.config.allow_unsafe
-                    && proven.config.no_engine_references == config.config.no_engine_references
-                    && proven.config.override_references == config.config.override_references
-                    && equal_strings(&sorted_strings(&proven.dependencies), &config.dependencies)
-                    && equal_strings(
-                        &sorted_strings(&proven.config.precompiled),
-                        &sorted_strings(&config.config.precompiled),
-                    )
-                    && fact.source_hashes.iter().all(|(logical, expected)| {
-                        let path = physical_path(&project, packages, logical);
-                        !path.is_empty() && graph.compiler_inputs.at(&path) == expected
-                    })
-                    && config
-                        .sources
-                        .iter()
-                        .all(|source| source_proof(fact, source, false))
-            });
+            // The preparation compiles the bridge from the installation's
+            // sources with the SDK and puts it, with its initializers, in
+            // place of the host's (`compiler::prepare`). The host only has
+            // to hold an assembly of that name, which its
+            // `ScriptingAssemblies.json` registers.
+            native = fact.is_some_and(|fact| fact.name == *name);
             if !native {
                 bail!(
-                    "runtime bridge source/configuration differs from its native source-build proof; prepare a matching SDK bridge profile"
+                    "the host Player holds no runtime bridge (UnityMicroEditor); build a host with the tool's runtime package"
                 );
             }
         }
