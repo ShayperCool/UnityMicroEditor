@@ -556,7 +556,10 @@ impl Probe<'_> {
         }
         // The exit text of a process that needed a signal to stop; `<nil>` for a clean exit.
         let sprint = |worker: &Waiter| worker.exit_error().unwrap_or_else(|| "<nil>".into());
-        if worker.done.wait(Some(Duration::from_secs(3))) {
+        // A worker unloads its domain and stops its shader compilers before
+        // it exits; on a busy machine, with other workers beside it, that
+        // takes more than a few seconds.
+        if worker.done.wait(Some(Duration::from_secs(15))) {
             match worker.exit_error() {
                 Some(exit) => {
                     error = join([error, Some(anyhow!("worker shutdown: {exit}"))]);
