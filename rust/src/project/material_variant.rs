@@ -35,6 +35,17 @@ pub struct InspectedMaterial {
     pub data_json: String,
 }
 
+/// The serialization of a material the session reads from its text. The
+/// engine upgrades an older one when it loads it, which takes the shader:
+/// it sorts the keywords into those the shader declares and those it does
+/// not.
+pub(crate) const MATERIAL_VERSION: i64 = 8;
+
+/// Whether a material is of an older serialization than the session reads.
+pub fn outdated_material(material: &Document) -> bool {
+    value::number(get(material.fields(), "serializedVersion")) < MATERIAL_VERSION
+}
+
 /// How long a chain of parents is followed.
 const DEEPEST_PARENT: usize = 32;
 
@@ -125,15 +136,18 @@ impl Inner {
     }
 
     /// The fields a variant of a shader with an inspector is published
-    /// with; `None` for any other material. When the importer has not
-    /// supplied them from the files as they are now, it is asked to.
+    /// with, and those of a material of an older serialization as the
+    /// engine upgrades it; `None` for any other material. When the importer
+    /// has not supplied them from the files as they are now, it is asked
+    /// to.
     pub(crate) fn inspected_material_fields(
         &mut self,
         path: &str,
         material: &Document,
     ) -> Result<Option<Map>> {
-        if value::map_file_id(object(material.get("m_Parent"))) == "0"
-            || !self.variant_with_inspector(path, material)?
+        if !outdated_material(material)
+            && (value::map_file_id(object(material.get("m_Parent"))) == "0"
+                || !self.variant_with_inspector(path, material)?)
         {
             return Ok(None);
         }

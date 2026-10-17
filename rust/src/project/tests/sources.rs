@@ -342,6 +342,74 @@ fn authored_material_keeps_properties_and_native_references() {
     );
 }
 
+/// A material of an older serialization is the engine's to upgrade: the
+/// session asks for it and takes the fields the importer supplies while the
+/// files they were made from are unchanged.
+#[test]
+fn outdated_material_takes_the_fields_the_engine_upgrades_it_to() {
+    let fixture = fixture_session();
+    let path = "Assets/Material.mat";
+    let physical = format!("{}/{path}", fixture.project);
+    let outdated = AUTHORED_MATERIAL_FIXTURE
+        .replacen("serializedVersion: 8", "serializedVersion: 6", 1)
+        .replacen(
+            "  m_Parent: {fileID: 0}\n",
+            "  m_ShaderKeywords: _A _B\n",
+            1,
+        );
+    write_fixture_file(&physical, &outdated);
+    write_fixture_file(
+        format!("{physical}.meta"),
+        "guid: 22222222222222222222222222222222\n",
+    );
+    {
+        let mut session = fixture.session.lock();
+        let guid = "22222222222222222222222222222222";
+        session.by_guid.insert(guid.into(), path.into());
+        session.by_path.insert(path.into(), guid.into());
+    }
+    let refresh = || {
+        let mut material = asset(serde_json::json!({"path": path, "kind": "authoredMaterial"}));
+        fixture
+            .session
+            .lock()
+            .refresh_asset(&mut material)
+            .map(|()| material)
+    };
+    let asked = refresh().unwrap_err();
+    assert!(
+        asked
+            .downcast_ref::<crate::project::session::NeedsImportError>()
+            .is_some_and(|error| error.path == path),
+        "{asked:#}"
+    );
+    let upgraded = parse_unity_yaml(AUTHORED_MATERIAL_FIXTURE.as_bytes()).unwrap();
+    let data_json = value::compact_map(upgraded[0].fields()).unwrap();
+    let hash = |file: &str| crate::util::file_hash(file).unwrap();
+    fixture
+        .session
+        .set_inspected_material(&crate::project::InspectedMaterial {
+            guid: "22222222222222222222222222222222".into(),
+            source_path: path.into(),
+            ingredient_sha256: [
+                (path.to_string(), hash(&physical)),
+                (format!("{path}.meta"), hash(&format!("{physical}.meta"))),
+            ]
+            .into(),
+            data_json: data_json.clone(),
+        })
+        .unwrap();
+    let material = refresh().unwrap();
+    assert_eq!(
+        value::get(&material, "dataJson").as_str(),
+        Some(data_json.as_str())
+    );
+    write_fixture_file(&physical, outdated.replacen("_A _B", "_A", 1));
+    // An edit within the same preparation is refused as such; a later one
+    // asks the importer again.
+    assert!(refresh().is_err());
+}
+
 #[test]
 fn reject_unsupported_authored_material_variant_and_runtime_subasset() {
     for content in [

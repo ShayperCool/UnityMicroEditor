@@ -11,13 +11,13 @@ use super::{
     build_settings::{Sources, material_parents},
     importer::NativeProjectImporter,
     inspector::{InspectionOptions, inspect_material_variants, inspection_cache},
-    player_objects::open_sources,
+    player_objects::{Build, open_sources, save_materials},
     support::Event,
 };
 use crate::{
     cancel::Context,
     playerbake::{self, ShaderFacts, Unsupported},
-    project::InspectedMaterial,
+    project::{InspectedMaterial, outdated_material, parse_unity_yaml, value},
     sysutil,
     util::random_id,
 };
@@ -106,9 +106,16 @@ impl NativeProjectImporter {
             .guid_of(logical)
             .ok_or_else(|| anyhow!("{logical} has no .meta"))?
             .to_string();
+        let source = sources.read(logical)?;
+        if let Some(material) = parse_unity_yaml(&source)?
+            .into_iter()
+            .find(|document| document.class_id == 21)
+            && outdated_material(&material)
+        {
+            return self.upgrade_material(ctx, &sources, logical, &guid, material.fields());
+        }
         // The variants among its parents are built by the same inspector
         // before a build writes it.
-        let source = sources.read(logical)?;
         let parents = material_parents(&sources, &source)?;
         // A material without a parent is loaded from its authored fields.
         // The session names it when it changed after the baseline was
@@ -185,6 +192,93 @@ impl NativeProjectImporter {
             .with("parents", &parents.len())
             .with("workerRuns", &inspection.worker_runs)
             .with("kept", &inspection.kept)
+            .seconds("elapsedSeconds", started.elapsed().as_secs_f64())
+            .emit();
+        Ok(())
+    }
+}
+
+impl NativeProjectImporter {
+    /// Has the engine load a material of an older serialization, which
+    /// upgrades it, and hands the session the fields the Editor writes of
+    /// it then. The worker imports the material's shader first: the
+    /// upgrade sorts the keywords into those the shader declares and those
+    /// it does not. Those fields stand while the material, its shader and
+    /// their `.meta` files are unchanged.
+    fn upgrade_material(
+        &mut self,
+        ctx: &Context,
+        sources: &Sources,
+        logical: &str,
+        guid: &str,
+        fields: &value::Map,
+    ) -> Result<()> {
+        let started = Instant::now();
+        let refused = |reason: String| {
+            anyhow::Error::from(Unsupported(reason)).context(format!("bake native {logical}"))
+        };
+        if value::map_file_id(value::object(value::get(fields, "m_Parent"))) != "0" {
+            return Err(refused(format!(
+                "the material variant {logical}, which is of an older serialization"
+            )));
+        }
+        let shader_guid = value::text(value::object(value::get(fields, "m_Shader")), "guid");
+        let Some(shader) = sources.path_of(&shader_guid).map(String::from) else {
+            return Err(refused(format!(
+                "the material {logical} of an older serialization, whose shader {shader_guid} is no source of the project or its packages"
+            )));
+        };
+        let saved = save_materials(
+            ctx,
+            &Build {
+                project: self.opts.project.clone(),
+                editor: self.opts.editor.clone(),
+                output: sysutil::join(&[&self.opts.output, "native/imports", &random_id()]),
+                target: shader.clone(),
+                users: vec![logical.to_string()],
+                timeout: Duration::from_secs(600),
+                reload_list: self.reload_list(),
+                shader_cache: String::new(),
+            },
+        )
+        .map_err(|error| error.context(format!("bake native {logical}")))?;
+        let text = saved
+            .into_iter()
+            .find_map(|(path, text)| (path == logical).then_some(text))
+            .ok_or_else(|| anyhow!("the worker saved no text of {logical}"))?;
+        let Some(upgraded) = parse_unity_yaml(&text)?
+            .into_iter()
+            .find(|document| document.class_id == 21)
+        else {
+            return Err(anyhow!("the worker's text of {logical} holds no material"));
+        };
+        if outdated_material(&upgraded) {
+            return Err(refused(format!(
+                "the material {logical}, which the engine leaves at an older serialization"
+            )));
+        }
+        let mut ingredient_sha256 = BTreeMap::new();
+        for path in [logical, &shader] {
+            let Some(physical) = sources.physical(path) else {
+                return Err(anyhow!("{path} has no file"));
+            };
+            ingredient_sha256.insert(path.to_string(), crate::util::file_hash(&physical)?);
+            ingredient_sha256.insert(
+                format!("{path}.meta"),
+                crate::util::file_hash(&format!("{physical}.meta"))?,
+            );
+        }
+        let data_json = value::compact_map(upgraded.fields())?;
+        self.session.set_inspected_material(&InspectedMaterial {
+            guid: guid.to_string(),
+            source_path: logical.to_string(),
+            ingredient_sha256,
+            data_json,
+        })?;
+        Event::new("native-material-upgraded")
+            .with("path", logical)
+            .with("guid", guid)
+            .with("shader", &shader)
             .seconds("elapsedSeconds", started.elapsed().as_secs_f64())
             .emit();
         Ok(())

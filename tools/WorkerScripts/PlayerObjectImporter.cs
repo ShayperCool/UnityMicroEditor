@@ -13,6 +13,9 @@
 //                        objects are written into the same file, as a build does for an asset no bundle holds
 //   use <asset path>     an asset that uses the written ones (a material); it adds usage, not objects
 //   need <asset path>    an asset that only has to be importable (settings the pipeline reads)
+//   save <asset path>    an asset whose objects are saved as the Editor writes them as text, after the engine
+//                        loaded them and so upgraded an older serialization; reported as "saved <base64> <path>".
+//                        A request that only saves writes no Player objects.
 // The artifact holds the serialized file under the extension "player" and a
 // report (the main object, a TextAsset) that lists what the file refers to.
 // Every object keeps the local ID it has in its asset, in the written file
@@ -216,6 +219,30 @@ namespace UnityMicroEditor.Worker
             return text.Append(')').ToString();
         }
 
+        // The objects of each asset as the Editor writes them as text. They
+        // are read from the source again, as MaterialInspector reads them,
+        // which upgrades an older serialization; the references they hold
+        // resolve to the assets imported in this context. The Editor maps a
+        // path under Packages to the package's directory in GetFullPath.
+        static void Save(List<string> paths, StringBuilder report)
+        {
+            if (paths.Count == 0) return;
+            string directory = Path.Combine("Temp", "ume-saved");
+            Directory.CreateDirectory(directory);
+            for (int index = 0; index < paths.Count; index++)
+            {
+                var objects = UnityEditorInternal.InternalEditorUtility.LoadSerializedFileAndForget(Path.GetFullPath(paths[index]));
+                if (objects == null || objects.Length == 0)
+                    throw new InvalidOperationException("the worker cannot read " + paths[index]);
+                string file = Path.Combine(directory, index + Path.GetExtension(paths[index]));
+                UnityEditorInternal.InternalEditorUtility.SaveToSerializedFileAndForget(objects, file, true);
+                if (!File.Exists(file))
+                    throw new InvalidOperationException("the Editor saved no text of " + paths[index]);
+                string text = Convert.ToBase64String(File.ReadAllBytes(file));
+                report.Append("saved ").Append(text).Append(' ').Append(paths[index]).Append('\n');
+            }
+        }
+
         static ObjectIdentifier[] Identifiers(AssetImportContext ctx, string path, StringBuilder report, string role)
         {
             ctx.DependsOnArtifact(path);
@@ -236,6 +263,7 @@ namespace UnityMicroEditor.Worker
             var embedded = new List<ObjectIdentifier>();
             string only = null;
             var users = new List<ObjectIdentifier>();
+            var saved = new List<string>();
             foreach (var raw in File.ReadAllLines(ctx.assetPath))
             {
                 string line = raw.TrimEnd('\r');
@@ -255,8 +283,18 @@ namespace UnityMicroEditor.Worker
                         break;
                     case "use": users.AddRange(Identifiers(ctx, value, report, "user")); break;
                     case "need": Identifiers(ctx, value, report, "needed"); break;
+                    case "save":
+                        Identifiers(ctx, value, report, "saved-source");
+                        saved.Add(value);
+                        break;
                     default: throw new InvalidOperationException("unknown request statement " + verb);
                 }
+            }
+            Save(saved, report);
+            if (saved.Count != 0 && written.Count == 0)
+            {
+                report.Append("done\n");
+                return;
             }
             if (only != null)
             {
