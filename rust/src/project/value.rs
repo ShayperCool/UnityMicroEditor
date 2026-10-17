@@ -118,7 +118,8 @@ impl Value {
         self.encode(&mut out)?;
         Ok(out)
     }
-    /// JSON output: sorted keys, HTML escaping, shortest round-trip float layout.
+    /// JSON output: sorted keys (a managed reference entry leads with `rid`,
+    /// `type`, `data`), HTML escaping, shortest round-trip float layout.
     pub fn encode(&self, out: &mut String) -> Result<()> {
         match self {
             Value::Null => out.push_str("null"),
@@ -181,9 +182,30 @@ impl Value {
     }
 }
 
+/// The keys of an entry of a managed reference registry, in the order Unity
+/// writes them: a reader makes the object of the type before it reads the
+/// data into it.
+const MANAGED_REFERENCE_KEYS: [&str; 3] = ["rid", "type", "data"];
+
 pub fn encode_map(map: &Map, out: &mut String) -> Result<()> {
     out.push('{');
-    for (index, (key, value)) in map.iter().enumerate() {
+    let managed = MANAGED_REFERENCE_KEYS
+        .iter()
+        .all(|key| map.contains_key(*key));
+    let ordered: Box<dyn Iterator<Item = (&String, &Value)>> = if managed {
+        Box::new(
+            MANAGED_REFERENCE_KEYS
+                .iter()
+                .filter_map(|key| map.get_key_value(*key))
+                .chain(
+                    map.iter()
+                        .filter(|(key, _)| !MANAGED_REFERENCE_KEYS.contains(&key.as_str())),
+                ),
+        )
+    } else {
+        Box::new(map.iter())
+    };
+    for (index, (key, value)) in ordered.enumerate() {
         if index > 0 {
             out.push(',');
         }
@@ -898,6 +920,21 @@ pub fn parse_json(data: &[u8], use_number: bool) -> Result<(Value, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_managed_reference_entry_leads_with_its_identity_and_type() {
+        let entry = map([
+            (
+                "data",
+                Value::Object(map([("b", Value::Int(1)), ("a", Value::Int(2))])),
+            ),
+            ("type", Value::Object(map([("class", "C".into())]))),
+            ("rid", Value::Int(7)),
+        ]);
+        assert_eq!(
+            compact_map(&entry).unwrap(),
+            r#"{"rid":7,"type":{"class":"C"},"data":{"a":2,"b":1}}"#
+        );
+    }
     #[test]
     fn floats_have_fixed_layouts() {
         for (value, sprint, json) in [

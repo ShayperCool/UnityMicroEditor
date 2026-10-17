@@ -623,7 +623,7 @@ Every importer keeps what it built beneath its own output: the scene's importer,
 
 The store used to keep 48 builds. URP and SRP Core resources are about 85 shaders and compute shaders, so every preparation dropped each build before the next one asked for it again, and none was ever reused.
 
-A pipeline's resources are found one by one: the session stops at the first one it lacks, the importer builds it, and the session tries again. So the first time the importer builds a shader of a pipeline project, it builds the rest side by side beforehand (`native-prebuild`, then `native-prebuilt`). These are the shader sources that the graphics and quality settings reach through settings assets. Sources in an `Editor` folder are skipped. One worker runs for every three cores, between one and six workers, and each result goes into the store under the key of its inputs. A source built for nothing costs time, not correctness. A prebuild that fails is reported (`native-prebuild-failed`), and the importer builds that source again when it asks for it.
+A pipeline's resources are found one by one: the session stops at the first one it lacks, the importer builds it, and the session tries again. So the first time the importer builds a shader of a pipeline project, it builds the rest side by side beforehand (`native-prebuild`, then `native-prebuilt`). These are the shader sources that the graphics and quality settings reach through settings assets. Sources in an `Editor` folder are skipped. One worker runs for every three cores and every 2 GiB of available memory, whichever allows fewer, between one and six workers, and each result goes into the store under the key of its inputs. A source built for nothing costs time, not correctness. A prebuild that fails is reported (`native-prebuild-failed`), and the importer builds that source again when it asks for it.
 
 A build changes two things that every build reads, and builds running side by side write both safely:
 - the list of assets the pipeline loads by path, which each build merges into and replaces whole;
@@ -683,6 +683,28 @@ A baked source is kept with the hashes of the project's files it was built from:
 - Of the shader graphs a Player rendered one, with one material. The compute shader a Player ran used a structured buffer on OpenGL Core; textures as kernel targets, several buffers and Vulkan were not run.
 - Materials found for a shader are those of the project's sources; a material that only a package holds is not counted, as in the first route.
 - The scripts of the packages run in the worker with the state the worker has. A stripper that reads Editor state a worker lacks (the open scene, build profiles, XR settings) gets the worker's state. URP's reads of the quality levels, the graphics settings and the volume profiles were checked against the worker's report; nothing else was.
+
+## What a session lacks
+
+A session that lacks an import goes on through the rest of its closure and
+names everything it lacks in one error (`NeedsImportError.also`). The importer
+first takes what its cache holds. It imports the rest that a standalone worker
+imports alone in batches of one context kind, up to 32 sources per worker,
+and the others one by one. Before this, a source was imported per worker run.
+A preparation of the URP copy spent 166 of its 196 s in `publish_baseline`
+on 44 package textures, about 3.5 s each, most of it the worker starting.
+
+Three other answers of a worker are kept for the project under
+`Library/UnityMicroEditor/session-supplies`:
+- the fields of a material of an older serialization;
+- the fields of a Mesh of an older serialization;
+- the entries of a pipeline's global settings that a Player build keeps.
+
+Each is kept with the import environment, the identity of the compiled
+Editor code, and the graphics and quality settings it was made with. Each is
+taken only while those and the hash of every file it was made from are
+unchanged. Each new process otherwise asked the worker again: about 19 s for
+the settings and for each material, and 6 s for each Mesh.
 
 ## UI and fonts
 

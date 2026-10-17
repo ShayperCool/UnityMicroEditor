@@ -130,6 +130,12 @@ wire_struct! {
         pub ui_bindings: List<NativeUIBinding>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub ui_binding_proof: Option<NativeUIBindingProof>,
+        /// The shaders of the file a build compiled no program of: the
+        /// pipeline's stripper removed every variant. A build keeps such a
+        /// shader where an object names it, and the Player finds it
+        /// unsupported; nothing draws with it.
+        #[serde(skip_serializing_if = "List::is_empty_list")]
+        pub programless_shaders: List<String>,
     }
 }
 wire_struct! {

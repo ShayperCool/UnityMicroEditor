@@ -305,8 +305,36 @@ namespace UnityMicroEditor.Raw
             // NGO's pinned NetworkPrefabsList has no lifecycle callbacks.
             if (type.FullName == "Unity.Netcode.NetworkPrefabsList" && assembly == "Unity.Netcode.Runtime") return true;
             if (type == typeof(VolumeProfile) && assembly == "Unity.RenderPipelines.Core.Runtime") return true;
-            return typeof(VolumeComponent).IsAssignableFrom(type)
-                && (assembly == "Unity.RenderPipelines.Core.Runtime" || assembly == "Unity.RenderPipelines.Universal.Runtime");
+            if (typeof(VolumeComponent).IsAssignableFrom(type)
+                && (assembly == "Unity.RenderPipelines.Core.Runtime" || assembly == "Unity.RenderPipelines.Universal.Runtime"))
+                return true;
+            return assembly == "Unity.RenderPipelines.Universal.Runtime" && UniversalPipelineObject(type);
+        }
+
+        // The Universal pipeline's objects (17.6), whose Player code does
+        // nothing with default data before the loader overwrites it: the
+        // global settings and PostProcessData have no lifecycle callbacks; the
+        // pipeline asset only an OnDisable, and the migrations of its
+        // OnAfterDeserialize run with the overwrite; a renderer's data marks
+        // itself dirty in OnEnable, so its renderer is made from the data
+        // when used; a renderer feature creates its passes in OnEnable only
+        // while the Universal pipeline runs, which the loader activates after
+        // loading, and its renderer creates them again from the data.
+        private static bool UniversalPipelineObject(Type type)
+        {
+            switch (type.FullName)
+            {
+                case "UnityEngine.Rendering.Universal.UniversalRenderPipelineGlobalSettings":
+                case "UnityEngine.Rendering.Universal.UniversalRenderPipelineAsset":
+                case "UnityEngine.Rendering.Universal.PostProcessData":
+                    return true;
+            }
+            for (Type current = type.BaseType; current != null; current = current.BaseType)
+                if (current.Assembly == type.Assembly
+                    && (current.FullName == "UnityEngine.Rendering.Universal.ScriptableRendererData"
+                        || current.FullName == "UnityEngine.Rendering.Universal.ScriptableRendererFeature"))
+                    return true;
+            return false;
         }
 
         [Serializable] private sealed class HostScriptTypeManifest { public string[] providedPackageAssemblies; }
@@ -628,7 +656,8 @@ namespace UnityMicroEditor.Raw
                         ConfigureComponent(record);
                     if (manifest.assets != null)
                         foreach (var asset in manifest.assets)
-                            if (asset.kind == "scriptableObject") ConfigureSerializedObject(asset.dataJson, assets[AssetKey(asset.guid, asset.fileId)], false);
+                            if (asset.kind == "scriptableObject" && !configuredEarly.Contains(AssetKey(asset.guid, asset.fileId)))
+                                ConfigureSerializedObject(asset.dataJson, assets[AssetKey(asset.guid, asset.fileId)], false);
                     VerifyHostVolumeCaches();
                     ConfigurePrefabTemplates();
                     ConfigureImportedBindings();

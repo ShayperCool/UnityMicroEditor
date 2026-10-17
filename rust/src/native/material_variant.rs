@@ -228,6 +228,18 @@ impl NativeProjectImporter {
                 "the material {logical} of an older serialization, whose shader {shader_guid} is no source of the project or its packages"
             )));
         };
+        if let Some(kept) =
+            self.kept_supply::<InspectedMaterial>(sources, "material-upgrade", guid, |kept| {
+                &kept.ingredient_sha256
+            })
+            && kept.source_path == logical
+        {
+            self.session.set_inspected_material(&kept)?;
+            Event::new("native-material-upgrade-kept")
+                .with("path", logical)
+                .emit();
+            return Ok(());
+        }
         let saved = save_materials(
             ctx,
             &Build {
@@ -269,12 +281,14 @@ impl NativeProjectImporter {
             );
         }
         let data_json = value::compact_map(upgraded.fields())?;
-        self.session.set_inspected_material(&InspectedMaterial {
+        let supplied = InspectedMaterial {
             guid: guid.to_string(),
             source_path: logical.to_string(),
             ingredient_sha256,
             data_json,
-        })?;
+        };
+        self.session.set_inspected_material(&supplied)?;
+        self.keep_supply("material-upgrade", guid, &supplied);
         Event::new("native-material-upgraded")
             .with("path", logical)
             .with("guid", guid)

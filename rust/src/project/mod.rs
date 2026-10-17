@@ -6,6 +6,7 @@ mod compiled_shader_snapshot;
 mod cubemap;
 mod discovery;
 mod expand;
+mod graphics_settings;
 mod image_config;
 mod imported_bindings;
 mod imported_source_closure;
@@ -27,6 +28,7 @@ mod shader_usage;
 pub mod strconv;
 mod texture;
 mod types;
+mod upgraded;
 pub mod value;
 mod worklist;
 
@@ -38,8 +40,10 @@ pub use builtin_shader::BUILTIN_RESOURCE_GUID;
 pub use cache_paths::is_owned_cache_path;
 pub use discovery::ControllerMask;
 pub use expand::{apply_authored_override, resolve_authored_graph};
+pub use graphics_settings::PlayerGraphicsSettings;
 pub(crate) use material::editor_version_stamp;
 pub use material_variant::{InspectedMaterial, outdated_material};
+pub use mesh::MESH_VERSION;
 pub use native_model::native_model_graph_sha256;
 pub use session::{NeedsImportError, Options, Prepared, Session, manifest_json};
 pub(crate) use shader_sources::shader_without_comments;
@@ -53,6 +57,7 @@ pub use types::{
     NativeModelGraphTarget, NativeReplacement, NativeUIBinding, NativeUIBindingProof,
     PrefabOverrideDiagnostic, RetainedBuiltinShader, ShaderSourceRequirement,
 };
+pub use upgraded::UpgradedSource;
 pub use value::{Map, Value};
 
 /// Parses Unity text serialization into typed documents. YAML aliases,

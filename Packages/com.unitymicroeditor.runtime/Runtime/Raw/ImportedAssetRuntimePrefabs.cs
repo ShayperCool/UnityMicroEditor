@@ -100,8 +100,32 @@ namespace UnityMicroEditor.Raw
             }
             private readonly List<PrefabTemplate> prefabTemplates = new List<PrefabTemplate>();
 
+            // The pipeline's global settings and asset, when published from their
+            // authored fields, get their data before the pipeline takes them; the
+            // other raw ScriptableObjects get theirs after the prefab templates
+            // exist, which these two do not name.
+            private readonly HashSet<string> configuredEarly = new HashSet<string>(StringComparer.Ordinal);
+
+            private void ConfigureRawPipelineObject(string guid, string fileId)
+            {
+                string key = AssetKey(guid, fileId);
+                if (manifest.assets == null || configuredEarly.Contains(key)) return;
+                foreach (var asset in manifest.assets)
+                    if (asset.kind == "scriptableObject" && asset.guid == guid && asset.fileId == fileId)
+                    {
+                        ConfigureSerializedObject(asset.dataJson, assets[key], false);
+                        configuredEarly.Add(key);
+                        return;
+                    }
+            }
+
             private void ConfigurePipeline()
             {
+                if (manifest.renderPipelineGlobalSettings != null)
+                    foreach (RawRenderPipelineGlobalSettings settings in manifest.renderPipelineGlobalSettings)
+                        ConfigureRawPipelineObject(settings.guid, settings.fileId);
+                if (!string.IsNullOrEmpty(manifest.renderPipelineGuid))
+                    ConfigureRawPipelineObject(manifest.renderPipelineGuid, manifest.renderPipelineFileId);
                 if (manifest.renderPipelineGlobalSettings != null)
                     foreach (RawRenderPipelineGlobalSettings settings in manifest.renderPipelineGlobalSettings)
                     {

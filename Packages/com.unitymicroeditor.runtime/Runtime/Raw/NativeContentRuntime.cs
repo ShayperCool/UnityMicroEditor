@@ -210,7 +210,10 @@ namespace UnityMicroEditor.Raw
                             Object value = handle.File.GetObject(unchecked((ulong)localID));
                             if (value == null || value.GetType().FullName != entry.typeName)
                                 throw new InvalidDataException("Native ContentFile identity/type readback failed: " + descriptor.guid + "/" + entry.fileId);
-                            if (value is Shader shader && !shader.isSupported)
+                            // A shader a build compiled no program of (every variant stripped) is
+                            // unsupported in a built Player as well; nothing draws with it.
+                            if (value is Shader shader && !shader.isSupported
+                                && Array.IndexOf(descriptor.programlessShaders ?? Array.Empty<string>(), entry.fileId) < 0)
                                 throw new InvalidDataException("Native compiled Shader is unsupported on the active GPU: " + descriptor.guid + "/" + entry.fileId);
                             // A clip that is not preloaded stays unloaded until the game loads or plays it, one
                             // that loads in the background may still be loading, and a streaming clip opens its

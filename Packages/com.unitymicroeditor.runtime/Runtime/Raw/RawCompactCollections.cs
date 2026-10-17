@@ -6,7 +6,8 @@ using System.Reflection;
 
 namespace UnityMicroEditor.Raw
 {
-    // Unity's binary-YAML collections use hex UInt8 ('y') or little-endian Int32 ('i').
+    // Unity's binary-YAML collections use hex UInt8 ('y'), little-endian Int32 ('i')
+    // or little-endian Int64 (no suffix: a renderer's m_RendererFeatureMap).
     // Only field type metadata is inspected: object values stay with JsonUtility.
     internal static class RawCompactCollections
     {
@@ -37,24 +38,25 @@ namespace UnityMicroEditor.Raw
                 {
                     Type storage = element.IsEnum ? Enum.GetUnderlyingType(element) : element;
                     int bytes = storage == typeof(byte) && text.EndsWith("y", StringComparison.Ordinal) ? 1 :
-                        storage == typeof(int) && text.EndsWith("i", StringComparison.Ordinal) ? 4 : 0;
+                        storage == typeof(int) && text.EndsWith("i", StringComparison.Ordinal) ? 4 :
+                        storage == typeof(long) ? 8 : 0;
                     if (bytes == 0)
                         throw new InvalidDataException("Unsupported compact collection encoding for " + type.FullName + " at " + Describe(path));
-                    int digits = text.Length - 1;
+                    int digits = bytes == 8 ? text.Length : text.Length - 1;
                     int elementDigits = bytes * 2;
                     if (digits % elementDigits != 0 || digits > 2 * 1024 * 1024)
                         throw new InvalidDataException("Invalid or oversized compact " + storage.Name + " collection at " + Describe(path));
                     var decoded = new List<object>(digits / elementDigits);
                     for (int index = 0; index < digits; index += elementDigits)
                     {
-                        uint word = 0;
+                        ulong word = 0;
                         for (int offset = 0; offset < bytes; offset++)
                         {
                             int high = Hex(text[index + offset * 2]), low = Hex(text[index + offset * 2 + 1]);
                             if (high < 0 || low < 0) throw new InvalidDataException("Invalid compact " + storage.Name + " hex digit at " + Describe(path));
-                            word |= (uint)((high << 4) | low) << (offset * 8);
+                            word |= (ulong)((high << 4) | low) << (offset * 8);
                         }
-                        decoded.Add(bytes == 4 ? (long)unchecked((int)word) : (long)word);
+                        decoded.Add(bytes == 8 ? unchecked((long)word) : bytes == 4 ? (long)unchecked((int)word) : (long)word);
                     }
                     expected.Add(new Expectation(path, decoded));
                     return decoded;

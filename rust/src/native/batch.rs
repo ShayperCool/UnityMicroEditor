@@ -66,7 +66,7 @@ fn cold_runtime_profile(logical: &str) -> Option<&'static str> {
 
 /// What a source's import context holds beyond the sources: nothing, the
 /// Editor's shader name table, or compiled importers.
-fn context_kind(logical: &str) -> u8 {
+pub(crate) fn context_kind(logical: &str) -> u8 {
     let extension = lower_ext(logical);
     if scripted_profile(&extension) {
         2
@@ -203,6 +203,48 @@ impl NativeProjectImporter {
         }
         for batch in atlas_batches {
             self.import_cold_batch(ctx, &batch)?;
+        }
+        Ok(())
+    }
+
+    /// Imports the sources a session found it lacks in one pass. Those a
+    /// standalone worker imports alone, and that the cache does not hold,
+    /// run together in batches of one context kind: a worker started per
+    /// source spends most of its time starting. The others are imported one
+    /// by one, as before.
+    pub(crate) fn import_needed(&mut self, ctx: &Context, logicals: &[String]) -> Result<()> {
+        if let [one] = logicals {
+            return self.import_asset(ctx, one);
+        }
+        let mut cold = Vec::new();
+        let mut single = Vec::new();
+        for logical in logicals {
+            if cold_native_profile(logical)
+                && !self.atlas_batch.contains_key(logical)
+                && !native_texture_needs_warm(&self.opts.project, logical)?
+            {
+                if !self.take_cold_cache(logical)? {
+                    cold.push(logical.clone());
+                }
+            } else {
+                single.push(logical.clone());
+            }
+        }
+        cold.sort_by_key(|logical| context_kind(logical));
+        cold.dedup();
+        let mut paths = &cold[..];
+        while !paths.is_empty() {
+            let kind = context_kind(&paths[0]);
+            let count = paths
+                .iter()
+                .take(NATIVE_IMPORT_BATCH_SIZE)
+                .take_while(|logical| context_kind(logical) == kind)
+                .count();
+            self.import_cold_batch(ctx, &paths[..count])?;
+            paths = &paths[count..];
+        }
+        for logical in single {
+            self.import_asset(ctx, &logical)?;
         }
         Ok(())
     }

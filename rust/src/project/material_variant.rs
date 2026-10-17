@@ -23,7 +23,7 @@ use std::{
 };
 
 /// The fields of one variant as a build writes them.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InspectedMaterial {
     pub guid: String,
     pub source_path: String,

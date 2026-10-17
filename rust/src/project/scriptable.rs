@@ -38,6 +38,8 @@ impl Inner {
             bail!("raw ScriptableObject {path} has no source localID {id}");
         };
         let mut data = selected.fields().clone();
+        // As a build serializes a pipeline's global settings for the Player.
+        self.player_graphics_settings(&path, &mut data)?;
         let mut failure: Option<anyhow::Error> = None;
         visit_map_mut(&mut data, "", &mut |property, reference| {
             let local = map_file_id(reference).into_owned();

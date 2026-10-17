@@ -327,31 +327,62 @@ prepared with `--host-player` set to the sample's host:
 - **Player.** `run --frames 200` played 200 frames with no error and no
   exception, and exited with code 0.
 
-### Where it stops (2026-10-17)
+### A URP project without the Editor (2026-10-17)
 
-A cold preparation of the URP copy on the sample's host gets through:
+The URP copy (`Temp/e2e/nobuild/urp8`) was prepared on a sample host with
+`--host-player`, and no Editor ran. `run --frames 200` played 200 frames with
+no error and no exception. The Player reported the project's global settings
+active, with 17 runtime entries and URP's SSAO resources present. The
+preparation took 235 s, with every shader build taken from the project's
+store.
 
-- the package builds;
-- the Editor compilation;
-- 52 shader builds;
-- the two material upgrades its closure needs (about 19 s each).
+What the run needed, besides UI Toolkit imports in the worker
+([UI_IMPORTS.md](UI_IMPORTS.md)):
 
-It then stops at SRP Core's runtime debug UI:
-`RenderingDebuggerRuntimeResources` names `RuntimeDebugWindow.uxml`, its
-style sheets and its panel settings. A development build keeps these: the
-stripper removes them only without diagnostic checks.
+- **Graphics settings as a build serializes them.** A Player reads a global
+  settings asset's runtime list (`m_RuntimeSettings`). A build fills that list
+  from the Editor's list (`m_SettingsList`), so the authored text holds
+  whatever the last save left there. The worker now asks the pipeline's own
+  build code which entries a Player build keeps (the `settings` request of
+  `tools/WorkerScripts/PlayerObjectImporter.cs`):
+  - an entry whose type has active `IRenderPipelineGraphicsSettingsStripper<T>`
+    strippers is kept unless all of them remove it;
+  - any other entry is kept when it is `isAvailableInPlayerBuild`.
 
-UXML, USS and fonts are taken only from the import databases an Editor left
-in the project's `Library` (`docs/UI_IMPORTS.md`). A project no Editor opened
-has none. The standalone worker reaches UI Toolkit's own importers. Their
-`AddObjectToAsset` refuses `VisualTreeAsset` and `StyleSheet` ("Failed to
-add object of type `VisualTreeAsset`"), because the worker lacks the engine's
-registration of its built-in scripting classes. Linking the Editor's
-`unity default resources` into the context does not change that, and no
-public API sets it.
+  The session then publishes the asset with that runtime list, without the
+  Editor's list, and without the stripped entries of the reference registry
+  or what they name. For the URP copy, 21 of 38 entries were stripped,
+  among them the Editor shaders and materials, the 2D resources, the probe
+  volume baking resources and the rendering debugger's resources. This
+  replaces an earlier rule that followed no reference into an `Editor`
+  folder. That rule was wrong for assets: URP's default volume profile lies
+  in one, and the Player uses it.
+- **Older Mesh sources.** SRP Core's sky meshes are `.mesh` files of Mesh
+  serialization 11. The worker has the engine load and save them, and the
+  session takes the fields at serialization 12, as it does for older
+  materials.
+- **Missing references.** A reference to a GUID that no source of the project
+  or its packages has is published as empty, as Unity reads it, in the asset's
+  data as well as in its reference list. The URP copy's renderer names a
+  probe sampling mesh that its URP version no longer ships.
+- **The pipeline's objects as raw ScriptableObjects.** The global settings,
+  the pipeline asset, renderer data, renderer features and `PostProcessData`
+  of URP 17.6 are loaded from their authored fields. The runtime trusts these
+  types without lifecycle instrumentation, for the reasons given in
+  `TrustedHostScriptableObject`. The global settings and the pipeline asset
+  get their data before the pipeline takes them. Managed reference entries are
+  written with `rid`, `type`, `data` first, as Unity writes them, and
+  renderer feature maps (`m_RendererFeatureMap`, little-endian Int64 hex) are
+  decoded.
+- **Shaders with no program.** URP's stripper removes every variant of the
+  post-processing shaders when no renderer uses post-processing. The build
+  keeps such a shader where an object names it, and the Player finds it
+  unsupported, as a built Player does. These shaders are now marked
+  (`programlessShaders`), and the runtime does not require them to be
+  supported.
 
-Until that gap is closed, a project whose closure holds UI Toolkit assets
-needs one Editor run, or a project `Library` an Editor already filled.
+Before those changes, the preparation stopped first at UI Toolkit assets and
+then at each of these in turn.
 
 ## Limits and what remains
 
@@ -369,8 +400,7 @@ needs one Editor run, or a project `Library` an Editor already filled.
 - **The Editor in preparation.** Without `--host-player`, a new project still
   runs the Editor once in its staging copy, to build its host, export the
   engine graph and import native content. With it, preparation runs no
-  Editor. It stops at UI Toolkit assets the project never imported in an
-  Editor; see above. In that route:
+  Editor (see above). In that route:
   - The Editor compilation is made once per preparation. It is not redone in
     a watched session.
   - `Unity.Collections.CodeGen` is left out, because it names an Editor

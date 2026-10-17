@@ -780,6 +780,16 @@ impl NativeProjectImporter {
             }
             dependencies.push(external.guid.clone());
         }
+        let mut programless = Vec::new();
+        if matches!(lower_ext(logical).as_str(), ".shader" | ".shadergraph") {
+            for object in playerbake::read_serialized(&baked.file)? {
+                if object.tree.class_id == 48
+                    && playerbake::verify_shader_programs(&object.tree, &object.data)? == 0
+                {
+                    programless.push(object.local_id.to_string());
+                }
+            }
+        }
         let file_sha = sha256(&baked.file);
         let filename = self.store_baked(&guid, &file_sha, &baked.file)?;
         let mut replacement = NativeReplacement {
@@ -793,6 +803,7 @@ impl NativeProjectImporter {
                 guid: guid.clone(),
                 path: filename,
                 sha256: file_sha,
+                programless_shaders: programless.into(),
                 ..Default::default()
             },
             ..Default::default()
@@ -1389,7 +1400,7 @@ impl NativeProjectImporter {
     }
 
     /// The build of a source for the materials `users`.
-    fn build_of(&self, logical: &str, users: Vec<String>) -> Build {
+    pub(super) fn build_of(&self, logical: &str, users: Vec<String>) -> Build {
         Build {
             project: self.opts.project.clone(),
             editor: self.opts.editor.clone(),
@@ -1573,7 +1584,7 @@ impl NativeProjectImporter {
     /// settings: the shaders, compute shaders and graphs the graphics and
     /// quality settings reach over settings assets (`.asset`), as the
     /// pipeline's global settings and resources hold them.
-    fn pipeline_shader_sources(&self) -> Result<Vec<(String, String)>> {
+    pub(super) fn pipeline_shader_sources(&self) -> Result<Vec<(String, String)>> {
         static GUID: std::sync::LazyLock<regex::bytes::Regex> =
             std::sync::LazyLock::new(|| regex::bytes::Regex::new(r"guid: ([0-9a-f]{32})").unwrap());
         let sources = open_sources(&self.opts.project)?;
@@ -1668,9 +1679,11 @@ impl NativeProjectImporter {
             return;
         }
         // A worker run starts a whole Editor process and keeps few cores
-        // busy for most of it.
+        // busy for most of it; with its shader compilers it holds up to
+        // about 2 GiB.
         let workers = std::thread::available_parallelism()
             .map_or(2, |count| count.get() / 3)
+            .min(available_memory().map_or(usize::MAX, |bytes| (bytes / (2 << 30)) as usize))
             .clamp(1, 6)
             .min(jobs.len());
         Event::new("native-prebuild")
@@ -1725,4 +1738,14 @@ impl NativeProjectImporter {
             .seconds("elapsedSeconds", started.elapsed().as_secs_f64())
             .emit();
     }
+}
+
+/// The memory the system can give without swapping (`MemAvailable`).
+fn available_memory() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("MemAvailable:"))?;
+    let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kib * 1024)
 }

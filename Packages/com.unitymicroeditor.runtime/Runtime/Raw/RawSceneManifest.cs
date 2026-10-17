@@ -67,6 +67,8 @@ namespace UnityMicroEditor.Raw
         public NativeContentDependencyDescriptor[] dependencies;
         public NativeMeshCpuRetentionDescriptor[] meshCpuRetention;
         public NativeUIBindingDescriptor[] uiBindings;
+        // Shaders a build compiled no program of: unsupported in a Player too.
+        public string[] programlessShaders;
     }
 
     [Serializable]
