@@ -100,7 +100,7 @@ impl Inner {
         // writes it: whole, without a parent.
         let inspected = self.inspected_material_fields(&path, material)?;
         let data = inspected.as_ref().unwrap_or_else(|| material.fields());
-        if number(get(data, "serializedVersion")) != 8 {
+        if number(get(data, "serializedVersion")) != super::material_variant::MATERIAL_VERSION {
             bail!("material {path} requires serializedVersion8");
         }
         if file_id(get(data, "m_Shader")) == "0" {

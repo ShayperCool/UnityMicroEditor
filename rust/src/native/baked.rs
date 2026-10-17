@@ -1271,7 +1271,7 @@ impl NativeProjectImporter {
 
     /// The assets the pipeline's objects were found to load by path, kept
     /// for the project from one build to the next.
-    fn reload_list(&self) -> String {
+    pub(super) fn reload_list(&self) -> String {
         sysutil::join(&[
             &self.opts.project,
             "Library/UnityMicroEditor/pipeline-reloads.json",

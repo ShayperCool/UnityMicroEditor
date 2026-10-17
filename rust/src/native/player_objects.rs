@@ -63,6 +63,9 @@ pub struct Request {
     pub users: Vec<String>,
     /// The assets a build reads beside them, which have to load.
     pub needs: Vec<String>,
+    /// The assets whose objects are saved as the Editor writes them as
+    /// text, once the engine has loaded them.
+    pub save: Vec<String>,
 }
 
 impl Request {
@@ -76,6 +79,7 @@ impl Request {
             ("use", &self.users),
             ("write", &self.write),
             ("embed", &self.embed),
+            ("save", &self.save),
         ] {
             for path in paths {
                 if path.contains(['\n', '\r']) {
@@ -133,6 +137,8 @@ pub struct Report {
     pub compute_preprocessors: Vec<String>,
     /// The volume profiles the worker's asset search finds, by path.
     pub volume_profiles: Vec<String>,
+    /// The text the Editor writes of each saved asset, by path.
+    pub saved: Vec<(String, Vec<u8>)>,
 }
 
 fn external(statement: &str) -> Option<ExternalObject> {
@@ -204,6 +210,14 @@ pub fn parse_report(text: &str) -> Result<Report> {
             "volume-profile" => {
                 let (_, path) = rest.split_once(' ').ok_or_else(malformed)?;
                 report.volume_profiles.push(path.to_string());
+            }
+            "saved" => {
+                use base64::Engine as _;
+                let (text, path) = rest.split_once(' ').ok_or_else(malformed)?;
+                let text = base64::engine::general_purpose::STANDARD
+                    .decode(text)
+                    .map_err(|_| malformed())?;
+                report.saved.push((path.to_string(), text));
             }
             "done" => done = true,
             // What was named and found, and what a later revision adds.
@@ -546,6 +560,7 @@ pub fn plan(
             .filter(|path| *path != target && !users.contains(path))
             .cloned()
             .collect(),
+        save: Vec::new(),
     };
     if plan.batch.len() >= 4000 {
         bail!(Unsupported(format!(
@@ -1093,6 +1108,71 @@ pub fn write_player_objects(ctx: &Context, build: &Build) -> Result<PlayerObject
     bail!("the build of {} did not settle", build.target)
 }
 
+/// Has a worker load materials as the engine does, which upgrades an older
+/// serialization, and returns each as the Editor writes it as text.
+/// `build.target` is the shader source the materials of `build.users` use,
+/// imported before them with what it is made of, so that the engine finds
+/// it when it sorts their keywords into those the shader declares and
+/// those it does not. Nothing is compiled or written for the Player.
+pub fn save_materials(ctx: &Context, build: &Build) -> Result<Vec<(String, Vec<u8>)>> {
+    if lower_ext(&build.target) != ".shader" {
+        bail!(Unsupported(format!(
+            "a material of an older serialization whose shader {} is not a .shader source",
+            build.target
+        )));
+    }
+    let sources = open_sources(&build.project)?;
+    let reloaded = read_reload_list(&sources, &build.reload_list);
+    let settings = build_settings(&sources, &reloaded)?;
+    let text = sources.read(&build.target)?;
+    let mut plan = plan(
+        &sources,
+        &build.project,
+        &settings,
+        &build.target,
+        &build.users,
+        &[(build.target.as_str(), &text[..])],
+        &[],
+        &|name| Ok(super::host_shaders::editor_builtin_shader_names(&build.editor)?.contains(name)),
+    )?;
+    plan.request = Request {
+        save: build.users.clone(),
+        ..Default::default()
+    };
+    let request = plan.request.encode()?;
+    let identity = sha256(format!("{}\0{request}", importer_identity()).as_bytes());
+    let files = BuildFiles {
+        generated: BTreeMap::from([(
+            REQUEST_PATH.to_string(),
+            (
+                request.into_bytes(),
+                format!("fileFormatVersion: 2\nguid: {}\n", &identity[..32]).into_bytes(),
+            ),
+        )]),
+        files: Vec::new(),
+    };
+    mkdir_all(&build.output, 0o700)?;
+    let run = run(
+        ctx,
+        build,
+        &sysutil::join(&[&build.output, "save"]),
+        &plan.batch,
+        &plan.scripts,
+        &files,
+        &[],
+    )?;
+    let Some((_, primary)) = run.files.iter().find(|(name, _)| name.is_empty()) else {
+        bail!("the worker's run left no report");
+    };
+    let report = read_report(primary)?;
+    for user in &build.users {
+        if !report.saved.iter().any(|(path, _)| path == user) {
+            bail!("the worker saved no text of {user}");
+        }
+    }
+    Ok(report.saved)
+}
+
 /// The sources of the shaders a text names itself.
 fn linked_shaders_direct(sources: &Sources, _from: &str, text: &[u8]) -> Vec<String> {
     super::baked::linked_shader_names(text)
@@ -1116,6 +1196,7 @@ mod tests {
             needs: vec!["Assets/Settings/Pipeline.asset".into()],
             embed: vec!["Packages/p/F.shader".into()],
             only: "UnityEngine.Shader".into(),
+            save: Vec::new(),
         };
         assert_eq!(
             request.encode().unwrap(),
@@ -1548,6 +1629,25 @@ mod tests {
         .unwrap_err();
         assert!(format!("{refused:#}").contains("the worker cannot load Assets/A.shader"));
         assert!(parse_report("ume-player-objects 1\nobject 1 UnityEngine.Shader a 1\n").is_err());
+        // What a run that only saves reports: the Editor's text of each asset.
+        let saved = parse_report(
+            "ume-player-objects 1\nsaved-source 22 1 Packages/p/A B.mat\nsaved JVlBTUwgMS4x Packages/p/A B.mat\ndone\n",
+        )
+        .unwrap();
+        assert_eq!(
+            saved.saved,
+            [("Packages/p/A B.mat".to_string(), b"%YAML 1.1".to_vec())]
+        );
+        assert!(parse_report("ume-player-objects 1\nsaved %%% A.mat\ndone\n").is_err());
+        assert_eq!(
+            Request {
+                save: vec!["Packages/p/A.mat".into()],
+                ..Default::default()
+            }
+            .encode()
+            .unwrap(),
+            "save Packages/p/A.mat\n"
+        );
         assert!(parse_report("something else\n").is_err());
     }
 }
