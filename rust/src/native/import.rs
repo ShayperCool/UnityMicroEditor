@@ -332,7 +332,8 @@ pub(crate) fn copy_missing(from: &str, to: &str) -> std::io::Result<()> {
         if kind.is_dir() {
             copy_missing(&source, &destination)?;
         } else if kind.is_file() && !std::path::Path::new(&destination).exists() {
-            let partial = format!("{destination}.{}.partial", std::process::id());
+            // Builds run side by side, in one process: the name is the copy's own.
+            let partial = format!("{destination}.{}.partial", crate::util::random_id());
             std::fs::copy(&source, &partial)?;
             std::fs::rename(&partial, &destination)?;
         }

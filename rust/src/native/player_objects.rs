@@ -1032,11 +1032,17 @@ pub fn write_player_objects(ctx: &Context, build: &Build) -> Result<PlayerObject
             && reloaded != read_reload_list(&sources, &build.reload_list)
         {
             mkdir_all(&sysutil::dir(&build.reload_list), 0o700)?;
-            write_file(
-                &build.reload_list,
-                &serde_json::to_vec_pretty(&reloaded)?,
-                0o600,
-            )?;
+            // Builds run side by side: each adds what it found to the list
+            // as it is now, and a reader never sees a partial file.
+            let mut merged = read_reload_list(&sources, &build.reload_list);
+            for path in &reloaded {
+                if !merged.contains(path) {
+                    merged.push(path.clone());
+                }
+            }
+            let partial = format!("{}.{}.partial", build.reload_list, crate::util::random_id());
+            write_file(&partial, &serde_json::to_vec_pretty(&merged)?, 0o600)?;
+            std::fs::rename(&partial, &build.reload_list)?;
         }
         let file = |name: &str| {
             run.files
