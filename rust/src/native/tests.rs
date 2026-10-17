@@ -2200,3 +2200,31 @@ fn context_settings_give_an_automatic_linux_list_the_api_of_the_player() {
     let environment = parse_worker_environment(held(WORKER_SETTINGS).as_bytes()).unwrap();
     assert_eq!(environment.graphics_api_mask, 1 << 17);
 }
+
+#[test]
+fn script_register_needs_the_editor_scripts() {
+    let temp = tempfile::tempdir().unwrap();
+    let editor = temp.path().join("Unity").to_string_lossy().into_owned();
+    assert!(super::scripted::script_register(&editor).is_err());
+}
+
+#[test]
+fn script_register_lists_the_ui_scripts_of_the_installed_editor() {
+    // Optional: the Editor at UNITY_EDITOR.
+    let Some(editor) = std::env::var("UNITY_EDITOR").ok().filter(|v| !v.is_empty()) else {
+        return;
+    };
+    let register = super::scripted::script_register(&editor).unwrap();
+    let text = std::str::from_utf8(&register).unwrap();
+    assert!(
+        text.starts_with(
+            "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!116 &1\nMonoManager:\n"
+        )
+    );
+    // VisualTreeAsset and StyleSheet.
+    for id in [11995, 11998] {
+        assert!(text.contains(&format!(
+            "  - {{fileID: {id}, guid: 0000000000000000e000000000000000, type: 0}}\n"
+        )));
+    }
+}

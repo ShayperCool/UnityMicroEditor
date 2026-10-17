@@ -16,7 +16,10 @@ use super::support::{eval_symlinks, read_file, stat, wrap};
 use crate::{registry::meta_guid, sha256, sysutil, util::within_directory};
 use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{Arc, Mutex},
+};
 
 const BEE_LIMIT: i64 = 256 * 1024 * 1024;
 const SCRIPT_LIMIT: usize = 3500;
@@ -141,6 +144,50 @@ pub fn shader_name_registry(project: &str) -> Result<Vec<u8>> {
         "a model whose importer makes its own material needs the shader name table of an Editor run of the project, which a preparation that builds its host leaves in the staging clone",
         failure.unwrap(),
     ))
+}
+
+/// The Editor's register of scripts, `Library/MonoManager.asset`, listing
+/// the engine's own scripts, which lie in its `unity default resources`.
+///
+/// The main Editor keeps the register in the source database, and a worker
+/// takes it from there. An importer's `AddObjectToAsset` takes an object of
+/// a script class only when the class's script is registered or listed as a
+/// compilation asset in the source registry; with no register, the objects
+/// of the engine's script classes are refused ("Check that the definition is
+/// in a file of the same name"): UI Toolkit's `VisualTreeAsset` and
+/// `StyleSheet`, `PanelSettings`, `Tile`. The Editor's register also lists
+/// the project's scripts, which the worker finds through the source registry
+/// without it.
+pub fn script_register(editor: &str) -> Result<Arc<Vec<u8>>> {
+    static KNOWN: Mutex<BTreeMap<String, Arc<Vec<u8>>>> = Mutex::new(BTreeMap::new());
+    let mut known = KNOWN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(register) = known.get(editor) {
+        return Ok(register.clone());
+    }
+    let path = sysutil::join(&[
+        &sysutil::dir(editor),
+        "Data/Resources/unity default resources",
+    ]);
+    let file = read_file(&path)?;
+    let scripts = crate::playerbake::read_serialized_of_class(&file, 115)
+        .map_err(|error| wrap(&format!("read the scripts of {path}"), error))?;
+    if scripts.is_empty() {
+        bail!("{path} holds no scripts");
+    }
+    let mut text = String::from(
+        "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!116 &1\nMonoManager:\n  m_ObjectHideFlags: 0\n  m_Scripts:\n",
+    );
+    for script in &scripts {
+        text.push_str(&format!(
+            "  - {{fileID: {}, guid: 0000000000000000e000000000000000, type: 0}}\n",
+            script.local_id
+        ));
+    }
+    let register = Arc::new(text.into_bytes());
+    known.insert(editor.to_string(), register.clone());
+    Ok(register)
 }
 
 /// The source formats a package's `ScriptedImporter` is verified for, by
