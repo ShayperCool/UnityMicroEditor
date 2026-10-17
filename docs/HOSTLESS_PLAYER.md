@@ -295,24 +295,53 @@ including fields that exist only in the Editor:
 - A reference to an asset in an `Editor` folder is not followed.
 - A GUID that no asset has is read as missing, as Unity reads it.
 
-On 2026-10-17 a cold preparation of the URP copy on the sample's host got
-through package builds, the Editor compilation and 52 shader builds. It
-then stopped:
+**Materials of an older serialization.** URP's global settings name package
+materials that are still `serializedVersion: 6`, such as
+`Sprite-Unlit-Default.mat`. The Editor upgrades such a material when it
+loads it. The upgrade depends on the shader: keywords are split into those
+the shader declares and those it does not. The Editor-made catalog delivered
+these materials already imported; this route reads authored text, which has
+to be version 8.
 
-- **What stopped it.** URP's global settings name
-  `Sprite-Unlit-Default.mat` and three other materials of the package. These
-  are still `serializedVersion: 6`.
-- **Why the Editor route had no such problem.** The Editor upgrades such a
-  material when it loads it, and the Editor-made catalog delivered it
-  already imported.
-- **Why this route does.** Here it is read as authored text, which needs
-  version 8. The upgrade depends on the shader: keywords split into valid and
-  invalid ones, and int properties move to `m_Ints`. It is to be done by a
-  worker that loads the material and saves it as the engine writes it, not
-  restated here.
-- **What a real build would do instead.** For a 3D project, a Player build
-  would strip `Renderer2DResources` with URP's own stripper and never need
-  these materials. The stripping API is internal.
+So the session now asks the importer for such a material. The worker:
+
+1. imports the material's shader and what that shader is made of;
+2. loads the material again from its source, as `MaterialInspector` does;
+3. saves it as the Editor writes it (the `save` statement of
+   `PlayerObjectImporter`).
+
+The session takes those fields while the material, its shader and their
+`.meta` files are unchanged.
+
+For a 3D project, a Player build would strip `Renderer2DResources` with
+URP's own stripper and never need these materials. That stripping API is
+internal.
+
+### Where it stops (2026-10-17)
+
+A cold preparation of the URP copy on the sample's host gets through:
+
+- the package builds;
+- the Editor compilation;
+- 52 shader builds;
+- the two material upgrades its closure needs (about 19 s each).
+
+It then stops at SRP Core's runtime debug UI:
+`RenderingDebuggerRuntimeResources` names `RuntimeDebugWindow.uxml`, its
+style sheets and its panel settings. A development build keeps these: the
+stripper removes them only without diagnostic checks.
+
+UXML, USS and fonts are taken only from the import databases an Editor left
+in the project's `Library` (`docs/UI_IMPORTS.md`). A project no Editor opened
+has none. The standalone worker reaches UI Toolkit's own importers. Their
+`AddObjectToAsset` refuses `VisualTreeAsset` and `StyleSheet` ("Failed to
+add object of type `VisualTreeAsset`"), because the worker lacks the engine's
+registration of its built-in scripting classes. Linking the Editor's
+`unity default resources` into the context does not change that, and no
+public API sets it.
+
+Until that gap is closed, a project whose closure holds UI Toolkit assets
+needs one Editor run, or a project `Library` an Editor already filled.
 
 ## Limits and what remains
 
@@ -330,7 +359,8 @@ then stopped:
 - **The Editor in preparation.** Without `--host-player`, a new project still
   runs the Editor once in its staging copy, to build its host, export the
   engine graph and import native content. With it, preparation runs no
-  Editor, but it does not reach a Player yet; see above. In that route:
+  Editor. It stops at UI Toolkit assets the project never imported in an
+  Editor; see above. In that route:
   - The Editor compilation is made once per preparation. It is not redone in
     a watched session.
   - `Unity.Collections.CodeGen` is left out, because it names an Editor
