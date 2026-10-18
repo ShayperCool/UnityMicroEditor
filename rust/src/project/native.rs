@@ -950,6 +950,9 @@ impl Inner {
     }
 
     fn replace_native_content(&mut self, replacement: &NativeReplacement) -> Result<()> {
+        // A model's renderers may name an authored material by its GUID,
+        // which only the index tells; an importer replays before preparing.
+        self.index_guids()?;
         self.validate_native_replacement(replacement)?;
         let guid = &replacement.guid;
         let new_source = !self

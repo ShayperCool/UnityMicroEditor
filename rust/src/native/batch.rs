@@ -193,7 +193,10 @@ impl NativeProjectImporter {
         for logical in paths {
             if native_texture_needs_warm(&self.opts.project, &logical)? {
                 self.import_warm_ui(ctx, &logical, &mut HashSet::new())?;
-            } else {
+            // Another session of the project may have imported it as it is.
+            } else if atlas_batches.iter().flatten().any(|path| *path == logical)
+                || !self.take_cold_cache(&logical)?
+            {
                 cold.push(logical);
             }
         }
