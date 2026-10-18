@@ -876,8 +876,25 @@ pub fn plan_source(
     target: &str,
     users: &[String],
 ) -> Result<Plan> {
-    let reloaded = read_reload_list(sources, reload_list);
-    let settings = build_settings(sources, &reloaded)?;
+    let settings = plan_settings(sources, reload_list)?;
+    plan_source_with(sources, &settings, project, editor, target, users)
+}
+
+/// The settings every build of a project shares, which a plan reads.
+pub fn plan_settings(sources: &Sources, reload_list: &str) -> Result<BuildSettings> {
+    build_settings(sources, &read_reload_list(sources, reload_list))
+}
+
+/// [`plan_source`] with the settings of [`plan_settings`], which several
+/// plans of one pass share.
+pub fn plan_source_with(
+    sources: &Sources,
+    settings: &BuildSettings,
+    project: &str,
+    editor: &str,
+    target: &str,
+    users: &[String],
+) -> Result<Plan> {
     let text = sources.read(target)?;
     let graph = graph_sources(sources, target)?;
     let texts: Vec<(&str, &[u8])> = if lower_ext(target) == ".shadergraph" {
@@ -888,7 +905,7 @@ pub fn plan_source(
     plan(
         sources,
         project,
-        &settings,
+        settings,
         target,
         users,
         &texts,

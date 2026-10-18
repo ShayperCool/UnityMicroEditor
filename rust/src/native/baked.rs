@@ -3,11 +3,13 @@
 use super::{
     ProbeOptions,
     batch::GLOBAL_GUIDS,
+    build_settings::{BuildSettings, Sources},
     built_store,
     import::{IMPORT_BUDGET, run_bounded_import, run_project_import},
     importer::NativeProjectImporter,
     player_objects::{
-        Build, Plan, importer_identity, open_sources, plan_source, write_player_objects,
+        Build, Plan, importer_identity, open_sources, plan_settings, plan_source, plan_source_with,
+        write_player_objects,
     },
     resolve_project_import_source,
     scripted::script_environment_identity,
@@ -1009,8 +1011,20 @@ impl NativeProjectImporter {
     /// it and the shaders it names with what those are made from, each with
     /// its hash.
     fn shader_ingredients(&self, logical: &str, guid: &str) -> Result<ShaderIngredients> {
+        self.shader_ingredients_in(None, logical, guid)
+    }
+
+    /// The same, taking a build's sources and settings from `shared` when
+    /// given: one reading of them serves every shader of a pass.
+    fn shader_ingredients_in(
+        &self,
+        shared: Option<&(Sources, BuildSettings)>,
+        logical: &str,
+        guid: &str,
+    ) -> Result<ShaderIngredients> {
         if lower_ext(logical) != ".shader" || self.pipeline_project()? {
-            return Ok((self.built_plan(logical, guid)?.1.ingredients, Vec::new()));
+            let plan = self.built_plan_in(shared, logical, guid)?.1;
+            return Ok((plan.ingredients, Vec::new()));
         }
         let mut ingredients = BTreeMap::new();
         let mut visited = BTreeSet::from([logical.to_string()]);
@@ -1175,8 +1189,18 @@ impl NativeProjectImporter {
                 )
             })
             .collect();
+        // The project's sources and build settings are read once for all
+        // the plans of the pass; each costs more than a plan.
+        let shared = match shaders.is_empty() || !self.pipeline_project()? {
+            true => None,
+            false => {
+                let sources = open_sources(&self.opts.project)?;
+                let settings = plan_settings(&sources, &self.reload_list())?;
+                Some((sources, settings))
+            }
+        };
         for (guid, logical, baked_from) in shaders {
-            match self.shader_ingredients(&logical, &guid) {
+            match self.shader_ingredients_in(shared.as_ref(), &logical, &guid) {
                 Ok((current, _)) if current == baked_from => continue,
                 _ => {}
             }
@@ -1286,6 +1310,15 @@ impl NativeProjectImporter {
     /// The materials that use a source, and the plan of its build, which
     /// holds the hash of every file of the project the build depends on.
     fn built_plan(&self, logical: &str, guid: &str) -> Result<(Vec<String>, Plan)> {
+        self.built_plan_in(None, logical, guid)
+    }
+
+    fn built_plan_in(
+        &self,
+        shared: Option<&(Sources, BuildSettings)>,
+        logical: &str,
+        guid: &str,
+    ) -> Result<(Vec<String>, Plan)> {
         if !self.pipeline_project()? {
             return Err(Unsupported(format!(
                 "a {} of a project without a scriptable render pipeline: the Editor's build code in a worker is verified for pipeline projects only",
@@ -1305,15 +1338,24 @@ impl NativeProjectImporter {
                 .map(|material| material.path)
                 .collect()
         };
-        let sources = open_sources(&self.opts.project)?;
-        let plan = plan_source(
-            &sources,
-            &self.opts.project,
-            &self.opts.editor,
-            &self.reload_list(),
-            logical,
-            &users,
-        )?;
+        let plan = match shared {
+            Some((sources, settings)) => plan_source_with(
+                sources,
+                settings,
+                &self.opts.project,
+                &self.opts.editor,
+                logical,
+                &users,
+            )?,
+            None => plan_source(
+                &open_sources(&self.opts.project)?,
+                &self.opts.project,
+                &self.opts.editor,
+                &self.reload_list(),
+                logical,
+                &users,
+            )?,
+        };
         Ok((users, plan))
     }
 
