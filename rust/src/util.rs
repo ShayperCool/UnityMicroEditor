@@ -334,6 +334,24 @@ pub fn agent_immutable_json<T: Serialize + ?Sized>(path: &str, value: &T) -> Res
     Ok(())
 }
 
+/// The running program: its version, and the size and time of its file,
+/// which a build of another revision changes. What is remembered across
+/// starts as made by this program is made again by another.
+pub fn tool_identity() -> Option<&'static str> {
+    static TOOL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    TOOL.get_or_init(|| {
+        let info = fs::metadata(env::current_exe().ok()?).ok()?;
+        let modified = info.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+        Some(format!(
+            "{}\0{}\0{}",
+            env!("CARGO_PKG_VERSION"),
+            info.len(),
+            modified.as_nanos()
+        ))
+    })
+    .as_deref()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

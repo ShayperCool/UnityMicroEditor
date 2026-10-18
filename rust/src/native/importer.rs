@@ -100,6 +100,28 @@ pub struct NativeProjectImporter {
     pub(crate) atlas_identity: BTreeMap<String, String>,
     /// The index of the project's sources, read once for a pass.
     pub(crate) sources: std::sync::Mutex<Option<Arc<super::build_settings::Sources>>>,
+    /// Whether a pass has run. Only the first takes a remembered revision:
+    /// a later one follows edits that only the walk of the sources sees.
+    pub(crate) prepared_once: bool,
+}
+
+/// What a published revision was made of; see `unchanged_revision`.
+#[derive(Debug, Default, serde::Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct RevisionMemo {
+    schema_version: i64,
+    tool: String,
+    configuration: String,
+    guid_index: String,
+    /// Every file the preparation read, with its metadata then.
+    files: BTreeMap<String, [i64; 8]>,
+    manifest: String,
+    manifest_sha256: String,
+    revision: String,
+    project: String,
+    scene: String,
+    objects: usize,
+    assets: usize,
 }
 
 struct Replay<'a> {
@@ -131,6 +153,7 @@ impl NativeProjectImporter {
             atlas_batch: BTreeMap::new(),
             atlas_identity: BTreeMap::new(),
             sources: Default::default(),
+            prepared_once: false,
         };
         let read_index = |index: &str| -> Result<Option<Option<Vec<NativeReplacement>>>> {
             match read_json_verbatim(index) {
@@ -354,6 +377,95 @@ impl NativeProjectImporter {
         // A pass sees the sources as they are when it begins.
         *self.sources.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.require_current_environment()?;
+        // What the session holds before it looks at the sources again; with
+        // native content waiting to be imported nothing is taken. A start
+        // replayed its index against the sources as they are; a later pass
+        // of a watched session has not.
+        let first = !std::mem::replace(&mut self.prepared_once, true);
+        let configuration = match first && self.pending_native_paths.is_empty() {
+            true => Some(self.session.configuration_sha256()?),
+            false => None,
+        };
+        if let Some(prepared) = configuration
+            .as_deref()
+            .and_then(|configuration| self.unchanged_revision(configuration))
+        {
+            Event::new("native-revision-unchanged")
+                .with("revision", &prepared.revision)
+                .emit();
+            return Ok(prepared);
+        }
+        let prepared = self.prepare_sources(ctx)?;
+        if let Some(configuration) = &configuration {
+            self.remember_revision(configuration, &prepared);
+        }
+        Ok(prepared)
+    }
+
+    /// The revision published last, when nothing it was made of has changed
+    /// since: the session's configuration and native content, the GUIDs of
+    /// the project, every file the preparation read (by its metadata), the
+    /// published manifest and this program. A start then neither walks nor
+    /// prepares the scene, as Unity enters Play Mode with an up-to-date
+    /// asset database.
+    fn unchanged_revision(&self, configuration: &str) -> Option<Prepared> {
+        let memo: RevisionMemo = read_json(&self.revision_memo()).ok()?;
+        let current = memo.schema_version == 1
+            && Some(memo.tool.as_str()) == crate::util::tool_identity()
+            && memo.configuration == configuration
+            && file_hash(&memo.manifest).ok()? == memo.manifest_sha256
+            && memo.files.iter().all(|(path, fields)| {
+                crate::cache::Identity::read(std::path::Path::new(path))
+                    .is_ok_and(|identity| identity.fields() == *fields)
+            })
+            && self.session.guid_index_sha256().ok()? == memo.guid_index;
+        current.then(|| Prepared {
+            manifest: memo.manifest,
+            revision: memo.revision,
+            project: memo.project,
+            scene: memo.scene,
+            objects: memo.objects,
+            assets: memo.assets,
+            ..Default::default()
+        })
+    }
+
+    /// Remembers what a published revision was made of. A record that cannot
+    /// be written only costs the next start a preparation.
+    fn remember_revision(&self, configuration: &str, prepared: &Prepared) {
+        let (Some(tool), Ok(guid_index), Ok(manifest_sha256)) = (
+            crate::util::tool_identity(),
+            self.session.guid_index_sha256(),
+            file_hash(&prepared.manifest),
+        ) else {
+            return;
+        };
+        let memo = RevisionMemo {
+            schema_version: 1,
+            tool: tool.into(),
+            configuration: configuration.into(),
+            guid_index,
+            files: self.session.read_identities(),
+            manifest: prepared.manifest.clone(),
+            manifest_sha256,
+            revision: prepared.revision.clone(),
+            project: prepared.project.clone(),
+            scene: prepared.scene.clone(),
+            objects: prepared.objects,
+            assets: prepared.assets,
+        };
+        let path = self.revision_memo();
+        if mkdir_all(&sysutil::dir(&path), 0o700).is_ok() {
+            let _ = atomic_json(&path, &memo);
+        }
+    }
+
+    fn revision_memo(&self) -> String {
+        sysutil::join(&[&self.opts.output, "native/revision-memo.json"])
+    }
+
+    /// Publishes a revision from the sources, importing what they need.
+    fn prepare_sources(&mut self, ctx: &Context) -> Result<Prepared> {
         self.refresh_pending_native(ctx)?;
         let mut attempted = HashSet::new();
         loop {

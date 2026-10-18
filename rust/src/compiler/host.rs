@@ -34,8 +34,39 @@ pub fn stage_host(
     editor: &str,
     baseline_player: &str,
 ) -> Result<String> {
-    let destination = join(&[output, "players", &random_id()]);
+    // The bridge is compiled against the Player's own assemblies, which the
+    // staged copy holds unchanged.
+    let dll = compile_bridge(
+        ctx,
+        output,
+        editor,
+        &join(&[&player_data(baseline_player), "Managed"]),
+    )?;
+    let bridge = file_hash(&dll)?;
+    // A prepared Player is never changed, so the same Player with the same
+    // bridge is staged once per output and keeps its paths: a start whose
+    // sources did not change then publishes the scene it published before.
+    let key = sha256(format!("staged-host-v1\0{baseline_player}\0{bridge}").as_bytes());
+    let destination = join(&[output, "players", &format!("staged-{}", &key[..32])]);
+    let staged = |root: &str| {
+        (
+            join(&[root, &sysutil::base(baseline_player)]),
+            join(&[
+                root,
+                &sysutil::base(&player_data(baseline_player)),
+                "Managed",
+                "UnityMicroEditor.dll",
+            ]),
+        )
+    };
+    let (player, installed) = staged(&destination);
+    if sysutil::lstat(&player).is_ok_and(|info| info.is_regular())
+        && file_hash(&installed).is_ok_and(|sha| sha == bridge)
+    {
+        return Ok(player);
+    }
     sys::mkdir_all(&sysutil::dir(&destination))?;
+    let partial = join(&[output, "players", &format!(".staging-{}", random_id())]);
     let (copied, error) = plain(
         ctx,
         "cp",
@@ -44,26 +75,23 @@ pub fn stage_host(
             "-a",
             "--",
             &sysutil::dir(baseline_player),
-            &destination,
+            &partial,
         ],
     );
     if let Some(error) = error {
+        let _ = std::fs::remove_dir_all(&partial);
         bail!(
             "stage native host: {error}: {}",
             String::from_utf8_lossy(&copied)
         );
     }
-    let managed = join(&[
-        &destination,
-        &sysutil::base(&player_data(baseline_player)),
-        "Managed",
-    ]);
-    let dll = compile_bridge(ctx, output, editor, &managed)?;
-    sys::write(
-        &join(&[&managed, "UnityMicroEditor.dll"]),
-        &sys::read(&dll)?,
-    )?;
-    Ok(join(&[&destination, &sysutil::base(baseline_player)]))
+    let (_, partial_bridge) = staged(&partial);
+    sys::write(&partial_bridge, &sys::read(&dll)?)?;
+    // A copy left by an interrupted start is replaced whole.
+    let _ = std::fs::remove_dir_all(&destination);
+    std::fs::rename(&partial, &destination)
+        .map_err(|e| sys::os_error("rename", &destination, &e))?;
+    Ok(player)
 }
 
 /// Compiles the tool's runtime bridge from the installation's sources with

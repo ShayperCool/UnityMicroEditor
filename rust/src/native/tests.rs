@@ -1217,6 +1217,7 @@ fn native_adoption_rejects_wrong_worker_environment_before_publishing() {
         atlas_batch: BTreeMap::new(),
         atlas_identity: BTreeMap::new(),
         sources: Default::default(),
+        prepared_once: false,
     };
     let environment = read_worker_environment(&opts.project).unwrap();
     for name in [
@@ -2481,4 +2482,45 @@ fn two_checkouts_of_the_same_scripts_name_one_script_environment() {
     assert!(!main.is_empty());
     assert_eq!(main, worktree);
     assert_ne!(main_legacy, worktree_legacy);
+}
+
+#[test]
+fn a_start_takes_the_revision_it_published_while_nothing_it_was_made_of_changed() {
+    let Replay {
+        _root,
+        opts,
+        session: _,
+        entries,
+    } = native_replay_fixture();
+    atomic_json(&index_path(&opts), &entries).unwrap();
+    let scene = format!("{}/Assets/Scene.unity", opts.project);
+    let document = |name: &str| {
+        format!(
+            "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!1 &10\nGameObject:\n  m_Component:\n  - component: {{fileID: 11}}\n  m_Name: {name}\n  m_IsActive: 1\n--- !u!4 &11\nTransform:\n  m_GameObject: {{fileID: 10}}\n  m_LocalPosition: {{x: 0, y: 0, z: 0}}\n  m_LocalRotation: {{x: 0, y: 0, z: 0, w: 1}}\n  m_LocalScale: {{x: 1, y: 1, z: 1}}\n  m_Father: {{fileID: 0}}\n  m_Children: []\n"
+        )
+    };
+    write(&scene, document("Original"));
+    write(
+        &format!("{scene}.meta"),
+        "guid: 44444444444444444444444444444444\n",
+    );
+    let start = || {
+        let session = Session::new(Options {
+            project: opts.project.clone(),
+            manifest: format!("{}/baseline.json", opts.output),
+            scene: "Assets/Scene.unity".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let mut importer = NativeProjectImporter::new(opts.clone(), Arc::new(session)).unwrap();
+        importer.prepare(&Context::background()).unwrap()
+    };
+    let first = start();
+    let again = start();
+    assert_eq!(again.revision, first.revision);
+    assert_eq!(again.manifest, first.manifest);
+    // A file the preparation read changed: the scene is prepared again.
+    write(&scene, document("Edited"));
+    let edited = start();
+    assert_ne!(edited.revision, first.revision);
 }

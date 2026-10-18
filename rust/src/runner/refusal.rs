@@ -2,6 +2,7 @@
 //! changes. Preparing such a scene costs its whole discovery before the
 //! loader sees the object it has no adapter for; a session that starts
 //! again with the same sources leaves the scene out at once.
+use crate::util::tool_identity;
 use crate::{
     project::{Session, UnsupportedClass},
     sysutil,
@@ -9,7 +10,7 @@ use crate::{
 };
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, sync::OnceLock, time::UNIX_EPOCH};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -28,23 +29,6 @@ struct Refusal {
 
 fn record(directory: &str) -> String {
     sysutil::join(&[directory, "refusal.json"])
-}
-
-/// The running program: its version, and the size and time of its file,
-/// which a build of another revision changes.
-fn tool_identity() -> Option<&'static str> {
-    static TOOL: OnceLock<Option<String>> = OnceLock::new();
-    TOOL.get_or_init(|| {
-        let info = std::fs::metadata(std::env::current_exe().ok()?).ok()?;
-        let modified = info.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
-        Some(format!(
-            "{}\0{}\0{}",
-            env!("CARGO_PKG_VERSION"),
-            info.len(),
-            modified.as_nanos()
-        ))
-    })
-    .as_deref()
 }
 
 /// Why the content scene whose importer writes to `directory` was refused,

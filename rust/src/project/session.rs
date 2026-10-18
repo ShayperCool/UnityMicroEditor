@@ -183,7 +183,7 @@ pub(crate) struct YamlRecord {
 }
 
 /// The result of one published revision.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Prepared {
     pub manifest: String,
     pub revision: String,
@@ -1048,6 +1048,59 @@ impl Session {
             hasher.update([0]);
         }
         Ok(crate::hex(&hasher.finalize()))
+    }
+
+    /// What a preparation is made of beside the files it reads: the baseline
+    /// as configured (scene, assemblies, script types, initializers), the
+    /// runtime-addressed prefabs and the native content the session holds.
+    /// Two sessions with the same configuration and the same files publish
+    /// the same scene.
+    pub fn configuration_sha256(&self) -> Result<String> {
+        let s = self.lock();
+        let mut hasher = Sha256::new();
+        let mut put = |bytes: &[u8]| {
+            hasher.update((bytes.len() as u64).to_le_bytes());
+            hasher.update(bytes);
+        };
+        // The catalog comes with the baseline: a preparation names both.
+        put(value::compact_map(&s.baseline)?.as_bytes());
+        put(&[s.has_catalog as u8]);
+        for path in &s.extra_assets {
+            put(path.as_bytes());
+        }
+        let mut sorted: Vec<(&String, &String)> = s.script_types.iter().collect();
+        sorted.sort();
+        for (guid, name) in sorted {
+            put(guid.as_bytes());
+            put(name.as_bytes());
+        }
+        let mut sorted: Vec<(&String, &String)> = s.critical.iter().collect();
+        sorted.sort();
+        for (path, sha) in sorted {
+            put(path.as_bytes());
+            put(sha.as_bytes());
+        }
+        for (guid, overlay) in &s.native_overlays {
+            put(guid.as_bytes());
+            put(overlay.content.sha256.as_bytes());
+            put(overlay.source_sha256.as_bytes());
+            put(overlay.meta_sha256.as_bytes());
+        }
+        for (guid, file) in &s.derived_native {
+            put(guid.as_bytes());
+            put(file.sha256.as_bytes());
+        }
+        Ok(crate::hex(&hasher.finalize()))
+    }
+
+    /// The files the last preparation read, each with its metadata then.
+    pub fn read_identities(&self) -> BTreeMap<String, [i64; 8]> {
+        self.lock()
+            .cache
+            .observed
+            .iter()
+            .map(|(path, identity)| (path.to_string_lossy().into_owned(), identity.fields()))
+            .collect()
     }
 
     /// Stops serving runtime-addressed prefabs.
