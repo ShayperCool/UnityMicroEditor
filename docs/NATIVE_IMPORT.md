@@ -720,6 +720,11 @@ UXML, USS and font assets are extracted from the Editor's import cache while it 
 - A shader is delivered only in the cases listed under [Shaders](#shaders). In a project with a scriptable render pipeline a shader, shader graph or compute shader needs the script assemblies of an Editor run of the project, like the entries above, and is refused in the cases listed [there](#refused-in-a-pipeline-project); in a project without one, shader graphs and compute shaders still need a catalog built by the Editor.
 - The store reader handles inline and concatenated storage, limits one file to 64 MiB and refuses other layouts. The LMDB reader targets the observed Linux x64 format.
 - A worker is started per import batch. A persistent native service is not used.
+  Batches of one pass are independent of each other until their results are
+  adopted, so up to three workers run side by side (`UME_IMPORT_WORKERS`, by
+  default a quarter of the processors, at most three; a worker holds about
+  1.3 GB and its data store 0.3 GB), and their results are adopted in the order
+  the batches were made, as one after the other would be.
 
 ## Code
 

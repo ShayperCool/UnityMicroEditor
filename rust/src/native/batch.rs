@@ -137,6 +137,29 @@ pub(crate) fn cold_input(
     })
 }
 
+/// What a worker reported for a batch, before it is adopted.
+struct ColdRun {
+    report: Option<ProbeReport>,
+    root: String,
+    report_path: String,
+    inputs: BTreeMap<String, NativeColdInput>,
+}
+
+/// How many import workers run at once: `UME_IMPORT_WORKERS`, else a
+/// quarter of the processors, at most three. A worker holds about 1.3 GB
+/// and its data store 0.3 GB.
+pub(crate) fn import_workers() -> usize {
+    std::env::var("UME_IMPORT_WORKERS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|count| *count > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map_or(1, |count| count.get() / 4)
+                .clamp(1, 3)
+        })
+}
+
 pub(crate) const GLOBAL_GUIDS: [&str; 2] = [
     "0000000000000000f000000000000000",
     "0000000000000000e000000000000000",
@@ -204,18 +227,9 @@ impl NativeProjectImporter {
         // depend on what changed along with it.
         cold.sort_by_key(|logical| context_kind(&self.opts.project, logical));
         self.pending_native_paths = cold.clone();
-        let mut paths = &cold[..];
-        while !paths.is_empty() {
-            let kind = context_kind(&self.opts.project, &paths[0]);
-            let count = paths
-                .iter()
-                .take(NATIVE_IMPORT_BATCH_SIZE)
-                .take_while(|logical| context_kind(&self.opts.project, logical) == kind)
-                .count();
-            self.import_cold_batch(ctx, &paths[..count])?;
-            paths = &paths[count..];
-            self.pending_native_paths = paths.to_vec();
-        }
+        let batches = self.cold_batches(&cold);
+        self.import_cold_batches(ctx, &batches)?;
+        self.pending_native_paths.clear();
         for batch in atlas_batches {
             self.import_cold_batch(ctx, &batch)?;
         }
@@ -246,17 +260,8 @@ impl NativeProjectImporter {
         let mut cold = self.take_cold_caches(cold)?;
         cold.sort_by_key(|logical| context_kind(&self.opts.project, logical));
         cold.dedup();
-        let mut paths = &cold[..];
-        while !paths.is_empty() {
-            let kind = context_kind(&self.opts.project, &paths[0]);
-            let count = paths
-                .iter()
-                .take(NATIVE_IMPORT_BATCH_SIZE)
-                .take_while(|logical| context_kind(&self.opts.project, logical) == kind)
-                .count();
-            self.import_cold_batch(ctx, &paths[..count])?;
-            paths = &paths[count..];
-        }
+        let batches = self.cold_batches(&cold);
+        self.import_cold_batches(ctx, &batches)?;
         for logical in single {
             self.import_asset(ctx, &logical)?;
         }
@@ -264,6 +269,79 @@ impl NativeProjectImporter {
     }
 
     pub(crate) fn import_cold_batch(&mut self, ctx: &Context, logicals: &[String]) -> Result<()> {
+        let run = self.run_cold_batch(ctx, logicals)?;
+        self.adopt_cold_run(ctx, run, logicals)
+    }
+
+    /// Imports several batches: their workers run side by side, at most
+    /// [`import_workers`] at once, and their results are adopted in the
+    /// order given, as one batch after the other would be. A worker imports
+    /// its batch from the sources alone; only adopting a result needs what
+    /// the batches before it brought.
+    pub(crate) fn import_cold_batches(
+        &mut self,
+        ctx: &Context,
+        batches: &[Vec<String>],
+    ) -> Result<()> {
+        if batches.len() < 2 || import_workers() < 2 {
+            for batch in batches {
+                self.import_cold_batch(ctx, batch)?;
+            }
+            return Ok(());
+        }
+        for chunk in batches.chunks(import_workers()) {
+            let importer = &*self;
+            let runs: Vec<Result<ColdRun>> = std::thread::scope(|scope| {
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|batch| scope.spawn(move || importer.run_cold_batch(ctx, batch)))
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| {
+                        handle
+                            .join()
+                            .unwrap_or_else(|_| bail!("native import worker thread panicked"))
+                    })
+                    .collect()
+            });
+            for (run, batch) in runs.into_iter().zip(chunk) {
+                self.adopt_cold_run(ctx, run?, batch)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn adopt_cold_run(&mut self, ctx: &Context, run: ColdRun, logicals: &[String]) -> Result<()> {
+        let ColdRun {
+            report,
+            root,
+            report_path,
+            inputs,
+        } = run;
+        self.adopt_cold_report(ctx, report.as_ref(), &root, &report_path, inputs, logicals)
+    }
+
+    /// Sources sorted by context kind, in batches of one kind and at most
+    /// [`NATIVE_IMPORT_BATCH_SIZE`] sources.
+    fn cold_batches(&self, sorted: &[String]) -> Vec<Vec<String>> {
+        let mut batches = Vec::new();
+        let mut paths = sorted;
+        while !paths.is_empty() {
+            let kind = context_kind(&self.opts.project, &paths[0]);
+            let count = paths
+                .iter()
+                .take(NATIVE_IMPORT_BATCH_SIZE)
+                .take_while(|logical| context_kind(&self.opts.project, logical) == kind)
+                .count();
+            batches.push(paths[..count].to_vec());
+            paths = &paths[count..];
+        }
+        batches
+    }
+
+    /// Runs the worker for one batch and returns what it reported.
+    fn run_cold_batch(&self, ctx: &Context, logicals: &[String]) -> Result<ColdRun> {
         self.require_current_environment()?;
         if logicals.is_empty() || logicals.len() > NATIVE_IMPORT_BATCH_SIZE {
             bail!("native cold import batch exceeds supported asset count");
@@ -327,7 +405,12 @@ impl NativeProjectImporter {
         if let Some(error) = error {
             return Err(error);
         }
-        self.adopt_cold_report(ctx, report.as_ref(), &root, &report_path, inputs, logicals)
+        Ok(ColdRun {
+            report,
+            root,
+            report_path,
+            inputs,
+        })
     }
 
     pub(crate) fn adopt_cold_report(
