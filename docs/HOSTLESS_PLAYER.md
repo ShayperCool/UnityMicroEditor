@@ -384,6 +384,88 @@ What the run needed, besides UI Toolkit imports in the worker
 Before those changes, the preparation stopped first at UI Toolkit assets and
 then at each of these in turn.
 
+## A game project without the Editor (2026-10-18)
+
+A copy of Dungeon (URP, Netcode, VContainer, KINEMATION, UI Toolkit) was
+prepared for `Assets/Dungeon/Scenes/ShootingRange.unity` with
+`--host-player`, and no Editor ran. `run --frames 600 --screenshot` played
+600 frames with no error and no exception, and the screenshot shows the scene
+and the HUD as the Editor's Play Mode does. The preparation stopped at each of
+the following in turn.
+
+**Compilation of the Editor assemblies.**
+
+- Unity 6.6 references `UnityEngine.UI` (and `UnityEditor.UI` in the Editor)
+  from almost every assembly, and the test framework from Editor and test
+  assemblies, without the asmdef naming them. The compilation adds them
+  where no cycle results, and reads the reference `Unity.ugui` as those
+  assemblies.
+- A plugin's "Any Platform" is the unnamed `Any` entry of its `.meta`; the
+  legacy `Any:` entry counts only where the unnamed one is absent.
+- Netcode's code generator and `Mono.Cecil` are found in the package
+  snapshot when the project has no `PackageCache`.
+- The engine profile does not prove the tool's bridge against its sources:
+  the preparation compiles it.
+- Scripted importers load the assemblies immutable packages ship compiled
+  (nunit for an assembly the test framework is referenced from), as
+  material inspectors already did.
+
+**Sources.**
+
+- A name Unity hides (starting with `.`, ending with `~`, `cvs`, `*.tmp`) is
+  not indexed, so a package's `Samples~` holds no asset.
+- An `.anim` larger than what is baked from text without an Editor catalog
+  is imported instead.
+- An authored Mesh may skin a vertex with one to four bones, and one a script
+  saved may have no bone name hashes.
+
+**Models of a pipeline project.** A model's generated materials take the
+pipeline's Lit shader from URP's `FBXMaterialDescriptionPreprocessor`, and a
+part without a material of its own takes the pipeline's default material
+(`Lit.mat`, through the Editor entries of the global settings). Such models
+(`native/pipeline_models.rs`) are imported in the context of a build of the
+Lit shader: the pipeline's assets, global settings and Editor assemblies.
+
+A model's renderers may name a `.mat` source, the default material or one
+its `externalObjects` remap to. A ContentFile reaches another file only
+through that file's ContentFile, and an authored material is loaded from its
+source. The renderers are placed from the model's static graph, which keeps
+the material's identity, so the adapted file drops the reference and the
+renderers' pointers along it (`runtimeartifact::unbind_source_references`),
+and the scene binds the authored material.
+
+The static graph now also takes `SkinnedMeshRenderer` and `Animator`, read
+by the artifact's type trees, and a model's clips and `Avatar`.
+
+**UI.** See [UI_IMPORTS.md](UI_IMPORTS.md) for `<Style src>` references
+and custom elements. A `PanelSettings` names UI Toolkit's shaders in
+`unity_builtin_extra` (path IDs 9001, 9100, 9101, 19011, 19012, 20300–20302)
+and its ICU data (20204). The runtime resolves the shaders by name with
+`Shader.Find`.
+
+**ScriptableObjects of packages the host provides.** `VContainerSettings`
+is trusted without lifecycle instrumentation: it takes its instance in
+`OnEnable`, and the runtime makes the root scope of the restored data through
+VContainer's public API (`InitializePreloadedRootScopes`), as it did for the
+Editor-imported asset.
+
+**Limits of this route:**
+
+- An animation event of a model's clip that passes a script (`MonoScript`)
+  as its object parameter passes none. Neither a ContentFile nor the scene
+  loader here holds a `MonoScript`. A receiver taking `int`, `float` or
+  `string`, as all of Dungeon's do, sees no difference.
+- No public API reaches a Player's ICU data, so a panel falls back to basic
+  line breaking, as with a panel made at runtime.
+- A host keeps the shaders of USS filters and of sprites inside text only when
+  its own build used them. Without one, the runtime logs a warning and the
+  panel draws no filter, or no sprite in a text. The other panel shaders are
+  required.
+- `run` imports in its own session what the preparation imported while
+  proving the scene, and prepares the project's Addressables scenes as well.
+  A scene it cannot adapt is skipped with an event (Dungeon's `TestRoom` holds
+  a `NavMeshObstacle`).
+
 ## Limits and what remains
 
 - **Settings.** Writing the managers needs a base `globalgamemanagers` of the
