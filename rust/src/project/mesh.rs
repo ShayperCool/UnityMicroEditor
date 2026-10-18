@@ -68,7 +68,9 @@ pub(crate) fn validate_authored_mesh(data: &Map) -> Result<()> {
         bail!("bone metadata without bindposes is unsupported");
     }
     if bindposes > 0
-        && (!mesh_hex(&value::text(data, "m_BoneNameHashes")).is_ok_and(|len| len == 4 * bindposes)
+        // A Mesh a script made has no bone names.
+        && (!mesh_hex(&value::text(data, "m_BoneNameHashes"))
+            .is_ok_and(|len| len == 0 || len == 4 * bindposes)
             || bone_bounds != bindposes)
     {
         bail!("source bone metadata does not match bindpose count");
@@ -136,24 +138,18 @@ pub(crate) fn validate_authored_mesh(data: &Map) -> Result<()> {
             );
         }
         if index >= 12
-            && (bindposes == 0
-                || dimension != 4
-                || index == 12 && format != 0
-                || index == 13 && format != 10)
+            && (bindposes == 0 || index == 12 && format != 0 || index == 13 && format != 10)
         {
-            bail!(
-                "only fixed four-weight skinning with float32 weights and UInt32 bone indices is supported"
-            );
+            bail!("only skinning with float32 weights and UInt32 bone indices is supported");
         }
     }
     if n(object(&channels[0]), "dimension") != 3 {
         bail!("Mesh needs float32 position3");
     }
-    if bindposes != 0
-        && (n(object(&channels[12]), "dimension") != 4
-            || n(object(&channels[13]), "dimension") != 4)
-    {
-        bail!("skinned Mesh lacks fixed four-weight channels");
+    // One to four bones a vertex, a weight for each.
+    let weights = n(object(&channels[12]), "dimension");
+    if bindposes != 0 && (weights == 0 || weights != n(object(&channels[13]), "dimension")) {
+        bail!("skinned Mesh lacks matching weight and bone index channels");
     }
     if array(get(data, "m_SubMeshes")).is_empty() {
         bail!("Mesh has no submeshes");

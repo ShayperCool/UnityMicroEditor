@@ -390,7 +390,7 @@ fn cooked_large_native_discovery_streams_current_source_and_keeps_late_dependenc
         let mut s = fixture.session.lock();
         s.index_dirty = true;
         s.index_guids().unwrap();
-        let refs = s.native_reference_guids(&path);
+        let refs = s.native_reference_guids("Assets/Source.anim", &path);
         assert!(
             refs.as_ref()
                 .is_ok_and(|refs| *refs == strings(&[LATE_NATIVE_GUID])),
@@ -420,7 +420,7 @@ fn cooked_large_native_discovery_rejects_changed_current_source_and_metadata() {
         write_at(&format!("{path}{suffix}"), 20, b"X");
         let mut s = fixture.session.lock();
         s.cache.observed.clear();
-        let result = s.native_reference_guids(&path);
+        let result = s.native_reference_guids("Assets/Source.anim", &path);
         assert!(
             result
                 .as_ref()
@@ -472,7 +472,8 @@ fn cooked_large_native_discovery_requires_exact_current_cooked_proof() {
         let mut s = fixture.session.lock();
         change(&mut s, &pack);
         assert!(
-            s.native_reference_guids(&path).is_err(),
+            s.native_reference_guids("Assets/Source.anim", &path)
+                .is_err(),
             "oversized source accepted without exact current cooked proof: {name}"
         );
         assert!(
@@ -488,7 +489,7 @@ fn cooked_large_native_discovery_never_falls_back_to_full_yaml() {
         "  pointer:\n    fileID: 4300000\n    guid: {LATE_NATIVE_GUID}\n    type: 3\n"
     ));
     let mut s = fixture.session.lock();
-    let result = s.native_reference_guids(&path);
+    let result = s.native_reference_guids("Assets/Source.anim", &path);
     assert!(
         result
             .as_ref()
@@ -509,7 +510,7 @@ fn cooked_large_native_discovery_retains_absolute_streaming_bound() {
         fixture
             .session
             .lock()
-            .native_reference_guids(&path)
+            .native_reference_guids("Assets/Source.anim", &path)
             .is_err(),
         "source larger than supported cooked streaming bound accepted"
     );
@@ -586,7 +587,7 @@ fn native_reference_scanner_fallback_keeps_block_pointers_and_schema_errors() {
             format!("--- !u!114 &11400000\nMonoBehaviour:\n{body}"),
         );
         s.cache.observed.clear();
-        let refs = s.native_reference_guids(&path);
+        let refs = s.native_reference_guids("Assets/Source.anim", &path);
         assert!(
             refs.as_ref().is_ok_and(|refs| *refs == strings(&[guid])),
             "custom PPtr lost ({name}): {refs:?}"
@@ -604,7 +605,8 @@ fn native_reference_scanner_fallback_keeps_block_pointers_and_schema_errors() {
     );
     s.cache.observed.clear();
     assert!(
-        s.native_reference_guids(&path).is_err(),
+        s.native_reference_guids("Assets/Source.anim", &path)
+            .is_err(),
         "fallback accepted duplicate pointer keys"
     );
     write_fixture_file(
@@ -615,7 +617,8 @@ fn native_reference_scanner_fallback_keeps_block_pointers_and_schema_errors() {
     );
     s.cache.observed.clear();
     assert!(
-        s.native_reference_guids(&path).is_err(),
+        s.native_reference_guids("Assets/Source.anim", &path)
+            .is_err(),
         "fallback rounded oversized signed fileID"
     );
 }
@@ -632,7 +635,7 @@ fn native_reference_discovery_does_not_cache_large_buffers_and_keeps_current_has
         "  - index: 123\n    value: {x: 1, y: 2}\n".repeat(10000)
     );
     write_fixture_file(&path, &content);
-    let refs = s.native_reference_guids(&path);
+    let refs = s.native_reference_guids("Assets/Source.anim", &path);
     assert!(
         refs.as_ref().is_ok_and(|refs| *refs == strings(&[guid])),
         "bounded discovery failed: {refs:?}"
@@ -648,11 +651,12 @@ fn native_reference_discovery_does_not_cache_large_buffers_and_keeps_current_has
         content.replacen(guid, "44444444444444444444444444444444", 1),
     );
     assert!(
-        s.native_reference_guids(&path).is_err(),
+        s.native_reference_guids("Assets/Source.anim", &path)
+            .is_err(),
         "changed source during one scan pass accepted"
     );
     s.cache.observed.clear();
-    let refs = s.native_reference_guids(&path);
+    let refs = s.native_reference_guids("Assets/Source.anim", &path);
     assert!(
         refs.as_ref()
             .is_ok_and(|refs| *refs == strings(&["44444444444444444444444444444444"])),
@@ -735,14 +739,29 @@ fn native_reference_source_bounds_reject_fifo_and_oversize_before_reading() {
         .unwrap();
     assert!(made.success(), "mkfifo failed");
     assert!(
-        s.native_reference_guids(&pipe).is_err(),
+        s.native_reference_guids("Assets/Source.anim", &pipe)
+            .is_err(),
         "nonregular source accepted"
     );
     let large = format!("{}/oversize.asset", fixture.project);
     write_fixture_file(&large, "--- !u!43 &4300000\nMesh:\n");
     truncate(&large, MAX_TEXT_BYTES as u64 + 1);
     assert!(
-        s.native_reference_guids(&large).is_err(),
+        s.native_reference_guids("Assets/Source.anim", &large)
+            .is_err(),
         "oversize source accepted"
+    );
+    // An oversized clip without an Editor's cooked catalog is baked first.
+    let clip = format!("{}/oversize.anim", fixture.project);
+    write_fixture_file(&clip, "--- !u!74 &7400000\nAnimationClip:\n");
+    truncate(&clip, MAX_TEXT_BYTES as u64 + 1);
+    let asked = s
+        .native_reference_guids("Assets/Clip.anim", &clip)
+        .unwrap_err();
+    assert!(
+        asked
+            .downcast_ref::<crate::project::session::NeedsImportError>()
+            .is_some_and(|error| error.path == "Assets/Clip.anim"),
+        "{asked:#}"
     );
 }

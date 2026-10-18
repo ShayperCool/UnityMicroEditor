@@ -352,6 +352,7 @@ impl LargeNativeDiscoveryProof {
 impl Inner {
     fn verified_large_native_discovery(
         &mut self,
+        logical: &str,
         path: &str,
         size: u64,
     ) -> Result<LargeNativeDiscoveryProof> {
@@ -371,6 +372,19 @@ impl Inner {
             });
         }
         let catalog = &self.catalog;
+        // Without an Editor's cooked catalog, the importer bakes the clip,
+        // which then proves it as one baked in this session.
+        let cooked = catalog.success
+            && catalog.cooked_registry_verified
+            && !catalog.contains_scenes
+            && catalog.scene_loader == "raw"
+            && (catalog.backend == "unity_editor_public_api" || catalog.backend == "unity_editor");
+        if !cooked
+            && size <= MAX_COOKED_NATIVE_DISCOVERY_BYTES
+            && lexpath::equal_fold(lexpath::ext(path), ".anim")
+        {
+            return Err(needs_import(logical));
+        }
         if size > MAX_COOKED_NATIVE_DISCOVERY_BYTES
             || !lexpath::equal_fold(lexpath::ext(path), ".anim")
             || !catalog.success
@@ -513,7 +527,11 @@ impl Inner {
     /// Discovery only needs PPtr targets. The current source is hashed while
     /// bounded lines are scanned; noncanonical YAML uses the full parser
     /// without retaining its documents in the session cache.
-    pub(crate) fn native_reference_guids(&mut self, path: &str) -> Result<Vec<String>> {
+    pub(crate) fn native_reference_guids(
+        &mut self,
+        logical: &str,
+        path: &str,
+    ) -> Result<Vec<String>> {
         let before = file_identity(path)?;
         if !before.is_regular() {
             bail!("unsupported nonregular or oversized native discovery source: {path}");
@@ -521,7 +539,7 @@ impl Inner {
         let mut large_proof = None;
         let mut byte_limit = MAX_TEXT_BYTES as u64;
         if before.size > byte_limit {
-            large_proof = Some(self.verified_large_native_discovery(path, before.size)?);
+            large_proof = Some(self.verified_large_native_discovery(logical, path, before.size)?);
             byte_limit = before.size;
         }
         let key = PathBuf::from(path);
@@ -692,7 +710,7 @@ impl Inner {
                 ".controller" | ".overridecontroller"
             );
             let physical = self.source(&logical)?;
-            for guid in self.native_reference_guids(&physical)? {
+            for guid in self.native_reference_guids(&logical, &physical)? {
                 let source = self.path_of(&guid);
                 if source.is_empty() {
                     continue;

@@ -151,9 +151,9 @@ namespace UnityMicroEditor.Raw
                 if (channel.stream < 0 || channel.stream > 3 || channel.offset != strides[channel.stream]
                     || !(channel.format == 0 || channel.format == 2 || channel.format == 10))
                     throw Error(asset, "Only tightly packed float32/UNorm8/UInt32 vertex attributes are supported.");
-                if (index >= 12 && (data.m_BindPose == null || data.m_BindPose.Length == 0 || channel.dimension != 4
+                if (index >= 12 && (data.m_BindPose == null || data.m_BindPose.Length == 0
                     || index == 12 && channel.format != 0 || index == 13 && channel.format != 10))
-                    throw Error(asset, "Only fixed-four skinning with float32 weights/UInt32 bone indices is supported.");
+                    throw Error(asset, "Only skinning with float32 weights/UInt32 bone indices is supported.");
                 attributes.Add(new VertexAttributeDescriptor((VertexAttribute)index, (VertexAttributeFormat)channel.format, channel.dimension, channel.stream));
                 strides[channel.stream] = checked(strides[channel.stream] + (channel.format == 2 ? 1 : 4) * channel.dimension);
                 maximumStream = Math.Max(maximumStream, channel.stream);
@@ -178,8 +178,10 @@ namespace UnityMicroEditor.Raw
             if (sourceOffset != source.vertices.Length) throw Error(asset, "Source vertex buffer contains unsupported trailing data.");
             source.bindposes = new Matrix4x4[data.m_BindPose == null ? 0 : data.m_BindPose.Length];
             if (source.bindposes.Length > 1024) throw Error(asset, "Bindpose count exceeds supported bounds.");
-            if (source.bindposes.Length != 0 && (data.m_VertexData.m_Channels[12].dimension != 4 || data.m_VertexData.m_Channels[13].dimension != 4))
-                throw Error(asset, "Skinned Mesh has no fixed-four weight/index channels.");
+            // One to four bones a vertex, a weight for each.
+            if (source.bindposes.Length != 0 && (data.m_VertexData.m_Channels[12].dimension == 0
+                || data.m_VertexData.m_Channels[12].dimension != data.m_VertexData.m_Channels[13].dimension))
+                throw Error(asset, "Skinned Mesh has no matching weight/index channels.");
             for (int index = 0; index < source.bindposes.Length; index++)
             {
                 if (data.m_BindPose[index] == null) throw Error(asset, "Missing source bindpose matrix.");
@@ -234,7 +236,9 @@ namespace UnityMicroEditor.Raw
             // bindposes/weights plus the renderer's authored bones/localBounds.
             if (map.TryGetValue("m_BindPose", out object poseValue) && poseValue is List<object> poses && poses.Count > 0)
             {
-                if (Hex(asset, Text(map, "m_BoneNameHashes")).Length != poses.Count * 4
+                // A Mesh a script made has no bone names.
+                int names = Hex(asset, Text(map, "m_BoneNameHashes")).Length;
+                if (names != 0 && names != poses.Count * 4
                     || !map.TryGetValue("m_BonesAABB", out object aabbs) || !(aabbs is List<object> boneBounds) || boneBounds.Count != poses.Count)
                     throw Error(asset, "Importer bone metadata does not match bindpose count.");
             }
@@ -298,12 +302,13 @@ namespace UnityMicroEditor.Raw
                 Channel weight = data.m_VertexData.m_Channels[12], bone = data.m_VertexData.m_Channels[13];
                 byte[] weights = streams[weight.stream], bones = streams[bone.stream];
                 int w = vertex * strides[weight.stream] + weight.offset, b = vertex * strides[bone.stream] + bone.offset;
+                // The public weights of a vertex with fewer bones read zero past them.
+                float Part(int slot) => slot < weight.dimension ? BitConverter.ToSingle(weights, w + 4 * slot) : 0;
+                int Bone(int slot) => slot < bone.dimension ? checked((int)BitConverter.ToUInt32(bones, b + 4 * slot)) : 0;
                 return new BoneWeight
                 {
-                    weight0 = BitConverter.ToSingle(weights, w), weight1 = BitConverter.ToSingle(weights, w + 4),
-                    weight2 = BitConverter.ToSingle(weights, w + 8), weight3 = BitConverter.ToSingle(weights, w + 12),
-                    boneIndex0 = checked((int)BitConverter.ToUInt32(bones, b)), boneIndex1 = checked((int)BitConverter.ToUInt32(bones, b + 4)),
-                    boneIndex2 = checked((int)BitConverter.ToUInt32(bones, b + 8)), boneIndex3 = checked((int)BitConverter.ToUInt32(bones, b + 12)),
+                    weight0 = Part(0), weight1 = Part(1), weight2 = Part(2), weight3 = Part(3),
+                    boneIndex0 = Bone(0), boneIndex1 = Bone(1), boneIndex2 = Bone(2), boneIndex3 = Bone(3),
                 };
             }
         }

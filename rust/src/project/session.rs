@@ -268,6 +268,16 @@ pub(crate) fn validate_authored_path(path: &str, extension: &str) -> Result<()> 
     }
     Ok(())
 }
+/// Whether the Editor leaves a file or folder of this name out of its asset
+/// database: a name that starts with `.` or ends with `~`, `cvs`, or a
+/// `.tmp` file.
+pub(crate) fn unity_hidden_name(name: &str) -> bool {
+    name.starts_with('.')
+        || name.ends_with('~')
+        || name.eq_ignore_ascii_case("cvs")
+        || name.to_ascii_lowercase().ends_with(".tmp")
+}
+
 pub(crate) fn asset_key(guid: &str, id: &str) -> String {
     format!("{guid}/{id}")
 }
@@ -551,6 +561,11 @@ impl Inner {
                     }
                     continue;
                 };
+                // The Editor imports nothing under a hidden name, such as a
+                // package's `Samples~`.
+                if unity_hidden_name(&name) {
+                    continue;
+                }
                 let child = format!("{}/{name}", path.trim_end_matches('/'));
                 self.index_entry(root, &child, entry.file_type()?, by_guid, by_path)?;
             }
