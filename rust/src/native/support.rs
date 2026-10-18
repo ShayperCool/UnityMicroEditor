@@ -211,6 +211,24 @@ pub(crate) fn read_json_verbatim<T: serde::de::DeserializeOwned>(path: &str) -> 
     let data = read_file(path)?;
     crate::project::value::decode_use_number(&String::from_utf8_lossy(&data))
 }
+/// The text of an entry of a store of native content, whose paths into a
+/// store are paths into `store`. A store may have been copied from another
+/// checkout of the project (a worktree is filled by reflink): its entries
+/// name the files of the store they were written in, which the copy holds
+/// under the same names. Every file is checked by its hash where it is used,
+/// so one the copy lacks is made again.
+pub(crate) fn store_entry_text(path: &str, store: &str) -> Result<String> {
+    static STORED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#""[^"]*/Library/UnityMicroEditor/native-store/"#).expect("store path")
+    });
+    let data = read_file(path)?;
+    let text = String::from_utf8_lossy(&data);
+    let quoted = serde_json::to_string(&format!("{store}/"))?;
+    let prefix = &quoted[..quoted.len() - 1];
+    Ok(STORED
+        .replace_all(&text, regex::NoExpand(prefix))
+        .into_owned())
+}
 /// Per-character simple lower-casing, without Unicode's context-sensitive
 /// special cases.
 pub(crate) fn rune_lower(text: &str) -> String {

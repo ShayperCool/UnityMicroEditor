@@ -7,8 +7,8 @@ use super::{
     resolve_project_import_source,
     shader_cache::verify_compiled_shader_cache,
     support::{
-        Event, is_not_exist, lower_ext, mkdir_all, read_file, read_json, read_json_verbatim, text,
-        wrap, write_file,
+        Event, is_not_exist, lower_ext, mkdir_all, read_file, read_json, read_json_verbatim,
+        store_entry_text, text, wrap, write_file,
     },
     texture_profile::{native_texture_needs_warm, validate_native_configuration},
 };
@@ -446,8 +446,54 @@ impl NativeProjectImporter {
     /// Publishes a source's import from the cache when the cache holds one
     /// made from the source and environment as they are now.
     pub(crate) fn take_cold_cache(&mut self, logical: &str) -> Result<bool> {
+        Ok(match self.cached_cold(logical)? {
+            Cached::Taken => true,
+            Cached::Absent => false,
+            Cached::Refused(error) => {
+                cache_rejected(logical, &error);
+                false
+            }
+        })
+    }
+
+    /// The same for several sources: returns those the cache does not give.
+    /// An entry can depend on another of them (a clip on the model whose
+    /// avatar it copies), so they are taken in passes until one takes none.
+    pub(crate) fn take_cold_caches(&mut self, logicals: Vec<String>) -> Result<Vec<String>> {
+        let mut left: Vec<(String, Option<anyhow::Error>)> = logicals
+            .into_iter()
+            .map(|logical| (logical, None))
+            .collect();
+        loop {
+            let before = left.len();
+            let mut next = Vec::new();
+            for (logical, _) in left {
+                match self.cached_cold(&logical)? {
+                    Cached::Taken => {}
+                    Cached::Absent => next.push((logical, None)),
+                    Cached::Refused(error) => next.push((logical, Some(error))),
+                }
+            }
+            left = next;
+            if left.len() == before || left.iter().all(|(_, refused)| refused.is_none()) {
+                break;
+            }
+        }
+        Ok(left
+            .into_iter()
+            .map(|(logical, refused)| {
+                if let Some(error) = refused {
+                    cache_rejected(&logical, &error);
+                }
+                logical
+            })
+            .collect())
+    }
+
+    fn cached_cold(&mut self, logical: &str) -> Result<Cached> {
         let input = self.cold_input(logical)?;
-        if let Ok(cached) = read_json_verbatim::<NativeReplacement>(&input.cache_path)
+        if let Ok(cached) = store_entry_text(&input.cache_path, &self.opts.native_dir())
+            .and_then(|text| crate::project::value::decode_use_number::<NativeReplacement>(&text))
             && cached.source_path == logical
             && cached.source_sha256 == input.source_sha
             && cached.meta_sha256 == input.meta_sha
@@ -456,18 +502,19 @@ impl NativeProjectImporter {
             && host_binding_current(&self.opts, &cached)
         {
             let cached = retain_native_model_mesh_cpu(&self.opts, cached)?;
-            if self.session.replace_native_content(&cached).is_ok() {
-                let guid = cached.guid.clone();
-                self.entries.insert(guid.clone(), cached);
-                self.publish_index()?;
-                Event::new("native-cache-hit")
-                    .with("path", logical)
-                    .with("guid", &guid)
-                    .emit();
-                return Ok(true);
+            if let Err(error) = self.session.replace_native_content(&cached) {
+                return Ok(Cached::Refused(error));
             }
+            let guid = cached.guid.clone();
+            self.entries.insert(guid.clone(), cached);
+            self.publish_index()?;
+            Event::new("native-cache-hit")
+                .with("path", logical)
+                .with("guid", &guid)
+                .emit();
+            return Ok(Cached::Taken);
         }
-        Ok(false)
+        Ok(Cached::Absent)
     }
 
     pub(crate) fn require_current_environment(&self) -> Result<()> {
@@ -486,6 +533,21 @@ impl NativeProjectImporter {
         mkdir_all(&sysutil::dir(&index), 0o700)?;
         atomic_json(&index, &entries)
     }
+}
+
+/// What the cache gave for a source.
+enum Cached {
+    Taken,
+    Absent,
+    /// An entry the session would not take as things are now.
+    Refused(anyhow::Error),
+}
+
+fn cache_rejected(logical: &str, error: &anyhow::Error) {
+    Event::new("native-cache-rejected")
+        .with("path", logical)
+        .with("reason", &text(error))
+        .emit();
 }
 
 /// Mounts the published native resources under their runtime aliases. The

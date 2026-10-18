@@ -8,8 +8,8 @@ use super::{
     environment::read_worker_environment,
     resolve_project_import_source,
     support::{
-        Event, bytes_contain, check, lower_ext, mkdir_all, read_file, read_json, rune_lower, wrap,
-        write_file,
+        Event, bytes_contain, check, lower_ext, mkdir_all, read_file, rune_lower, store_entry_text,
+        wrap, write_file,
     },
     texture_profile::{
         texture_source, validate_native_configuration, verify_warm_bc7_dependency,
@@ -385,7 +385,8 @@ impl NativeProjectImporter {
             "cache",
             &format!("{signature}.json"),
         ]);
-        if let Ok(cached) = read_json::<NativeReplacement>(&cache_path)
+        if let Ok(cached) = store_entry_text(&cache_path, &self.opts.native_dir())
+            .and_then(|text| Ok(serde_json::from_str::<NativeReplacement>(&text)?))
             && cached.source_path == logical
             && cached.source_sha256 == sha
             && cached.meta_sha256 == meta_sha
@@ -497,6 +498,11 @@ impl NativeProjectImporter {
         )?;
         if batch.len() > super::NATIVE_IMPORT_BATCH_SIZE {
             bail!("the UI source {logical} names more sources than one import holds");
+        }
+        // What another session imported as it is now is taken; the batch is
+        // imported whole otherwise, since its sources name each other.
+        if self.take_cold_caches(batch.clone())?.is_empty() {
+            return Ok(());
         }
         self.import_cold_batch(ctx, &batch)
     }

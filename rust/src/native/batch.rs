@@ -193,13 +193,12 @@ impl NativeProjectImporter {
         for logical in paths {
             if native_texture_needs_warm(&self.opts.project, &logical)? {
                 self.import_warm_ui(ctx, &logical, &mut HashSet::new())?;
-            // Another session of the project may have imported it as it is.
-            } else if atlas_batches.iter().flatten().any(|path| *path == logical)
-                || !self.take_cold_cache(&logical)?
-            {
+            } else {
                 cold.push(logical);
             }
         }
+        // Another session of the project may have imported them as they are.
+        let mut cold = self.take_cold_caches(cold)?;
         // Imports that need more of the Editor in their context run apart
         // from the others, so that what an asset is imported with does not
         // depend on what changed along with it.
@@ -239,13 +238,12 @@ impl NativeProjectImporter {
                 && !self.atlas_batch.contains_key(logical)
                 && !native_texture_needs_warm(&self.opts.project, logical)?
             {
-                if !self.take_cold_cache(logical)? {
-                    cold.push(logical.clone());
-                }
+                cold.push(logical.clone());
             } else {
                 single.push(logical.clone());
             }
         }
+        let mut cold = self.take_cold_caches(cold)?;
         cold.sort_by_key(|logical| context_kind(&self.opts.project, logical));
         cold.dedup();
         let mut paths = &cold[..];

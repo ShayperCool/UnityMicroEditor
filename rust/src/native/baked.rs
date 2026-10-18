@@ -12,8 +12,8 @@ use super::{
         write_player_objects,
     },
     resolve_project_import_source,
-    scripted::script_environment_identity,
-    support::{Event, is_not_exist, lower_ext, mkdir_all, read_file},
+    scripted::{legacy_script_environment_identity, script_environment_identity},
+    support::{Event, is_not_exist, lower_ext, mkdir_all, read_file, store_entry_text},
 };
 use crate::{
     cancel::Context,
@@ -306,7 +306,8 @@ impl NativeProjectImporter {
             "cache",
             &format!("model-clips-{signature}.json"),
         ]);
-        if let Ok(known) = crate::util::read_json_file::<ModelClipSet>(&cache)
+        if let Ok(known) = store_entry_text(&cache, &self.opts.native_dir())
+            .and_then(|text| Ok(serde_json::from_str::<ModelClipSet>(&text)?))
             && known.path == logical
             && known.source_sha256 == source_sha
             && known.meta_sha256 == meta_sha
@@ -1368,11 +1369,49 @@ impl NativeProjectImporter {
         users: &[String],
         plan: &Plan,
     ) -> Result<String> {
+        let identity = script_environment_identity(&self.opts.project);
+        self.built_key_with(logical, guid, users, plan, &identity)
+    }
+
+    /// The build kept for a plan: under its key, or under the key an earlier
+    /// version of the tool gave it, which then keeps it under the key too.
+    /// Returns the key.
+    fn kept_build(
+        &self,
+        logical: &str,
+        guid: &str,
+        users: &[String],
+        plan: &Plan,
+    ) -> Result<(String, Option<built_store::Built>)> {
+        let project = &self.opts.project;
+        let key = self.built_key(logical, guid, users, plan)?;
+        if let Some(kept) = built_store::load(project, &key) {
+            return Ok((key, Some(kept)));
+        }
+        let legacy = legacy_script_environment_identity(project);
+        let earlier = self.built_key_with(logical, guid, users, plan, &legacy)?;
+        let kept = (earlier != key)
+            .then(|| built_store::load(project, &earlier))
+            .flatten();
+        if let Some(kept) = &kept {
+            let _ = built_store::store(project, &key, logical, kept);
+        }
+        Ok((key, kept))
+    }
+
+    fn built_key_with(
+        &self,
+        logical: &str,
+        guid: &str,
+        users: &[String],
+        plan: &Plan,
+        scripts_identity: &str,
+    ) -> Result<String> {
         let source = self.baked_source(logical)?;
         built_store::Inputs {
             importer: &importer_identity(),
             environment_sha256: &self.environment_sha256,
-            scripts_identity: &script_environment_identity(&self.opts.project),
+            scripts_identity,
             target: logical,
             guid,
             source_sha256: &file_sha(&source)?,
@@ -1400,8 +1439,8 @@ impl NativeProjectImporter {
         *ingredients = plan.ingredients.clone();
         // Another importer of the project may have built the same already:
         // that of a content scene builds the shaders of the scene's own.
-        let key = self.built_key(logical, guid, &users, &plan)?;
-        if let Some(kept) = built_store::load(&self.opts.project, &key) {
+        let (key, kept) = self.kept_build(logical, guid, &users, &plan)?;
+        if let Some(kept) = kept {
             Event::new("native-build-reused")
                 .with("path", logical)
                 .with("key", &key)
@@ -1702,10 +1741,10 @@ impl NativeProjectImporter {
             let Ok((users, plan)) = self.built_plan(&logical, &guid) else {
                 continue;
             };
-            let Ok(key) = self.built_key(&logical, &guid, &users, &plan) else {
+            let Ok((key, kept)) = self.kept_build(&logical, &guid, &users, &plan) else {
                 continue;
             };
-            if built_store::load(&self.opts.project, &key).is_some() {
+            if kept.is_some() {
                 continue;
             }
             jobs.push((guid, key, self.build_of(&logical, users)));

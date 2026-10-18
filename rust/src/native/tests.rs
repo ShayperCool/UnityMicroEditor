@@ -2430,3 +2430,54 @@ fn a_real_theme_projects_and_binds_its_imports() {
         "7433441132597879392"
     )));
 }
+
+#[test]
+fn a_store_copied_from_another_checkout_names_its_own_files() {
+    let root = tempfile::tempdir().unwrap();
+    let entry = root
+        .path()
+        .join("entry.json")
+        .to_string_lossy()
+        .into_owned();
+    fs::write(
+        &entry,
+        r#"{"content":{"path":"/a/Dungeon/Library/UnityMicroEditor/native-store/imports/x/runtime/g.bin","resources":[{"path":"/a/Dungeon/Library/UnityMicroEditor/native-store/imports/x/runtime/g.resS"}]},"sourcePath":"Assets/A.png","other":"/a/Dungeon/Library/UnityMicroEditor/agent/native/index.json"}"#,
+    )
+    .unwrap();
+    let store = "/b/Dungeon-wt/one/Library/UnityMicroEditor/native-store";
+    let text = super::support::store_entry_text(&entry, store).unwrap();
+    assert_eq!(
+        text,
+        format!(
+            r#"{{"content":{{"path":"{store}/imports/x/runtime/g.bin","resources":[{{"path":"{store}/imports/x/runtime/g.resS"}}]}},"sourcePath":"Assets/A.png","other":"/a/Dungeon/Library/UnityMicroEditor/agent/native/index.json"}}"#
+        )
+    );
+}
+
+#[test]
+fn two_checkouts_of_the_same_scripts_name_one_script_environment() {
+    let record = |project: &str, socket: &str| {
+        let root = tempfile::tempdir().unwrap();
+        let checkout = root.path().join(project);
+        let bee = checkout.join("Library/UnityMicroEditor/stage/project/Library/Bee");
+        fs::create_dir_all(&bee).unwrap();
+        let checkout = checkout.to_string_lossy().into_owned();
+        let stage = format!("{checkout}/Library/UnityMicroEditor/stage/project");
+        fs::write(
+            bee.join("1234E-inputdata.json"),
+            format!(
+                r#"{{"Sources":["{stage}/Assets/A.cs","{checkout}/Packages/p/B.cs"],"Socket":"/tmp/ilpp.sock-{socket}","Editor":"/opt/Unity/Editor"}}"#
+            ),
+        )
+        .unwrap();
+        let identity = scripted::script_environment_identity(&checkout);
+        let legacy = scripted::legacy_script_environment_identity(&checkout);
+        drop(root);
+        (identity, legacy)
+    };
+    let (main, main_legacy) = record("Dungeon", "fc2f4dec");
+    let (worktree, worktree_legacy) = record("Dungeon-wt/one", "0a1b2c3d");
+    assert!(!main.is_empty());
+    assert_eq!(main, worktree);
+    assert_ne!(main_legacy, worktree_legacy);
+}

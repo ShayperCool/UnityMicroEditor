@@ -239,15 +239,39 @@ fn compilation_record(library: &str) -> Result<String> {
 }
 
 /// Changes whenever the Editor compiled again. Cheap enough for a cache key.
+/// The record names the checkout it was made in, and the socket of one
+/// Editor run: they are left out, so that two checkouts of the same sources
+/// (a worktree and the one it was copied from) name one environment.
 pub fn script_environment_identity(project: &str) -> String {
-    for library in libraries(project) {
-        if let Ok(record) = compilation_record(&library)
-            && let Ok(data) = read_file(&record)
-        {
-            return sha256(&data);
-        }
-    }
-    String::new()
+    record_data(project).map_or_else(String::new, |(library, data)| {
+        sha256(&location_free_record(&data, &library, project))
+    })
+}
+
+/// The identity before it left out the checkout: the key under which the
+/// caches of earlier versions hold what they made.
+pub fn legacy_script_environment_identity(project: &str) -> String {
+    record_data(project).map_or_else(String::new, |(_, data)| sha256(&data))
+}
+
+fn record_data(project: &str) -> Option<(String, Vec<u8>)> {
+    libraries(project).into_iter().find_map(|library| {
+        let data = read_file(&compilation_record(&library).ok()?).ok()?;
+        Some((library, data))
+    })
+}
+
+/// The record with the places of its checkout written as placeholders, and
+/// the name of the Editor run's post-processing socket left out.
+fn location_free_record(data: &[u8], library: &str, project: &str) -> Vec<u8> {
+    let text = String::from_utf8_lossy(data)
+        .replace(library, "$LIBRARY")
+        .replace(project, "$PROJECT");
+    let socket = regex::Regex::new(r"/tmp/ilpp\.sock-[0-9a-f]+").expect("socket pattern");
+    socket
+        .replace_all(&text, "$$SOCKET")
+        .into_owned()
+        .into_bytes()
 }
 
 #[derive(Deserialize)]
