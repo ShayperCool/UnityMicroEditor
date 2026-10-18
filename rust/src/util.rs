@@ -2,7 +2,7 @@
 use crate::{ENGINE_VERSION, authoring::AuthoringError, hex, jsondoc, sysutil};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Serialize, de::DeserializeOwned};
-use sha2::{Digest, Sha256};
+
 use std::{
     env,
     fs::{self, File, OpenOptions},
@@ -171,7 +171,7 @@ pub fn session_lock_holder(output: &str) -> Option<Option<i32>> {
 
 /// An OS error carrying operation, path and cause in its text; whether the path
 /// was missing stays answerable through `downcast_ref::<sysutil::Error>()`.
-fn os_error(operation: &str, path: &str, error: &io::Error) -> anyhow::Error {
+pub(crate) fn os_error(operation: &str, path: &str, error: &io::Error) -> anyhow::Error {
     anyhow::Error::new(sysutil::Error::os(operation, path, error))
 }
 
@@ -184,17 +184,10 @@ pub fn valid_sha256(value: &str) -> bool {
 }
 
 /// SHA256 of a bounded regular file.
+/// The SHA-256 of a file, taken from [`crate::hashstore`] while the file is
+/// as it was when hashed.
 pub fn file_hash(filename: &str) -> Result<String> {
-    const LIMIT: u64 = 1024 * 1024 * 1024;
-    let file = File::open(filename).map_err(|e| os_error("open", filename, &e))?;
-    ensure!(
-        file.metadata()
-            .is_ok_and(|info| info.is_file() && info.len() <= LIMIT),
-        "compiler input is not a bounded regular file: {filename}"
-    );
-    let mut hasher = Sha256::new();
-    io::copy(&mut file.take(LIMIT + 1), &mut hasher)?;
-    Ok(hex(&hasher.finalize()))
+    crate::hashstore::file_sha256(filename)
 }
 
 pub fn random_id() -> String {

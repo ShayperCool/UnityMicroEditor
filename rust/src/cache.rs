@@ -46,6 +46,42 @@ impl Identity {
     pub(crate) fn is_regular(&self) -> bool {
         self.mode & 0o170000 == 0o100000
     }
+    /// Whether neither the content nor the metadata of the file changed in
+    /// the `margin` before `time`: a later write in the same tick of the
+    /// clock would leave every field as it is.
+    pub(crate) fn settled_before(&self, time: std::time::SystemTime, margin: f64) -> bool {
+        let Ok(now) = time.duration_since(std::time::UNIX_EPOCH) else {
+            return false;
+        };
+        let seconds = |whole: i64, nanos: i64| whole as f64 + nanos as f64 / 1e9;
+        let latest = seconds(self.mtime, self.mtime_ns).max(seconds(self.ctime, self.ctime_ns));
+        now.as_secs_f64() - latest >= margin
+    }
+    /// The fields as a line of text, and back.
+    pub(crate) fn fields(&self) -> [i64; 8] {
+        [
+            self.device as i64,
+            self.inode as i64,
+            self.size as i64,
+            self.mtime,
+            self.mtime_ns,
+            self.ctime,
+            self.ctime_ns,
+            self.mode as i64,
+        ]
+    }
+    pub(crate) fn from_fields(fields: [i64; 8]) -> Self {
+        Self {
+            device: fields[0] as u64,
+            inode: fields[1] as u64,
+            size: fields[2] as u64,
+            mtime: fields[3],
+            mtime_ns: fields[4],
+            ctime: fields[5],
+            ctime_ns: fields[6],
+            mode: fields[7] as u32,
+        }
+    }
 }
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -118,6 +154,20 @@ impl SourceCache {
             self.stats.file_hits += 1;
             return Ok((old.content.clone(), old.digest.clone()));
         }
+        // A file only hashed is not read while its metadata is as it was.
+        if !text && let Some(digest) = crate::hashstore::kept(path, &before) {
+            self.files.insert(
+                path.into(),
+                FileRecord {
+                    identity: before,
+                    content: None,
+                    digest: digest.clone(),
+                },
+            );
+            self.stats.file_hits += 1;
+            return Ok((None, digest));
+        }
+        let read = std::time::SystemTime::now();
         let mut file = File::open(path)
             .map_err(|e| crate::project::lexpath::os_error("open", &path.to_string_lossy(), e))?;
         let mut hasher = Sha256::new();
@@ -155,6 +205,7 @@ impl SourceCache {
             bail!("source replaced while reading, retry: {}", path.display());
         }
         let digest = hex(&hasher.finalize());
+        crate::hashstore::keep(path, after, &digest, read);
         self.files.insert(
             path.into(),
             FileRecord {

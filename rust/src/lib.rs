@@ -8,6 +8,7 @@ pub mod compiler;
 pub mod editorbridge;
 pub mod flags;
 pub mod graph;
+pub mod hashstore;
 pub mod hotreload;
 pub mod jsondoc;
 pub mod lmdb;
