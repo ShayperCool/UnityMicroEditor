@@ -109,9 +109,7 @@ pub(crate) fn run_pipeline_model_import(
     );
     // The pipeline's assets, the shader and the material are the run's own.
     if let Some(content) = report.as_mut().and_then(|report| report.content.as_mut()) {
-        content
-            .assets
-            .retain(|asset| models.iter().any(|model| *model == asset.path));
+        content.assets.retain(|asset| models.contains(&asset.path));
     }
     (report, error)
 }

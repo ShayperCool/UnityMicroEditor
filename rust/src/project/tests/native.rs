@@ -911,7 +911,7 @@ fn new_native_model_rejects_tampering_and_invalid_hierarchy_before_publication()
         ("unknown object", |r| {
             r.content
                 .objects
-                .push(native_object("90", "UnityEngine.Avatar"));
+                .push(native_object("10800000", "UnityEngine.Light"));
         }),
         ("unresolved external", |r| {
             graph_target(r, 1, 0)[0].guid = OTHER_GUID.into();
