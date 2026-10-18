@@ -65,16 +65,28 @@ fn cold_runtime_profile(logical: &str) -> Option<&'static str> {
 }
 
 /// What a source's import context holds beyond the sources: nothing, the
-/// Editor's shader name table, or compiled importers.
-pub(crate) fn context_kind(logical: &str) -> u8 {
+/// Editor's shader name table, compiled importers, or a render pipeline's
+/// model code (`pipeline_models`).
+pub(crate) fn context_kind(project: &str, logical: &str) -> u8 {
     let extension = lower_ext(logical);
     if scripted_profile(&extension) {
         2
     } else if generated_material_profile(&extension) {
         1
+    } else if cold_model_profile(logical)
+        && resolve_project_import_source(project, logical)
+            .and_then(|source| read_file(&format!("{source}.meta")))
+            .is_ok_and(|meta| super::pipeline_models::pipeline_model(project, logical, &meta))
+    {
+        3
     } else {
         0
     }
+}
+
+/// Whether a source is a model the worker imports as an FBX.
+pub(crate) fn cold_model_profile(logical: &str) -> bool {
+    lower_ext(logical) == ".fbx"
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -104,9 +116,10 @@ pub(crate) fn cold_input(
     let meta_sha = sha256(&meta);
     let mut identity =
         format!("native-runtime-v3\0{environment_sha256}\0{logical}\0{sha}\0{meta_sha}");
-    if cold_runtime_profile(logical) == Some("scripted") {
-        // The importer is compiled code of the project: another compilation
-        // may import the same source differently.
+    if cold_runtime_profile(logical) == Some("scripted") || lower_ext(logical) == ".uxml" {
+        // The importer is compiled code of the project, or writes the data of
+        // the project's element classes: another compilation may import the
+        // same source differently.
         identity.push('\0');
         identity.push_str(&script_environment_identity(&opts.project));
     }
@@ -187,15 +200,15 @@ impl NativeProjectImporter {
         // Imports that need more of the Editor in their context run apart
         // from the others, so that what an asset is imported with does not
         // depend on what changed along with it.
-        cold.sort_by_key(|logical| context_kind(logical));
+        cold.sort_by_key(|logical| context_kind(&self.opts.project, logical));
         self.pending_native_paths = cold.clone();
         let mut paths = &cold[..];
         while !paths.is_empty() {
-            let kind = context_kind(&paths[0]);
+            let kind = context_kind(&self.opts.project, &paths[0]);
             let count = paths
                 .iter()
                 .take(NATIVE_IMPORT_BATCH_SIZE)
-                .take_while(|logical| context_kind(logical) == kind)
+                .take_while(|logical| context_kind(&self.opts.project, logical) == kind)
                 .count();
             self.import_cold_batch(ctx, &paths[..count])?;
             paths = &paths[count..];
@@ -230,15 +243,15 @@ impl NativeProjectImporter {
                 single.push(logical.clone());
             }
         }
-        cold.sort_by_key(|logical| context_kind(logical));
+        cold.sort_by_key(|logical| context_kind(&self.opts.project, logical));
         cold.dedup();
         let mut paths = &cold[..];
         while !paths.is_empty() {
-            let kind = context_kind(&paths[0]);
+            let kind = context_kind(&self.opts.project, &paths[0]);
             let count = paths
                 .iter()
                 .take(NATIVE_IMPORT_BATCH_SIZE)
-                .take_while(|logical| context_kind(logical) == kind)
+                .take_while(|logical| context_kind(&self.opts.project, logical) == kind)
                 .count();
             self.import_cold_batch(ctx, &paths[..count])?;
             paths = &paths[count..];
@@ -276,19 +289,31 @@ impl NativeProjectImporter {
         // Every run of the worker writes into a directory of its own, and
         // leaves its report there.
         let (mut root, mut written) = (String::new(), None);
+        let pipeline_models = context_kind(&self.opts.project, &logicals[0]) == 3;
         let (report, error) = run_bounded_import(ctx, &what, IMPORT_BUDGET, |bounded, budget| {
             root = sysutil::join(&[&imports, &random_id()]);
-            let (report, error) = run_project_import(
-                bounded,
-                ProbeOptions {
-                    project: self.opts.project.clone(),
-                    editor: self.opts.editor.clone(),
-                    output: root.clone(),
-                    timeout: budget,
-                    ..Default::default()
-                },
-                logicals,
-            );
+            let (report, error) = if pipeline_models {
+                super::pipeline_models::run_pipeline_model_import(
+                    bounded,
+                    &self.opts.project,
+                    &self.opts.editor,
+                    &root,
+                    budget,
+                    logicals,
+                )
+            } else {
+                run_project_import(
+                    bounded,
+                    ProbeOptions {
+                        project: self.opts.project.clone(),
+                        editor: self.opts.editor.clone(),
+                        output: root.clone(),
+                        timeout: budget,
+                        ..Default::default()
+                    },
+                    logicals,
+                )
+            };
             written = report.as_ref().and_then(|report| {
                 atomic_json(&sysutil::join(&[&root, "result.json"]), report).err()
             });
@@ -383,6 +408,17 @@ impl NativeProjectImporter {
             }
             let filename = sysutil::join(&[root, "runtime", &format!("{}.bin", asset.guid)]);
             let binding = atlas.as_ref().map(|(atlas, packed)| (atlas, packed));
+            let session = &self.session;
+            let unimported = |guid: &str| -> &'static [i32] {
+                match session.source_of_guid(guid).map(|path| lower_ext(&path)) {
+                    Ok(extension) if extension == ".mat" => &[
+                        runtimeartifact::MESH_RENDERER,
+                        runtimeartifact::SKINNED_MESH_RENDERER,
+                    ],
+                    Ok(extension) if extension == ".cs" => &[runtimeartifact::ANIMATION_CLIP],
+                    _ => &[],
+                }
+            };
             let replacement = adapt_cold_asset(
                 &self.opts,
                 &self.environment_sha256,
@@ -390,6 +426,7 @@ impl NativeProjectImporter {
                 &input,
                 &filename,
                 binding,
+                &unimported,
             )?;
             replacements.push(match cold_ui_profile(&asset.path) {
                 true => self.bind_native_ui_references(ctx, replacement)?,
@@ -583,6 +620,7 @@ pub(crate) fn adapt_cold_asset(
     input: &NativeColdInput,
     filename: &str,
     atlas: Option<(&NativeReplacement, &runtimeartifact::PackedAtlas)>,
+    unimported: &dyn Fn(&str) -> &'static [i32],
 ) -> Result<NativeReplacement> {
     let data = primary_artifact(asset)?;
     let extension = lower_ext(&input.path);
@@ -608,6 +646,15 @@ pub(crate) fn adapt_cold_asset(
         adapted.map_err(|e| wrap(&format!("adapt native {}", input.path), e))?;
     let host_binding = bind_generated_materials(opts, &input.path, &mut output, &mut metadata)
         .map_err(|e| wrap(&format!("generated material of {}", input.path), e))?;
+    // The scene binds the authored materials of the model's renderers from
+    // its graph; see `runtimeartifact::unbind_source_references`.
+    if cold_runtime_profile(&input.path) == Some("fbx")
+        && let Some(unbound) =
+            runtimeartifact::unbind_source_references(&output, &mut metadata, unimported)
+                .map_err(|e| wrap(&format!("unimported sources of {}", input.path), e))?
+    {
+        output = unbound;
+    }
     let packed = atlas.filter(|(_, packed)| {
         cold_runtime_profile(&input.path) == Some("texture")
             && packed.sprites.iter().any(|(guid, _)| *guid == asset.guid)

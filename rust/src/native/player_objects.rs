@@ -1204,7 +1204,7 @@ pub fn player_settings(
 }
 
 /// The plan of a build of the `.shader` source `build.target`.
-fn shader_plan(build: &Build) -> Result<Plan> {
+pub(crate) fn shader_plan(build: &Build) -> Result<Plan> {
     let sources = open_sources(&build.project)?;
     let reloaded = read_reload_list(&sources, &build.reload_list);
     let settings = build_settings(&sources, &reloaded)?;

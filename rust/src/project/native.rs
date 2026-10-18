@@ -41,6 +41,9 @@ pub(crate) fn native_content_class(type_name: &str) -> i32 {
         "UnityEngine.Material" => 21,
         "UnityEngine.Font" => 128,
         "UnityEngine.AnimationClip" => 74,
+        "UnityEngine.Avatar" => 90,
+        "UnityEngine.Animator" => 95,
+        "UnityEngine.SkinnedMeshRenderer" => 137,
         "UnityEngine.RuntimeAnimatorController" => 91,
         "UnityEngine.AnimatorOverrideController" => 221,
         "UnityEngine.AvatarMask" => 319,
@@ -1073,6 +1076,13 @@ impl Inner {
 }
 
 impl Session {
+    /// The project source that owns a GUID; empty when none does.
+    pub fn source_of_guid(&self, guid: &str) -> Result<String> {
+        let mut s = self.lock();
+        s.index_guids()?;
+        Ok(s.path_of(guid).to_string())
+    }
+
     /// Publishes content derived from part of a source under a GUID that no
     /// project source owns, so other native content can depend on it. The
     /// caller keeps it current with the source it was derived from.

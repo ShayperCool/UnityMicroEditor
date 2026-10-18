@@ -3,6 +3,7 @@ use super::{
     adapt::{ExternalReference, Object, ObjectEntry},
     le16, le32, le64,
 };
+use crate::playerbake::Val;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -58,6 +59,136 @@ fn model_graph_tree(class_id: i32) -> &'static str {
     }
 }
 
+const ANIMATOR: i32 = 95;
+const SKINNED_MESH_RENDERER: i32 = 137;
+
+/// The pointers of a skinned renderer and an animator in the graph, in order;
+/// a list for `m_Materials` and `m_Bones`.
+pub const SKINNED_MESH_RENDERER_REFERENCES: [&str; 7] = [
+    "m_GameObject",
+    "m_Materials",
+    "m_StaticBatchRoot",
+    "m_ProbeAnchor",
+    "m_Mesh",
+    "m_Bones",
+    "m_RootBone",
+];
+pub const ANIMATOR_REFERENCES: [&str; 3] = ["m_GameObject", "m_Avatar", "m_Controller"];
+/// Their values beside the pointers.
+pub const SKINNED_MESH_RENDERER_SCALARS: [&str; 15] = [
+    "m_Enabled",
+    "m_CastShadows",
+    "m_ReceiveShadows",
+    "m_DynamicOccludee",
+    "m_MotionVectors",
+    "m_LightProbeUsage",
+    "m_ReflectionProbeUsage",
+    "m_RenderingLayerMask",
+    "m_SortingLayerID",
+    "m_SortingOrder",
+    "m_Quality",
+    "m_UpdateWhenOffscreen",
+    "m_SkinnedMotionVectors",
+    "m_AABB",
+    "m_BlendShapeWeights",
+];
+pub const ANIMATOR_SCALARS: [&str; 9] = [
+    "m_Enabled",
+    "m_CullingMode",
+    "m_UpdateMode",
+    "m_ApplyRootMotion",
+    "m_LinearVelocityBlending",
+    "m_StabilizeFeet",
+    "m_HasTransformHierarchy",
+    "m_KeepAnimatorStateOnDisable",
+    "m_WriteDefaultValuesOnDisable",
+];
+
+fn typed_pointer(value: &Val, externals: &[ExternalReference]) -> Result<ModelGraphReference> {
+    let (Some(Val::I(index)), Some(Val::I(local))) =
+        (value.field("m_FileID"), value.field("m_PathID"))
+    else {
+        bail!("field is not a pointer");
+    };
+    let mut target = ModelGraphReference {
+        file_id: local.to_string(),
+        guid: String::new(),
+    };
+    if *index < 0 || *index as usize > externals.len() {
+        bail!("external PPtr index {index} outside table");
+    }
+    if *local != 0 && *index != 0 {
+        target.guid = externals[*index as usize - 1].guid.clone();
+    }
+    Ok(target)
+}
+
+/// A value of the graph: numbers as written, flags as 0 or 1.
+fn typed_scalar(value: &Val) -> Result<Value> {
+    Ok(match value {
+        Val::Bool(flag) => Value::from(u32::from(*flag)),
+        Val::I(number) => Value::from(*number),
+        Val::U(number) => Value::from(*number),
+        Val::F(number) if number.is_finite() => {
+            Value::from(if *number == 0.0 { 0.0 } else { *number })
+        }
+        Val::Seq(items) => Value::Array(items.iter().map(typed_scalar).collect::<Result<_>>()?),
+        Val::Map(fields) => {
+            let mut map = serde_json::Map::new();
+            for (name, field) in fields {
+                map.insert(name.to_string(), typed_scalar(field)?);
+            }
+            Value::Object(map)
+        }
+        _ => bail!("unsupported value"),
+    })
+}
+
+fn read_typed_graph_object(
+    id: &str,
+    class_id: i32,
+    value: &Val,
+    externals: &[ExternalReference],
+) -> Result<ModelGraphObject> {
+    let (pointers, values): (&[&str], &[&str]) = match class_id {
+        SKINNED_MESH_RENDERER => (
+            &SKINNED_MESH_RENDERER_REFERENCES,
+            &SKINNED_MESH_RENDERER_SCALARS,
+        ),
+        _ => (&ANIMATOR_REFERENCES, &ANIMATOR_SCALARS),
+    };
+    let mut references = Vec::with_capacity(pointers.len());
+    for name in pointers {
+        let field = value
+            .field(name)
+            .ok_or_else(|| anyhow::anyhow!("no field {name}"))?;
+        let targets = match field {
+            Val::Seq(items) => items
+                .iter()
+                .map(|item| typed_pointer(item, externals))
+                .collect::<Result<_>>()?,
+            _ => vec![typed_pointer(field, externals)?],
+        };
+        references.push(ModelGraphProperty {
+            property: name.to_string(),
+            targets,
+        });
+    }
+    let mut scalars = BTreeMap::new();
+    for name in values {
+        let field = value
+            .field(name)
+            .ok_or_else(|| anyhow::anyhow!("no field {name}"))?;
+        scalars.insert(name.to_string(), typed_scalar(field)?);
+    }
+    Ok(ModelGraphObject {
+        file_id: id.to_string(),
+        class_id,
+        references,
+        scalars,
+    })
+}
+
 /// Err carries the reason the graph is not proven, never a hard failure.
 pub(crate) fn read_model_graph(
     input: &[u8],
@@ -72,6 +203,8 @@ pub(crate) fn read_model_graph(
         .map(|object| object.file_id.as_str())
         .collect();
     let mut graph = Vec::new();
+    // Read by their inline type trees, which name every field.
+    let mut decoded = None;
     for entry in entries {
         let id = entry.id.to_string();
         if !retained.contains(id.as_str()) {
@@ -79,6 +212,34 @@ pub(crate) fn read_model_graph(
         }
         match entry.class_id {
             21 | 43 | 74 | 90 => continue, // Separate identities/data hashes cover assets.
+            ANIMATOR | SKINNED_MESH_RENDERER => {
+                if decoded.is_none() {
+                    decoded = Some(
+                        crate::playerbake::read_serialized_with_externals(input)
+                            .map_err(|error| format!("model types unreadable: {error}"))?
+                            .0,
+                    );
+                }
+                let object = decoded
+                    .as_ref()
+                    .and_then(|objects| objects.iter().find(|object| object.local_id == entry.id))
+                    .ok_or_else(|| format!("model object {id} unreadable"))?;
+                let value = object
+                    .tree
+                    .decode(&object.data)
+                    .map_err(|error| format!("model object {id} unreadable: {error}"))?;
+                graph.push(
+                    read_typed_graph_object(&id, entry.class_id, &value, externals).map_err(
+                        |error| {
+                            format!(
+                                "native class {} local ID {} graph: {}",
+                                entry.class_id, id, error
+                            )
+                        },
+                    )?,
+                );
+                continue;
+            }
             1 | 4 | 23 | 33 => {
                 if trees.get(&entry.class_id).map(String::as_str)
                     != Some(model_graph_tree(entry.class_id))

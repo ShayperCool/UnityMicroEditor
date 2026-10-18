@@ -2,6 +2,7 @@
 //! ContentFiles. Supported native data stays byte-for-byte unchanged.
 mod adapt;
 mod atlas;
+mod authored_reference;
 mod builtin_lighting;
 mod builtin_reference;
 mod builtin_shader;
@@ -23,6 +24,9 @@ pub use adapt::{
     audio_profile, read_native_audio_resource, text_profile,
 };
 pub use atlas::{PackedAtlas, adapt_sprite_atlas, bind_packed_sprites};
+pub use authored_reference::{
+    ANIMATION_CLIP, MESH_RENDERER, SKINNED_MESH_RENDERER, unbind_source_references,
+};
 pub use builtin_lighting::{BuiltinLightingIdentity, inspect_builtin_lighting};
 pub use builtin_reference::{
     BUILTIN_EXTRA_GUID, BuiltinShaderUse, HostShader, bind_builtin_shaders,
@@ -31,7 +35,9 @@ pub use builtin_shader::{BuiltinShaderIdentity, ReadAt, inspect_builtin_shader};
 pub use builtin_shader_cmd::{BuiltinShaderOptions, builtin_shader_command, extract_builtin};
 pub use mesh_cpu::{MeshCpuFlags, MeshCpuProjection, read_mesh_cpu_flags, retain_model_mesh_cpu};
 pub use model_graph::{
-    ModelGraphObject, ModelGraphProperty, ModelGraphReference, hash_model_graph,
+    ANIMATOR_REFERENCES, ANIMATOR_SCALARS, ModelGraphObject, ModelGraphProperty,
+    ModelGraphReference, SKINNED_MESH_RENDERER_REFERENCES, SKINNED_MESH_RENDERER_SCALARS,
+    hash_model_graph,
 };
 pub use player_shader::{
     PlayerShaderMetadata, extract_builtin_player_shader, extract_player_shader, read_player_shader,

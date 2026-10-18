@@ -1,6 +1,7 @@
 //! Verified static model projections supplied by the native adapter.
 use super::{
     expand::builtin_guid,
+    lexpath,
     native::{native_content_class, valid_native_id},
     session::Inner,
     strconv,
@@ -24,6 +25,8 @@ fn static_model_references(class: i32) -> Option<&'static [&'static str]> {
             "m_LightProbeVolumeOverride",
             "m_AdditionalVertexStreams",
         ],
+        137 => &crate::runtimeartifact::SKINNED_MESH_RENDERER_REFERENCES,
+        95 => &crate::runtimeartifact::ANIMATOR_REFERENCES,
         _ => return None,
     })
 }
@@ -50,6 +53,8 @@ fn static_model_scalars(class: i32) -> Option<&'static [&'static str]> {
             "m_SortingLayerID",
             "m_SortingOrder",
         ],
+        137 => &crate::runtimeartifact::SKINNED_MESH_RENDERER_SCALARS,
+        95 => &crate::runtimeartifact::ANIMATOR_SCALARS,
         _ => return None,
     })
 }
@@ -110,9 +115,38 @@ fn validate_static_model_scalars(graph: &NativeModelGraphObject) -> Result<()> {
                 native_vector(value, *name == "m_LocalRotation")
             }
             "m_Layer" => native_integer(value, 0, 31),
-            "m_Enabled" | "m_IsActive" | "m_ReceiveShadows" | "m_DynamicOccludee" => {
-                native_integer(value, 0, 1)
-            }
+            "m_Enabled"
+            | "m_IsActive"
+            | "m_ReceiveShadows"
+            | "m_DynamicOccludee"
+            | "m_UpdateWhenOffscreen"
+            | "m_SkinnedMotionVectors"
+            | "m_ApplyRootMotion"
+            | "m_LinearVelocityBlending"
+            | "m_StabilizeFeet"
+            | "m_HasTransformHierarchy"
+            | "m_KeepAnimatorStateOnDisable"
+            | "m_WriteDefaultValuesOnDisable" => native_integer(value, 0, 1),
+            "m_Quality" => native_integer(value, 0, 4),
+            "m_CullingMode" | "m_UpdateMode" => native_integer(value, 0, 3),
+            "m_AABB" => match value {
+                Value::Object(bounds) => {
+                    bounds.len() == 2
+                        && ["m_Center", "m_Extent"].iter().all(|name| {
+                            bounds
+                                .get(*name)
+                                .is_some_and(|vector| native_vector(vector, false))
+                        })
+                }
+                _ => false,
+            },
+            "m_BlendShapeWeights" => match value {
+                Value::Array(weights) => weights.iter().all(|weight| {
+                    numeric(weight)
+                        && strconv::parse_float32(&sprint(weight)).is_ok_and(|n| n.is_finite())
+                }),
+                _ => false,
+            },
             "m_CastShadows" => native_integer(value, 0, 3),
             "m_MotionVectors" | "m_LightProbeUsage" | "m_ReflectionProbeUsage" => {
                 native_integer(value, 0, 2)
@@ -149,7 +183,7 @@ impl Inner {
             }
             if !matches!(
                 native_content_class(&value.type_name),
-                1 | 4 | 23 | 33 | 21 | 43
+                1 | 4 | 23 | 33 | 21 | 43 | 74 | 90 | 95 | 137
             ) {
                 bail!(
                     "native model type {} is not a verified static profile",
@@ -178,7 +212,8 @@ impl Inner {
         }
         for (id, type_name) in &objects {
             let class = native_content_class(type_name);
-            if class != 21 && class != 43 && !graph_objects.contains_key(id) {
+            // Assets of the model, whose own data the content holds.
+            if !matches!(class, 21 | 43 | 74 | 90) && !graph_objects.contains_key(id) {
                 bail!("native model graph omits object {id}");
             }
         }
@@ -204,6 +239,14 @@ impl Inner {
                     bail!("dangling native model local reference {}", target.file_id);
                 }
                 return Ok(known);
+            }
+            // The adapted file drops a renderer's authored material, which
+            // the scene binds from its source.
+            if !dependencies.contains(target.guid.as_str())
+                && target.file_id == "2100000"
+                && lexpath::equal_fold(lexpath::ext(self.path_of(&target.guid)), ".mat")
+            {
+                return Ok("UnityEngine.Material".into());
             }
             if !dependencies.contains(target.guid.as_str()) {
                 bail!(
@@ -264,7 +307,10 @@ impl Inner {
                         graph.file_id
                     );
                 }
-                let list = matches!(name, "m_Component" | "m_Children" | "m_Materials");
+                let list = matches!(
+                    name,
+                    "m_Component" | "m_Children" | "m_Materials" | "m_Bones"
+                );
                 if !list && property.targets.len() != 1 {
                     bail!("native model scalar reference has wrong cardinality: {name}");
                 }
@@ -284,6 +330,8 @@ impl Inner {
                                     "UnityEngine.Transform"
                                         | "UnityEngine.MeshRenderer"
                                         | "UnityEngine.MeshFilter"
+                                        | "UnityEngine.SkinnedMeshRenderer"
+                                        | "UnityEngine.Animator"
                                 )
                             {
                                 bail!(
@@ -307,6 +355,14 @@ impl Inner {
                                 bail!("native child pointer invalid or duplicated");
                             }
                         }
+                        "m_Bones" | "m_RootBone" => {
+                            wanted_type = "UnityEngine.Transform";
+                            if !local {
+                                bail!("native model bone must be local");
+                            }
+                        }
+                        "m_Avatar" => wanted_type = "UnityEngine.Avatar",
+                        "m_Controller" => wanted_type = "UnityEngine.RuntimeAnimatorController",
                         "m_Father" | "m_StaticBatchRoot" | "m_ProbeAnchor" => {
                             wanted_type = "UnityEngine.Transform";
                             if !local && name == "m_Father" {

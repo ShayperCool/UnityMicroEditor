@@ -76,16 +76,16 @@ fn count_pointers(value: &Val, index: i64) -> usize {
 }
 
 /// Where the parts of an adapted file lie.
-struct Layout {
-    metadata_end: usize,
-    data_offset: usize,
+pub(super) struct Layout {
+    pub metadata_end: usize,
+    pub data_offset: usize,
     /// Local ID, start in the file and size of every object.
-    objects: Vec<(i64, usize, usize)>,
+    pub objects: Vec<(i64, usize, usize)>,
     /// Start and end of every external reference in the file.
-    externals: Vec<(usize, usize)>,
+    pub externals: Vec<(usize, usize)>,
 }
 
-fn layout(file: &[u8]) -> Result<Layout> {
+pub(super) fn layout(file: &[u8]) -> Result<Layout> {
     if file.len() < 64 || be32(&file[8..12]) != 23 || file[16] != 0 {
         bail!("not a little-endian SerializedFile v23");
     }
