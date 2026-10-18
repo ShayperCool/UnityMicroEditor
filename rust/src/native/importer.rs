@@ -99,7 +99,7 @@ pub struct NativeProjectImporter {
     /// What the import of such a source depends on beyond the source itself.
     pub(crate) atlas_identity: BTreeMap<String, String>,
     /// The index of the project's sources, read once for a pass.
-    sources: std::sync::Mutex<Option<Arc<super::build_settings::Sources>>>,
+    pub(crate) sources: std::sync::Mutex<Option<Arc<super::build_settings::Sources>>>,
 }
 
 struct Replay<'a> {

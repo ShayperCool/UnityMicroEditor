@@ -1216,6 +1216,7 @@ fn native_adoption_rejects_wrong_worker_environment_before_publishing() {
         additive_references: BTreeMap::new(),
         atlas_batch: BTreeMap::new(),
         atlas_identity: BTreeMap::new(),
+        sources: Default::default(),
     };
     let environment = read_worker_environment(&opts.project).unwrap();
     for name in [
