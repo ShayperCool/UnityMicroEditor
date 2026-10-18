@@ -60,7 +60,7 @@ namespace UnityMicroEditor.Raw
                 {
                     if (record == null || string.IsNullOrEmpty(record.fileId) || records.ContainsKey(record.fileId))
                         throw new InvalidDataException("Raw prefab IDs must be nonempty and unique: " + asset.path);
-                    if (!SupportedClass(record.classId) || !(RawJson.Parse(record.dataJson) is Dictionary<string, object>))
+                    if ((!SupportedClass(record.classId) && record.templateComponent <= 0) || !(RawJson.Parse(record.dataJson) is Dictionary<string, object>))
                         throw Error(record, "Unsupported raw prefab object record.");
                     if (record.classId == 114 && !record.skipMissingScript && string.IsNullOrEmpty(record.typeName)) throw Error(record, "Raw prefab script type is missing.");
                     records.Add(record.fileId, record);
@@ -69,7 +69,7 @@ namespace UnityMicroEditor.Raw
                     throw new InvalidDataException("Raw prefab root is not a GameObject: " + asset.path);
                 foreach (RawSceneObject record in records.Values)
                 {
-                    if (IsComponent(record.classId)
+                    if (IsComponent(record)
                         && (!records.TryGetValue(record.gameObjectId ?? "", out RawSceneObject owner) || owner.classId != 1))
                         throw Error(record, "Raw prefab component owner is missing.");
                     if (record.references != null)
@@ -225,7 +225,7 @@ namespace UnityMicroEditor.Raw
                             bool rect = false;
                             foreach (RawSceneObject candidate in currentRecords)
                                 if (candidate.classId == 224 && candidate.gameObjectId == record.fileId) { rect = true; break; }
-                            var gameObject = rect ? new GameObject(data.m_Name ?? "Raw prefab", typeof(RectTransform)) : new GameObject(data.m_Name ?? "Raw prefab");
+                            var gameObject = NewGameObject(record, data.m_Name ?? "Raw prefab", rect);
                             gameObject.SetActive(false); SceneManager.MoveGameObjectToScene(gameObject, scene);
                             gameObject.layer = data.m_Layer; gameObject.isStatic = data.m_StaticEditorFlags != 0;
                             if (!string.IsNullOrEmpty(data.m_TagString) && data.m_TagString != "Untagged") gameObject.tag = data.m_TagString;

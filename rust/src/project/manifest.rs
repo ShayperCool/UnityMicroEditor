@@ -257,8 +257,49 @@ impl std::fmt::Display for UnsupportedClass {
 }
 impl std::error::Error for UnsupportedClass {}
 
+/// Where the loader takes the GameObjects with templated components from.
+#[derive(Default)]
+pub(crate) struct TemplateAssignments {
+    /// The template's ContentFile and the GameObject in it, by the scene's
+    /// GameObject.
+    pub game_objects: HashMap<String, (String, i64)>,
+    /// The position of a templated component among the template's
+    /// components (the Transform is 0).
+    pub components: HashMap<String, usize>,
+}
+
 impl Inner {
+    /// The templates of `objects`, from the derived content the session
+    /// holds; the ones it lacks are asked for.
+    pub(crate) fn native_templates(&self, objects: &[Expanded]) -> Result<TemplateAssignments> {
+        let mut assignments = TemplateAssignments::default();
+        let mut missing = Vec::new();
+        for (owner, template, order) in super::native_template::templates_of(objects)? {
+            let local = template.game_object.to_string();
+            let found = self.derived_native.iter().find(|(_, file)| {
+                file.objects.iter().any(|object| {
+                    object.file_id == local && object.type_name == "UnityEngine.GameObject"
+                })
+            });
+            let Some((guid, _)) = found else {
+                missing.push(template);
+                continue;
+            };
+            assignments
+                .game_objects
+                .insert(owner, (guid.clone(), template.game_object));
+            for (index, component) in order.into_iter().enumerate() {
+                assignments.components.insert(component, index + 1);
+            }
+        }
+        if !missing.is_empty() {
+            return Err(super::native_template::NeedsNativeTemplates(missing).into());
+        }
+        Ok(assignments)
+    }
+
     pub(crate) fn manifest_objects(&self, objects: &[Expanded]) -> Result<Vec<Value>> {
+        let templates = self.native_templates(objects)?;
         let mut result = Vec::with_capacity(objects.len());
         for o in objects {
             let renamed: Map;
@@ -302,7 +343,7 @@ impl Inner {
             let full = compact_map(data)?;
             let mut scalars = String::new();
             encode_scalar_map(data, skip, &mut scalars)?;
-            result.push(Value::Object(value::map([
+            let mut record = value::map([
                 ("fileId", o.file_id.as_str().into()),
                 ("classId", Value::Int(o.class_id)),
                 (
@@ -316,7 +357,15 @@ impl Inner {
                 ("dataJson", full.into()),
                 ("scalarDataJson", scalars.into()),
                 ("references", reference_list(data)),
-            ])));
+            ]);
+            if let Some((guid, local)) = templates.game_objects.get(&o.file_id) {
+                record.insert("templateGuid".into(), guid.as_str().into());
+                record.insert("templateFileId".into(), local.to_string().into());
+            }
+            if let Some(index) = templates.components.get(&o.file_id) {
+                record.insert("templateComponent".into(), Value::Int(*index as i64));
+            }
+            result.push(Value::Object(record));
         }
         Ok(result)
     }
@@ -327,7 +376,8 @@ impl Inner {
             if by_id.insert(&o.file_id, o).is_some() {
                 bail!("duplicate expanded identity {}", o.file_id);
             }
-            if !supported_class(o.class_id) {
+            // A component without an adapter is made from a template.
+            if !supported_class(o.class_id) && !super::native_template::templated(o) {
                 return Err(UnsupportedClass {
                     class_id: o.class_id,
                     type_name: o.type_name.clone(),
@@ -335,6 +385,9 @@ impl Inner {
                 .into());
             }
         }
+        // A templated component that refers outside its GameObject is
+        // refused before anything is prepared.
+        super::native_template::templates_of(objects)?;
         for o in objects {
             let mut failure: Option<anyhow::Error> = None;
             visit_map(&o.data, "", &mut |property, reference| {

@@ -534,9 +534,10 @@ pub fn prepare_agent_project_with_native(
         // an older form: import or bake it as a running session would. The
         // artifacts stay with the baseline.
         Err(error)
-            if error
-                .chain()
-                .any(|cause| cause.is::<project::NeedsImportError>()) =>
+            if error.chain().any(|cause| {
+                cause.is::<project::NeedsImportError>()
+                    || cause.is::<project::NeedsNativeTemplates>()
+            }) =>
         {
             let mut importer = crate::native::NativeProjectImporter::new(
                 crate::native::NativeOptions {

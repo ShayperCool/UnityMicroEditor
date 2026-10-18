@@ -289,6 +289,20 @@ namespace UnityMicroEditor.Raw
                 }
             }
 
+            // The GameObject of a record: a copy of its native template when
+            // it has one, a new GameObject otherwise.
+            private GameObject NewGameObject(RawSceneObject record, string name, bool rect)
+            {
+                if (string.IsNullOrEmpty(record.templateGuid))
+                    return rect ? new GameObject(name, typeof(RectTransform)) : new GameObject(name);
+                if (!assets.TryGetValue(AssetKey(record.templateGuid, record.templateFileId), out Object found) || !(found is GameObject template))
+                    throw Error(record, "The native template of this GameObject was not loaded.");
+                var instance = Object.Instantiate(template);
+                instance.name = name;
+                if (rect && !(instance.transform is RectTransform)) instance.AddComponent<RectTransform>();
+                return instance;
+            }
+
             private void CreateAuthoredComponents()
             {
                 var records = new Dictionary<string, RawSceneObject>(StringComparer.Ordinal);
@@ -305,18 +319,27 @@ namespace UnityMicroEditor.Raw
                         {
                             ReferenceData reference = Reference(Value(Map(item), "component", item));
                             if (!string.IsNullOrEmpty(reference.guid) || !records.TryGetValue(reference.fileID, out RawSceneObject component)
-                                || !IsComponent(component.classId) || component.gameObjectId != ownerRecord.fileId)
+                                || !IsComponent(component) || component.gameObjectId != ownerRecord.fileId)
                                 throw Error(ownerRecord, "Authored component list contains an invalid owner or object reference.");
                             ordered.Add(component);
                         }
                     }
                     else foreach (RawSceneObject candidate in currentRecords)
-                        if (IsComponent(candidate.classId) && candidate.gameObjectId == ownerRecord.fileId) ordered.Add(candidate);
+                        if (IsComponent(candidate) && candidate.gameObjectId == ownerRecord.fileId) ordered.Add(candidate);
                     foreach (RawSceneObject record in ordered)
                     {
                         if (!created.Add(record.fileId)) throw Error(record, "Authored component list contains a duplicate component.");
                         if (IsTransform(record.classId)) continue;
                         GameObject owner = (GameObject)sceneObjects[record.gameObjectId];
+                        if (record.templateComponent > 0)
+                        {
+                            Component[] made = owner.GetComponents<Component>();
+                            Component held = record.templateComponent < made.Length ? made[record.templateComponent] : null;
+                            if (held == null || held is Transform)
+                                throw Error(record, "The native template of its GameObject does not hold this component.");
+                            sceneObjects.Add(record.fileId, held);
+                            continue;
+                        }
                         if (record.classId == 114)
                         {
                             if (record.skipMissingScript) { sceneObjects.Add(record.fileId, null); continue; }
@@ -340,7 +363,7 @@ namespace UnityMicroEditor.Raw
                     }
                 }
                 foreach (RawSceneObject record in currentRecords)
-                    if (IsComponent(record.classId) && !created.Contains(record.fileId))
+                    if (IsComponent(record) && !created.Contains(record.fileId))
                         throw Error(record, "Authored GameObject component list omits this component.");
             }
 
@@ -349,7 +372,7 @@ namespace UnityMicroEditor.Raw
                 if (required == null) return;
                 foreach (RawSceneObject candidate in currentRecords)
                 {
-                    if (candidate.gameObjectId != record.gameObjectId || !IsComponent(candidate.classId)) continue;
+                    if (candidate.gameObjectId != record.gameObjectId || !IsComponent(candidate)) continue;
                     if (candidate.skipMissingScript) continue;
                     Type actual = candidate.classId == 114 ? types[candidate.typeName]
                         : IsTransform(candidate.classId) ? (candidate.classId == 224 ? typeof(RectTransform) : typeof(Transform))

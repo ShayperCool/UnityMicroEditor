@@ -1167,6 +1167,73 @@ pub fn write_player_objects(ctx: &Context, build: &Build) -> Result<PlayerObject
     bail!("the build of {} did not settle", build.target)
 }
 
+/// Has a worker write the Player objects of assets the coordinator made
+/// itself (`generated`: the data and `.meta` of each, by logical path),
+/// those of `write` among them, into one file. Nothing of the project's
+/// sources is imported.
+pub fn write_generated_objects(
+    ctx: &Context,
+    build: &Build,
+    generated: BTreeMap<String, (Vec<u8>, Vec<u8>)>,
+    write: &[String],
+) -> Result<PlayerObjects> {
+    let started = Instant::now();
+    mkdir_all(&build.output, 0o700)?;
+    let request = Request {
+        write: write.to_vec(),
+        ..Default::default()
+    }
+    .encode()?;
+    let identity = sha256(format!("{}\0{request}", importer_identity()).as_bytes());
+    let mut generated = generated;
+    generated.insert(
+        REQUEST_PATH.to_string(),
+        (
+            request.into_bytes(),
+            format!("fileFormatVersion: 2\nguid: {}\n", &identity[..32]).into_bytes(),
+        ),
+    );
+    let mut batch = write.to_vec();
+    batch.push(REQUEST_PATH.to_string());
+    let files = BuildFiles {
+        generated,
+        files: Vec::new(),
+    };
+    let output = sysutil::join(&[&build.output, "build-0"]);
+    let run = run(ctx, build, &output, &batch, &BTreeSet::new(), &files, &[])?;
+    let file = |name: &str| {
+        run.files
+            .iter()
+            .find(|(file, _)| file == name)
+            .map(|(_, data)| data.as_slice())
+    };
+    let Some(primary) = file("") else {
+        bail!("the worker's build left no report");
+    };
+    let report = read_report(primary)?;
+    let Some(player) = file(PLAYER_FILE) else {
+        bail!("the worker's build left no file");
+    };
+    let (objects, names) = read_serialized_with_externals(player)?;
+    let mut externals = Vec::with_capacity(names.len());
+    for name in &names {
+        let Some(known) = report.externals.iter().find(|known| known.file == *name) else {
+            bail!("the written file refers to {name}, which the build's report does not list");
+        };
+        externals.push(known.clone());
+    }
+    Ok(PlayerObjects {
+        objects,
+        externals,
+        external_paths: BTreeMap::new(),
+        report,
+        ingredients: BTreeMap::new(),
+        imports: run.imports,
+        seconds: started.elapsed().as_secs_f64(),
+        database_seconds: run.database_seconds,
+    })
+}
+
 /// Has a worker load materials as the engine does, which upgrades an older
 /// serialization, and returns each as the Editor writes it as text.
 /// `build.target` is the shader source the materials of `build.users` use,

@@ -861,8 +861,9 @@ Limits:
 - A scene or prefab the raw loader cannot prepare is dropped with an
   `addressables-skipped` event and stays with the host's content. Each one is
   dropped on its own; the others are served. A prefab whose own sources hold
-  an object the loader has no adapter for (a `NavMeshAgent`, say) is dropped
-  before its content is imported. A scene is prepared once: one that fails
+  a component that a native template cannot hold (one that refers to an
+  object outside its GameObject, see NATIVE_IMPORT.md, "Components without a
+  runtime adapter") is dropped before its content is imported. A scene is prepared once: one that fails
   is left out without preparing the others again. When a scene fails on such
   an object, the runner records the sources its preparation read, with their
   hashes, in `<output>/content/<guid>/refusal.json`; the next session leaves

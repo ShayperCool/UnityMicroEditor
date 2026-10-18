@@ -473,6 +473,24 @@ impl NativeProjectImporter {
                 Ok(prepared) => return Ok(prepared),
                 Err(error) => error,
             };
+            // Native components the loader has no adapter for are built
+            // from templates, which the worker writes once.
+            if let Some(templates) = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<crate::project::NeedsNativeTemplates>())
+            {
+                let templates = templates.0.clone();
+                let key = templates
+                    .iter()
+                    .map(|t| t.key.clone())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                if !attempted.insert(format!("templates:{key}")) || attempted.len() >= 1024 {
+                    return Err(wrap("native component templates did not resolve", error));
+                }
+                self.build_native_templates(ctx, &templates)?;
+                continue;
+            }
             let Some(needed) = error
                 .chain()
                 .find_map(|cause| cause.downcast_ref::<NeedsImportError>())

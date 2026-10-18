@@ -58,7 +58,9 @@ pub(crate) fn remember(
     baseline: &str,
     error: &anyhow::Error,
 ) {
-    if !error.chain().any(|cause| cause.is::<UnsupportedClass>()) {
+    if !error.chain().any(|cause| {
+        cause.is::<UnsupportedClass>() || cause.is::<crate::project::UnsupportedNativeReference>()
+    }) {
         return;
     }
     let (Some(tool), Ok(guid_index), Ok(baseline)) = (
@@ -112,6 +114,7 @@ Transform:
 --- !u!208 &12
 NavMeshObstacle:
   m_GameObject: {fileID: 10}
+  m_Target: {fileID: 11}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_Roots:
@@ -144,7 +147,7 @@ SceneRoots:
         let (ship, other) = (session(), session());
         let output = format!("{project}/output");
         let directory = format!("{output}/content/ship");
-        // Only a class without an adapter is remembered.
+        // Only a component the loader cannot make is remembered.
         remember(&directory, &other, &ship, &baseline, &anyhow!("other"));
         assert!(remembered(&directory, &other, &baseline).is_none());
         let error = ship.prepare(&output).unwrap_err();

@@ -600,12 +600,13 @@ fn runtime_addressed_prefab_includes_exact_root_and_source_closure() {
 fn a_refused_runtime_prefab_is_known_before_preparing_and_named_after() {
     let f = fixture_session();
     let hierarchy = FIXTURE_SCENE.split("--- !u!1660057539").next().unwrap();
-    // A component the loader has no adapter for.
+    // A component the loader has no adapter for, which refers outside the
+    // GameObject a template holds.
     let obstacle = hierarchy.replacen(
         "  - component: {fileID: 11}\n",
         "  - component: {fileID: 11}\n  - component: {fileID: 12}\n",
         1,
-    ) + "--- !u!208 &12\nNavMeshObstacle:\n  m_GameObject: {fileID: 10}\n";
+    ) + "--- !u!208 &12\nNavMeshObstacle:\n  m_GameObject: {fileID: 10}\n  m_Target: {fileID: 11}\n";
     let (good, bad) = ("Assets/Good.prefab", "Assets/Obstacle.prefab");
     for (path, text, guid) in [
         (good, hierarchy, "33333333333333333333333333333333"),
@@ -643,9 +644,29 @@ fn a_refused_runtime_prefab_is_known_before_preparing_and_named_after() {
     assert!(message(&refusal).contains("class 208"), "{refusal:#}");
 }
 
+#[test]
+fn a_component_without_an_adapter_asks_for_its_native_template() {
+    let f = fixture_session();
+    let plain = obstacle_tail().replacen("  m_Target: {fileID: 11}\n", "", 1);
+    fs::write(
+        &f.scene,
+        FIXTURE_SCENE.replacen("--- !u!1660057539", &plain, 1),
+    )
+    .unwrap();
+    let session = Session::new(options(&f)).unwrap();
+    assert!(session.scene_refusal().is_none());
+    let error = session.prepare(&f.output).unwrap_err();
+    let needed = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<crate::project::NeedsNativeTemplates>())
+        .expect("templates asked for");
+    assert_eq!(needed.0.len(), 1);
+    assert_eq!(needed.0[0].components[0].1, 208);
+}
+
 /// A NavMeshObstacle document ahead of the fixture scene's SceneRoots.
 fn obstacle_tail() -> String {
-    "--- !u!208 &12\nNavMeshObstacle:\n  m_GameObject: {fileID: 10}\n--- !u!1660057539".into()
+    "--- !u!208 &12\nNavMeshObstacle:\n  m_GameObject: {fileID: 10}\n  m_Target: {fileID: 11}\n--- !u!1660057539".into()
 }
 
 /// A baseline and catalog carrying one imported

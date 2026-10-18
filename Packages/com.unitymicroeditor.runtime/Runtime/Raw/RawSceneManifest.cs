@@ -133,6 +133,13 @@ namespace UnityMicroEditor.Raw
         public string scalarDataJson;
         public RawSceneReference[] references;
         public bool skipMissingScript;
+        // A GameObject with components the loader has no adapter for is a
+        // copy of a template the import worker built: the ContentFile and the
+        // GameObject in it. Each such component is the template's component
+        // at this position (the Transform is 0).
+        public string templateGuid;
+        public string templateFileId;
+        public int templateComponent;
     }
 
     [Serializable]

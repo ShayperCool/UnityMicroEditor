@@ -684,6 +684,22 @@ A baked source is kept with the hashes of the project's files it was built from:
 - Materials found for a shader are those of the project's sources; a material that only a package holds is not counted, as in the first route.
 - The scripts of the packages run in the worker with the state the worker has. A stripper that reads Editor state a worker lacks (the open scene, build profiles, XR settings) gets the worker's state. URP's reads of the quality levels, the graphics settings and the volume profiles were checked against the worker's report; nothing else was.
 
+## Components without a runtime adapter
+
+The raw loader sets an engine component's fields through its public properties, with one adapter per class (`supported_class` in `rust/src/project/manifest.rs`, `ConfigureComponent` in the runtime). A Player has no other way to apply serialized fields to an engine object: `JsonUtility.FromJsonOverwrite` refuses engine types outside the Editor. Every other engine component (`NavMeshObstacle`, `NavMeshAgent`, `LODGroup`, a package's native component) is therefore built by Unity's own code from a template:
+
+- For each GameObject that holds such components, the coordinator writes a template prefab (`rust/src/project/native_template.rs`). The prefab holds an inactive GameObject, an identity Transform and these components with their fields as authored. A template is named by its components' classes and fields, so equal components of many GameObjects, scenes and prefabs share one template.
+- A worker imports the templates a preparation lacks and writes their Player objects with the build's own code. They are written into one ContentFile (`rust/src/native/native_template.rs`), which is kept in `Library/UnityMicroEditor/built-sources` under the templates, the worker's identity and the import environment, and is published as derived native content of the session.
+- The manifest names the template of each such GameObject (`templateGuid`, `templateFileId`) and, for each templated component, its position in the template (`templateComponent`). The Player makes the GameObject as a copy of the template (`Object.Instantiate`), takes these components from the copy, and adds the components it has adapters for as before.
+
+Verified in a Player on a copy of `Samples/RawProject` with the AI module: a scene's `NavMeshObstacle` (box shape, extents, center, carving) and disabled `NavMeshAgent` (speed, radius) keep their authored fields, a script's reference to the obstacle resolves, and a prefab's obstacle is there after `Instantiate`. A second preparation takes the template file from the store.
+
+Limits:
+
+- A templated component may refer only to its own GameObject and that GameObject's other templated components. A reference to another object of the scene, or to an asset (a `NavMeshAgent`'s fields hold none; an `OffMeshLink`'s end points do), is refused with `UnsupportedNativeReference`, which names the property. The runner records such a refusal of an addressable scene like the other refusals.
+- The templated components come first on the GameObject, after its Transform, and the adapted ones follow. `GetComponents` can therefore list them in another order than the authored one.
+- A template is a copy of the authored fields. A component that reads its scene in `Awake` or `OnEnable` sees the GameObject as the loader has built it by then, as it does for adapted components.
+
 ## What a session lacks
 
 A session that lacks an import goes on through the rest of its closure and

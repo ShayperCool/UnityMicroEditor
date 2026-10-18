@@ -53,7 +53,7 @@ namespace UnityMicroEditor.Raw
             {
                 if (record == null || string.IsNullOrEmpty(record.fileId) || records.ContainsKey(record.fileId))
                     throw new InvalidDataException("Scene object IDs must be nonempty and unique.");
-                if (!SupportedClass(record.classId)) throw Error(record, "Unsupported class ID " + record.classId);
+                if (!SupportedClass(record.classId) && record.templateComponent <= 0) throw Error(record, "Unsupported class ID " + record.classId);
                 if (!(RawJson.Parse(record.dataJson) is Dictionary<string, object>)) throw Error(record, "Object data must be a JSON map.");
                 records.Add(record.fileId, record);
                 if (record.classId == 114 && !record.skipMissingScript && string.IsNullOrEmpty(record.typeName)) throw Error(record, "Missing MonoBehaviour typeName.");
@@ -93,7 +93,7 @@ namespace UnityMicroEditor.Raw
             AddPrefabValidationAliases(manifest, assets);
             foreach (var record in manifest.objects)
             {
-                if (IsComponent(record.classId)
+                if (IsComponent(record)
                     && (!records.TryGetValue(record.gameObjectId ?? "", out var owner) || owner.classId != 1))
                     throw Error(record, "Component owner is not a GameObject.");
                 if (record.references != null)
@@ -105,7 +105,7 @@ namespace UnityMicroEditor.Raw
                     var data = ReadData<GameObjectData>(record.dataJson);
                     if (data.m_Layer < 0 || data.m_Layer > 31) throw Error(record, "GameObject layer must be between 0 and 31.");
                 }
-                if (IsComponent(record.classId))
+                if (IsComponent(record))
                 {
                     var map = (Dictionary<string, object>)RawJson.Parse(record.dataJson);
                     if (!map.TryGetValue("m_GameObject", out var ownerData) || !(ownerData is Dictionary<string, object> ownerReference)
@@ -531,6 +531,11 @@ namespace UnityMicroEditor.Raw
                 || NativeComponentType(classId) != null;
         }
 
+        private static bool IsComponent(RawSceneObject record)
+        {
+            return record.templateComponent > 0 || IsComponent(record.classId);
+        }
+
         private static bool IsComponent(int classId)
         {
             return classId == 4 || classId == 20 || classId == 23 || classId == 33 || classId == 54
@@ -658,7 +663,7 @@ namespace UnityMicroEditor.Raw
                         bool rect = false;
                         foreach (var componentRecord in manifest.objects)
                             if (componentRecord.classId == 224 && componentRecord.gameObjectId == record.fileId) { rect = true; break; }
-                        var gameObject = rect ? new GameObject(data.m_Name ?? "Raw GameObject", typeof(RectTransform)) : new GameObject(data.m_Name ?? "Raw GameObject");
+                        var gameObject = NewGameObject(record, data.m_Name ?? "Raw GameObject", rect);
                         ownedSceneObjects.Add(gameObject);
                         gameObject.SetActive(false);
                         SceneManager.MoveGameObjectToScene(gameObject, scene);

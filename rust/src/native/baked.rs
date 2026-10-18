@@ -420,7 +420,7 @@ impl NativeProjectImporter {
     }
 
     /// Writes a baked file under its content hash and returns its path.
-    fn store_baked(&self, guid: &str, file_sha: &str, file: &[u8]) -> Result<String> {
+    pub(super) fn store_baked(&self, guid: &str, file_sha: &str, file: &[u8]) -> Result<String> {
         // Content-addressed, so a published revision's file is never rewritten.
         let filename = sysutil::join(&[
             &self.opts.native_dir(),

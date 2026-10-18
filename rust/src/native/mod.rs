@@ -21,6 +21,7 @@ mod importer;
 mod inspector;
 mod material_variant;
 mod mesh_cpu;
+mod native_template;
 mod pipeline_models;
 mod player_objects;
 mod probe;
