@@ -1532,6 +1532,7 @@ fn player_launch_for_hot_reload() {
     let finite = LaunchOptions {
         watch: false,
         interactive: false,
+        screenshot: "/tmp/last.png".into(),
         ..options(true)
     };
     let (args, mono, _) = launch_recording(&finite);
@@ -1540,6 +1541,16 @@ fn player_launch_for_hot_reload() {
             .iter()
             .any(|argument| argument == "--unity-cli-code-reload")
     );
+    // A screenshot needs a window to capture.
+    assert!(!args.iter().any(|argument| argument == "-batchmode"));
+    assert!(
+        args.windows(2)
+            .any(|pair| pair[0] == "--unity-cli-screenshot" && pair[1] == "/tmp/last.png")
+    );
+    let (args, _, _) = launch_recording(&LaunchOptions {
+        screenshot: String::new(),
+        ..finite
+    });
     assert!(args.iter().any(|argument| argument == "-batchmode"));
     assert_eq!(mono, inherited.unwrap_or("<unset>".into()));
 }

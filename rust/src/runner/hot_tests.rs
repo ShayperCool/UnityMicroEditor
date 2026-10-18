@@ -66,6 +66,27 @@ fn patch(generation: u64) -> Patched {
 // Flags
 
 #[test]
+fn a_screenshot_is_an_absolute_png_of_a_finite_run() {
+    let parse = |args: &[&str]| launch_options(&strings(args));
+    assert_eq!(
+        parse(&["--screenshot", "/tmp/last.png"])
+            .unwrap()
+            .screenshot,
+        "/tmp/last.png"
+    );
+    for args in [
+        &["--screenshot", "last.png"][..],
+        &["--screenshot", "/tmp/last.jpg"],
+        &["--screenshot", "/tmp/last.png", "--interactive"],
+    ] {
+        assert_eq!(
+            parse(args).unwrap_err().to_string(),
+            "--screenshot takes an absolute .png path and a finite run"
+        );
+    }
+}
+
+#[test]
 fn hot_reload_flags() {
     let parse = |args: &[&str]| launch_options(&strings(args));
     let options = |args: &[&str]| parse(args).unwrap();

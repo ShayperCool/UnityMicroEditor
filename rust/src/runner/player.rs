@@ -106,6 +106,9 @@ pub fn start_player(
             }
             args.extend([hotreload::PLAYER_ARGUMENT.into(), code_request]);
         }
+    } else if !opts.screenshot.is_empty() {
+        // A Player without a window draws no screen to capture.
+        args.extend(["--unity-cli-screenshot".into(), opts.screenshot.clone()]);
     } else {
         args.push("-batchmode".into());
     }

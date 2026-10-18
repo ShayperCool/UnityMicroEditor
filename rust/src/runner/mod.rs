@@ -114,6 +114,8 @@ pub struct LaunchOptions {
     pub width: i64,
     pub height: i64,
     pub fps: i64,
+    /// A PNG of the last frame of a finite run; none when empty.
+    pub screenshot: String,
 }
 impl LaunchOptions {
     /// Whether the Player gets a content route snapshot.
@@ -480,6 +482,11 @@ pub(crate) fn run_flags() -> FlagSet {
     flags.int("width", 960, "window width");
     flags.int("height", 540, "window height");
     flags.int("fps", 60, "frame cap");
+    flags.string(
+        "screenshot",
+        "",
+        "absolute .png path for the last frame of a finite run, which then has a window",
+    );
     flags
 }
 
@@ -518,6 +525,7 @@ pub(crate) fn launch_options(args: &[String]) -> Result<LaunchOptions> {
         width: flags.get_int("width"),
         height: flags.get_int("height"),
         fps: flags.get_int("fps"),
+        screenshot: flags.get_string("screenshot"),
     };
     if !flags.args().is_empty()
         || opts.frames <= 0
@@ -529,6 +537,13 @@ pub(crate) fn launch_options(args: &[String]) -> Result<LaunchOptions> {
     }
     if opts.watch {
         opts.interactive = true;
+    }
+    if !opts.screenshot.is_empty()
+        && (opts.interactive
+            || !sysutil::is_abs(&opts.screenshot)
+            || lexpath::lower_ext(&opts.screenshot) != ".png")
+    {
+        bail!("--screenshot takes an absolute .png path and a finite run");
     }
     if opts.control && (!opts.interactive || opts.prepare_only) {
         bail!("--control requires an interactive Player run");

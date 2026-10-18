@@ -32,6 +32,7 @@ unity-micro-editor run \
 | `--interactive` | Keep the Player window open without a watcher. |
 | `--frames` | Frame count in finite mode. |
 | `--width`, `--height`, `--fps` | Window size and frame cap. Defaults: 960, 540, 60. |
+| `--screenshot` | Absolute `.png` path for the last frame of a finite run. Such a run opens a window: a Player in `-batchmode` draws no screen to capture. |
 | `--control` | Enable revision-checked agent commands in an interactive Player. |
 | `--prepare-only` | Write immutable source, content and managed manifests without starting a Player. |
 | `--prepared` | Launch from such a descriptor. Cannot be combined with source preparation or `--watch`. |
