@@ -2259,6 +2259,23 @@ fn ui_source_references_follow_guids_and_relative_urls() {
     assert!(
         super::warm::ui_source_references("A.uss", br#"url("../../x.uss")"#, &known).is_empty()
     );
+    // A document names its sheets and templates by path too; a sheet's
+    // text that looks like an attribute is no reference.
+    let document = br#"<ui:UXML><Style src="Window.uss" /><ui:Template src='/Packages/p/Common.uss' name="c" /></ui:UXML>"#;
+    let mut expected = vec!["aa".repeat(16), "bb".repeat(16)];
+    expected.sort();
+    assert_eq!(
+        super::warm::ui_source_references("Packages/p/UI/Screen.uxml", document, &known),
+        expected
+    );
+    assert!(
+        super::warm::ui_source_references(
+            "Packages/p/UI/A.uss",
+            br#"/* src="Window.uss" */"#,
+            &known
+        )
+        .is_empty()
+    );
 }
 
 #[test]

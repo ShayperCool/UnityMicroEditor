@@ -304,6 +304,9 @@ namespace UnityMicroEditor.Raw
             string assembly = type.Assembly.GetName().Name;
             // NGO's pinned NetworkPrefabsList has no lifecycle callbacks.
             if (type.FullName == "Unity.Netcode.NetworkPrefabsList" && assembly == "Unity.Netcode.Runtime") return true;
+            // VContainer's settings take their instance in OnEnable and make the
+            // root scope of the restored data later (`InitializePreloadedRootScopes`).
+            if (type.FullName == "VContainer.Unity.VContainerSettings" && assembly == "VContainer") return true;
             if (type == typeof(VolumeProfile) && assembly == "Unity.RenderPipelines.Core.Runtime") return true;
             if (typeof(VolumeComponent).IsAssignableFrom(type)
                 && (assembly == "Unity.RenderPipelines.Core.Runtime" || assembly == "Unity.RenderPipelines.Universal.Runtime"))
@@ -357,7 +360,7 @@ namespace UnityMicroEditor.Raw
         }
 
         private static RawSceneObject AssetRecord(RawSceneAsset asset)
-        { return new RawSceneObject { fileId = asset.fileId, sourcePath = asset.path, classId = asset.classId }; }
+        { return new RawSceneObject { fileId = asset.fileId, sourcePath = asset.path, classId = asset.classId, typeName = asset.typeName }; }
 
         private static void ValidateReference(RawSceneObject record, RawSceneReference reference,
             Dictionary<string, RawSceneObject> records, Dictionary<string, RawSceneAsset> assets, bool emptyLightingDataVerified = false)
@@ -373,6 +376,9 @@ namespace UnityMicroEditor.Raw
             if (reference.guid == BuiltinMeshGuid && Primitive(reference.fileId, out _)) return;
             if (reference.guid == BuiltinResourceGuid && reference.fileId == "10303") return;
             if (record.classId == 21 && reference.property == "m_Shader" && reference.guid == BuiltinResourceGuid && BuiltinShaderName(reference.fileId, out _)) return;
+            // The shaders a panel draws with, and its ICU data, are engine resources.
+            if (record.classId == 114 && record.typeName == "UnityEngine.UIElements.PanelSettings" && reference.guid == BuiltinResourceGuid
+                && (PanelShaderName(reference.fileId, out _) || reference.fileId == PanelICUData)) return;
             if (record.classId == 104 && reference.guid == BuiltinResourceGuid && reference.fileId == "10304") return;
             if (record.classId == 104 && reference.property == "m_SpotCookie" && reference.guid == BuiltinMeshGuid && reference.fileId == "10001") return;
             if (emptyLightingDataVerified && record.classId == 157 && reference.property == "m_LightingDataAsset"
@@ -555,6 +561,26 @@ namespace UnityMicroEditor.Raw
                 default: name = null; return false;
             }
         }
+        // Exact identities of the pinned 6000.6.3f1 `unity_builtin_extra`
+        // that a PanelSettings names.
+        private const string PanelICUData = "20204";
+        private static bool PanelShaderName(string id, out string name)
+        {
+            switch (id)
+            {
+                case "9001": name = "Hidden/Internal-GUITextureClipText"; return true;
+                case "9100": name = "Hidden/Internal-UIRDefault"; return true;
+                case "9101": name = "Hidden/Internal-UIRAtlasBlitCopy"; return true;
+                case "19011": name = "Hidden/TextCore/Distance Field SSD"; return true;
+                case "19012": name = "Hidden/TextCore/Sprite"; return true;
+                case "20300": name = "Hidden/UIR/GaussianBlur"; return true;
+                case "20301": name = "Hidden/UIR/ColorEffect"; return true;
+                case "20302": name = "Hidden/UIR/DropShadowComposite"; return true;
+                default: name = null; return false;
+            }
+        }
+        // USS filters, and sprites inside text.
+        private static bool PanelFilterShader(string id) => id == "20300" || id == "20301" || id == "20302" || id == "19012";
         private static bool Primitive(string id, out PrimitiveType type)
         {
             switch (id)
@@ -1151,6 +1177,22 @@ namespace UnityMicroEditor.Raw
                         throw new InvalidDataException("Prepared host does not retain Unity builtin Shader " + reference.fileID + " (" + shaderName + ").");
                     return shader;
                 }
+                if (reference.guid == BuiltinResourceGuid && PanelShaderName(reference.fileID, out string panelShader))
+                {
+                    // The Player holds the shaders UI Toolkit draws with under these
+                    // names. A Player keeps those of USS filters and of sprites in
+                    // text only when a build took them; without one a panel draws
+                    // no filter, or no sprite in a text.
+                    Shader shader = Shader.Find(panelShader);
+                    if (shader == null && !PanelFilterShader(reference.fileID))
+                        throw new InvalidDataException("Prepared host does not hold the UI Toolkit shader " + reference.fileID + " (" + panelShader + ").");
+                    if (shader == null)
+                        Debug.LogWarning("[unity-micro-editor] The prepared host does not hold the UI Toolkit shader " + panelShader + "; what it draws stays empty.");
+                    return shader;
+                }
+                // No public API reaches a Player's ICU data; a panel without it
+                // falls back as it does when the field is empty.
+                if (reference.guid == BuiltinResourceGuid && reference.fileID == PanelICUData) return null;
                 if (reference.guid == BuiltinMeshGuid && Primitive(reference.fileID, out PrimitiveType primitive))
                 {
                     if (!builtinMeshes.TryGetValue(reference.fileID, out Mesh mesh))

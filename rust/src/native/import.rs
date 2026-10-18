@@ -25,6 +25,7 @@ use crate::{
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeSet,
     io::Write,
     time::{Duration, Instant},
 };
@@ -249,6 +250,11 @@ fn importer_environment(
     extras: &ImportExtras,
 ) -> Result<Option<ScriptEnvironment>> {
     let mut selection = extras.scripts.clone();
+    // As the Editor loads them: the assemblies an immutable package ships
+    // compiled, which the importers' assemblies name (nunit for an
+    // assembly the test framework is referenced from).
+    selection.plugins = true;
+    let mut elements = BTreeSet::new();
     let importers = &mut selection.scripts;
     for asset in assets {
         // A source that does not resolve is reported by the context.
@@ -260,8 +266,16 @@ fn importer_environment(
         {
             importers.insert(script);
         }
+        // The importer of a document writes the serialized data of each
+        // custom element, of a class it finds among the loaded assemblies.
+        if lower_ext(asset) == ".uxml"
+            && let Ok(text) = read_file(&source)
+        {
+            elements.extend(super::scripted::uxml_elements(&text));
+        }
     }
-    if selection.scripts.is_empty() && selection.files.is_empty() {
+    selection.elements.append(&mut elements);
+    if selection.scripts.is_empty() && selection.files.is_empty() && selection.elements.is_empty() {
         return Ok(None);
     }
     selected_environment(project, &selection).map(Some)

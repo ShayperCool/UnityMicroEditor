@@ -549,8 +549,14 @@ fn resolve_script_source(library: &str, relative: &str) -> Result<String> {
         .and_then(|entry| {
             eval_symlinks(&sysutil::join(&[library, "Library/PackageCache", entry])).ok()
         });
+    // So is the project's own `Assets`, which the compilation links to.
+    let assets = relative
+        .starts_with("Assets/")
+        .then(|| eval_symlinks(&sysutil::join(&[library, "Assets"])).ok())
+        .flatten();
     if !within_directory(&canonical, library)
         && !package_root.is_some_and(|root| within_directory(&canonical, &root))
+        && !assets.is_some_and(|root| within_directory(&canonical, &root))
     {
         bail!("importer source resolves outside its project: {relative}");
     }

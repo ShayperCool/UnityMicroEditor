@@ -570,12 +570,27 @@ pub(crate) fn ui_source_references(
     static URL: std::sync::LazyLock<regex::bytes::Regex> = std::sync::LazyLock::new(|| {
         regex::bytes::Regex::new(r#"url\(\s*["']?([^"')]+?)["']?\s*\)"#).unwrap()
     });
+    // A document's `<Style src="…">` and `<Template src="…">` name a file
+    // by its path the way a sheet's `url()` does.
+    static SOURCE: std::sync::LazyLock<regex::bytes::Regex> = std::sync::LazyLock::new(|| {
+        regex::bytes::Regex::new(r#"\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)')"#).unwrap()
+    });
     let mut found = Vec::new();
     for capture in GUID.captures_iter(text) {
         found.push(String::from_utf8_lossy(&capture[1]).to_ascii_lowercase());
     }
-    for capture in URL.captures_iter(text) {
-        let url = String::from_utf8_lossy(&capture[1]);
+    let sources = lower_ext(logical) == ".uxml";
+    let paths = URL
+        .captures_iter(text)
+        .filter_map(|capture| capture.get(1))
+        .chain(
+            SOURCE
+                .captures_iter(text)
+                .filter(|_| sources)
+                .filter_map(|capture| capture.get(1).or_else(|| capture.get(2))),
+        );
+    for capture in paths {
+        let url = String::from_utf8_lossy(capture.as_bytes());
         if url.contains("guid=") {
             continue;
         }

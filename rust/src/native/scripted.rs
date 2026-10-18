@@ -321,6 +321,69 @@ pub struct ScriptSelection {
     /// Whether the precompiled assemblies those assemblies name are put
     /// next to them instead of the run being refused.
     pub plugins: bool,
+    /// Full names of the classes UXML documents create, which the importer
+    /// writes the serialized data of; their assemblies are loaded, those of
+    /// the project too.
+    pub elements: BTreeSet<String>,
+}
+
+/// The full names of the custom elements a UXML document creates: each tag
+/// in the namespace its prefix or the default namespace gives, but those of
+/// UI Toolkit itself and the document's own markup.
+pub fn uxml_elements(text: &[u8]) -> BTreeSet<String> {
+    static NAMESPACE: std::sync::LazyLock<regex::bytes::Regex> = std::sync::LazyLock::new(|| {
+        regex::bytes::Regex::new(r#"\bxmlns(?::([A-Za-z_][\w.-]*))?\s*=\s*"([^"]*)""#).unwrap()
+    });
+    static TAG: std::sync::LazyLock<regex::bytes::Regex> = std::sync::LazyLock::new(|| {
+        regex::bytes::Regex::new(r"<([A-Za-z_][\w.-]*)(?::([A-Za-z_][\w.-]*))?[\s/>]").unwrap()
+    });
+    let mut prefixes = BTreeMap::new();
+    for capture in NAMESPACE.captures_iter(text) {
+        let prefix = capture
+            .get(1)
+            .map(|prefix| String::from_utf8_lossy(prefix.as_bytes()).into_owned())
+            .unwrap_or_default();
+        prefixes.insert(prefix, String::from_utf8_lossy(&capture[2]).into_owned());
+    }
+    let mut found = BTreeSet::new();
+    for capture in TAG.captures_iter(text) {
+        let first = String::from_utf8_lossy(&capture[1]).into_owned();
+        let (namespace, name) = match capture.get(2) {
+            Some(name) => (
+                prefixes.get(&first).cloned().unwrap_or_default(),
+                String::from_utf8_lossy(name.as_bytes()).into_owned(),
+            ),
+            None => (prefixes.get("").cloned().unwrap_or_default(), first),
+        };
+        // The document's own markup, by its local name in any namespace.
+        if matches!(
+            name.as_str(),
+            "UXML" | "Style" | "Template" | "Instance" | "AttributeOverrides"
+        ) {
+            continue;
+        }
+        let full = match (namespace.is_empty(), name.contains('.')) {
+            (_, true) | (true, false) => name,
+            (false, false) => format!("{namespace}.{name}"),
+        };
+        if full.contains('.')
+            && !full.starts_with("UnityEngine.UIElements.")
+            && !full.starts_with("UnityEditor.UIElements.")
+        {
+            found.insert(full);
+        }
+    }
+    found
+}
+
+/// Whether compiled code holds a string of its own, as metadata holds the
+/// name and the namespace of each type.
+fn holds_string(code: &[u8], text: &str) -> bool {
+    let mut needle = Vec::with_capacity(text.len() + 2);
+    needle.push(0);
+    needle.extend_from_slice(text.as_bytes());
+    needle.push(0);
+    !text.is_empty() && code.windows(needle.len()).any(|window| window == needle)
 }
 
 /// What an environment is read for.
@@ -523,6 +586,35 @@ fn read_environment(
     if let Some(missing) = wanted.first() {
         bail!("no compiled package assembly defines the importer script {missing}");
     }
+    // The assembly that defines each element of a document.
+    let mut elements: BTreeSet<&str> = selection.elements.iter().map(String::as_str).collect();
+    for (index, assembly) in assemblies.iter().enumerate() {
+        if elements.is_empty() {
+            break;
+        }
+        let Ok(code) = read_file(&sysutil::join(&[
+            &library,
+            "Library/ScriptAssemblies",
+            &format!("{}.dll", assembly.name),
+        ])) else {
+            continue;
+        };
+        let defined: Vec<&str> = elements
+            .iter()
+            .copied()
+            .filter(|full| {
+                let (namespace, name) = full.rsplit_once('.').unwrap_or(("", full));
+                holds_string(&code, name) && holds_string(&code, namespace)
+            })
+            .collect();
+        for full in defined {
+            elements.remove(full);
+            selected.insert(index);
+        }
+    }
+    if let Some(missing) = elements.first() {
+        bail!("no compiled assembly of the project defines the UXML element {missing}");
+    }
     if purpose == Purpose::Inspectors {
         let immutable = |source: &String| {
             package_root(source)
@@ -640,6 +732,14 @@ fn read_environment(
                     .filter(|directory| directory.starts_with("Library/PackageCache/"))
                     .map(|directory| (root, directory))
             });
+            // The elements of a document may be the project's own.
+            if directory.is_none()
+                && !selection.elements.is_empty()
+                && source.starts_with("Assets/")
+            {
+                scripts.insert(source.clone());
+                continue;
+            }
             let Some((root, directory)) = directory else {
                 bail!(
                     "importer assembly {} is compiled from {source}, which is not in an immutable package",
@@ -688,6 +788,30 @@ fn read_environment(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_document_names_its_custom_elements_by_namespace() {
+        let document =
+            br#"<ui:UXML xmlns:ui="UnityEngine.UIElements" xmlns:d="Dungeon" xmlns="Game.Hud">
+    <Style src="Terminal.uss" />
+    <ui:VisualElement name="a"><d:CornerBrackets /></ui:VisualElement>
+    <d:SegmentBar></d:SegmentBar>
+    <Gauge/>
+    <Other.Space.Meter />
+    <ui:Template src="T.uxml" name="t" />
+</ui:UXML>"#;
+        assert_eq!(
+            uxml_elements(document).into_iter().collect::<Vec<_>>(),
+            [
+                "Dungeon.CornerBrackets",
+                "Dungeon.SegmentBar",
+                "Game.Hud.Gauge",
+                "Other.Space.Meter",
+            ]
+        );
+        // Without a default namespace an unprefixed tag is markup.
+        assert!(uxml_elements(br#"<UXML><Style src="a.uss"/></UXML>"#).is_empty());
+    }
 
     #[test]
     fn reads_the_importer_script_of_a_scripted_meta() {

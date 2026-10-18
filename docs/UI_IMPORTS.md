@@ -71,7 +71,8 @@ A UI source is imported in one batch with the sources it names that are not
 imported yet, the sources they name, and so on. A source names another:
 
 - by GUID, as the Editor writes a reference;
-- by a `url()` path relative to the source;
+- by a `url()` path relative to the source, or a document's `<Style src>` and
+  `<Template src>`;
 - by a path relative to the project (`/Assets/...` or `project://database/...`).
 
 `unity-theme://` and other schemes name no source. Such a batch records each
@@ -84,6 +85,20 @@ their textures. The artifact therefore keeps `ThemeStyleSheet` objects (script
 19202) and `Texture2D` objects with their pixels. The runtime prepares each
 style sheet after the local sheets it links: an imported theme comes before
 the theme that imports it.
+
+A document's custom elements (`[UxmlElement]` classes, written with their
+namespace's prefix such as `<d:SegmentBar>`) are created in a Player from the
+serialized data the importer writes into the `VisualTreeAsset`. The importer
+writes it only for a class it finds among the loaded assemblies; without the
+class it logs "missing a UxmlElementAttribute", and the Player creates
+nothing there. So the worker of a batch with a `.uxml` loads, from the
+Editor compilation (`compile_editor_assemblies`), each assembly whose metadata
+holds the name and the namespace of such an element, and what that assembly
+refers to. For these assemblies, unlike the importers of packages, sources
+under `Assets` are placed in the worker's project. The cache key of a
+document includes the identity of that compilation. Dungeon's
+`InventoryScreen.uxml` loaded `Dungeon.Runtime` and the 29 assemblies it
+refers to, 1657 sources.
 
 These importers add objects of the engine's script classes (`VisualTreeAsset`,
 `StyleSheet`). `AddObjectToAsset` takes such an object only when its
