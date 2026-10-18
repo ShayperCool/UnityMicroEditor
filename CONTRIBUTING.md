@@ -6,6 +6,8 @@ The CLI, the runner and the MCP server (on the `rmcp` crate) are one Rust crate:
 
 Persisted files, hashes and replies follow fixed byte formats that existing project caches and receipts depend on; [rust/README.md](rust/README.md) lists them. Change one only deliberately, together with its recorded test cases.
 
+Build with `cargo build --profile fast` (into `target/fast`) while working: it is optimized like `release` but has no LTO, sixteen code generation units and an incremental cache, so an edit is rebuilt in seconds instead of four minutes, and it runs within a few percent of `release`. Check, run and measure with it, `./unity-micro-editor` included. `cargo build --release` is for the binary that game projects link to (`target/release`) and for a release; build it once when the work is done. The integration tests are one binary, `cargo test --locked --test integration [filter]`, whose modules are the files of `rust/tests`; the unit tests are `cargo test --locked --lib [filter]`.
+
 Run these checks before committing:
 
 ```bash

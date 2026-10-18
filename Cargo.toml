@@ -13,13 +13,11 @@ path = "rust/src/lib.rs"
 name = "unity-micro-editor"
 path = "rust/src/main.rs"
 
+# One binary for every integration test: each binary of its own loads and
+# links the library again, which a build after an edit of it paid eight times.
 [[test]]
-name = "formats"
-path = "rust/tests/formats.rs"
-
-[[test]]
-name = "graph"
-path = "rust/tests/graph.rs"
+name = "integration"
+path = "rust/tests/integration.rs"
 
 [dependencies]
 anyhow = "1"
@@ -49,31 +47,24 @@ str0m = { version = "0.24.1", default-features = false, features = ["rust-crypto
 [build-dependencies]
 cc = "1"
 
-[[test]]
-name = "authoring"
-path = "rust/tests/authoring.rs"
-
-[[test]]
-name = "runtimeartifact"
-path = "rust/tests/runtimeartifact.rs"
-
-[[test]]
-name = "regressions"
-path = "rust/tests/regressions.rs"
-
-[[test]]
-name = "mcp"
-path = "rust/tests/mcp.rs"
-
-[[test]]
-name = "playerbake"
-path = "rust/tests/playerbake.rs"
+# Line tables keep file and line in backtraces and test failures; full debug
+# info made the library's metadata 400 MB, which every test binary loads.
+[profile.dev]
+debug = "line-tables-only"
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
 strip = true
 
-[[test]]
-name = "shader"
-path = "rust/tests/shader.rs"
+
+# An optimized build for iterating: what `release` makes, without the
+# whole-crate LTO and single code generation unit that take minutes after an
+# edit. `cargo build --profile fast` writes target/fast.
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+strip = false
+debug = "line-tables-only"

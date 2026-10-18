@@ -9,6 +9,7 @@ fi
 # Build outputs stay in the user cache; cargo's incremental build does the rest.
 target_root="${CARGO_TARGET_DIR:-${UNITY_MICRO_EDITOR_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/unity-micro-editor}/target}"
 
-"$cargo_command" build --quiet --locked --release --manifest-path "$tool_root/Cargo.toml" --target-dir "$target_root"
+# The `fast` profile: optimized like `release`, rebuilt in seconds after an edit.
+"$cargo_command" build --quiet --locked --profile fast --manifest-path "$tool_root/Cargo.toml" --target-dir "$target_root"
 export UNITY_MICRO_EDITOR_ROOT="$tool_root"
-exec "$target_root/release/unity-micro-editor" "$@"
+exec "$target_root/fast/unity-micro-editor" "$@"

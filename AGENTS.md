@@ -5,6 +5,7 @@
 - Unity `6000.6.3f1` is the verified profile. Engine upgrades require matching host, package locks, protocol checks, and runtime comparisons.
 - Authored scenes, prefabs, materials, and `.meta` GUIDs are the source of truth. Do not silently overwrite them. Keep scene loading in our implementation and use the native importer for supported heavy content.
 - Use public Unity/package APIs for runtime access. Do not reach into foreign private members. Validate imported identities and dependencies before publishing content.
+- Build with `cargo build --profile fast` (`target/fast`) to check, run and measure; it rebuilds in seconds. Build `--release` (`target/release`, which game projects link to) only when the work is done.
 - Keep caches, builds, reports, and SDK binaries out of Git. Run the relevant cargo and SDK checks from `CONTRIBUTING.md` before committing.
 - Document limitations explicitly when a path depends on prepared game content or retained shader output.
 - When working commit your progress using conventional commits, and push it to github

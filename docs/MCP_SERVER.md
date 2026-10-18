@@ -189,7 +189,7 @@ whose runner no longer reads commands; its message names
 
 ```sh
 cargo test --locked --lib mcp::
-cargo test --locked --test mcp
+cargo test --locked --test integration mcp::
 ```
 
 Tests cover real stdio framing and Streamable HTTP, authentication and Origin/Host

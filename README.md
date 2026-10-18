@@ -22,7 +22,7 @@ It runs on Linux with one pinned Unity version. Coverage of Editor features is p
 
 ## Quick start
 
-`unity-micro-editor` in the repository root builds the CLI with `cargo build --release` into a cache and runs it. Call it by path or add the directory to `PATH`.
+`unity-micro-editor` in the repository root builds the CLI with `cargo build --profile fast` (optimized, rebuilt in seconds after an edit) into a cache and runs it. Call it by path or add the directory to `PATH`.
 
 Prepare a project and scene. This resolves packages, builds a package-aware host if none matches, compiles the code and prepares native content:
 
