@@ -40,18 +40,24 @@ pub fn read_source_plugin(path: &str, defines: &[String]) -> Result<SourcePlugin
     };
     result.explicit = metadata.explicit != 0;
     result.constraints = metadata.constraints;
-    let (mut any_enabled, mut explicit_linux, mut linux_enabled) = (false, false, false);
+    let (mut any_current, mut any_legacy) = (None, None);
+    let (mut explicit_linux, mut linux_enabled) = (false, false);
     for platform in &metadata.platforms {
         for (group, target) in &platform.first {
-            if target == "Any" || group == "Any" {
-                any_enabled = platform.enabled != 0;
-                if platform
-                    .settings
-                    .get("Exclude Linux64")
-                    .is_some_and(|value| value == "1")
-                {
-                    any_enabled = false;
-                }
+            // "Any Platform" is the entry `'': Any`, with its exclusions;
+            // an older importer wrote it as `Any:`, which counts only
+            // without the newer entry.
+            if group.is_empty() && target == "Any" {
+                any_current = Some(
+                    platform.enabled != 0
+                        && !platform
+                            .settings
+                            .get("Exclude Linux64")
+                            .is_some_and(|value| value == "1"),
+                );
+            }
+            if group == "Any" && target.is_empty() {
+                any_legacy = Some(platform.enabled != 0);
             }
             if group == "Standalone" && target == "Linux64" {
                 explicit_linux = true;
@@ -59,7 +65,7 @@ pub fn read_source_plugin(path: &str, defines: &[String]) -> Result<SourcePlugin
             }
         }
     }
-    result.enabled = any_enabled;
+    result.enabled = any_current.or(any_legacy).unwrap_or(false);
     if explicit_linux {
         result.enabled = linux_enabled;
     }
@@ -433,18 +439,24 @@ pub fn read_editor_plugin(path: &str, defines: &[String]) -> Result<SourcePlugin
     };
     result.explicit = metadata.explicit != 0;
     result.constraints = metadata.constraints;
-    let (mut any_enabled, mut explicit_editor, mut editor_enabled) = (false, false, false);
+    let (mut any_current, mut any_legacy) = (None, None);
+    let (mut explicit_editor, mut editor_enabled) = (false, false);
     for platform in &metadata.platforms {
         for (group, target) in &platform.first {
-            if target == "Any" || group == "Any" {
-                any_enabled = platform.enabled != 0;
-                if platform
-                    .settings
-                    .get("Exclude Editor")
-                    .is_some_and(|value| value == "1")
-                {
-                    any_enabled = false;
-                }
+            // "Any Platform" is the entry `'': Any`, with its exclusions;
+            // an older importer wrote it as `Any:`, which counts only
+            // without the newer entry.
+            if group.is_empty() && target == "Any" {
+                any_current = Some(
+                    platform.enabled != 0
+                        && !platform
+                            .settings
+                            .get("Exclude Editor")
+                            .is_some_and(|value| value == "1"),
+                );
+            }
+            if group == "Any" && target.is_empty() {
+                any_legacy = Some(platform.enabled != 0);
             }
             if group == "Editor" && target == "Editor" {
                 explicit_editor = true;
@@ -454,7 +466,7 @@ pub fn read_editor_plugin(path: &str, defines: &[String]) -> Result<SourcePlugin
     }
     // With "Any Platform" on, a platform is left out only by its exclusion;
     // its own entry counts when "Any Platform" is off.
-    result.enabled = match any_enabled {
+    result.enabled = match any_current.or(any_legacy).unwrap_or(false) {
         true => true,
         false => explicit_editor && editor_enabled,
     };

@@ -992,3 +992,27 @@ fn the_runtime_package_leaves_out_a_reference_the_project_lacks() {
         assert_eq!(result.is_ok(), accepted, "{name}: {:?}", result.err());
     }
 }
+
+#[test]
+fn any_platform_is_the_unnamed_any_entry_alone() {
+    // Newtonsoft.Json's AOT build: "Any Platform" off and the Editor
+    // excluded; the older `Any:` entry beside it changes nothing.
+    let (_directory, project) = temp();
+    let path = write_graph_file(&project, "Packages/p/AOT/Newtonsoft.Json.dll", "dll");
+    write_graph_file(
+        &project,
+        "Packages/p/AOT/Newtonsoft.Json.dll.meta",
+        "PluginImporter:\n  platformData:\n  - first:\n      '': Any\n    second:\n      enabled: 0\n      settings:\n        Exclude Editor: 1\n        Exclude Linux64: 0\n  - first:\n      Any: \n    second:\n      enabled: 1\n      settings: {}\n  - first:\n      Editor: Editor\n    second:\n      enabled: 0\n      settings: {}\n  - first:\n      Standalone: Linux64\n    second:\n      enabled: 1\n      settings: {}\n",
+    );
+    assert!(!options::read_editor_plugin(&path, &[]).unwrap().enabled);
+    assert!(options::read_source_plugin(&path, &[]).unwrap().enabled);
+    // Collections' ILSupport: only the older `Any:` entry, which then counts.
+    let legacy = write_graph_file(&project, "Packages/p/ILSupport.dll", "dll");
+    write_graph_file(
+        &project,
+        "Packages/p/ILSupport.dll.meta",
+        "PluginImporter:\n  platformData:\n  - first:\n      Any: \n    second:\n      enabled: 1\n      settings: {}\n  - first:\n      Editor: Editor\n    second:\n      enabled: 0\n      settings: {}\n",
+    );
+    assert!(options::read_editor_plugin(&legacy, &[]).unwrap().enabled);
+    assert!(options::read_source_plugin(&legacy, &[]).unwrap().enabled);
+}

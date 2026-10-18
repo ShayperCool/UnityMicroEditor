@@ -277,6 +277,20 @@ pub fn capture_engine_profile(
             Ok(hash) => hash,
             Err(error) => unproven!("host engine profile lacks {}: {error}", exported.name),
         };
+        // A preparation compiles the bridge again from the installation's
+        // sources and puts it in place of the host's (`compiler::prepare`):
+        // the host only has to hold it, whatever sources it was built from.
+        if exported.name == "UnityMicroEditor" {
+            profile.native_assemblies.insert(
+                &exported.name,
+                SourceNativeAssembly {
+                    name: exported.name.clone(),
+                    sha256: hash,
+                    ..Default::default()
+                },
+            );
+            continue;
+        }
         let mut fact = SourceNativeAssembly {
             name: exported.name.clone(),
             sha256: hash.clone(),

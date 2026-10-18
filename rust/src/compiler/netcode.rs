@@ -180,9 +180,37 @@ impl Compiler {
                 break;
             }
         }
+        // A project no Editor opened has no PackageCache: the packages are
+        // where the tool's own resolution put them.
+        if (packages.len() != 1 || cecil_packages.len() != 1)
+            && let Ok(snapshot) = crate::packages::load_current(
+                ctx,
+                &self.project,
+                &self.editor,
+                crate::packages::Options::default(),
+            )
+        {
+            let path = |name: &str| {
+                snapshot
+                    .packages
+                    .iter()
+                    .find(|package| package.name == name)
+                    .map(|package| package.path.clone())
+            };
+            if let (Some(netcode), Some(cecil)) = (
+                path("com.unity.netcode.gameobjects"),
+                path("com.unity.nuget.mono-cecil"),
+            ) {
+                let codegen = join(&[&netcode, "Editor/CodeGen"]);
+                if !sys::absent(&codegen) {
+                    packages = vec![codegen];
+                    cecil_packages = vec![cecil];
+                }
+            }
+        }
         if packages.len() != 1 || cecil_packages.len() != 1 {
             bail!(
-                "Netcode requires one pinned package CodeGen and Mono.Cecil package in the Library/PackageCache of the project or its host staging copy"
+                "Netcode requires one pinned package CodeGen and Mono.Cecil package in the Library/PackageCache of the project or its host staging copy, or in the tool's package resolution"
             );
         }
         let unstripped_runtime = unstripped_netcode_runtime(&self.player, &roots)?;

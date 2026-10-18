@@ -662,6 +662,9 @@ pub fn build_source_graph(
     let mut configs: BTreeMap<String, AssemblyConfig> = BTreeMap::new();
     let mut active: BTreeMap<String, bool> = BTreeMap::new();
     let mut owner_package: BTreeMap<String, String> = BTreeMap::new();
+    // Whether each active asmdef is Editor-only and whether it is a test
+    // assembly, for the references the Editor adds on its own.
+    let mut implicit_kinds: BTreeMap<String, (bool, bool)> = BTreeMap::new();
     for (name, definition) in &definitions {
         let mut defines = base.clone();
         for version in &definition.version_defines {
@@ -714,7 +717,9 @@ pub fn build_source_graph(
         config.config.no_engine_references = definition.no_engine_references;
         config.config.override_references = definition.override_references;
         config.config.precompiled = definition.precompiled_references.clone();
-        for reference in &definition.references {
+        for reference in
+            &expanded_references(&definition.references, &definitions, options.editor_domain)
+        {
             if !enabled {
                 break;
             }
@@ -762,8 +767,22 @@ pub fn build_source_graph(
             }
             config.dependencies.push(dependency);
         }
+        if enabled {
+            implicit_kinds.insert(
+                name.clone(),
+                (
+                    definition.include_platforms.len() == 1
+                        && has(&definition.include_platforms, "Editor"),
+                    test_assembly(definition)
+                        || has(&definition.define_constraints, "UNITY_INCLUDE_TESTS"),
+                ),
+            );
+        }
         configs.insert(name.clone(), config);
         owner_package.insert(name.clone(), definition.package.clone());
+    }
+    if options.editor_domain {
+        add_implicit_editor_references(&mut configs, &implicit_kinds);
     }
     for path in sources.keys() {
         let mut name = String::new();
@@ -859,7 +878,9 @@ pub fn build_source_graph(
             compiler_options: base_compiler_options.to_vec(),
             ..Default::default()
         };
-        for reference in &definition.references {
+        for reference in
+            &expanded_references(&definition.references, &definitions, options.editor_domain)
+        {
             if let Ok(reference) = resolve(&definitions, reference) {
                 assembly.references.push(reference);
             }
@@ -1211,4 +1232,89 @@ fn editor_plugin_references(
         }
     }
     sorted_strings(&result)
+}
+
+/// An asmdef's references with the names the Editor resolves to other
+/// assemblies: `Unity.ugui`, which no assembly is named, stands for uGUI's
+/// `UnityEngine.UI` and, in the Editor, `UnityEditor.UI` (the Editor's own
+/// compilation record of a project whose Input System names it, 6000.6.3f1).
+fn expanded_references<T>(
+    references: &[String],
+    definitions: &BTreeMap<String, T>,
+    editor_domain: bool,
+) -> Vec<String> {
+    let mut expanded = Vec::with_capacity(references.len());
+    for reference in references {
+        if reference == "Unity.ugui" && !definitions.contains_key(reference) {
+            for name in ["UnityEngine.UI", "UnityEditor.UI"] {
+                if (editor_domain || name == "UnityEngine.UI")
+                    && !expanded.iter().any(|known| known == name)
+                {
+                    expanded.push(name.to_string());
+                }
+            }
+            continue;
+        }
+        expanded.push(reference.clone());
+    }
+    expanded
+}
+
+/// The references the Editor adds to asmdefs on its own (6000.6.3f1, from
+/// its compilation record of a project): uGUI's `UnityEngine.UI` and
+/// `UnityEditor.UI` to every assembly that refers to the engine, and the test
+/// runner's `UnityEngine.TestRunner` and `UnityEditor.TestRunner` to every
+/// Editor-only or test assembly. None is added where it would make a cycle
+/// or where the target is not part of the compilation.
+fn add_implicit_editor_references(
+    configs: &mut BTreeMap<String, AssemblyConfig>,
+    kinds: &BTreeMap<String, (bool, bool)>,
+) {
+    fn reaches(configs: &BTreeMap<String, AssemblyConfig>, from: &str, to: &str) -> bool {
+        let mut pending = vec![from.to_string()];
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(name) = pending.pop() {
+            if name == to {
+                return true;
+            }
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            if let Some(config) = configs.get(&name) {
+                pending.extend(config.dependencies.iter().cloned());
+            }
+        }
+        false
+    }
+    const UI: [&str; 2] = ["UnityEngine.UI", "UnityEditor.UI"];
+    const TESTS: [&str; 2] = ["UnityEngine.TestRunner", "UnityEditor.TestRunner"];
+    let names: Vec<String> = kinds.keys().cloned().collect();
+    for name in names {
+        let (editor_only, test) = kinds[&name];
+        let Some(config) = configs.get(&name) else {
+            continue;
+        };
+        let mut wanted: Vec<&str> = Vec::new();
+        if !config.config.no_engine_references {
+            wanted.extend(UI);
+        }
+        if editor_only || test {
+            wanted.extend(TESTS);
+        }
+        for target in wanted {
+            if target == name
+                || !kinds.contains_key(target)
+                || configs[&name]
+                    .dependencies
+                    .iter()
+                    .any(|known| known == target)
+                || reaches(configs, target, &name)
+            {
+                continue;
+            }
+            if let Some(config) = configs.get_mut(&name) {
+                config.dependencies.push(target.to_string());
+            }
+        }
+    }
 }
