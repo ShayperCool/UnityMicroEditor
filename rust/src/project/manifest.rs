@@ -239,6 +239,24 @@ pub(crate) fn order_scene_roots(mut objects: Vec<Value>) -> Result<Vec<Value>> {
     Ok(objects)
 }
 
+/// An object of a class the raw loader has no adapter for. Which classes
+/// those are depends on the authored sources alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnsupportedClass {
+    pub class_id: i64,
+    pub type_name: String,
+}
+impl std::fmt::Display for UnsupportedClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "class {} {} has no runtime adapter",
+            self.class_id, self.type_name
+        )
+    }
+}
+impl std::error::Error for UnsupportedClass {}
+
 impl Inner {
     pub(crate) fn manifest_objects(&self, objects: &[Expanded]) -> Result<Vec<Value>> {
         let mut result = Vec::with_capacity(objects.len());
@@ -310,11 +328,11 @@ impl Inner {
                 bail!("duplicate expanded identity {}", o.file_id);
             }
             if !supported_class(o.class_id) {
-                bail!(
-                    "class {} {} has no runtime adapter",
-                    o.class_id,
-                    o.type_name
-                );
+                return Err(UnsupportedClass {
+                    class_id: o.class_id,
+                    type_name: o.type_name.clone(),
+                }
+                .into());
             }
         }
         for o in objects {
@@ -425,7 +443,9 @@ impl Inner {
             if guid.is_empty() {
                 bail!("runtime-addressed prefab has no source GUID: {path}");
             }
-            let (objects, _) = self.expand(&path, "", &[])?;
+            let (objects, _) = self
+                .expand(&path, "", &[])
+                .map_err(super::session::RefusedPrefab::wrap(&path))?;
             let mut root = String::new();
             for o in &objects {
                 if transform(o.class_id) && file_id(o.get("m_Father")) == "0" {
@@ -668,8 +688,9 @@ impl Inner {
                 Ok(())
             }
             "prefab" => {
-                let (objects, aliases) = self.expand(&path, "", &[])?;
-                self.validate(&objects)?;
+                let refused = || super::session::RefusedPrefab::wrap(&path);
+                let (objects, aliases) = self.expand(&path, "", &[]).map_err(refused())?;
+                self.validate(&objects).map_err(refused())?;
                 let roots: Vec<&Expanded> = objects
                     .iter()
                     .filter(|o| transform(o.class_id) && file_id(o.get("m_Father")) == "0")

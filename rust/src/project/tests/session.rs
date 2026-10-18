@@ -596,6 +596,58 @@ fn runtime_addressed_prefab_includes_exact_root_and_source_closure() {
     );
 }
 
+#[test]
+fn a_refused_runtime_prefab_is_known_before_preparing_and_named_after() {
+    let f = fixture_session();
+    let hierarchy = FIXTURE_SCENE.split("--- !u!1660057539").next().unwrap();
+    // A component the loader has no adapter for.
+    let obstacle = hierarchy.replacen(
+        "  - component: {fileID: 11}\n",
+        "  - component: {fileID: 11}\n  - component: {fileID: 12}\n",
+        1,
+    ) + "--- !u!208 &12\nNavMeshObstacle:\n  m_GameObject: {fileID: 10}\n";
+    let (good, bad) = ("Assets/Good.prefab", "Assets/Obstacle.prefab");
+    for (path, text, guid) in [
+        (good, hierarchy, "33333333333333333333333333333333"),
+        (bad, obstacle.as_str(), "44444444444444444444444444444444"),
+    ] {
+        let physical = format!("{}/{path}", f.project);
+        write_fixture_file(&physical, text);
+        write_fixture_file(format!("{physical}.meta"), format!("guid: {guid}\n"));
+    }
+    let session = Session::new(Options {
+        extra_assets: vec![good.into(), bad.into()],
+        ..options(&f)
+    })
+    .unwrap();
+    assert!(session.scene_refusal().is_none());
+    assert!(session.runtime_prefab_refusal(good).is_none());
+    let refusal = session.runtime_prefab_refusal(bad).expect("refused prefab");
+    assert!(message(&refusal).contains("class 208"), "{refusal:#}");
+    let error = session.prepare(&f.output).unwrap_err();
+    let named = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<crate::project::RefusedPrefab>());
+    assert_eq!(named.map(|refused| refused.path.as_str()), Some(bad));
+    session.remove_extra_assets(&[bad.into()]);
+    let prepared = session.prepare(&f.output).unwrap();
+    let manifest = manifest_json(&prepared.manifest).unwrap();
+    assert_eq!(array(value::get(&manifest, "assets")).len(), 1);
+    // A scene refuses the same way.
+    fs::write(
+        &f.scene,
+        FIXTURE_SCENE.replacen("--- !u!1660057539", &obstacle_tail(), 1),
+    )
+    .unwrap();
+    let refusal = session.scene_refusal().expect("refused scene");
+    assert!(message(&refusal).contains("class 208"), "{refusal:#}");
+}
+
+/// A NavMeshObstacle document ahead of the fixture scene's SceneRoots.
+fn obstacle_tail() -> String {
+    "--- !u!208 &12\nNavMeshObstacle:\n  m_GameObject: {fileID: 10}\n--- !u!1660057539".into()
+}
+
 /// A baseline and catalog carrying one imported
 /// model whose hierarchy is the fixture scene without its SceneRoots.
 fn native_fbx_fixture() -> (Fixture, Session, NativeReplacement) {

@@ -859,7 +859,17 @@ Limits:
 - A prefab is requested as a `GameObject`; a component type or a sub-object key
   (`key[sub]`) is not resolved from sources.
 - A scene or prefab the raw loader cannot prepare is dropped with an
-  `addressables-skipped` event and stays with the host's content.
+  `addressables-skipped` event and stays with the host's content. Each one is
+  dropped on its own; the others are served. A prefab whose own sources hold
+  an object the loader has no adapter for (a `NavMeshAgent`, say) is dropped
+  before its content is imported. A scene is prepared once: one that fails
+  is left out without preparing the others again. When a scene fails on such
+  an object, the runner records the sources its preparation read, with their
+  hashes, in `<output>/content/<guid>/refusal.json`; the next session leaves
+  the scene out at once while those sources, the project's GUIDs, the
+  baseline and the runner itself are unchanged. A prefab a preparation fails
+  in without naming it, or that only another prefab reaches, still drops all
+  addressable prefabs, as before.
 - The host needs built Addressables content for `Addressables.InitializeAsync`
   to succeed, as any Player does. A project that builds Addressables with the
   Player has it. Without it the source keys still resolve, but the game sees a

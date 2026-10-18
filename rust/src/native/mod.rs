@@ -53,7 +53,8 @@ pub use import::{
     run_project_import_with,
 };
 pub use importer::{
-    NativeOptions, NativeProjectImporter, stage_native_resources, valid_native_guid,
+    NativeOptions, NativeProjectImporter, native_index, project_native_store,
+    stage_native_resources, valid_native_guid,
 };
 pub use inspector::{
     InspectedMaterial, Inspection, InspectionOptions, MaterialInspection, VERIFIED_GRAPH_PACKAGE,

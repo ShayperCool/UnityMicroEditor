@@ -133,7 +133,7 @@ pub(crate) fn cold_input(
         guid,
         source_sha: sha,
         meta_sha,
-        cache_path: sysutil::join(&[&opts.output, "native/cache", &format!("{signature}.json")]),
+        cache_path: sysutil::join(&[&opts.native_dir(), "cache", &format!("{signature}.json")]),
     })
 }
 
@@ -276,7 +276,7 @@ impl NativeProjectImporter {
             }
             inputs.insert(logical.clone(), input);
         }
-        let imports = sysutil::join(&[&self.opts.output, "native/imports"]);
+        let imports = sysutil::join(&[&self.opts.native_dir(), "imports"]);
         mkdir_all(&imports, 0o700)?;
         let what = match logicals {
             [one] => format!("native import of {one}"),

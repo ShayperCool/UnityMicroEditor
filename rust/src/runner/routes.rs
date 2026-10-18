@@ -6,7 +6,7 @@ use super::{
     json::{First, members, read_document, set_list, set_strings},
     mkdir_all,
     noop::scene_runtime_equal,
-    os_error, read_file, text_error, wrap,
+    os_error, read_file, refusal, text_error, wrap,
 };
 use crate::{
     cancel::Context,
@@ -216,6 +216,7 @@ pub fn prepare_content_routes(
     importers: &mut ContentImporters,
     changed_paths: &[String],
     failed: &mut String,
+    mut refused: Option<&mut Vec<(String, anyhow::Error)>>,
 ) -> Result<String> {
     let mut routes = RawContentRoutes {
         schema_version: 1,
@@ -237,6 +238,18 @@ pub fn prepare_content_routes(
         if registry::meta_guid(&metadata).ok().as_deref() != Some(guid.as_str()) {
             bail!("content scene GUID disagrees with authored metadata: {scene}");
         }
+        // At the start of a session, an addressable scene the loader refuses
+        // is left out without failing the others: one refused before, whose
+        // sources are as they were, at once; one its own sources refuse,
+        // before its content is imported.
+        let tolerated = refused.is_some() && opts.addressable_content.contains(&guid);
+        let directory = sysutil::join(&[&opts.output, "content", &guid]);
+        if let (true, Some(root), Some(refused)) = (tolerated, root, refused.as_deref_mut())
+            && let Some(error) = refusal::remembered(&directory, &root.session, &baseline.manifest)
+        {
+            refused.push((guid, wrap(&format!("prepare content scene {scene}"), error)));
+            continue;
+        }
         if !importers.contains_key(&guid) {
             // Global runtime-addressed prefabs belong to the root session. Follow
             // each additive scene's authored references without duplicating them.
@@ -252,7 +265,7 @@ pub fn prepare_content_routes(
             // of the output keeps; a compile's copy may be removed (caches6-1).
             let mut route_options =
                 opts.native(root.map_or(&baseline.player, |root| &root.opts.player));
-            route_options.output = sysutil::join(&[&opts.output, "content", &guid]);
+            route_options.output = directory.clone();
             let importer = NativeProjectImporter::new(route_options, Arc::new(session))?;
             importers.insert(
                 guid.clone(),
@@ -289,10 +302,30 @@ pub fn prepare_content_routes(
                 .set_behaviour_layouts(ctx, root.behaviour_layouts.clone())
                 .map_err(|e| wrap(&format!("prepare content scene {scene}"), e))?;
         }
-        let prepared = cached
-            .importer
-            .prepare(ctx)
-            .map_err(|e| wrap(&format!("prepare content scene {scene}"), e))?;
+        let prepared = match tolerated.then(|| session.scene_refusal()).flatten() {
+            Some(error) => Err(error),
+            None => cached.importer.prepare(ctx).inspect_err(|error| {
+                if let (true, Some(root)) = (tolerated, root) {
+                    refusal::remember(
+                        &directory,
+                        &root.session,
+                        &session,
+                        &baseline.manifest,
+                        error,
+                    );
+                }
+            }),
+        }
+        .map_err(|e| wrap(&format!("prepare content scene {scene}"), e));
+        let prepared = match (prepared, refused.as_deref_mut()) {
+            (Ok(prepared), _) => prepared,
+            (Err(error), Some(refused)) if tolerated && ctx.error().is_none() => {
+                refused.push((guid, error));
+                continue;
+            }
+            (Err(error), _) => return Err(error),
+        };
+        refusal::forget(&directory);
         let hash = file_hash(&prepared.manifest)?;
         routes
             .scenes
@@ -304,6 +337,11 @@ pub fn prepare_content_routes(
             });
     }
     failed.clear();
+    if let Some(refused) = refused {
+        routes
+            .addressables
+            .retain(|entry| !refused.iter().any(|(guid, _)| *guid == entry.guid));
+    }
     publish_content_routes(&opts.output, &routes)
 }
 

@@ -606,6 +606,7 @@ SceneRoots:
             cache,
             changed,
             &mut String::new(),
+            None,
         )
     };
     let before = prepare(&mut cache, &[]).unwrap();
@@ -1388,7 +1389,7 @@ fn relevant_sources() {
 fn baseline_and_launch_descriptors_decode() {
     let (_guard, root) = temp_dir();
     let path = sysutil::join(&[&root, "current.json"]);
-    fs::write(&path, r#"{"Project":"/p","manifest":"/m","player":null,"nativeImport":{"CATALOG":"/c"},"extra":[1]}"#).unwrap();
+    fs::write(&path, r#"{"Project":"/p","manifest":"/m","player":null,"nativeImport":{"CATALOG":"/c","index":"/i"},"extra":[1]}"#).unwrap();
     assert_eq!(
         BaselineBuild::read(&path).unwrap(),
         BaselineBuild {
@@ -1396,7 +1397,8 @@ fn baseline_and_launch_descriptors_decode() {
             manifest: "/m".into(),
             player: String::new(),
             native_import: BaselineNativeImport {
-                catalog: "/c".into()
+                catalog: "/c".into(),
+                index: "/i".into(),
             },
         }
     );

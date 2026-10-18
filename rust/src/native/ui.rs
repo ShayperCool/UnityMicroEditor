@@ -350,7 +350,7 @@ pub(crate) fn bind_native_ui_references(
         Ok(data) if sha256(&data) == entry.content.sha256 => data,
         _ => bail!("native UI binding input changed"),
     };
-    let root = sysutil::join(&[&opts.output, "native/ui-bindings"]);
+    let root = sysutil::join(&[&opts.native_dir(), "ui-bindings"]);
     mkdir_all(&root, 0o700)?;
     let name = {
         let temporary = tempfile::Builder::new()

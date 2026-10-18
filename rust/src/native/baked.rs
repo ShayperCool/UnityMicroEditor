@@ -11,7 +11,7 @@ use super::{
     },
     resolve_project_import_source,
     scripted::script_environment_identity,
-    support::{Event, is_not_exist, lower_ext, mkdir_all, read_file, write_file},
+    support::{Event, is_not_exist, lower_ext, mkdir_all, read_file},
 };
 use crate::{
     cancel::Context,
@@ -300,8 +300,8 @@ impl NativeProjectImporter {
             .as_bytes(),
         );
         let cache = sysutil::join(&[
-            &self.opts.output,
-            "native/cache",
+            &self.opts.native_dir(),
+            "cache",
             &format!("model-clips-{signature}.json"),
         ]);
         if let Ok(known) = crate::util::read_json_file::<ModelClipSet>(&cache)
@@ -319,7 +319,7 @@ impl NativeProjectImporter {
             return Ok(());
         }
         let started = Instant::now();
-        let imports = sysutil::join(&[&self.opts.output, "native/imports"]);
+        let imports = sysutil::join(&[&self.opts.native_dir(), "imports"]);
         mkdir_all(&imports, 0o700)?;
         let (report, error) = run_bounded_import(
             ctx,
@@ -420,19 +420,12 @@ impl NativeProjectImporter {
     fn store_baked(&self, guid: &str, file_sha: &str, file: &[u8]) -> Result<String> {
         // Content-addressed, so a published revision's file is never rewritten.
         let filename = sysutil::join(&[
-            &self.opts.output,
-            "native/baked",
+            &self.opts.native_dir(),
+            "baked",
             &format!("{guid}-{file_sha}.bin"),
         ]);
-        match read_file(&filename) {
-            Ok(existing) if existing == file => {}
-            Ok(_) => bail!("baked native artifact changed on disk: {filename}"),
-            Err(error) if is_not_exist(&error) => {
-                mkdir_all(&sysutil::dir(&filename), 0o700)?;
-                write_file(&filename, file, 0o600)?;
-            }
-            Err(error) => return Err(error),
-        }
+        mkdir_all(&sysutil::dir(&filename), 0o700)?;
+        super::mesh_cpu::write_immutable_native_mesh_file(&filename, file)?;
         Ok(filename)
     }
 
@@ -1107,7 +1100,7 @@ impl NativeProjectImporter {
             )?,
             materials,
         };
-        let imports = sysutil::join(&[&self.opts.output, "native/imports"]);
+        let imports = sysutil::join(&[&self.opts.native_dir(), "imports"]);
         mkdir_all(&imports, 0o700)?;
         let mut root = String::new();
         let (report, error) = run_bounded_import(
@@ -1404,7 +1397,7 @@ impl NativeProjectImporter {
         Build {
             project: self.opts.project.clone(),
             editor: self.opts.editor.clone(),
-            output: sysutil::join(&[&self.opts.output, "native/imports", &random_id()]),
+            output: sysutil::join(&[&self.opts.native_dir(), "imports", &random_id()]),
             target: logical.to_string(),
             users,
             timeout: Duration::from_secs(1800),

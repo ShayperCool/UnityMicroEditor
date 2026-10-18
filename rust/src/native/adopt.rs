@@ -95,7 +95,7 @@ pub fn run_native_adopt_cli(args: &[String]) -> Result<()> {
         project,
         output: output.clone(),
         editor: flags.get_string("editor"),
-        player: String::new(),
+        ..Default::default()
     };
     let mut importer = NativeProjectImporter::new(opts, Arc::new(session))?;
     let inputs = adoption_inputs(&importer.opts, &importer.environment_sha256, &prepared)?;

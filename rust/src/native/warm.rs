@@ -381,8 +381,8 @@ impl NativeProjectImporter {
             signature = sha256(format!("native-ui-v3\0{signature}\0{settings}").as_bytes());
         }
         let cache_path = sysutil::join(&[
-            &self.opts.output,
-            "native/cache",
+            &self.opts.native_dir(),
+            "cache",
             &format!("{signature}.json"),
         ]);
         if let Ok(cached) = read_json::<NativeReplacement>(&cache_path)
@@ -412,7 +412,7 @@ impl NativeProjectImporter {
             }
         }
         let started = Instant::now();
-        let root = sysutil::join(&[&self.opts.output, "native/imports", &random_id()]);
+        let root = sysutil::join(&[&self.opts.native_dir(), "imports", &random_id()]);
         let filename = sysutil::join(&[&root, "runtime.bin"]);
         let mut proof = extract_warm_native_ui(ctx, &project, logical, &filename)
             .map_err(|e| wrap(&format!("exact-source warm native UI {logical}"), e))?;

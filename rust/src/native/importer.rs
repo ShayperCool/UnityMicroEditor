@@ -36,6 +36,41 @@ pub struct NativeOptions {
     /// has none. A generated material takes its built-in shader from the
     /// files of that Player.
     pub player: String,
+    /// Where imports, bakes and their caches are written: the store the
+    /// sessions of a project share (see [`project_native_store`]), or, when
+    /// empty, the session's own `native` directory. The index of what the
+    /// session holds stays with the session either way.
+    pub store: String,
+    /// The index of another session of the same scene, replayed when this
+    /// output has none of its own yet: the preparation a run starts from.
+    pub seed: String,
+}
+
+impl NativeOptions {
+    /// The directory of the imports, bakes and caches of this importer.
+    pub fn native_dir(&self) -> String {
+        match self.store.is_empty() {
+            true => sysutil::join(&[&self.output, "native"]),
+            false => self.store.clone(),
+        }
+    }
+
+    /// The index of the content this importer's session holds.
+    pub fn index_path(&self) -> String {
+        native_index(&self.output)
+    }
+}
+
+/// The store of native content that every session of a project shares. Its
+/// entries are named by what they were made from, so that a preparation and
+/// the runs after it import a source once.
+pub fn project_native_store(project: &str) -> String {
+    sysutil::join(&[project, "Library/UnityMicroEditor/native-store"])
+}
+
+/// The index of the native content of a session output.
+pub fn native_index(output: &str) -> String {
+    sysutil::join(&[output, "native/index.json"])
 }
 
 pub struct NativeProjectImporter {
@@ -94,11 +129,25 @@ impl NativeProjectImporter {
             atlas_batch: BTreeMap::new(),
             atlas_identity: BTreeMap::new(),
         };
-        let index = sysutil::join(&[&importer.opts.output, "native/index.json"]);
-        let entries: Option<Vec<NativeReplacement>> = match read_json_verbatim(&index) {
-            Ok(entries) => entries,
-            Err(error) if is_not_exist(&error) => None,
-            Err(error) => return Err(error),
+        let read_index = |index: &str| -> Result<Option<Option<Vec<NativeReplacement>>>> {
+            match read_json_verbatim(index) {
+                Ok(entries) => Ok(Some(entries)),
+                Err(error) if is_not_exist(&error) => Ok(None),
+                Err(error) => Err(error),
+            }
+        };
+        // A new output starts from what the seed holds. The seed's entries
+        // are checked as this output's own would be; one that no longer
+        // replays is left to be imported again rather than failing the start.
+        let (entries, seeded) = match read_index(&importer.opts.index_path())? {
+            Some(entries) => (entries, false),
+            None if !importer.opts.seed.is_empty() => {
+                match read_index(&importer.opts.seed).unwrap_or_default() {
+                    Some(entries) => (entries, true),
+                    None => (None, false),
+                }
+            }
+            None => (None, false),
         };
         let mut current: BTreeMap<String, NativeReplacement> = BTreeMap::new();
         for entry in entries.unwrap_or_default() {
@@ -197,13 +246,29 @@ impl NativeProjectImporter {
             ui_bindings_upgraded: false,
         };
         for guid in current.keys() {
-            importer.replay(&mut replay, guid)?;
+            match importer.replay(&mut replay, guid) {
+                Ok(()) => {}
+                Err(error) if seeded => {
+                    Event::new("native-cache-rejected")
+                        .with("path", &current[guid].source_path)
+                        .with("reason", &text(&error))
+                        .emit();
+                    replay.visiting.clear();
+                }
+                Err(error) => return Err(error),
+            }
         }
         let (mesh_cpu_upgraded, ui_bindings_upgraded) =
             (replay.mesh_cpu_upgraded, replay.ui_bindings_upgraded);
         importer.require_current_environment()?;
         importer.pending_native_paths.sort();
-        if mesh_cpu_upgraded || ui_bindings_upgraded {
+        if seeded {
+            importer.publish_index()?;
+            Event::new("native-cache-seeded")
+                .with("index", &importer.opts.seed)
+                .with("entryCount", &importer.entries.len())
+                .emit();
+        } else if mesh_cpu_upgraded || ui_bindings_upgraded {
             importer.publish_index()?;
             if mesh_cpu_upgraded {
                 Event::new("native-mesh-cpu-prepared")
@@ -417,10 +482,9 @@ impl NativeProjectImporter {
 
     pub(crate) fn publish_index(&self) -> Result<()> {
         let entries: Vec<&NativeReplacement> = self.entries.values().collect();
-        atomic_json(
-            &sysutil::join(&[&self.opts.output, "native/index.json"]),
-            &entries,
-        )
+        let index = self.opts.index_path();
+        mkdir_all(&sysutil::dir(&index), 0o700)?;
+        atomic_json(&index, &entries)
     }
 }
 

@@ -49,6 +49,37 @@ impl std::fmt::Display for NeedsImportError {
     }
 }
 impl std::error::Error for NeedsImportError {}
+/// A runtime prefab a preparation failed in, and why.
+#[derive(Debug)]
+pub struct RefusedPrefab {
+    pub path: String,
+    cause: anyhow::Error,
+}
+impl RefusedPrefab {
+    /// Names the prefab in an error of its preparation. A source that has to
+    /// be imported first is not a refusal: that error stays as it is.
+    pub(crate) fn wrap(path: &str) -> impl FnOnce(anyhow::Error) -> anyhow::Error + '_ {
+        move |cause| match cause.chain().any(|cause| cause.is::<NeedsImportError>()) {
+            true => cause,
+            false => RefusedPrefab {
+                path: path.into(),
+                cause,
+            }
+            .into(),
+        }
+    }
+}
+impl std::fmt::Display for RefusedPrefab {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "runtime prefab {}", self.path)
+    }
+}
+impl std::error::Error for RefusedPrefab {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.cause.as_ref())
+    }
+}
+
 pub(crate) fn needs_import(path: &str) -> anyhow::Error {
     NeedsImportError {
         path: path.into(),
@@ -942,6 +973,88 @@ impl Session {
     /// Publishes `revisions/<id>/scene.json` under `output_root`.
     pub fn prepare(&self, output_root: &str) -> Result<Prepared> {
         self.lock().prepare(output_root)
+    }
+
+    /// Why preparing would refuse the session's scene, as far as the scene
+    /// and the prefabs it instantiates tell without imported content: an
+    /// object of a class the loader has no adapter for, say. `None` when it
+    /// would not, or when only imported content can tell.
+    pub fn scene_refusal(&self) -> Option<anyhow::Error> {
+        self.refusal(|s| {
+            let scene = s.baseline_text("scenePath");
+            let (objects, _) = s.expand(&scene, "", &[])?;
+            s.validate(&objects)
+        })
+    }
+
+    /// The same for a runtime-addressed prefab of the session.
+    pub fn runtime_prefab_refusal(&self, path: &str) -> Option<anyhow::Error> {
+        self.refusal(|s| {
+            let (objects, _) = s.expand(path, "", &[])?;
+            s.validate(&objects)?;
+            let roots = objects
+                .iter()
+                .filter(|o| super::expand::transform(o.class_id))
+                .filter(|o| value::file_id(o.get("m_Father")) == "0")
+                .count();
+            if roots != 1 {
+                bail!("runtime-addressed prefab needs exactly one root: {path}");
+            }
+            Ok(())
+        })
+    }
+
+    fn refusal(&self, check: impl FnOnce(&mut Inner) -> Result<()>) -> Option<anyhow::Error> {
+        let mut s = self.lock();
+        // What a check reads is not what the next preparation depends on.
+        let observed = std::mem::take(&mut s.cache.observed);
+        let stats = std::mem::take(&mut s.cache.stats);
+        let dependencies = std::mem::take(&mut s.dependencies);
+        let result = s.index_guids().and_then(|()| check(&mut s));
+        s.cache.observed = observed;
+        s.cache.stats = stats;
+        s.dependencies = dependencies;
+        result
+            .err()
+            .filter(|error| !error.chain().any(|cause| cause.is::<NeedsImportError>()))
+    }
+
+    /// Every source the last preparation read, with the hash of what it
+    /// read, by absolute path.
+    pub fn read_sources(&self) -> BTreeMap<String, String> {
+        let s = self.lock();
+        s.cache
+            .observed
+            .iter()
+            .filter_map(|(path, identity)| {
+                let record = s.cache.files.get(path)?;
+                (record.identity == *identity)
+                    .then(|| (path.to_string_lossy().into_owned(), record.digest.clone()))
+            })
+            .collect()
+    }
+
+    /// A digest of which source each GUID of the project names.
+    pub fn guid_index_sha256(&self) -> Result<String> {
+        let mut s = self.lock();
+        s.index_guids()?;
+        let mut pairs: Vec<(&String, &String)> = s.by_guid.iter().collect();
+        pairs.sort();
+        let mut hasher = Sha256::new();
+        for (guid, path) in pairs {
+            hasher.update(guid.as_bytes());
+            hasher.update([0]);
+            hasher.update(path.as_bytes());
+            hasher.update([0]);
+        }
+        Ok(crate::hex(&hasher.finalize()))
+    }
+
+    /// Stops serving runtime-addressed prefabs.
+    pub fn remove_extra_assets(&self, paths: &[String]) {
+        self.lock()
+            .extra_assets
+            .retain(|path| !paths.contains(path));
     }
 
     /// Accepts watcher events. New, deleted or changed metadata rebuilds the

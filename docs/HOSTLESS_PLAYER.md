@@ -461,10 +461,19 @@ Editor-imported asset.
   its own build used them. Without one, the runtime logs a warning and the
   panel draws no filter, or no sprite in a text. The other panel shaders are
   required.
-- `run` imports in its own session what the preparation imported while
-  proving the scene, and prepares the project's Addressables scenes as well.
-  A scene it cannot adapt is skipped with an event (Dungeon's `TestRoom` holds
-  a `NavMeshObstacle`).
+- `run` prepares the project's Addressables scenes and prefabs before the
+  Player starts. One the loader cannot adapt is skipped with an event:
+  Dungeon's `Zombie` holds a `NavMeshAgent`, its `VB_*` door prefabs a
+  `NavMeshObstacle`, and `ShipGenDemo` and `TestRoom` reach those prefabs.
+  The other 427 prefabs are served.
+
+**Start time.** A preparation and the runs after it share one native store
+(see [RUNNER.md](RUNNER.md#the-native-store-of-a-project)), and a new output
+starts from the preparation's index, so `run` no longer imports again what
+the preparation imported. Addressables entries are refused one by one, before
+their content is imported where their own sources tell, and a refused scene
+is remembered until its sources change. A run of the prepared ShootingRange
+took 23 s to its first frame instead of 50 s.
 
 ## Limits and what remains
 

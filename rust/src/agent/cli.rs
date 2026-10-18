@@ -544,6 +544,8 @@ pub fn prepare_agent_project_with_native(
                     output: source_output.clone(),
                     editor: editor.to_string(),
                     player: preparation.player.clone(),
+                    store: crate::native::project_native_store(&project),
+                    seed: earlier_native_index(&project, scene, &output),
                 },
                 session.clone(),
             )?;
@@ -596,7 +598,10 @@ pub fn prepare_agent_project_with_native(
         ("compiler", value::raw(&accepted_compiler)?),
         (
             "nativeImport",
-            Any::Object(obj([("catalog", native_catalog.into())])),
+            Any::Object(obj([
+                ("catalog", native_catalog.into()),
+                ("index", crate::native::native_index(&source_output).into()),
+            ])),
         ),
         ("preparation", preparation_backend.into()),
     ]);
@@ -604,4 +609,53 @@ pub fn prepare_agent_project_with_native(
     // Published: the staging directory stays as part of the baseline.
     let _ = staging_directory.keep();
     Ok(())
+}
+
+/// The index of the native content of the newest other preparation of the
+/// scene, or empty when there is none. A new preparation starts from it: the
+/// content it holds is checked against the sources as they are now, and
+/// whatever changed is imported again.
+fn earlier_native_index(project: &str, scene: &str, output: &str) -> String {
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    struct Prepared {
+        scene: String,
+        baseline: String,
+    }
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    struct NativeImport {
+        index: String,
+    }
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    struct Baseline {
+        #[serde(rename = "nativeImport")]
+        native_import: NativeImport,
+    }
+    let preparations = join(&[project, "Library/UnityMicroEditor/preparations"]);
+    let Ok(directories) = fs::read_dir(&preparations) else {
+        return String::new();
+    };
+    let mut newest: Option<(std::time::SystemTime, String)> = None;
+    for directory in directories.flatten() {
+        let result = join(&[&directory.path().to_string_lossy(), "result.json"]);
+        let Ok(Some(found)) = read_json_file::<Option<Prepared>>(&result) else {
+            continue;
+        };
+        if found.scene != scene || found.baseline == output {
+            continue;
+        }
+        let Ok(Some(baseline)) = read_json_file::<Option<Baseline>>(&found.baseline) else {
+            continue;
+        };
+        let index = baseline.native_import.index;
+        let Ok(modified) = fs::metadata(&index).and_then(|info| info.modified()) else {
+            continue;
+        };
+        if newest.as_ref().is_none_or(|(time, _)| modified > *time) {
+            newest = Some((modified, index));
+        }
+    }
+    newest.map(|(_, index)| index).unwrap_or_default()
 }

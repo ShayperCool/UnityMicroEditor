@@ -9,6 +9,7 @@ mod patch;
 mod player;
 mod prepared;
 mod prune;
+mod refusal;
 mod routes;
 mod watch;
 mod window;
@@ -130,6 +131,8 @@ impl LaunchOptions {
             output: self.output.clone(),
             editor: self.editor.clone(),
             player: player.to_string(),
+            store: crate::native::project_native_store(&self.project),
+            seed: String::new(),
         }
     }
 }
@@ -137,6 +140,10 @@ impl LaunchOptions {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct BaselineNativeImport {
     pub catalog: String,
+    /// The index of the native content the preparation imported, which a
+    /// new session output starts from.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub index: String,
 }
 /// The validated preparation `current.json`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -166,15 +173,12 @@ impl BaselineBuild {
                 2 => jsondoc::set_string(&mut baseline.player, &member.value, at),
                 _ => {
                     let fields = json::members(&member.value, at, "object")?;
-                    jsondoc::decode_struct(fields, &["catalog"], |_, member| {
-                        jsondoc::set_string(
-                            &mut baseline.native_import.catalog,
-                            &member.value,
-                            Target {
-                                strukt: "",
-                                field: "nativeImport.catalog",
-                            },
-                        )
+                    jsondoc::decode_struct(fields, &["catalog", "index"], |index, member| {
+                        let (value, field) = match index {
+                            0 => (&mut baseline.native_import.catalog, "nativeImport.catalog"),
+                            _ => (&mut baseline.native_import.index, "nativeImport.index"),
+                        };
+                        jsondoc::set_string(value, &member.value, Target { strukt: "", field })
                     })
                 }
             }
@@ -658,27 +662,74 @@ fn adopt_addressables(opts: &mut LaunchOptions) -> Vec<String> {
     found.sources
 }
 
-/// Gives up the prefabs that were added for Addressables after they failed to
-/// prepare. False when there is none, so the error is the caller's.
-fn drop_addressable_prefabs(opts: &mut LaunchOptions, error: &anyhow::Error) -> bool {
-    let dropped: Vec<String> = opts
-        .addressable_content
+/// The prefabs added for Addressables that the session still serves.
+fn addressable_prefabs(opts: &LaunchOptions) -> Vec<String> {
+    opts.addressable_content
         .iter()
         .filter(|path| opts.content_prefabs.contains(path))
         .cloned()
-        .collect();
-    if dropped.is_empty() {
-        return false;
-    }
+        .collect()
+}
+
+/// Stops serving prefabs that were added for Addressables.
+fn give_up_prefabs(opts: &mut LaunchOptions, session: &Session, dropped: &[String], error: &str) {
     opts.content_prefabs.retain(|path| !dropped.contains(path));
     opts.addressable_content
         .retain(|path| !dropped.contains(path));
     opts.addressables
         .retain(|entry| entry.scene || !dropped.contains(&entry.path));
+    session.remove_extra_assets(dropped);
     Event::new("addressables-skipped")
         .with("paths", &dropped)
-        .with("error", &err_text(error))
+        .with("error", error)
         .emit();
+}
+
+/// Gives up the prefabs added for Addressables that preparing would refuse,
+/// as far as their own sources tell: before their content is imported, and
+/// each on its own. True when there was one.
+fn refuse_addressable_prefabs(opts: &mut LaunchOptions, session: &Session) -> bool {
+    let mut refused: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for path in addressable_prefabs(opts) {
+        if let Some(error) = session.runtime_prefab_refusal(&path) {
+            refused.entry(err_text(&error)).or_default().push(path);
+        }
+    }
+    for (error, paths) in &refused {
+        give_up_prefabs(opts, session, paths, error);
+    }
+    !refused.is_empty()
+}
+
+/// Gives up the prefabs added for Addressables after the session failed to
+/// prepare: the one the error names, else those it refuses now that their
+/// content is imported, else all of them. False when there is none, so the
+/// error is the caller's.
+fn drop_addressable_prefabs(
+    opts: &mut LaunchOptions,
+    session: &Session,
+    error: &anyhow::Error,
+) -> bool {
+    let prefabs = addressable_prefabs(opts);
+    if prefabs.is_empty() {
+        return false;
+    }
+    let named = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<project::RefusedPrefab>())
+        .filter(|refused| prefabs.contains(&refused.path));
+    if let Some(refused) = named {
+        give_up_prefabs(
+            opts,
+            session,
+            std::slice::from_ref(&refused.path),
+            &err_text(error),
+        );
+        return true;
+    }
+    if !refuse_addressable_prefabs(opts, session) {
+        give_up_prefabs(opts, session, &prefabs, &err_text(error));
+    }
     true
 }
 
@@ -965,6 +1016,7 @@ impl Steps for Live<'_> {
                 &mut self.content_importers,
                 &window.paths,
                 &mut self.failed_scene,
+                None,
             )?;
         }
         let equal = content_routes_runtime_equal(&self.opts.raw_routes, &routes)?;
@@ -1229,46 +1281,52 @@ fn run_session(
     let addressable_sources = adopt_addressables(opts);
     let assemblies = compiler::player_assembly_paths(&baseline.player, &baseline.manifest)?;
     let initializers = json::read_runtime_initializers(&baseline.manifest)?;
-    let (session, native_importer, prepared) = loop {
-        let session = Arc::new(Session::new(project::Options {
-            project: project.clone(),
-            manifest: baseline.manifest.clone(),
-            native_catalog: baseline.native_import.catalog.clone(),
-            scene: opts.scene.clone(),
-            extra_assets: opts.content_prefabs.clone(),
-            script_types: (*script_types).clone(),
-        })?);
-        session.set_managed_bindings(
-            assemblies_of(&assemblies),
-            &BTreeMap::new(),
-            Some(initializers.clone()),
-        );
-        if let Some(compiled) = &initial_compile {
-            apply_compiled_bindings(&session, compiled, &script_types);
-        }
-        apply_builtin_shaders(&session, &opts.builtin_shaders)?;
-        // The importer reads the built-in shaders of the host from the
-        // Player's data. A compile copies that data as it is, and the bound
-        // of the output removes a compile no Player runs any more, also the
-        // one of the session's start: the staged host stays (caches6-1).
-        let mut native_importer =
-            NativeProjectImporter::new(opts.native(&staged_player), session.clone())?;
-        native_importer.script_assemblies = compiler.script_assemblies();
-        let layouts = compiler.behaviour_layouts(ctx, &script_types)?;
-        native_importer.behaviour_code = compiler.behaviour_code.clone();
-        native_importer.set_behaviour_layouts(ctx, layouts)?;
+    let session = Arc::new(Session::new(project::Options {
+        project: project.clone(),
+        manifest: baseline.manifest.clone(),
+        native_catalog: baseline.native_import.catalog.clone(),
+        scene: opts.scene.clone(),
+        extra_assets: opts.content_prefabs.clone(),
+        script_types: (*script_types).clone(),
+    })?);
+    session.set_managed_bindings(
+        assemblies_of(&assemblies),
+        &BTreeMap::new(),
+        Some(initializers.clone()),
+    );
+    if let Some(compiled) = &initial_compile {
+        apply_compiled_bindings(&session, compiled, &script_types);
+    }
+    apply_builtin_shaders(&session, &opts.builtin_shaders)?;
+    // The importer reads the built-in shaders of the host from the
+    // Player's data. A compile copies that data as it is, and the bound
+    // of the output removes a compile no Player runs any more, also the
+    // one of the session's start: the staged host stays (caches6-1).
+    let mut native_options = opts.native(&staged_player);
+    native_options.seed = baseline.native_import.index.clone();
+    let mut native_importer = NativeProjectImporter::new(native_options, session.clone())?;
+    native_importer.script_assemblies = compiler.script_assemblies();
+    let layouts = compiler.behaviour_layouts(ctx, &script_types)?;
+    native_importer.behaviour_code = compiler.behaviour_code.clone();
+    native_importer.set_behaviour_layouts(ctx, layouts)?;
+    // An addressable prefab the raw loader cannot prepare must not stop a
+    // session that runs without it, nor cost the import of its content.
+    refuse_addressable_prefabs(opts, &session);
+    let prepared = loop {
         match native_importer.prepare(ctx) {
-            Ok(prepared) => break (session, native_importer, prepared),
-            // An addressable prefab the raw loader cannot prepare must not
-            // stop a session that runs without it.
-            Err(error) if ctx.error().is_none() && drop_addressable_prefabs(opts, &error) => {}
+            Ok(prepared) => break prepared,
+            Err(error)
+                if ctx.error().is_none() && drop_addressable_prefabs(opts, &session, &error) => {}
             Err(error) => return Err(error),
         }
     };
     let mut content_importers = ContentImporters::new();
     let mut failed_scene = String::new();
-    while opts.has_content_routes() {
-        match prepare_content_routes(
+    if opts.has_content_routes() {
+        // An addressable scene that cannot be prepared is left out in the
+        // same pass; the others are not prepared again.
+        let mut refused = Vec::new();
+        opts.raw_routes = prepare_content_routes(
             ctx,
             opts,
             baseline,
@@ -1279,15 +1337,11 @@ fn run_session(
             &mut content_importers,
             &[],
             &mut failed_scene,
-        ) {
-            Ok(routes) => {
-                opts.raw_routes = routes;
-                break;
-            }
-            Err(error)
-                if ctx.error().is_none() && drop_addressable_scene(opts, &failed_scene, &error) => {
-            }
-            Err(error) => return Err(error),
+            Some(&mut refused),
+        )?;
+        for (guid, error) in refused {
+            drop_addressable_scene(opts, &guid, &error);
+            content_importers.remove(&guid);
         }
     }
     if !opts.addressables.is_empty() {

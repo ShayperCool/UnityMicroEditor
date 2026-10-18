@@ -132,7 +132,7 @@ impl NativeProjectImporter {
                 editor: self.opts.editor.clone(),
                 project: self.opts.project.clone(),
                 sources: &sources,
-                output: sysutil::join(&[&self.opts.output, "native/imports", &random_id()]),
+                output: sysutil::join(&[&self.opts.native_dir(), "imports", &random_id()]),
                 timeout: Duration::from_secs(290),
                 // Kept for the project, not for the session.
                 cache: inspection_cache(&self.opts.project),
@@ -245,7 +245,7 @@ impl NativeProjectImporter {
             &Build {
                 project: self.opts.project.clone(),
                 editor: self.opts.editor.clone(),
-                output: sysutil::join(&[&self.opts.output, "native/imports", &random_id()]),
+                output: sysutil::join(&[&self.opts.native_dir(), "imports", &random_id()]),
                 target: shader.clone(),
                 users: vec![logical.to_string()],
                 timeout: Duration::from_secs(600),

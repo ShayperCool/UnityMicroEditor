@@ -934,8 +934,7 @@ fn native_replay_fixture() -> Replay {
         opts: NativeOptions {
             project,
             output,
-            editor: String::new(),
-            player: String::new(),
+            ..Default::default()
         },
         session: Arc::new(session),
         entries,
@@ -993,6 +992,41 @@ fn native_index_replay_loads_dependencies_before_guid_sorted_dependent() {
         entries[0].content.dependencies
     );
     assert_eq!(original, fs::read(&index).unwrap());
+}
+
+#[test]
+fn a_new_output_starts_from_its_seed_and_leaves_what_no_longer_replays() {
+    let Replay {
+        _root,
+        mut opts,
+        session,
+        entries,
+    } = native_replay_fixture();
+    let seed = format!("{}/seed/native/index.json", opts.output);
+    fs::create_dir_all(crate::sysutil::dir(&seed)).unwrap();
+    atomic_json(&seed, &entries).unwrap();
+    // The content of one entry is gone: it is imported again on demand.
+    fs::remove_file(&entries[2].content.path).unwrap();
+    opts.seed = seed;
+    let importer = NativeProjectImporter::new(opts.clone(), session).unwrap();
+    let replayed: Vec<&String> = importer.entries.keys().collect();
+    assert_eq!(replayed, [&entries[0].guid, &entries[1].guid]);
+    // The output keeps its own index from then on.
+    let own: Vec<NativeReplacement> =
+        serde_json::from_slice(&fs::read(index_path(&opts)).unwrap()).unwrap();
+    assert_eq!(own, entries[..2]);
+    // An output with an index of its own does not read the seed.
+    atomic_json(&index_path(&opts), &Vec::<NativeReplacement>::new()).unwrap();
+    let session = Arc::new(
+        Session::new(Options {
+            project: opts.project.clone(),
+            manifest: format!("{}/baseline.json", opts.output),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let importer = NativeProjectImporter::new(opts, session).unwrap();
+    assert!(importer.entries.is_empty());
 }
 
 #[test]
@@ -1390,8 +1424,7 @@ fn native_mesh_cpu_cache_upgrade_actual_index() {
     let opts = NativeOptions {
         project,
         output: output.clone(),
-        editor: String::new(),
-        player: String::new(),
+        ..Default::default()
     };
     let (mut models, mut meshes) = (0, 0);
     let mut first: Option<NativeReplacement> = None;

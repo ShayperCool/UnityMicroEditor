@@ -71,7 +71,7 @@ pub(crate) fn retain_native_model_mesh_cpu(
         return Ok(entry);
     }
     let key = sha256(format!("native-model-mesh-cpu-v1\0{}\0{source_sha}", entry.guid).as_bytes());
-    let filename = sysutil::join(&[&opts.output, "native/mesh-cpu", &format!("{key}.bin")]);
+    let filename = sysutil::join(&[&opts.native_dir(), "mesh-cpu", &format!("{key}.bin")]);
     mkdir_all(&sysutil::dir(&filename), 0o700)?;
     write_immutable_native_mesh_file(&filename, &output)?;
     let proof_bytes = serde_json::to_vec(&proof)?;
@@ -109,20 +109,29 @@ pub(crate) fn read_owned_native_mesh_file(project: &str, path: &str) -> Result<V
     read_file(path)
 }
 
+/// Writes a file that is never rewritten. It appears whole: sessions that
+/// share the store may write and read the same name at once.
 pub(crate) fn write_immutable_native_mesh_file(path: &str, data: &[u8]) -> Result<()> {
-    let mut file = match create_new(path, 0o600) {
-        Ok(file) => file,
+    let temporary = format!("{path}.{}.tmp", crate::util::random_id());
+    let written = create_new(&temporary, 0o600).and_then(|mut file| {
+        file.write_all(data)
+            .map_err(|e| os_error("write", &temporary, &e))
+    });
+    let linked = written.and_then(|()| {
+        std::fs::hard_link(&temporary, path).map_err(|e| os_error("link", path, &e))
+    });
+    let _ = std::fs::remove_file(&temporary);
+    match linked {
+        Ok(()) => Ok(()),
         Err(error) if super::support::kind_of(&error) == sysutil::ErrorKind::Exist => {
             if !sysutil::lstat(path).is_ok_and(|info| info.is_regular()) {
-                bail!("native Mesh CPU immutable output is symlinked or not regular");
+                bail!("native immutable output is symlinked or not regular: {path}");
             }
             if !file_hash(path).is_ok_and(|actual| actual == sha256(data)) {
-                bail!("native Mesh CPU immutable output has conflicting bytes");
+                bail!("native immutable output has conflicting bytes: {path}");
             }
-            return Ok(());
+            Ok(())
         }
-        Err(error) => return Err(error),
-    };
-    file.write_all(data)
-        .map_err(|e| os_error("write", path, &e))
+        Err(error) => Err(error),
+    }
 }

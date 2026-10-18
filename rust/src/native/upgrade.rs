@@ -68,7 +68,7 @@ impl NativeProjectImporter {
             &Build {
                 project: self.opts.project.clone(),
                 editor: self.opts.editor.clone(),
-                output: sysutil::join(&[&self.opts.output, "native/imports", &random_id()]),
+                output: sysutil::join(&[&self.opts.native_dir(), "imports", &random_id()]),
                 target: logical.to_string(),
                 users: vec![logical.to_string()],
                 timeout: Duration::from_secs(600),
