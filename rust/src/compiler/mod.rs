@@ -56,6 +56,23 @@ use std::sync::{Arc, Mutex};
 
 pub const UNITY_VERSION: &str = crate::ENGINE_VERSION;
 
+/// The store the compilers of a project share. It is not copied between
+/// checkouts: an assembly holds the paths of the sources it was compiled
+/// from, and hot reload compares it with what the checkout compiles.
+pub fn project_compiler_store(project: &str) -> String {
+    crate::sysutil::join(&[project, "Library/UnityMicroEditor/compiler-store"])
+}
+
+impl Compiler {
+    /// The directory of one kind of entry of the store.
+    pub(crate) fn stored(&self, kind: &str) -> String {
+        match self.store.is_empty() {
+            true => crate::sysutil::join(&[&self.cache, kind]),
+            false => crate::sysutil::join(&[&self.store, kind]),
+        }
+    }
+}
+
 /// An f64 as JSON text: shortest round-trip digits, exponent form outside 1e-6..1e21.
 pub fn float_layout(value: f64) -> serde_json::Number {
     let magnitude = value.abs();
@@ -557,6 +574,13 @@ pub struct Compiler {
     pub project: String,
     pub editor: String,
     pub cache: String,
+    /// Where what is named by its inputs is kept: compiled assemblies, the
+    /// helpers built from the tool's sources and what they read from
+    /// assemblies. The compilers of a project share it (see
+    /// [`project_compiler_store`]), so a preparation, the next one and the
+    /// sessions after them compile a state of the sources once. Empty: in
+    /// `cache`.
+    pub store: String,
     pub player: String,
     pub dotnet: String,
     pub csc: String,

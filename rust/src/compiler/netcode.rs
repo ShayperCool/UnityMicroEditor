@@ -284,7 +284,7 @@ impl Compiler {
             cache_inputs.insert(name.clone(), hash.clone());
         }
         let key = sha256(&marshal(&cache_inputs)?);
-        let entry = join(&[&self.cache, "netcode-processor", &key]);
+        let entry = join(&[&self.stored("netcode-processor"), &key]);
         if let Ok(files) = read_json_file::<NilMap<String>>(&join(&[&entry, "files.json"]))
             && !files.at("Unity.Netcode.Editor.CodeGen.dll").is_empty()
             && verify_cache_files(&entry, &files)

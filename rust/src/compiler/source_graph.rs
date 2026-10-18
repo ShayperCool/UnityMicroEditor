@@ -102,22 +102,43 @@ impl Compiler {
         }
         let request_path = join(&[&self.cache, "native-source-declarations.json"]);
         atomic_json(&request_path, &requests)?;
-        let output = compiler_command(
-            ctx,
-            &self.cache,
-            &self.dotnet,
-            &[helper, "--source-type-declarations", &request_path],
-        )
-        .map_err(|error| anyhow!("native Player source declarations: {error}"))?;
+        // What the helper reads: the request, the sources it names, which
+        // were checked against the graph above, and the helper itself.
+        let mut identity = crate::util::marshal(&requests)?;
+        for request in &requests {
+            for source in request.sources.iter() {
+                identity.extend_from_slice(graph.compiler_inputs.at(source.path).as_bytes());
+            }
+        }
+        identity.extend_from_slice(file_hash(helper)?.as_bytes());
+        let kept = join(&[
+            &self.stored("source-declarations"),
+            &format!("{}.json", crate::sha256(&identity)),
+        ]);
+        let output = match sys::read(&kept) {
+            Ok(output) => output,
+            Err(_) => {
+                let output = compiler_command(
+                    ctx,
+                    &self.cache,
+                    &self.dotnet,
+                    &[helper, "--source-type-declarations", &request_path],
+                )
+                .map_err(|error| anyhow!("native Player source declarations: {error}"))?;
+                sys::mkdir_all(&sysutil::dir(&kept))?;
+                let partial = format!("{kept}.{}.tmp", crate::util::random_id());
+                sys::write(&partial, &output)?;
+                std::fs::rename(&partial, &kept).map_err(|e| sys::os_error("rename", &kept, &e))?;
+                output
+            }
+        };
         let declarations = match unmarshal::<NilMap<Declarations>>(&output) {
             Ok(declarations) if declarations.len() == requests.len() => declarations,
             _ => bail!("native Player source declaration proof is incomplete"),
         };
-        let mut arguments = vec![helper, "--type-definitions"];
-        arguments.extend(paths.iter().map(String::as_str));
-        let output = compiler_command(ctx, &self.cache, &self.dotnet, &arguments)?;
-        let definitions = match unmarshal::<NilMap<NilVec<String>>>(&output) {
-            Ok(definitions) if definitions.len() == paths.len() => definitions,
+        let listed: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let definitions = match self.type_definitions(ctx, helper, &listed)? {
+            definitions if definitions.len() == paths.len() => definitions,
             _ => bail!("native DLL type inventory proof is incomplete"),
         };
         let scripts = self.manifest.scripts.to_vec();

@@ -175,7 +175,7 @@ impl Compiler {
     }
 
     pub fn read_script_type_cache(&self, key: &str) -> Option<NilMap<String>> {
-        let directory = join(&[&self.cache, "script-types", key]);
+        let directory = join(&[&self.stored("script-types"), key]);
         if sysutil::eval_symlinks(&directory).ok()? != directory {
             return None;
         }
@@ -219,7 +219,7 @@ impl Compiler {
     }
 
     pub fn save_script_type_cache(&self, key: &str, types: &NilMap<String>) -> Result<()> {
-        let directory = join(&[&self.cache, "script-types", key]);
+        let directory = join(&[&self.stored("script-types"), key]);
         sys::mkdir_all(&directory)?;
         let filename = join(&[&directory, "types.json"]);
         atomic_json(&filename, types)?;

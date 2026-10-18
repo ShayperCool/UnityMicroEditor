@@ -318,6 +318,16 @@ impl Compiler {
         if cached().is_some() {
             return Ok(sysutil::join(&[&entry, &library]));
         }
+        // The compiler's errors for these inputs, which it gives again.
+        let refused = format!("{entry}.refused.txt");
+        if let Ok(message) = sys::read(&refused) {
+            bail!(
+                "compile {} {}: {}",
+                compile.kind,
+                compile.name,
+                String::from_utf8_lossy(&message)
+            );
+        }
         let folder = sysutil::join(&[staging, compile.kind, compile.name]);
         sys::mkdir_all(&folder)?;
         let dll = sysutil::join(&[&folder, &library]);
@@ -377,6 +387,16 @@ impl Compiler {
             &[&self.csc, &format!("@{response}")],
         )
         .map_err(|error| {
+            // Errors of the sources are kept; a compiler that was stopped or
+            // failed otherwise is asked again.
+            if ctx.error().is_none() && error.message.contains(": error CS") {
+                let partial = format!("{refused}.{}.tmp", crate::util::random_id());
+                if sys::mkdir_all(&sysutil::dir(&refused)).is_ok()
+                    && sys::write(&partial, error.message.as_bytes()).is_ok()
+                {
+                    let _ = std::fs::rename(&partial, &refused);
+                }
+            }
             anyhow!(
                 "compile {} {}: {}",
                 compile.kind,

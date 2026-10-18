@@ -63,6 +63,8 @@ pub struct BehaviourCode {
     dotnet: String,
     helper: String,
     cache: String,
+    /// Where the replies are kept.
+    replies: String,
     /// The assemblies the layouts were read from, in the helper's order.
     assemblies: Vec<String>,
     /// Identifies the helper and the content of the assemblies.
@@ -95,7 +97,7 @@ impl BehaviourCode {
         }
         let encoded = marshal(request)?;
         let key = sha256(&[self.key.as_bytes(), b"\n", encoded.as_slice()].concat());
-        let directory = join(&[&self.cache, "behaviour-objects", &key]);
+        let directory = join(&[&self.replies, &key]);
         let record = join(&[&directory, "reply.json"]);
         if let Ok(known) = read_json_file::<CodeRecord>(&record)
             && known.request == *request
@@ -198,10 +200,11 @@ impl Compiler {
             dotnet: self.dotnet.clone(),
             helper: helper.clone(),
             cache: self.cache.clone(),
+            replies: self.stored("behaviour-objects"),
             assemblies: assemblies.clone(),
             key: key.clone(),
         };
-        let directory = join(&[&self.cache, "behaviour-layouts", &key]);
+        let directory = join(&[&self.stored("behaviour-layouts"), &key]);
         if let Some(layouts) = read_layout_cache(&directory, &key) {
             return Ok(layouts);
         }

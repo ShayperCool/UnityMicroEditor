@@ -544,11 +544,14 @@ impl Compiler {
         {
             bail!("Compiler cache must be under owned project Temp or Library/UnityMicroEditor");
         }
+        // The helpers run in it, whatever the store holds.
+        sys::mkdir_all(&cache)?;
         let (manifest, baseline_path) = compiler_manifest(baseline_manifest)?;
         if manifest.project != project || manifest.unity != editor {
             bail!("compiler baseline project or Unity SDK differs from launch");
         }
         let mut compiler = Compiler {
+            store: super::project_compiler_store(&project),
             project,
             editor: editor.into(),
             cache,
@@ -1630,9 +1633,7 @@ impl Compiler {
                 .cloned()
         };
         if previous_dll.is_empty() {
-            let output =
-                self.helper_command(ctx, &self.cache, &[helper, "--type-definitions", next_dll])?;
-            let definitions = unmarshal::<NilMap<NilVec<String>>>(&output).unwrap_or_default();
+            let definitions = self.type_definitions(ctx, helper, &[next_dll])?;
             return match listed(&definitions, next_dll) {
                 Some(next) if definitions.len() == 1 => {
                     self.validate_required_script_types(assembly, &[], &next)
@@ -1640,14 +1641,9 @@ impl Compiler {
                 _ => bail!("SDK source output lacks exact type definition proof: {assembly}"),
             };
         }
-        let output = self
-            .helper_command(
-                ctx,
-                &self.cache,
-                &[helper, "--type-definitions", previous_dll, next_dll],
-            )
+        let definitions = self
+            .type_definitions(ctx, helper, &[previous_dll, next_dll])
             .map_err(|error| anyhow!("validate baseline script types in {assembly}: {error}"))?;
-        let definitions = unmarshal::<NilMap<NilVec<String>>>(&output).unwrap_or_default();
         match (
             listed(&definitions, previous_dll),
             listed(&definitions, next_dll),
@@ -1657,6 +1653,48 @@ impl Compiler {
             }
             _ => bail!("compiled DLL has no exact baseline/new TypeDef proof: {assembly}"),
         }
+    }
+
+    /// The types each DLL defines, by its path, as the helper lists them. What
+    /// it listed for a DLL is kept in the store under the DLL's content and
+    /// the helper's: a DLL taken from the store is not read again by a
+    /// process of its own.
+    pub(crate) fn type_definitions(
+        &self,
+        ctx: &Context,
+        helper: &str,
+        dlls: &[&str],
+    ) -> Result<NilMap<NilVec<String>>> {
+        let helper_sha = file_hash(helper)?;
+        let directory = self.stored("type-definitions");
+        let mut keys = Vec::new();
+        let mut definitions = NilMap::make();
+        for dll in dlls {
+            let key = sha256(
+                format!("type-definitions-v1\0{helper_sha}\0{}", file_hash(dll)?).as_bytes(),
+            );
+            if let Ok(Some(names)) = read_json_file::<Option<NilVec<String>>>(&join(&[
+                &directory,
+                &format!("{key}.json"),
+            ])) {
+                definitions.insert(*dll, names);
+            }
+            keys.push(key);
+        }
+        if definitions.len() == dlls.iter().collect::<BTreeSet<_>>().len() {
+            return Ok(definitions);
+        }
+        let mut arguments = vec![helper, "--type-definitions"];
+        arguments.extend(dlls);
+        let output = self.helper_command(ctx, &self.cache, &arguments)?;
+        let definitions = unmarshal::<NilMap<NilVec<String>>>(&output).unwrap_or_default();
+        sys::mkdir_all(&directory)?;
+        for (dll, key) in dlls.iter().zip(&keys) {
+            if let Some(names) = definitions.get(*dll).filter(|names| !names.is_nil()) {
+                atomic_json(&join(&[&directory, &format!("{key}.json")]), names)?;
+            }
+        }
+        Ok(definitions)
     }
 
     /// With several missing types, names the first by name.
@@ -1735,7 +1773,7 @@ impl Compiler {
         let tool_root = micro_editor_root()?;
         let source_root = join(&[&tool_root, "tools/LifecycleCompiler"]);
         let (key, inputs) = self.lifecycle_helper_key()?;
-        let entry = join(&[&self.cache, "lifecycle", &key]);
+        let entry = join(&[&self.stored("lifecycle"), &key]);
         let helper = join(&[&entry, "LifecycleCompiler.dll"]);
         let verified = || {
             read_json_file::<NilMap<String>>(&join(&[&entry, "files.json"]))
@@ -1853,7 +1891,7 @@ impl Compiler {
         }
         let key = sha256(&marshal(&identity)?);
         lap = self.last_phases.lap("assembly_identity", lap);
-        let entry = join(&[&self.cache, "assemblies", &key]);
+        let entry = join(&[&self.stored("assemblies"), &key]);
         let library = format!("{}.dll", assembly.name);
         // The entry as it stands, when every part of it holds.
         let cached = || {

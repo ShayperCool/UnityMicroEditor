@@ -203,6 +203,7 @@ pub fn prepare_compiler_graph_with(
         editor: editor.into(),
         player: staged_player.clone(),
         cache: join(&[&staging_path, "compiler-cache"]),
+        store: super::project_compiler_store(&project),
         configs: NilMap::make(),
         configuration_hashes: NilMap::make(),
         configuration: NilMap::make(),
@@ -637,8 +638,13 @@ pub fn prepare_compiler_graph_with(
             )?;
         }
         let configuration = canonical_configuration(&compiler.configs.value(&assembly.name))?;
+        // The descriptor belongs to this preparation, the assembly to the
+        // project's store: it is kept where the baseline's readers look,
+        // under the preparation's own cache.
+        let described = join(&[&compiler.cache, "assemblies", &assembly.assembly_input_hash]);
+        sys::mkdir_all(&described)?;
         atomic_json(
-            &join(&[&sysutil::dir(&dll), "compile.json"]),
+            &join(&[&described, "compile.json"]),
             &descriptor(&compiler.manifest, &configuration, &assembly)?,
         )?;
     }
@@ -1204,12 +1210,11 @@ impl Compiler {
         }
         let mut paths: Vec<&str> = by_assembly.values().map(String::as_str).collect();
         paths.sort_unstable();
-        let mut arguments = vec![helper, "--type-definitions"];
-        arguments.extend(&paths);
-        let output = compiler_command(ctx, &self.cache, &self.dotnet, &arguments)
+        let definitions = self
+            .type_definitions(ctx, helper, &paths)
             .map_err(|error| anyhow!("verify native package types: {error}"))?;
-        let definitions = match unmarshal::<NilMap<NilVec<String>>>(&output) {
-            Ok(definitions) if definitions.len() == paths.len() => definitions,
+        let definitions = match definitions {
+            definitions if definitions.len() == paths.len() => definitions,
             _ => bail!("native package type proof lacks exact assembly metadata"),
         };
         for script in &scripts {
