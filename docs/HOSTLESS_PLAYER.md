@@ -472,8 +472,10 @@ Editor-imported asset.
 starts from the preparation's index, so `run` no longer imports again what
 the preparation imported. Addressables entries are refused one by one, before
 their content is imported where their own sources tell, and a refused scene
-is remembered until its sources change. A run of the prepared ShootingRange
-took 23 s to its first frame instead of 50 s.
+is remembered until its sources change. Measured on ShootingRange to the
+first frame, one phase at a time: cold (wiped `Library`, preparation and run)
+1884 s instead of 2847 s, warm (a new preparation and run) 165 s instead of
+439 s, and a run of the prepared scene 33 s instead of 50 s.
 
 ## Limits and what remains
 
