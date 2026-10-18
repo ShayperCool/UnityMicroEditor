@@ -23,6 +23,10 @@ namespace UnityMicroEditor.Raw
             internal readonly List<Object> OwnedUIObjects = new List<Object>();
             internal string UIIdentity;
             internal NativeContentHandle[] Dependencies;
+            // Set while the file loads: what its readback checks, and the
+            // dependencies handed to the load, which live until it is done.
+            internal NativeContentFileDescriptor Pending;
+            internal NativeArray<ContentFile> PendingDependencies;
         }
 
         private static void ReleaseRetiredNativeContent(NativeAssetCache cache)
@@ -103,10 +107,15 @@ namespace UnityMicroEditor.Raw
                 var loaded = new Dictionary<string, NativeContentHandle>(StringComparer.Ordinal);
                 var visiting = new HashSet<string>(StringComparer.Ordinal);
                 var created = new List<NativeContentHandle>();
+                VerifyNativeContentHashes(manifest.nativeContentFiles);
                 try
                 {
+                    // Every file is started first, a dependency before what needs
+                    // it, so that the loading thread takes them one after the
+                    // other; each is then waited for and read back in that order.
                     foreach (NativeContentFileDescriptor descriptor in manifest.nativeContentFiles)
                         LoadNativeContentDescriptor(descriptor, descriptors, loaded, visiting, created);
+                    CompleteNativeContentFiles(created, loaded);
                     // All native parsing and exact-ID readback succeeds before
                     // replacing the cache. Old files remain alive for old scenes.
                     foreach (var item in loaded)
@@ -143,10 +152,51 @@ namespace UnityMicroEditor.Raw
                         RawCleanup.Run(() => NativeUIRuntime.Release(failed.OwnedUIObjects), ref cleanupFailure);
                         if (failed.File.IsValid)
                             RawCleanup.Run(() => failed.File.UnloadAsync().WaitForCompletion(10000), ref cleanupFailure);
+                        if (failed.PendingDependencies.IsCreated) failed.PendingDependencies.Dispose();
                     }
                     if (cleanupFailure != null) throw new AggregateException("Native ContentFile load and cleanup failed.", loadFailure, cleanupFailure);
                     throw;
                 }
+                finally { verifiedContent = null; }
+            }
+
+            // The files whose hashes were checked for this load, as "path\nsha256".
+            private static HashSet<string> verifiedContent;
+
+            // Checks every file the load reads against its hash at once, on all
+            // cores: some 1 000 files and 120 MB for a scene, which one thread
+            // hashed for seconds. A file that does not match is checked again,
+            // and refused, where it is loaded.
+            private void VerifyNativeContentHashes(NativeContentFileDescriptor[] descriptors)
+            {
+                var checks = new HashSet<KeyValuePair<string, string>>();
+                foreach (NativeContentFileDescriptor descriptor in descriptors)
+                {
+                    if (nativeCache.ContentFiles.TryGetValue(descriptor.guid, out NativeContentHandle cached) && cached.Hash == descriptor.sha256)
+                        continue;
+                    string path = AssetPath(manifest, descriptor.path);
+                    checks.Add(new KeyValuePair<string, string>(path, descriptor.sha256));
+                    foreach (NativeContentResourceDescriptor resource in descriptor.resources ?? Array.Empty<NativeContentResourceDescriptor>())
+                    {
+                        if (resource == null || string.IsNullOrEmpty(resource.virtualPath)) continue;
+                        checks.Add(new KeyValuePair<string, string>(AssetPath(manifest, resource.path), resource.sha256));
+                        checks.Add(new KeyValuePair<string, string>(Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, resource.virtualPath)), resource.sha256));
+                        checks.Add(new KeyValuePair<string, string>(Path.GetFullPath(Path.Combine(Path.GetDirectoryName(path), resource.virtualPath)), resource.sha256));
+                    }
+                }
+                var verified = new System.Collections.Concurrent.ConcurrentBag<string>();
+                System.Threading.Tasks.Parallel.ForEach(checks, check =>
+                {
+                    try
+                    {
+                        using (var stream = File.OpenRead(check.Key))
+                        using (var hash = SHA256.Create())
+                            if (RawReloadIdentity.Hex(hash.ComputeHash(stream)) == check.Value) verified.Add(check.Key + "\n" + check.Value);
+                    }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                });
+                verifiedContent = new HashSet<string>(verified, StringComparer.Ordinal);
             }
 
             private NativeContentHandle LoadNativeContentDescriptor(NativeContentFileDescriptor descriptor,
@@ -190,20 +240,49 @@ namespace UnityMicroEditor.Raw
                     ValidateNativeContentResources(descriptor, path);
                     var handle = new NativeContentHandle { Hash = descriptor.sha256, Dependencies = dependencies, UIIdentity = NativeUIRuntime.Identity(descriptor) };
                     created.Add(handle);
-                    int nativeErrors = 0;
-                    string nativeFailure = string.Empty;
-                    var errorLock = new object();
-                    Application.LogCallback capture = (message, stack, type) =>
+                    handle.File = ContentLoadInterface.LoadContentFileAsync(ContentNamespace.Default, path, nativeDependencies);
+                    handle.Pending = descriptor;
+                    handle.PendingDependencies = nativeDependencies;
+                    nativeDependencies = default;
+                    loaded.Add(descriptor.guid, handle);
+                    return handle;
+                }
+                finally
+                {
+                    if (nativeDependencies.IsCreated) nativeDependencies.Dispose();
+                    visiting.Remove(descriptor.guid);
+                }
+            }
+
+            // Waits for the files started by the load, in the order they were
+            // started, and reads back what each holds.
+            private void CompleteNativeContentFiles(List<NativeContentHandle> created, Dictionary<string, NativeContentHandle> loaded)
+            {
+                int nativeErrors = 0;
+                string nativeFailure = string.Empty;
+                var errorLock = new object();
+                Application.LogCallback capture = (message, stack, type) =>
+                {
+                    if (type != LogType.Error && type != LogType.Exception && type != LogType.Assert) return;
+                    lock (errorLock) { nativeErrors++; if (nativeFailure.Length == 0) nativeFailure = message; }
+                };
+                Application.logMessageReceivedThreaded += capture;
+                try
+                {
+                    foreach (NativeContentHandle handle in created)
                     {
-                        if (type != LogType.Error && type != LogType.Exception && type != LogType.Assert) return;
-                        lock (errorLock) { nativeErrors++; if (nativeFailure.Length == 0) nativeFailure = message; }
-                    };
-                    Application.logMessageReceivedThreaded += capture;
-                    try
-                    {
-                        handle.File = ContentLoadInterface.LoadContentFileAsync(ContentNamespace.Default, path, nativeDependencies);
-                        if (!handle.File.IsValid || !handle.File.WaitForCompletion(10000) || handle.File.LoadingStatus != LoadingStatus.Completed)
-                            throw new InvalidDataException("Native ContentFile failed to load: " + path);
+                        NativeContentFileDescriptor descriptor = handle.Pending;
+                        if (descriptor == null) continue;
+                        try
+                        {
+                            if (!handle.File.IsValid || !handle.File.WaitForCompletion(10000) || handle.File.LoadingStatus != LoadingStatus.Completed)
+                                throw new InvalidDataException("Native ContentFile failed to load: " + AssetPath(manifest, descriptor.path));
+                        }
+                        finally
+                        {
+                            if (handle.PendingDependencies.IsCreated) handle.PendingDependencies.Dispose();
+                            handle.Pending = null;
+                        }
                         foreach (NativeContentObjectDescriptor entry in descriptor.objects)
                         {
                             long localID = long.Parse(entry.fileId, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
@@ -233,14 +312,16 @@ namespace UnityMicroEditor.Raw
                             return value;
                         }, handle.OwnedUIObjects);
                         InitializeNativeMeshRetention(handle, descriptor);
-                        lock (errorLock)
-                            if (nativeErrors != 0) throw new InvalidDataException("Native ContentFile emitted errors: " + nativeFailure);
                     }
-                    finally { Application.logMessageReceivedThreaded -= capture; }
-                    loaded.Add(descriptor.guid, handle);
-                    return handle;
+                    lock (errorLock)
+                        if (nativeErrors != 0) throw new InvalidDataException("Native ContentFile emitted errors: " + nativeFailure);
                 }
-                finally { nativeDependencies.Dispose(); visiting.Remove(descriptor.guid); }
+                finally
+                {
+                    Application.logMessageReceivedThreaded -= capture;
+                    foreach (NativeContentHandle handle in created)
+                        if (handle.PendingDependencies.IsCreated) handle.PendingDependencies.Dispose();
+                }
             }
 
             private static bool NativeContentDependenciesMatch(NativeContentHandle[] first, NativeContentHandle[] second)
@@ -310,6 +391,7 @@ namespace UnityMicroEditor.Raw
             private static void RequireNativeContentHash(string path, string expected)
             {
                 if (!ValidNativeHash(expected)) throw new InvalidDataException("Native content hash is invalid.");
+                if (verifiedContent != null && verifiedContent.Contains(path + "\n" + expected)) return;
                 using (var stream = File.OpenRead(path))
                 using (var hash = SHA256.Create())
                     if (RawReloadIdentity.Hex(hash.ComputeHash(stream)) != expected)
