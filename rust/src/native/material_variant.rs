@@ -11,7 +11,7 @@ use super::{
     build_settings::{Sources, material_parents},
     importer::NativeProjectImporter,
     inspector::{InspectionOptions, inspect_material_variants, inspection_cache},
-    player_objects::{Build, open_sources, save_materials},
+    player_objects::{Build, save_materials},
     support::Event,
 };
 use crate::{
@@ -100,7 +100,8 @@ impl NativeProjectImporter {
         let refused = |reason: String| {
             anyhow::Error::from(Unsupported(reason)).context(format!("bake native {logical}"))
         };
-        let sources = open_sources(&self.opts.project)
+        let sources = self
+            .project_sources()
             .map_err(|error| refused(format!("material variant {logical}: {error:#}")))?;
         let guid = sources
             .guid_of(logical)

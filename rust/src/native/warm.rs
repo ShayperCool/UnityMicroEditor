@@ -484,7 +484,7 @@ impl NativeProjectImporter {
     /// names by GUID that are not imported yet, so that its importer finds
     /// them as the Editor's does.
     pub(crate) fn import_cold_ui(&mut self, ctx: &Context, logical: &str) -> Result<()> {
-        let sources = super::player_objects::open_sources(&self.opts.project)?;
+        let sources = self.project_sources()?;
         let batch = ui_import_order(
             logical,
             &|path| sources.read(path),

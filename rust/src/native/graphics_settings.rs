@@ -1,11 +1,7 @@
 //! Which entries of a render pipeline's global settings a Player build
 //! keeps, decided by the pipeline's build code in a worker. See
 //! `project::graphics_settings`.
-use super::{
-    importer::NativeProjectImporter,
-    player_objects::{open_sources, player_settings},
-    support::Event,
-};
+use super::{importer::NativeProjectImporter, player_objects::player_settings, support::Event};
 use crate::{
     cancel::Context, playerbake::Unsupported, project::PlayerGraphicsSettings, registry::meta_guid,
 };
@@ -27,7 +23,7 @@ impl NativeProjectImporter {
         logical: &str,
     ) -> Result<()> {
         let started = Instant::now();
-        let sources = open_sources(&self.opts.project)?;
+        let sources = self.project_sources()?;
         let Some(physical) = sources.physical(logical) else {
             return Err(anyhow!("{logical} has no file"));
         };

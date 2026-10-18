@@ -98,6 +98,8 @@ pub struct NativeProjectImporter {
     pub(crate) atlas_batch: BTreeMap<String, Vec<String>>,
     /// What the import of such a source depends on beyond the source itself.
     pub(crate) atlas_identity: BTreeMap<String, String>,
+    /// The index of the project's sources, read once for a pass.
+    sources: std::sync::Mutex<Option<Arc<super::build_settings::Sources>>>,
 }
 
 struct Replay<'a> {
@@ -128,6 +130,7 @@ impl NativeProjectImporter {
             additive_references: BTreeMap::new(),
             atlas_batch: BTreeMap::new(),
             atlas_identity: BTreeMap::new(),
+            sources: Default::default(),
         };
         let read_index = |index: &str| -> Result<Option<Option<Vec<NativeReplacement>>>> {
             match read_json_verbatim(index) {
@@ -317,6 +320,19 @@ impl NativeProjectImporter {
         Ok(())
     }
 
+    /// The project's sources, `Assets` and the packages, as an index: read
+    /// once for a pass of [`Self::prepare`] (and for the replay of the index)
+    /// instead of by every source of a package that is looked up.
+    pub(crate) fn project_sources(&self) -> Result<Arc<super::build_settings::Sources>> {
+        let mut sources = self.sources.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(sources) = &*sources {
+            return Ok(sources.clone());
+        }
+        let opened = Arc::new(super::player_objects::open_sources(&self.opts.project)?);
+        *sources = Some(opened.clone());
+        Ok(opened)
+    }
+
     pub fn entries(&self) -> &BTreeMap<String, NativeReplacement> {
         &self.entries
     }
@@ -335,6 +351,8 @@ impl NativeProjectImporter {
     /// Publishes a revision, importing native content the Session reports as
     /// changed until it resolves.
     pub fn prepare(&mut self, ctx: &Context) -> Result<Prepared> {
+        // A pass sees the sources as they are when it begins.
+        *self.sources.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.require_current_environment()?;
         self.refresh_pending_native(ctx)?;
         let mut attempted = HashSet::new();

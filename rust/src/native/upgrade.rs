@@ -7,7 +7,7 @@
 //! source to load.
 use super::{
     importer::NativeProjectImporter,
-    player_objects::{Build, open_sources, save_sources},
+    player_objects::{Build, save_sources},
     support::Event,
 };
 use crate::{
@@ -32,7 +32,7 @@ impl NativeProjectImporter {
         let refused = |reason: String| {
             anyhow::Error::from(Unsupported(reason)).context(format!("upgrade native {logical}"))
         };
-        let sources = open_sources(&self.opts.project)?;
+        let sources = self.project_sources()?;
         let Some(physical) = sources.physical(logical) else {
             return Err(anyhow!("{logical} has no file"));
         };

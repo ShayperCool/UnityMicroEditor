@@ -8,7 +8,7 @@ use super::{
     import::{IMPORT_BUDGET, run_bounded_import, run_project_import},
     importer::NativeProjectImporter,
     player_objects::{
-        Build, Plan, importer_identity, open_sources, plan_settings, plan_source, plan_source_with,
+        Build, Plan, importer_identity, plan_settings, plan_source, plan_source_with,
         write_player_objects,
     },
     resolve_project_import_source,
@@ -1019,7 +1019,7 @@ impl NativeProjectImporter {
     /// given: one reading of them serves every shader of a pass.
     fn shader_ingredients_in(
         &self,
-        shared: Option<&(Sources, BuildSettings)>,
+        shared: Option<&(std::sync::Arc<Sources>, BuildSettings)>,
         logical: &str,
         guid: &str,
     ) -> Result<ShaderIngredients> {
@@ -1195,7 +1195,7 @@ impl NativeProjectImporter {
         let shared = match shaders.is_empty() || !self.pipeline_project()? {
             true => None,
             false => {
-                let sources = open_sources(&self.opts.project)?;
+                let sources = self.project_sources()?;
                 let settings = plan_settings(&sources, &self.reload_list())?;
                 Some((sources, settings))
             }
@@ -1228,14 +1228,12 @@ impl NativeProjectImporter {
         if !logical.starts_with("Packages/") {
             return resolve_project_import_source(&self.opts.project, logical);
         }
-        open_sources(&self.opts.project)?
-            .physical(logical)
-            .ok_or_else(|| {
-                Unsupported(format!(
-                    "{logical}, which lies in a package outside the project"
-                ))
-                .into()
-            })
+        self.project_sources()?.physical(logical).ok_or_else(|| {
+            Unsupported(format!(
+                "{logical}, which lies in a package outside the project"
+            ))
+            .into()
+        })
     }
 
     /// Builds the shaders of packages that materials of the scene name, in a
@@ -1316,7 +1314,7 @@ impl NativeProjectImporter {
 
     fn built_plan_in(
         &self,
-        shared: Option<&(Sources, BuildSettings)>,
+        shared: Option<&(std::sync::Arc<Sources>, BuildSettings)>,
         logical: &str,
         guid: &str,
     ) -> Result<(Vec<String>, Plan)> {
@@ -1349,7 +1347,7 @@ impl NativeProjectImporter {
                 &users,
             )?,
             None => plan_source(
-                &open_sources(&self.opts.project)?,
+                &*self.project_sources()?,
                 &self.opts.project,
                 &self.opts.editor,
                 &self.reload_list(),
@@ -1661,7 +1659,7 @@ impl NativeProjectImporter {
     pub(super) fn pipeline_shader_sources(&self) -> Result<Vec<(String, String)>> {
         static GUID: std::sync::LazyLock<regex::bytes::Regex> =
             std::sync::LazyLock::new(|| regex::bytes::Regex::new(r"guid: ([0-9a-f]{32})").unwrap());
-        let sources = open_sources(&self.opts.project)?;
+        let sources = self.project_sources()?;
         let mut pending: Vec<String> = Vec::new();
         for settings in &SHADER_SETTINGS[..2] {
             match resolve_project_import_source(&self.opts.project, settings) {
