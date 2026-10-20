@@ -823,3 +823,262 @@ pub fn rss_kib(pid: i64) -> i64 {
     }
     0
 }
+
+/// A worker that lives on between imports over one context: it is started
+/// once, imports what it is asked as often as it is asked, and stops when
+/// it is stopped or dropped. Each accepted import is recorded in the
+/// context's ArtifactDB at once, so a later import loads it.
+pub(crate) struct WarmWorker {
+    lifetime: Context,
+    project: String,
+    output: String,
+    service: DataStoreService,
+    connection: Connection,
+    worker: Waiter,
+    prepare: Vec<u8>,
+    _watcher: Watcher,
+    requests: usize,
+}
+
+impl WarmWorker {
+    /// Starts the DataStore service and a worker over `opts.context`.
+    pub(crate) fn start(opts: &ProbeOptions) -> Result<Self> {
+        let lifetime = Context::background().with_cancel();
+        let output = abs(&opts.output)?;
+        let logs = sysutil::join(&[&output, "logs"]);
+        mkdir_all(&logs, 0o700)?;
+        let project = opts.context.clone();
+        let (initialize, prepare) = match read_worker_environment(&project) {
+            Ok(environment) => (environment.message(16), environment.message(17)),
+            Err(error) if is_not_exist(&error) => (initialize(24), prepare(24)),
+            Err(error) => return Err(error),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|e| anyhow!("listen tcp 127.0.0.1:0: {}", sysutil::errno_text(&e)))?;
+        let listener = Arc::new(listener);
+        let mut service = DataStoreService::new(&opts.editor, &project, &logs);
+        service.start(&lifetime)?;
+        let started = Self::spawn(opts, &project, &logs, &listener, &service);
+        let (worker, stdout) = match started {
+            Ok(started) => started,
+            Err(error) => {
+                let _ = service.stop();
+                return Err(error);
+            }
+        };
+        drop(stdout);
+        let startup = lifetime.with_timeout(Duration::from_secs(120));
+        let accepted = {
+            let _watcher = Watcher::new(&startup, &listener);
+            listener.accept()
+        };
+        let (stream, peer) = match accepted {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                let _ = worker.signal_group(libc::SIGKILL);
+                let _ = service.stop();
+                bail!("worker connection: accept: {}", sysutil::errno_text(&error));
+            }
+        };
+        let watcher = Watcher::new(&lifetime, &listener);
+        watcher
+            .attach(&stream)
+            .map_err(|e| anyhow!("{}", sysutil::errno_text(&e)))?;
+        let mut warm = Self {
+            lifetime: lifetime.clone(),
+            project,
+            output: output.clone(),
+            service,
+            connection: Connection {
+                stream,
+                ctx: startup,
+                route: format!("worker->{peer}"),
+                final_write: None,
+            },
+            worker,
+            prepare,
+            _watcher: watcher,
+            requests: 0,
+        };
+        let log = sysutil::join(&[&logs, "worker.log"]);
+        if let Err(error) = warm.handshake(&initialize, &log) {
+            warm.stop();
+            return Err(error);
+        }
+        Ok(warm)
+    }
+
+    fn spawn(
+        opts: &ProbeOptions,
+        project: &str,
+        logs: &str,
+        listener: &TcpListener,
+        service: &DataStoreService,
+    ) -> Result<(Waiter, File)> {
+        let log = sysutil::join(&[logs, "worker.log"]);
+        let stdout = create_new(&sysutil::join(&[logs, "worker-stdout.log"]), 0o600)?;
+        let port = listener
+            .local_addr()
+            .map_err(|e| anyhow!("{}", sysutil::errno_text(&e)))?
+            .port();
+        let mut command = Command::new(&opts.editor);
+        command
+            .args([
+                "-adb2",
+                "-batchMode",
+                "-noUpm",
+                "-name",
+                "AssetImportWorkerWarm",
+                "-projectPath",
+                project,
+                "-logFile",
+                &log,
+                "-srvPort",
+                &port.to_string(),
+                "-parentPid",
+                &std::process::id().to_string(),
+                "-job-worker-count",
+                &opts.job_workers.max(2).to_string(),
+                "-background-job-worker-count",
+                "2",
+                "-nographics",
+                "-noDiagnosticSwitchPersistentStore",
+            ])
+            .args(service.worker_arguments())
+            .current_dir(project)
+            .stdin(Stdio::null())
+            .stdout(stdout.try_clone()?)
+            .stderr(stdout.try_clone()?)
+            .process_group(0);
+        let child = command.spawn().map_err(|error| {
+            anyhow!("fork/exec {}: {}", opts.editor, sysutil::errno_text(&error))
+        })?;
+        Ok((Waiter::new(child), stdout))
+    }
+
+    /// A report that holds the evidence of one request.
+    fn evidence(&self) -> ProbeReport {
+        ProbeReport {
+            schema_version: 1,
+            max_frames: 65536,
+            max_frame_bytes: 128 * 1024 * 1024,
+            ..Default::default()
+        }
+    }
+
+    fn frames(&self) -> Result<String> {
+        let directory = sysutil::join(&[&self.output, &format!("request-{}", self.requests)]);
+        mkdir_all(&directory, 0o700)?;
+        Ok(directory)
+    }
+
+    fn handshake(&mut self, initialize: &[u8], log: &str) -> Result<()> {
+        let mut report = self.evidence();
+        let frames = self.frames()?;
+        let frame = read_frame(&mut self.connection)?;
+        validate_handshake(&frame)?;
+        write_frame(&mut self.connection, &handshake())?;
+        let frame = capture_frame(&mut self.connection, &frames, &mut report)?;
+        worker_hello(&frame.payload)?;
+        validate_worker_version(log)?;
+        write_frame(
+            &mut self.connection,
+            &Frame {
+                kind: 1,
+                payload: initialize.to_vec(),
+            },
+        )?;
+        let frame = receive_message(&mut self.connection, &frames, &mut report, WORKER_PREPARED)?;
+        if frame.payload.len() != 1 || frame.payload[0] != WORKER_PREPARED {
+            bail!("unexpected initialization reply type {}", frame.payload[0]);
+        }
+        Ok(())
+    }
+
+    /// Whether the worker still runs.
+    pub(crate) fn alive(&self) -> bool {
+        !self.worker.finished() && self.lifetime.error().is_none()
+    }
+
+    /// The context the worker imports from.
+    pub(crate) fn project(&self) -> &str {
+        &self.project
+    }
+
+    /// Imports `jobs` in order, within `ctx`'s deadline, and records each
+    /// result in the context's ArtifactDB.
+    pub(crate) fn import(&mut self, ctx: &Context, jobs: &[NativeImportJob]) -> Result<usize> {
+        self.requests += 1;
+        let frames = self.frames()?;
+        let mut report = self.evidence();
+        let deadline = ctx.remaining();
+        self.connection.ctx = match deadline {
+            Some(left) => self.lifetime.with_timeout(left),
+            None => self.lifetime.clone(),
+        };
+        let application = |payload: &[u8]| Frame {
+            kind: 1,
+            payload: payload.to_vec(),
+        };
+        for job in jobs {
+            write_frame(&mut self.connection, &application(&self.prepare))?;
+            let frame =
+                receive_message(&mut self.connection, &frames, &mut report, WORKER_PREPARED)?;
+            if frame.payload.len() != 1 || frame.payload[0] != WORKER_PREPARED {
+                bail!("worker did not prepare next import");
+            }
+            let address = import_address(&job.guid, job.importer, [0; 16])?;
+            write_frame(
+                &mut self.connection,
+                &application(&import_request(&address, 0)),
+            )?;
+            let frame =
+                receive_message(&mut self.connection, &frames, &mut report, IMPORT_RESPONSE)?;
+            let response = import_response(&frame.payload)?;
+            if response.address != address {
+                bail!("import response address differs from request");
+            }
+            if response.consistency_failure_count != 0 {
+                bail!("native importer reported consistency failures");
+            }
+            if response.error_code != 0 {
+                bail!(
+                    "native importer error {}: {}",
+                    response.error_code,
+                    response.error_message
+                );
+            }
+            if response.result_id == "0".repeat(32) {
+                bail!("native importer did not return an artifact identity");
+            }
+            super::artifactdb::publish(&self.project, &response)?;
+        }
+        Ok(jobs.len())
+    }
+
+    /// Asks the worker to stop, then stops the DataStore service.
+    pub(crate) fn stop(&mut self) {
+        if self.worker.finished() && self.lifetime.error().is_some() {
+            return;
+        }
+        self.connection.final_write = Some(Duration::from_secs(1));
+        if let Ok(payload) = shutdown("warm worker idle") {
+            let _ = write_frame(&mut self.connection, &Frame { kind: 1, payload });
+        }
+        if !self.worker.done.wait(Some(Duration::from_secs(15))) {
+            let _ = self.worker.signal_group(libc::SIGTERM);
+            if !self.worker.done.wait(Some(Duration::from_secs(2))) {
+                let _ = self.worker.signal_group(libc::SIGKILL);
+                self.worker.done.wait(Some(Duration::from_secs(2)));
+            }
+        }
+        self.lifetime.cancel();
+        let _ = self.service.stop();
+    }
+}
+
+impl Drop for WarmWorker {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}

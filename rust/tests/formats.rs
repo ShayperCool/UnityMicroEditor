@@ -406,6 +406,52 @@ fn registry_preserves_metadata_and_refuses_replacement() {
     assert_eq!(std::fs::read(report.database).unwrap(), data);
 }
 #[test]
+fn registry_records_a_changed_source_of_a_live_context_in_place() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("Temp/context");
+    std::fs::create_dir_all(project.join("Library")).unwrap();
+    std::fs::create_dir_all(project.join("Assets/Data")).unwrap();
+    std::fs::write(project.join("Assets/Data/A.asset"), "one\n").unwrap();
+    std::fs::write(
+        project.join("Assets/Data/A.asset.meta"),
+        "fileFormatVersion: 2\nguid: 0123456789abcdef0123456789abcdef\n",
+    )
+    .unwrap();
+    let report = registry::write(registry::Input {
+        project: project.clone(),
+        unity_version: String::new(),
+        assets: vec![registry::Asset {
+            path: "Assets/Data/A.asset".into(),
+            source: String::new(),
+            meta: String::new(),
+            guid: String::new(),
+            directory: false,
+            script: false,
+        }],
+        roots: Default::default(),
+        singletons: Default::default(),
+    })
+    .unwrap();
+    let record = |data: &[u8]| {
+        let image = Image::open(data).unwrap();
+        image
+            .table("hash")
+            .unwrap()
+            .iter()
+            .find(|record| record.key == b"assets/data/a.asset\0")
+            .unwrap()
+            .value
+            .clone()
+    };
+    let before = record(&std::fs::read(&report.database).unwrap());
+    std::fs::write(project.join("Assets/Data/A.asset"), "two, longer\n").unwrap();
+    registry::update_source(project.to_str().unwrap(), "Assets/Data/A.asset").unwrap();
+    let after = record(&std::fs::read(&report.database).unwrap());
+    assert_ne!(before[..16], after[..16]);
+    assert_eq!(u64::from_le_bytes(after[24..32].try_into().unwrap()), 12);
+    assert!(registry::update_source(project.to_str().unwrap(), "Assets/Data/B.asset").is_err());
+}
+#[test]
 fn registry_records_importer_scripts_package_roots_and_singletons() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("Temp/context");

@@ -368,20 +368,18 @@ pub fn run_build_import(
     import(ctx, opts, assets, &ImportExtras::default(), Some(build))
 }
 
-fn import(
+/// Creates the import context of a run and the options its worker is
+/// started with: the context, its source registry and the import jobs.
+fn prepare_run(
     ctx: &Context,
     mut opts: ProbeOptions,
     assets: &[String],
     extras: &ImportExtras,
     build: Option<&BuildImport<'_>>,
-) -> (Option<ProbeReport>, Option<anyhow::Error>) {
-    let started = Instant::now();
+) -> Result<(ProbeOptions, ProjectImportContext)> {
     let scripts = match build {
         Some(build) => Some(build.environment.clone()),
-        None => match importer_environment(&opts.project, assets, extras) {
-            Ok(scripts) => scripts,
-            Err(error) => return (None, Some(error)),
-        },
+        None => importer_environment(&opts.project, assets, extras)?,
     };
     let (prepared, created) = match build {
         Some(build) => create_build_import_context(
@@ -402,14 +400,12 @@ fn import(
             &extras.context,
         ),
     };
-    if let Err(error) = created {
-        return (None, Some(error));
-    }
+    created?;
     // A build of Player objects, as opposed to a run that only loads what
     // it imports.
     let player = build.is_some_and(|build| build.extras.is_none());
-    if player && let Err(error) = stage_importer(ctx, &opts.editor, &prepared.project) {
-        return (None, Some(error));
+    if player {
+        stage_importer(ctx, &opts.editor, &prepared.project)?;
     }
     // UI Toolkit's importers load the style sheets a source imports, which
     // the worker finds only among the imports recorded before.
@@ -442,29 +438,23 @@ fn import(
     if assets.iter().any(|asset| lower_ext(asset) == ".blend")
         && let Err(error) = super::scripted::require_blender()
     {
-        return (None, Some(error));
+        return Err(error);
     }
     if assets
         .iter()
         .any(|asset| generated_material_profile(&lower_ext(asset)))
     {
-        match shader_name_registry(&opts.project) {
-            Ok(table) => input
-                .singletons
-                .insert("Library/ScriptMapper".into(), table),
-            Err(error) => return (None, Some(error)),
-        };
+        let table = shader_name_registry(&opts.project)?;
+        input
+            .singletons
+            .insert("Library/ScriptMapper".into(), table);
     }
     // As the main Editor does, so that an importer may add objects of the
     // engine's script classes.
-    match super::scripted::script_register(&opts.editor) {
-        Ok(register) => {
-            input
-                .singletons
-                .insert("Library/MonoManager.asset".into(), register.to_vec());
-        }
-        Err(error) => return (None, Some(error)),
-    }
+    let register = super::scripted::script_register(&opts.editor)?;
+    input
+        .singletons
+        .insert("Library/MonoManager.asset".into(), register.to_vec());
     if player {
         // The worker reads these managers from the database, as text. With
         // them it has the project's colour space, its quality levels and
@@ -485,7 +475,7 @@ fn import(
                         .insert(format!("ProjectSettings/{name}"), data);
                 }
                 Err(error) if super::is_not_exist(&error) => {}
-                Err(error) => return (None, Some(error)),
+                Err(error) => return Err(error),
             }
         }
     }
@@ -519,13 +509,36 @@ fn import(
             script: true,
         });
     }
-    let registry = match registry::write(input) {
-        Ok(registry) => registry,
-        Err(error) => return (None, Some(error)),
-    };
+    let registry = registry::write(input)?;
     opts.context = prepared.project.clone();
     opts.registry = Some(registry);
     opts.project_context = Some(prepared.clone());
+    Ok((opts, prepared))
+}
+
+/// Prepares the context of a build of Player objects and the options of a
+/// worker that imports it, without starting the worker.
+pub(crate) fn prepare_build_run(
+    ctx: &Context,
+    opts: ProbeOptions,
+    assets: &[String],
+    build: &BuildImport<'_>,
+) -> Result<(ProbeOptions, ProjectImportContext)> {
+    prepare_run(ctx, opts, assets, &ImportExtras::default(), Some(build))
+}
+
+fn import(
+    ctx: &Context,
+    opts: ProbeOptions,
+    assets: &[String],
+    extras: &ImportExtras,
+    build: Option<&BuildImport<'_>>,
+) -> (Option<ProbeReport>, Option<anyhow::Error>) {
+    let started = Instant::now();
+    let (opts, prepared) = match prepare_run(ctx, opts, assets, extras, build) {
+        Ok(prepared) => prepared,
+        Err(error) => return (None, Some(error)),
+    };
     let output = opts.output.clone();
     let preparation = started.elapsed().as_secs_f64();
     let (report, error) = run_probe(ctx, opts);

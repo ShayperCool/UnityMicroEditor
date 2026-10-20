@@ -786,7 +786,7 @@ pub fn graph_sources(sources: &Sources, target: &str) -> Result<Vec<String>> {
     Ok(order)
 }
 
-fn job_workers() -> usize {
+pub(super) fn job_workers() -> usize {
     std::thread::available_parallelism().map_or(2, |count| count.get().clamp(2, 32))
 }
 
@@ -1267,7 +1267,7 @@ pub fn write_generated_objects(
 
 /// The assets a scene refers to, each after what it refers to in turn, the
 /// scene last. Scripts are not among them: their assemblies are loaded.
-fn scene_closure(sources: &Sources, scene: &str) -> Result<Vec<String>> {
+pub(super) fn scene_closure(sources: &Sources, scene: &str) -> Result<Vec<String>> {
     static GUID: std::sync::LazyLock<regex::bytes::Regex> =
         std::sync::LazyLock::new(|| regex::bytes::Regex::new(r"guid: ([0-9a-fA-F]{32})").unwrap());
     fn visit(

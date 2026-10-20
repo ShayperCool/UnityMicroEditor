@@ -6,7 +6,7 @@
 use super::{
     built_store,
     importer::NativeProjectImporter,
-    player_objects::{Build, importer_identity, write_scene_objects},
+    player_objects::{Build, importer_identity},
     support::{Event, mkdir_all},
 };
 use crate::{
@@ -148,7 +148,10 @@ impl NativeProjectImporter {
             reload_list: String::new(),
             shader_cache: String::new(),
         };
-        let written = write_scene_objects(ctx, &build, true)?;
+        let written = self
+            .scene_worker
+            .get_or_init(Default::default)
+            .write(ctx, &build)?;
         let Some(dependencies) = written.dependencies else {
             bail!("the worker wrote nothing the scene refers to");
         };

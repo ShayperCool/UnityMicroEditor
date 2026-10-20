@@ -19,6 +19,7 @@
 //   settings <asset path> a render pipeline's global settings, whose entries a Player build keeps or strips is
 //                        reported as "settings kept|stripped <managed reference ID> <type> <path>". A request
 //                        that only asks this writes no Player objects.
+//   revision <n>         ignored: a request kept by a worker that lives on is changed so that it is imported again
 //   scene <asset path>   a scene, written as a build writes it: prefab instances unpacked, EditorOnly objects
 //                        left out, with the scene's settings managers. A request that writes a scene writes
 //                        nothing else.
@@ -409,6 +410,8 @@ namespace UnityMicroEditor.Worker
             ctx.SetOutputArtifactFile("player", output);
             if (withDependencies) ctx.SetOutputArtifactFile("deps", Path.Combine(directory, "deps"));
             report.Append("done\n");
+            // A worker that lives on is read beside its artifacts.
+            File.WriteAllText(Path.Combine(directory, "report.txt"), report.ToString());
         }
 
         static void Write(AssetImportContext ctx, StringBuilder report)
@@ -449,6 +452,7 @@ namespace UnityMicroEditor.Worker
                         Identifiers(ctx, value, report, "settings-source");
                         settings.Add(value);
                         break;
+                    case "revision": break;
                     case "scene":
                     case "scene-with-dependencies":
                         ctx.DependsOnSourceAsset(value);

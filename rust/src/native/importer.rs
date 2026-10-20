@@ -103,6 +103,9 @@ pub struct NativeProjectImporter {
     /// Whether a pass has run. Only the first takes a remembered revision:
     /// a later one follows edits that only the walk of the sources sees.
     pub(crate) prepared_once: bool,
+    /// The worker that writes scenes in the Player format, started when
+    /// one is first written.
+    pub(crate) scene_worker: std::sync::OnceLock<super::scene_worker::SceneWorker>,
 }
 
 /// What a published revision was made of; see `unchanged_revision`.
@@ -154,6 +157,7 @@ impl NativeProjectImporter {
             atlas_identity: BTreeMap::new(),
             sources: Default::default(),
             prepared_once: false,
+            scene_worker: std::sync::OnceLock::new(),
         };
         let read_index = |index: &str| -> Result<Option<Option<Vec<NativeReplacement>>>> {
             match read_json_verbatim(index) {

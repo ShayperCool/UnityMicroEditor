@@ -26,6 +26,7 @@ mod native_template;
 mod pipeline_models;
 mod player_objects;
 mod probe;
+mod scene_worker;
 mod scripted;
 mod shader_cache;
 mod shader_compiler;

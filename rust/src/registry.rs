@@ -611,6 +611,36 @@ pub fn publish_new(path: &Path, data: &[u8]) -> Result<()> {
     cleanup?;
     Ok(())
 }
+/// Records the content a source of a live context has now in the context's
+/// SourceAssetDB, in place, as the Editor does when it sees a file change:
+/// a worker refuses to import a file whose time or size differs from its
+/// record. `logical` is the source's path in the project.
+pub fn update_source(project: &str, logical: &str) -> Result<()> {
+    let physical = Path::new(project).join(logical);
+    let mut buffer = vec![0u8; 128 * 1024];
+    let digest = hash_file(&physical, 1 << 30, &mut buffer)?;
+    let key = format!("{}\0", logical.to_lowercase()).into_bytes();
+    let database = format!("{project}/Library/SourceAssetDB");
+    lmdb::commit(&database, |tables| {
+        let table = tables
+            .get_mut("hash")
+            .context("SourceAssetDB has no hash table")?;
+        let record = table
+            .iter_mut()
+            .find(|record| record.key == key)
+            .with_context(|| format!("SourceAssetDB has no record of {logical}"))?;
+        ensure!(
+            record.value.len() >= 32,
+            "SourceAssetDB record of {logical} is short"
+        );
+        record.value[..16].copy_from_slice(&digest.hash);
+        put_u64(&mut record.value, 16, digest.ticks);
+        put_u64(&mut record.value, 24, digest.size);
+        Ok(())
+    })?;
+    Ok(())
+}
+
 pub fn write(input: Input) -> Result<Report> {
     let version = if input.unity_version.is_empty() {
         ENGINE_VERSION
