@@ -69,6 +69,11 @@ pub struct Request {
     /// Render pipeline global settings whose entries a Player build keeps
     /// are reported.
     pub settings: Vec<String>,
+    /// The scene written as a build writes it; a request that names one
+    /// writes nothing else.
+    pub scenes: Vec<String>,
+    /// A scene written with what it refers to in a file beside it.
+    pub scenes_with_dependencies: Vec<String>,
 }
 
 impl Request {
@@ -84,6 +89,8 @@ impl Request {
             ("embed", &self.embed),
             ("save", &self.save),
             ("settings", &self.settings),
+            ("scene", &self.scenes),
+            ("scene-with-dependencies", &self.scenes_with_dependencies),
         ] {
             for path in paths {
                 if path.contains(['\n', '\r']) {
@@ -597,6 +604,8 @@ pub fn plan(
             .collect(),
         save: Vec::new(),
         settings: Vec::new(),
+        scenes: Vec::new(),
+        scenes_with_dependencies: Vec::new(),
     };
     if plan.batch.len() >= 4000 {
         bail!(Unsupported(format!(
@@ -790,6 +799,19 @@ fn run(
     templates: &[String],
 ) -> Result<Run> {
     let environment = build_environment(&build.project, scripts)?;
+    run_in(ctx, build, output, batch, &environment, files, templates)
+}
+
+/// One worker run over a batch with the given compiled code.
+fn run_in(
+    ctx: &Context,
+    build: &Build,
+    output: &str,
+    batch: &[String],
+    environment: &super::scripted::ScriptEnvironment,
+    files: &BuildFiles,
+    templates: &[String],
+) -> Result<Run> {
     // A graph in the batch is written out from the templates of its
     // targets, which its importer reads as plain files.
     let mut files = files.clone();
@@ -813,7 +835,7 @@ fn run(
         },
         batch,
         &BuildImport {
-            environment: &environment,
+            environment,
             files,
             shader_cache: &build.shader_cache,
             extras: None,
@@ -1234,6 +1256,138 @@ pub fn write_generated_objects(
     })
 }
 
+/// The assets a scene refers to, each after what it refers to in turn, the
+/// scene last. Scripts are not among them: their assemblies are loaded.
+fn scene_closure(sources: &Sources, scene: &str) -> Result<Vec<String>> {
+    static GUID: std::sync::LazyLock<regex::bytes::Regex> =
+        std::sync::LazyLock::new(|| regex::bytes::Regex::new(r"guid: ([0-9a-fA-F]{32})").unwrap());
+    fn visit(
+        sources: &Sources,
+        path: &str,
+        seen: &mut BTreeSet<String>,
+        order: &mut Vec<String>,
+    ) -> Result<()> {
+        if !seen.insert(path.to_string()) {
+            return Ok(());
+        }
+        let Some(physical) = sources.physical(path) else {
+            bail!(Unsupported(format!(
+                "a scene that refers to {path}, which lies in a package outside the project"
+            )));
+        };
+        if stat(&physical)?.is_dir() {
+            return Ok(());
+        }
+        let data = read_file(&physical)?;
+        if data.starts_with(b"%YAML") {
+            for capture in GUID.captures_iter(&data) {
+                let guid = String::from_utf8_lossy(&capture[1]).to_ascii_lowercase();
+                let Some(target) = sources.path_of(&guid) else {
+                    continue;
+                };
+                if lower_ext(target) == ".cs" {
+                    continue;
+                }
+                let target = target.to_string();
+                visit(sources, &target, seen, order)?;
+            }
+        }
+        order.push(path.to_string());
+        Ok(())
+    }
+    let (mut seen, mut order) = (BTreeSet::new(), Vec::new());
+    visit(sources, scene, &mut seen, &mut order)?;
+    Ok(order)
+}
+
+/// Has the Editor's build code write a scene as a build writes it, in a
+/// standalone worker that imports the scene and everything it refers to,
+/// with every assembly of the project's Editor compilation loaded.
+pub fn write_scene_objects(
+    ctx: &Context,
+    build: &Build,
+    with_dependencies: bool,
+) -> Result<PlayerObjects> {
+    let started = Instant::now();
+    let sources = open_sources(&build.project)?;
+    mkdir_all(&build.output, 0o700)?;
+    let settings = build_settings(&sources, &[])?;
+    let mut batch = Vec::new();
+    for path in settings
+        .batch
+        .iter()
+        .cloned()
+        .chain(scene_closure(&sources, &build.target)?)
+    {
+        if !batch.contains(&path) {
+            batch.push(path);
+        }
+    }
+    let scenes = vec![build.target.clone()];
+    let request = if with_dependencies {
+        Request {
+            scenes_with_dependencies: scenes,
+            ..Default::default()
+        }
+    } else {
+        Request {
+            scenes,
+            ..Default::default()
+        }
+    }
+    .encode()?;
+    let identity = sha256(format!("{}\0{request}", importer_identity()).as_bytes());
+    let files = BuildFiles {
+        generated: BTreeMap::from([(
+            REQUEST_PATH.to_string(),
+            (
+                request.into_bytes(),
+                format!("fileFormatVersion: 2\nguid: {}\n", &identity[..32]).into_bytes(),
+            ),
+        )]),
+        files: Vec::new(),
+    };
+    batch.push(REQUEST_PATH.to_string());
+    let environment = super::scripted::scene_environment(&build.project)?;
+    let output = sysutil::join(&[&build.output, "build-0"]);
+    let run = run_in(ctx, build, &output, &batch, &environment, &files, &[])?;
+    let file = |name: &str| {
+        run.files
+            .iter()
+            .find(|(file, _)| file == name)
+            .map(|(_, data)| data.as_slice())
+    };
+    let Some(primary) = file("") else {
+        bail!("the worker's build left no report");
+    };
+    let report = read_report(primary)?;
+    let Some(player) = file(PLAYER_FILE) else {
+        bail!("the worker's build left no file");
+    };
+    let (objects, names) = read_serialized_with_externals(player)?;
+    let mut externals = Vec::with_capacity(names.len());
+    let mut external_paths = BTreeMap::new();
+    for name in names.iter().filter(|_| !with_dependencies) {
+        let Some(known) = report.externals.iter().find(|known| known.file == *name) else {
+            bail!("the written scene refers to {name}, which the build's report does not list");
+        };
+        if let Some(path) = sources.path_of(&known.guid) {
+            external_paths.insert(known.guid.clone(), path.to_string());
+        }
+        externals.push(known.clone());
+    }
+    Ok(PlayerObjects {
+        objects,
+        externals,
+        external_paths,
+        report,
+        ingredients: BTreeMap::new(),
+        imports: run.imports,
+        seconds: started.elapsed().as_secs_f64(),
+        database_seconds: run.database_seconds,
+    })
+}
+
 /// Has a worker load materials as the engine does, which upgrades an older
 /// serialization, and returns each as the Editor writes it as text.
 /// `build.target` is the shader source the materials of `build.users` use,
@@ -1387,10 +1541,12 @@ mod tests {
             only: "UnityEngine.Shader".into(),
             save: Vec::new(),
             settings: vec!["Assets/Settings/Global.asset".into()],
+            scenes: vec!["Assets/S.unity".into()],
+            scenes_with_dependencies: Vec::new(),
         };
         assert_eq!(
             request.encode().unwrap(),
-            "only UnityEngine.Shader\nneed Assets/Settings/Pipeline.asset\nuse Assets/M.mat\nwrite Assets/A.shader\nembed Packages/p/F.shader\nsettings Assets/Settings/Global.asset\n"
+            "only UnityEngine.Shader\nneed Assets/Settings/Pipeline.asset\nuse Assets/M.mat\nwrite Assets/A.shader\nembed Packages/p/F.shader\nsettings Assets/Settings/Global.asset\nscene Assets/S.unity\n"
         );
         let broken = Request {
             write: vec!["Assets/A\n.shader".into()],

@@ -700,6 +700,24 @@ Limits:
 - The templated components come first on the GameObject, after its Transform, and the adapted ones follow. `GetComponents` can therefore list them in another order than the authored one.
 - A template is a copy of the authored fields. A component that reads its scene in `Awake` or `OnEnable` sees the GameObject as the loader has built it by then, as it does for adapted components.
 
+## Scenes in the Player format (probe)
+
+A standalone worker can write a whole scene as a build writes it. No session uses this yet; it is the ground for loading scenes with the engine's own loader instead of the raw loader. The hidden command runs it:
+
+```bash
+unity-micro-editor scene-objects --project /absolute/project --editor /path/to/Unity \
+  --scene Assets/Scenes/S.unity --output /absolute/project/Library/UnityMicroEditor/scene-probe/1 \
+  [--with-dependencies 1]
+```
+
+- The coordinator imports the scene, everything it refers to (prefabs, materials, textures, scriptable objects, transitively) and what a build of the project reads, in one worker run. Every assembly of the project's Editor compilation that the project or an immutable package compiles is loaded, with the assemblies those refer to, so the scene's scripts have their classes.
+- The request's `scene` statement has the worker call `ContentBuildInterface.CalculatePlayerDependenciesForScene` and `WriteSceneSerializedFile`. The engine opens the scene from its source, unpacks its prefab instances, leaves out EditorOnly objects and writes the scene's objects with its settings managers. Each object of another file it refers to is named by an external file of its own, as for written assets. The Editor drops the extension of a scene file's name, so the file is named `scene`.
+- `scene-with-dependencies` also writes what the scene refers to, but the engine's own resources, into a file `deps` beside it (scripts first), and the scene then refers to `deps` and `Library/unity default resources`. Both stay in the worker's `project/Temp/ume-player-<guid>`; the coordinator does not read the scene's objects back yet, since its reader refuses script types from another file.
+
+Verified on 2026-10-20 on a copy of `Samples/RawProject` with the AI module (`Temp/e2e/nav`): one worker run took 6 to 7 s, of which the dependencies took 15 ms and the scene 9 ms. The scene holds 22 objects (5 GameObjects with their Transforms, a camera, a light, a renderer, a box collider, a `NavMeshObstacle`, a `NavMeshAgent`, two behaviours, the render, lightmap and NavMesh settings), the prefab instance unpacked. A Player built from a scratch project with the sample's scripts loaded `deps` with `ContentLoadInterface.LoadContentFileAsync` and the scene with `ContentLoadInterface.LoadSceneAsync` (dependencies `deps` and `ContentFile.GlobalTableDependency`) in 47 ms with integration. The sample's `Awake` checks passed, and its proof lines reported the authored material color, texture, prefab override, camera background, asset names and the obstacle's and agent's fields.
+
+Not done: the session's host Player does not load such a scene, the scene's references do not lead to the content a session publishes, the worker is started per run, and `typeDB` (the Player compilation of the scripts) is not given to the write: whether a script's fields under `#if UNITY_EDITOR` are then left out as a build leaves them out is not checked.
+
 ## What a session lacks
 
 A session that lacks an import goes on through the rest of its closure and

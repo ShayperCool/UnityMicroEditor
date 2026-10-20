@@ -349,6 +349,9 @@ pub struct ScriptSelection {
     /// writes the serialized data of; their assemblies are loaded, those of
     /// the project too.
     pub elements: BTreeSet<String>,
+    /// Whether every assembly the compilation left behind is loaded, those
+    /// of the project too: the classes of a scene's scripts.
+    pub all: bool,
 }
 
 /// The full names of the custom elements a UXML document creates: each tag
@@ -444,6 +447,16 @@ pub fn selected_environment(
 pub fn build_environment(project: &str, scripts: &BTreeSet<String>) -> Result<ScriptEnvironment> {
     let selection = ScriptSelection {
         scripts: scripts.clone(),
+        ..Default::default()
+    };
+    environment(project, &selection, Purpose::Build)
+}
+
+/// The environment in which a scene is written: every assembly of the
+/// project's Editor compilation, so that the classes of its scripts load.
+pub fn scene_environment(project: &str) -> Result<ScriptEnvironment> {
+    let selection = ScriptSelection {
+        all: true,
         ..Default::default()
     };
     environment(project, &selection, Purpose::Build)
@@ -669,6 +682,28 @@ fn read_environment(
             if selected.contains(&index) || assembly.name.contains(['/', '\\', '\0']) {
                 continue;
             }
+            if selection.all {
+                // A package the project holds in place can change under a
+                // compilation; only the project's own scripts and
+                // immutable packages are taken.
+                let placed = assembly.source_files.iter().all(|source| {
+                    source.starts_with("Assets/")
+                        || package_root(source)
+                            .and_then(|root| packages.get(root))
+                            .is_some_and(|directory| directory.starts_with("Library/PackageCache/"))
+                });
+                if placed
+                    && stat(&sysutil::join(&[
+                        &library,
+                        "Library/ScriptAssemblies",
+                        &format!("{}.dll", assembly.name),
+                    ]))
+                    .is_ok()
+                {
+                    selected.insert(index);
+                }
+                continue;
+            }
             // An assembly the compilation lists but did not leave behind
             // defines nothing a worker could load.
             let Ok(code) = read_file(&sysutil::join(&[
@@ -758,10 +793,15 @@ fn read_environment(
             });
             // The elements of a document may be the project's own.
             if directory.is_none()
-                && !selection.elements.is_empty()
+                && (!selection.elements.is_empty() || selection.all)
                 && source.starts_with("Assets/")
             {
                 scripts.insert(source.clone());
+                continue;
+            }
+            // A scene's scripts may refer to an assembly of a package held
+            // in place: it is loaded, its sources are no assets here.
+            if directory.is_none() && selection.all {
                 continue;
             }
             let Some((root, directory)) = directory else {

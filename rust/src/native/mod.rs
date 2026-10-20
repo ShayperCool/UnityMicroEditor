@@ -65,7 +65,7 @@ pub use player_objects::{
     Build as PlayerBuild, ExternalObject as PlayerExternalObject, Plan as PlayerBuildPlan,
     PlayerObjects, Report as PlayerObjectReport, Request as PlayerObjectRequest,
     importer_identity as player_importer_identity, open_sources as open_build_sources,
-    plan_source as plan_player_build, write_player_objects,
+    plan_source as plan_player_build, write_player_objects, write_scene_objects,
 };
 pub use probe::{
     FrameEvidence, ImportEvidence, NativeImportJob, ProbeOptions, ProbeReport, capture_frame,

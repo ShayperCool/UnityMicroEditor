@@ -19,6 +19,9 @@
 //   settings <asset path> a render pipeline's global settings, whose entries a Player build keeps or strips is
 //                        reported as "settings kept|stripped <managed reference ID> <type> <path>". A request
 //                        that only asks this writes no Player objects.
+//   scene <asset path>   a scene, written as a build writes it: prefab instances unpacked, EditorOnly objects
+//                        left out, with the scene's settings managers. A request that writes a scene writes
+//                        nothing else.
 // The artifact holds the serialized file under the extension "player" and a
 // report (the main object, a TextAsset) that lists what the file refers to.
 // Every object keeps the local ID it has in its asset, in the written file
@@ -326,6 +329,87 @@ namespace UnityMicroEditor.Worker
             return ids;
         }
 
+        // A scene as a build writes it. The Editor opens the scene from its
+        // source for the build, unpacks its prefab instances and leaves out
+        // its EditorOnly objects; every object of another file it refers to
+        // is named, like a written asset's, by an external file of its own.
+        static void WriteScene(AssetImportContext ctx, string scene, bool withDependencies, StringBuilder report)
+        {
+            var timer = System.Diagnostics.Stopwatch.StartNew();
+            var settings = new BuildSettings { target = Target, group = BuildTargetGroup.Standalone, buildFlags = ContentBuildFlags.None };
+            var usage = new BuildUsageTagSet();
+            var info = ContentBuildInterface.CalculatePlayerDependenciesForScene(scene, settings, usage);
+            report.Append("scene-dependencies ").Append(info.referencedObjects.Count).Append(' ').Append(timer.ElapsedMilliseconds).Append('\n');
+            var global = info.globalUsage | ContentBuildInterface.GetGlobalUsageFromGraphicsSettings();
+            var map = new BuildReferenceMap();
+            string directory = Path.Combine("Temp", "ume-player-" + AssetDatabase.AssetPathToGUID(ctx.assetPath));
+            Directory.CreateDirectory(directory);
+            if (withDependencies)
+            {
+                // What the scene refers to, but the engine's own resources,
+                // written into one file beside it, scripts first.
+                const string Builtin = "0000000000000000e000000000000000";
+                var dependencies = info.referencedObjects.Where(id => id.guid.ToString() != Builtin)
+                    .OrderBy(id => ContentBuildInterface.GetTypeForObject(id) == typeof(MonoScript) ? 0 : 1).ToList();
+                var depsCommand = new WriteCommand { fileName = "deps", internalName = "ume-deps", serializeObjects = new List<SerializationInfo>() };
+                for (int index = 0; index < dependencies.Count; index++)
+                {
+                    var id = dependencies[index];
+                    depsCommand.serializeObjects.Add(new SerializationInfo { serializationObject = id, serializationIndex = index + 1 });
+                    map.AddMapping("ume-deps", index + 1, id);
+                    var type = ContentBuildInterface.GetTypeForObject(id);
+                    report.Append("dependency ").Append(index + 1).Append(' ').Append(type == null ? "?" : type.FullName).Append(' ').Append(id.guid).Append(' ').Append(id.localIdentifierInFile).Append('\n');
+                }
+                var depsResult = ContentBuildInterface.WriteSerializedFile(directory, new WriteParameters
+                {
+                    writeCommand = depsCommand,
+                    settings = settings,
+                    globalUsage = global,
+                    usageSet = usage,
+                    referenceMap = map,
+                });
+                foreach (var file in depsResult.resourceFiles)
+                    report.Append("deps-file ").Append(file.fileAlias).Append(' ').Append(file.serializedFile ? 1 : 0).Append(' ').Append(Path.GetFileName(file.fileName)).Append('\n');
+                foreach (var name in depsResult.externalFileReferences)
+                    report.Append("deps-external ").Append(name.filePath).Append('\n');
+            }
+            foreach (var id in withDependencies ? new List<ObjectIdentifier>() : info.referencedObjects.ToList())
+            {
+                var type = ContentBuildInterface.GetTypeForObject(id);
+                string file = "ume-external/" + id.guid + "/" + (int)id.fileType + "/" + id.localIdentifierInFile;
+                map.AddMapping(file, id.localIdentifierInFile, id);
+                report.Append("external ").Append(file).Append(' ').Append(id.localIdentifierInFile).Append(' ').Append(type == null ? "?" : type.FullName).Append(' ').Append(OneLine(id.filePath ?? "")).Append('\n');
+            }
+            // A scene file is named without an extension: the Editor drops it.
+            var command = new WriteCommand { fileName = "scene", internalName = InternalName, serializeObjects = new List<SerializationInfo>() };
+            timer.Restart();
+            var result = ContentBuildInterface.WriteSceneSerializedFile(directory, new WriteSceneParameters
+            {
+                scenePath = scene,
+                writeCommand = command,
+                settings = settings,
+                globalUsage = global,
+                usageSet = usage,
+                referenceMap = map,
+            });
+            report.Append("scene-written ").Append(result.serializedObjects.Count).Append(' ').Append(timer.ElapsedMilliseconds).Append('\n');
+            foreach (var written in result.serializedObjects)
+            {
+                var id = written.serializedObject;
+                var type = ContentBuildInterface.GetTypeForObject(id);
+                report.Append("object ").Append(id.localIdentifierInFile).Append(' ').Append(type == null ? "?" : type.FullName).Append(' ').Append(id.guid).Append(' ').Append(id.localIdentifierInFile).Append('\n');
+            }
+            foreach (var file in result.resourceFiles)
+                report.Append("file ").Append(file.fileAlias).Append(' ').Append(file.serializedFile ? 1 : 0).Append(' ').Append(Path.GetFileName(file.fileName)).Append('\n');
+            foreach (var name in result.externalFileReferences)
+                report.Append("scene-external ").Append(name.filePath).Append('\n');
+            string output = Path.Combine(directory, command.fileName);
+            if (!File.Exists(output))
+                throw new InvalidOperationException("the Editor wrote no scene file");
+            ctx.SetOutputArtifactFile("player", output);
+            report.Append("done\n");
+        }
+
         static void Write(AssetImportContext ctx, StringBuilder report)
         {
             var written = new List<ObjectIdentifier>();
@@ -335,6 +419,8 @@ namespace UnityMicroEditor.Worker
             var users = new List<ObjectIdentifier>();
             var saved = new List<string>();
             var settings = new List<string>();
+            var scenes = new List<string>();
+            bool withDependencies = false;
             foreach (var raw in File.ReadAllLines(ctx.assetPath))
             {
                 string line = raw.TrimEnd('\r');
@@ -362,8 +448,21 @@ namespace UnityMicroEditor.Worker
                         Identifiers(ctx, value, report, "settings-source");
                         settings.Add(value);
                         break;
+                    case "scene":
+                    case "scene-with-dependencies":
+                        ctx.DependsOnSourceAsset(value);
+                        scenes.Add(value);
+                        withDependencies = verb == "scene-with-dependencies";
+                        break;
                     default: throw new InvalidOperationException("unknown request statement " + verb);
                 }
+            }
+            if (scenes.Count != 0)
+            {
+                if (scenes.Count != 1 || written.Count != 0 || embedded.Count != 0 || saved.Count != 0 || settings.Count != 0)
+                    throw new InvalidOperationException("a request that writes a scene writes nothing else");
+                WriteScene(ctx, scenes[0], withDependencies, report);
+                return;
             }
             Save(saved, report);
             Settings(settings, report);

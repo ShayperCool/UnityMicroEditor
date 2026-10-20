@@ -84,6 +84,7 @@ fn execute() -> Result<()> {
         }
         "run" => unity_micro_editor::runner::run_cli(&args.collect::<Vec<_>>())?,
         "game-managers" => run_game_managers(args.collect())?,
+        "scene-objects" => run_scene_objects(args.collect())?,
         "debug-build-environment" => {
             let args: Vec<String> = args.collect();
             let (project, scripts) = args.split_first().ok_or_else(|| {
@@ -144,6 +145,64 @@ fn read_text(path: &Path) -> Result<Vec<u8>> {
 /// `game-managers --project P --base globalgamemanagers --output F [--compare F]`:
 /// writes the managers authored in the project's `ProjectSettings` over a
 /// Player's `globalgamemanagers` (experimental, see `playerbake::managers`).
+/// Has a standalone import worker write a scene as a build writes it, and
+/// lists what the file holds and refers to.
+fn run_scene_objects(args: Vec<String>) -> Result<()> {
+    let mut flags = std::collections::BTreeMap::new();
+    let mut args = args.into_iter();
+    while let Some(flag) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("{flag} requires a value"))?;
+        flags.insert(flag, value);
+    }
+    let flag = |name: &str| {
+        flags
+            .get(name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("scene-objects requires {name}"))
+    };
+    use unity_micro_editor::native;
+    let build = native::PlayerBuild {
+        project: flag("--project")?,
+        editor: flag("--editor")?,
+        output: flag("--output")?,
+        target: flag("--scene")?,
+        users: Vec::new(),
+        timeout: std::time::Duration::from_secs(600),
+        reload_list: String::new(),
+        shader_cache: String::new(),
+    };
+    let written = native::write_scene_objects(
+        &unity_micro_editor::cancel::Context::background(),
+        &build,
+        flags.contains_key("--with-dependencies"),
+    )?;
+    for object in &written.report.objects {
+        println!("object {} {}", object.index, object.class_name);
+    }
+    for external in &written.externals {
+        println!(
+            "external {} {} {} {}",
+            external.guid,
+            external.local_id,
+            external.class_name,
+            written
+                .external_paths
+                .get(&external.guid)
+                .map_or("", String::as_str)
+        );
+    }
+    println!(
+        "objects {} externals {} imports {} seconds {:.1}",
+        written.objects.len(),
+        written.externals.len(),
+        written.imports,
+        written.seconds
+    );
+    Ok(())
+}
+
 fn run_game_managers(args: Vec<String>) -> Result<()> {
     let mut flags = std::collections::BTreeMap::new();
     let mut args = args.into_iter();
