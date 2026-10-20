@@ -37,6 +37,8 @@ fn idle_limit() -> Duration {
 
 struct Warm {
     worker: WarmWorker,
+    /// The project whose library the worker's imports go back to.
+    project: String,
     /// The assets of the context, in import order, the request last.
     batch: Vec<String>,
     /// The hash of each of those sources and of its `.meta`.
@@ -46,6 +48,196 @@ struct Warm {
     request_guid: String,
     revision: u64,
     last_used: Instant,
+}
+
+impl Drop for Warm {
+    fn drop(&mut self) {
+        self.worker.stop();
+        let library = sysutil::join(&[self.worker.project(), "Library"]);
+        if let Err(error) = keep_library(&self.project, &library, &self.environment, &self.sources)
+        {
+            Event::new("scene-library-not-kept")
+                .with("reason", &format!("{error:#}"))
+                .emit();
+        }
+    }
+}
+
+/// The assemblies and the scripts registered with them, which an import of
+/// a script's object depends on.
+fn environment_key(environment: &super::scripted::ScriptEnvironment) -> String {
+    sha256(format!("{}\0{}", environment.sha256, environment.scripts.join("\0")).as_bytes())
+}
+
+/// What a worker leaves in its context's `Library` that a later worker
+/// starts from: the import results and the store of their artifacts.
+const LIBRARY_PARTS: [&str; 3] = ["ArtifactDB", "ArtifactDB-lock", "DataStore"];
+
+/// The sources whose imports a library holds, with the hashes of each and
+/// of its `.meta` when it was imported.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LibraryState {
+    schema_version: u32,
+    /// The assemblies and scripts the imports were made with.
+    #[serde(default)]
+    environment: String,
+    sources: BTreeMap<String, (String, String)>,
+}
+
+/// The assets of a batch whose import is out of date: those whose source or
+/// `.meta` differs from what the library holds, and every text asset that
+/// refers to one of them by GUID, transitively.
+fn changed_assets(
+    sources: &super::build_settings::Sources,
+    batch: &[String],
+    hashes: &BTreeMap<String, (String, String)>,
+    kept: &BTreeMap<String, (String, String)>,
+) -> std::collections::BTreeSet<String> {
+    static GUID: std::sync::LazyLock<regex::bytes::Regex> =
+        std::sync::LazyLock::new(|| regex::bytes::Regex::new(r"guid: ([0-9a-fA-F]{32})").unwrap());
+    let mut changed: std::collections::BTreeSet<String> = batch
+        .iter()
+        .filter(|path| kept.get(*path) != hashes.get(*path))
+        .cloned()
+        .collect();
+    let mut references: BTreeMap<&String, Vec<String>> = BTreeMap::new();
+    for path in batch {
+        let Some(physical) = sources.physical(path) else {
+            continue;
+        };
+        let Ok(data) = read_file(&physical) else {
+            continue;
+        };
+        if !data.starts_with(b"%YAML") {
+            continue;
+        }
+        let targets = GUID
+            .captures_iter(&data)
+            .filter_map(|capture| {
+                let guid = String::from_utf8_lossy(&capture[1]).to_ascii_lowercase();
+                sources.path_of(&guid).map(str::to_string)
+            })
+            .collect();
+        references.insert(path, targets);
+    }
+    loop {
+        let more: Vec<String> = references
+            .iter()
+            .filter(|(path, targets)| {
+                !changed.contains(**path) && targets.iter().any(|target| changed.contains(target))
+            })
+            .map(|(path, _)| (*path).clone())
+            .collect();
+        if more.is_empty() {
+            return changed;
+        }
+        changed.extend(more);
+    }
+}
+
+fn library_directory(project: &str) -> String {
+    sysutil::join(&[
+        project,
+        "Library/UnityMicroEditor/native-store/scene-library",
+    ])
+}
+
+/// Moves the library of the project into a new context's `Library`; a
+/// library another worker took, or never kept, gives nothing.
+fn take_library(project: &str, context_library: &str) -> LibraryState {
+    let directory = library_directory(project);
+    let state_path = sysutil::join(&[&directory, "state.json"]);
+    let Ok(state) = crate::util::read_json_file::<LibraryState>(&state_path) else {
+        return LibraryState::default();
+    };
+    // Whoever takes the record takes the library.
+    if state.schema_version != 1 || std::fs::remove_file(&state_path).is_err() {
+        return LibraryState::default();
+    }
+    for part in LIBRARY_PARTS {
+        let from = sysutil::join(&[&directory, part]);
+        let to = sysutil::join(&[context_library, part]);
+        if std::fs::symlink_metadata(&from).is_err() {
+            continue;
+        }
+        let _ = std::fs::remove_dir_all(&to).or_else(|_| std::fs::remove_file(&to));
+        if std::fs::rename(&from, &to).is_err() {
+            return LibraryState::default();
+        }
+    }
+    state
+}
+
+/// Moves a stopped worker's imports back into the project's library.
+fn keep_library(
+    project: &str,
+    context_library: &str,
+    environment: &str,
+    sources: &BTreeMap<String, (String, String)>,
+) -> Result<()> {
+    let directory = library_directory(project);
+    super::support::mkdir_all(&directory, 0o700)?;
+    let state_path = sysutil::join(&[&directory, "state.json"]);
+    let _ = std::fs::remove_file(&state_path);
+    for part in LIBRARY_PARTS {
+        let from = sysutil::join(&[context_library, part]);
+        let to = sysutil::join(&[&directory, part]);
+        if std::fs::symlink_metadata(&from).is_err() {
+            continue;
+        }
+        let _ = std::fs::remove_dir_all(&to).or_else(|_| std::fs::remove_file(&to));
+        std::fs::rename(&from, &to).map_err(|error| anyhow!("rename {from}: {error}"))?;
+    }
+    crate::util::atomic_json(
+        &state_path,
+        &LibraryState {
+            schema_version: 1,
+            environment: environment.to_string(),
+            sources: sources.clone(),
+        },
+    )
+}
+
+/// Whether a source's import depends on nothing a script or another asset
+/// changes, so that an import of the same source and `.meta` is taken as
+/// it is: models, images, sounds, videos and fonts. Any other import is
+/// taken when the scripts are those it was made with and nothing it refers
+/// to changed.
+fn kept_as_imported(path: &str) -> bool {
+    matches!(
+        super::support::lower_ext(path).as_str(),
+        ".fbx"
+            | ".obj"
+            | ".blend"
+            | ".dae"
+            | ".3ds"
+            | ".max"
+            | ".ma"
+            | ".mb"
+            | ".png"
+            | ".jpg"
+            | ".jpeg"
+            | ".tga"
+            | ".psd"
+            | ".tif"
+            | ".tiff"
+            | ".exr"
+            | ".hdr"
+            | ".bmp"
+            | ".gif"
+            | ".wav"
+            | ".mp3"
+            | ".ogg"
+            | ".aif"
+            | ".aiff"
+            | ".flac"
+            | ".mp4"
+            | ".webm"
+            | ".mov"
+            | ".ttf"
+            | ".otf"
+    )
 }
 
 #[derive(Default)]
@@ -152,7 +344,7 @@ impl SceneWorker {
         let reusable = state.0.as_ref().is_some_and(|warm| {
             warm.worker.alive()
                 && warm.batch[..warm.batch.len() - 1] == batch[..]
-                && warm.environment == environment.sha256
+                && warm.environment == environment_key(&environment)
                 && warm.request == request
                 && batch.iter().all(|path| {
                     let (now, before) = (&hashes[path], &warm.sources[path]);
@@ -173,15 +365,21 @@ impl SceneWorker {
                     state.0 = None;
                 }
             }
-        } else if let Some(mut warm) = state.0.take() {
-            warm.worker.stop();
+        } else {
+            // Stopped, its imports go back to the library first.
+            state.0 = None;
         }
         if !reused {
-            let warm = Self::start(ctx, build, &batch, &environment, &request, &request_guid)?;
-            state.0 = Some(Warm {
-                sources: hashes,
-                ..warm
-            });
+            state.0 = Some(Self::start(
+                ctx,
+                build,
+                &batch,
+                &hashes,
+                &sources,
+                &environment,
+                &request,
+                &request_guid,
+            )?);
         }
         let warm = state.0.as_mut().unwrap();
         warm.last_used = Instant::now();
@@ -206,10 +404,13 @@ impl SceneWorker {
     }
 
     /// Starts a worker over a new context and imports everything once.
+    #[allow(clippy::too_many_arguments)]
     fn start(
         ctx: &Context,
         build: &Build,
         batch: &[String],
+        hashes: &BTreeMap<String, (String, String)>,
+        sources: &super::build_settings::Sources,
         environment: &super::scripted::ScriptEnvironment,
         request: &str,
         request_guid: &str,
@@ -254,13 +455,65 @@ impl SceneWorker {
                 extras: None,
             },
         )?;
-        let mut worker = WarmWorker::start(&opts)?;
-        worker.import(&ctx.with_timeout(build.timeout), &opts.jobs)?;
+        // The imports a worker before it kept: a source imported from the
+        // same file and `.meta` is not imported again.
+        let library = sysutil::join(&[&opts.context, "Library"]);
+        let kept = take_library(&build.project, &library);
+        let environment_key = environment_key(environment);
+        let changed = changed_assets(sources, batch, hashes, &kept.sources);
+        let paths: BTreeMap<&str, &str> = opts
+            .project_context
+            .iter()
+            .flat_map(|context| context.assets())
+            .map(|asset| (asset.guid.as_str(), asset.path.as_str()))
+            .collect();
+        let jobs: Vec<_> = opts
+            .jobs
+            .iter()
+            .filter(|job| {
+                // The request, and anything the batch does not hash, is
+                // always imported.
+                let Some(path) = paths
+                    .get(job.guid.as_str())
+                    .filter(|path| hashes.contains_key(**path))
+                else {
+                    return true;
+                };
+                !(!changed.contains(*path)
+                    && (kept_as_imported(path) || kept.environment == environment_key))
+            })
+            .cloned()
+            .collect();
+        Event::new("scene-library")
+            .with("kept", &(opts.jobs.len() - jobs.len()))
+            .with("imported", &jobs.len())
+            .emit();
+        // Until it is stopped, what the library held is the worker's.
+        let mut sources = kept.sources;
+        let mut worker = match WarmWorker::start(&opts) {
+            Ok(worker) => worker,
+            Err(error) => {
+                let _ = keep_library(&build.project, &library, &kept.environment, &sources);
+                return Err(error);
+            }
+        };
+        if let Err(error) = worker.import(&ctx.with_timeout(build.timeout), &jobs) {
+            // What the library held stays for the next worker.
+            worker.stop();
+            let _ = keep_library(&build.project, &library, &kept.environment, &sources);
+            return Err(error);
+        }
+        sources.extend(
+            hashes
+                .iter()
+                .map(|(path, hash)| (path.clone(), hash.clone())),
+        );
         Ok(Warm {
             worker,
+            project: build.project.clone(),
             batch: assets,
-            sources: BTreeMap::new(),
-            environment: environment.sha256.clone(),
+            sources,
+            environment: environment_key,
             request: request.to_string(),
             request_guid: request_guid.to_string(),
             revision: 0,
