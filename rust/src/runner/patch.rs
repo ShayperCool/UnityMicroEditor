@@ -114,6 +114,14 @@ fn patch_record_equal(old: &Map, next: &Map, old_data: &Map, next_data: &Map) ->
         && patch_maps_equal(old_data, next_data)
 }
 
+/// Whether a manifest names a scene in the Player format.
+fn native_scene(path: &str) -> Result<bool> {
+    Ok(match parse_document(&read_file(path)?)? {
+        Value::Object(fields) => matches!(fields.get("nativeScene"), Some(Value::Object(_))),
+        _ => false,
+    })
+}
+
 fn read_patch_scene(path: &str) -> Result<PatchScene> {
     let fields = match parse_document(&read_file(path)?)? {
         Value::Object(fields) => fields,
@@ -313,6 +321,11 @@ fn json_equal(old: Option<&Value>, next: Option<&Value>) -> bool {
 /// changes, removals, reparenting and changed native content use the complete
 /// loader: `None` then. Otherwise the published patch path and its SHA256.
 pub fn make_scene_patch(previous: &str, next: &str) -> Result<Option<(String, String)>> {
+    // A scene the engine loads itself holds no object records to patch; it
+    // is loaded again.
+    if native_scene(previous)? || native_scene(next)? {
+        return Ok(None);
+    }
     let old = read_patch_scene(previous)?;
     let fresh = read_patch_scene(next)?;
     if old.revision == fresh.revision {

@@ -537,6 +537,7 @@ pub fn prepare_agent_project_with_native(
             if error.chain().any(|cause| {
                 cause.is::<project::NeedsImportError>()
                     || cause.is::<project::NeedsNativeTemplates>()
+                    || cause.is::<project::NeedsNativeScene>()
             }) =>
         {
             let mut importer = crate::native::NativeProjectImporter::new(

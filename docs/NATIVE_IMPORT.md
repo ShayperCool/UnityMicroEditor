@@ -700,23 +700,28 @@ Limits:
 - The templated components come first on the GameObject, after its Transform, and the adapted ones follow. `GetComponents` can therefore list them in another order than the authored one.
 - A template is a copy of the authored fields. A component that reads its scene in `Awake` or `OnEnable` sees the GameObject as the loader has built it by then, as it does for adapted components.
 
-## Scenes in the Player format (probe)
+## Scenes in the Player format
 
-A standalone worker can write a whole scene as a build writes it. No session uses this yet; it is the ground for loading scenes with the engine's own loader instead of the raw loader. The hidden command runs it:
+A standalone worker writes a whole scene as a build writes it, and the Player loads it with the engine's own loader. This replaces the raw loader step by step; until then it is chosen with `UME_NATIVE_SCENE=1` for `auto-prepare`, `run` and sessions.
 
-```bash
-unity-micro-editor scene-objects --project /absolute/project --editor /path/to/Unity \
-  --scene Assets/Scenes/S.unity --output /absolute/project/Library/UnityMicroEditor/scene-probe/1 \
-  [--with-dependencies 1]
-```
+- **What the scene is made of.** The session follows the GUIDs of the scene and of every text asset it reaches (prefabs, materials, scriptable objects, controllers and the like), and each of those files and its `.meta` is a dependency of the revision (`project::native_scene`). Their hashes are the key of the written scene. A key the session does not hold is asked for with `NeedsNativeScene`.
+- **Writing.** The importer (`native::native_scene`) imports the scene, what it refers to and what a build of the project reads in one worker run, with every assembly of the project's Editor compilation that the project or an immutable package compiles loaded, with the assemblies those refer to. The request's `scene-with-dependencies` statement has the worker call `ContentBuildInterface.CalculatePlayerDependenciesForScene` and `WriteSceneSerializedFile`: the engine opens the scene from its source, unpacks its prefab instances, leaves out EditorOnly objects and writes the scene's objects with its settings managers. What the scene refers to, but the engine's own resources, is written into a second file (scripts first), and the scene refers to that file and to the engine's resources. The Editor drops the extension of a scene file's name.
+- **Keeping.** Both files are kept in `Library/UnityMicroEditor/built-sources` under the key, the worker's code, the import environment and the hash of the assemblies, so a revision whose sources were written before takes them from there (`native-scene-reused`).
+- **The manifest** holds no object records. `nativeScene` names the scene file, its hash and the file of each of its external references in their order (`ume-deps` becomes the dependencies file, published in `nativeContentFiles`; the engine's resources are global dependencies).
+- **The Player** loads the content files as before, then the scene with `ContentLoadInterface.LoadSceneAsync` (additive, integrated at the end of the frame). When the engine reports the scene loaded, it becomes the active scene, which gives it its lighting settings, and the `AfterSceneLoad` initializers run. A reload loads the new scene and unloads the old one with its file; a revision in this form is never patched.
 
-- The coordinator imports the scene, everything it refers to (prefabs, materials, textures, scriptable objects, transitively) and what a build of the project reads, in one worker run. Every assembly of the project's Editor compilation that the project or an immutable package compiles is loaded, with the assemblies those refer to, so the scene's scripts have their classes.
-- The request's `scene` statement has the worker call `ContentBuildInterface.CalculatePlayerDependenciesForScene` and `WriteSceneSerializedFile`. The engine opens the scene from its source, unpacks its prefab instances, leaves out EditorOnly objects and writes the scene's objects with its settings managers. Each object of another file it refers to is named by an external file of its own, as for written assets. The Editor drops the extension of a scene file's name, so the file is named `scene`.
-- `scene-with-dependencies` also writes what the scene refers to, but the engine's own resources, into a file `deps` beside it (scripts first), and the scene then refers to `deps` and `Library/unity default resources`. Both stay in the worker's `project/Temp/ume-player-<guid>`; the coordinator does not read the scene's objects back yet, since its reader refuses script types from another file.
+The hidden `scene-objects --project P --editor E --scene S --output DIR [--with-dependencies 1]` writes a scene into `DIR/scene` (and `DIR/deps`) without a session.
 
-Verified on 2026-10-20 on a copy of `Samples/RawProject` with the AI module (`Temp/e2e/nav`): one worker run took 6 to 7 s, of which the dependencies took 15 ms and the scene 9 ms. The scene holds 22 objects (5 GameObjects with their Transforms, a camera, a light, a renderer, a box collider, a `NavMeshObstacle`, a `NavMeshAgent`, two behaviours, the render, lightmap and NavMesh settings), the prefab instance unpacked. A Player built from a scratch project with the sample's scripts loaded `deps` with `ContentLoadInterface.LoadContentFileAsync` and the scene with `ContentLoadInterface.LoadSceneAsync` (dependencies `deps` and `ContentFile.GlobalTableDependency`) in 47 ms with integration. The sample's `Awake` checks passed, and its proof lines reported the authored material color, texture, prefab override, camera background, asset names and the obstacle's and agent's fields.
+Verified on 2026-10-20 on a copy of `Samples/RawProject` with the AI module (`Temp/e2e/nav`), in the session's host Player: `auto-prepare` took 21 s, of which the worker run took 7 s (dependencies 15 ms, the scene 9 ms; the rest is the worker's start and the imports). The sample's `Awake` checks passed, its proof lines reported the authored material color, texture, prefab override, camera background, asset names and the obstacle's and agent's fields, and 200 frames ran without an error. In a watched session a moved object was in the reloaded scene, and `Awake` and `Start` ran again; a scene the store held was in the Player 0.3 s after the edit, a new one 12.3 s after it (the worker's run 10.4 s).
 
-Not done: the session's host Player does not load such a scene, the scene's references do not lead to the content a session publishes, the worker is started per run, and `typeDB` (the Player compilation of the scripts) is not given to the write: whether a script's fields under `#if UNITY_EDITOR` are then left out as a build leaves them out is not checked.
+Not done:
+
+- A worker is started for every scene that changed; a reload of a new scene costs its start.
+- A revision in this form is loaded again for any edit, so the scene's state starts over; the patch of names, active states and poses does not apply to it yet.
+- The worker imports everything the scene refers to again for every write; models, textures and sounds are not taken from earlier imports.
+- `typeDB` (the Player compilation of the scripts) is not given to the write: whether a script's fields under `#if UNITY_EDITOR` are then left out as a build leaves them out is not checked.
+- Content scenes, Addressables, prefabs requested by name and the agent's runtime tools that find objects by their source file ID still use the raw loader's records, which this form does not have. A render pipeline's settings and the preloaded assets of the baseline are not applied.
+- A session disposed before the Player quits leaves the scene's files loaded until it does.
 
 ## What a session lacks
 

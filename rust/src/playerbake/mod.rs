@@ -54,7 +54,7 @@ pub use native::{
 };
 pub use override_controller::{bake_override, bake_override_object};
 pub use serialized::{
-    External, Object, Read, ReferenceType, read as read_serialized,
+    External, Object, Read, ReferenceType, external_paths, read as read_serialized,
     read_of_class as read_serialized_of_class,
     read_with_externals as read_serialized_with_externals, write, write_with_references,
 };

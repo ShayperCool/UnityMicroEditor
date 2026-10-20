@@ -18,6 +18,7 @@ namespace UnityMicroEditor.Raw
         public string importedAssetCatalog;
         public ImportedAssetPack[] importedAssetPacks;
         public NativeContentFileDescriptor[] nativeContentFiles;
+        public NativeSceneFileDescriptor nativeScene;
         public string renderPipelineGuid;
         public string renderPipelineFileId;
         public RawAssetReference[] preloadedAssets;

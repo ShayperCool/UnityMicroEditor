@@ -178,25 +178,28 @@ fn run_scene_objects(args: Vec<String>) -> Result<()> {
         &build,
         flags.contains_key("--with-dependencies"),
     )?;
-    for object in &written.report.objects {
-        println!("object {} {}", object.index, object.class_name);
-    }
-    for external in &written.externals {
+    let scene_externals = unity_micro_editor::playerbake::external_paths(&written.scene)?;
+    println!(
+        "scene {} bytes, refers to {scene_externals:?}",
+        written.scene.len()
+    );
+    if let Some(dependencies) = &written.dependencies {
         println!(
-            "external {} {} {} {}",
-            external.guid,
-            external.local_id,
-            external.class_name,
-            written
-                .external_paths
-                .get(&external.guid)
-                .map_or("", String::as_str)
+            "dependencies {} bytes, {} objects, refer to {:?}",
+            dependencies.len(),
+            written.report.dependencies.len(),
+            unity_micro_editor::playerbake::external_paths(dependencies)?
         );
+    }
+    let output = flag("--output")?;
+    fs::write(format!("{output}/scene"), &written.scene)?;
+    if let Some(dependencies) = &written.dependencies {
+        fs::write(format!("{output}/deps"), dependencies)?;
     }
     println!(
         "objects {} externals {} imports {} seconds {:.1}",
-        written.objects.len(),
-        written.externals.len(),
+        written.report.objects.len(),
+        written.report.externals.len(),
         written.imports,
         written.seconds
     );

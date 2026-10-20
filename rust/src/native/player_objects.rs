@@ -41,6 +41,8 @@ pub const IMPORTER_ASSEMBLY: &str = "UnityMicroEditor.Worker";
 pub const REQUEST_PATH: &str = "Assets/UnityMicroEditorWorker/request.umeplayer";
 /// The name the artifact gives the written file.
 const PLAYER_FILE: &str = "player";
+/// The name the artifact gives the file of what a written scene refers to.
+const DEPENDENCIES_FILE: &str = "deps";
 /// How often a batch is extended by an asset the pipeline's objects load by
 /// path and run again.
 const RELOAD_ROUNDS: usize = 24;
@@ -134,6 +136,8 @@ pub struct WrittenObject {
 pub struct Report {
     /// Every written object.
     pub objects: Vec<WrittenObject>,
+    /// The objects a scene refers to, written into the file beside it.
+    pub dependencies: Vec<WrittenObject>,
     pub externals: Vec<ExternalObject>,
     /// The render pipeline asset of every quality level; empty for none.
     pub quality_pipelines: Vec<String>,
@@ -199,7 +203,7 @@ pub fn parse_report(text: &str) -> Result<Report> {
             "error" => bail!(Unsupported(format!(
                 "a build the Editor's code refuses in a worker: {rest}"
             ))),
-            "object" => {
+            "object" | "dependency" => {
                 let mut fields = rest.split(' ');
                 let index = fields.next().and_then(|index| index.parse().ok());
                 let class_name = fields.next();
@@ -210,12 +214,17 @@ pub fn parse_report(text: &str) -> Result<Report> {
                 else {
                     return Err(malformed());
                 };
-                report.objects.push(WrittenObject {
+                let object = WrittenObject {
                     index,
                     class_name: class_name.to_string(),
                     guid: guid.to_ascii_lowercase(),
                     local_id,
-                });
+                };
+                if verb == "object" {
+                    report.objects.push(object);
+                } else {
+                    report.dependencies.push(object);
+                }
             }
             "external" => report.externals.push(external(rest).ok_or_else(malformed)?),
             "quality" => {
@@ -1300,14 +1309,27 @@ fn scene_closure(sources: &Sources, scene: &str) -> Result<Vec<String>> {
     Ok(order)
 }
 
+/// A scene the Editor's build code wrote, as the Player loads it.
+pub struct WrittenScene {
+    /// The scene's file.
+    pub scene: Vec<u8>,
+    /// What it refers to, when written beside it.
+    pub dependencies: Option<Vec<u8>>,
+    pub report: Report,
+    pub imports: usize,
+    pub seconds: f64,
+}
+
 /// Has the Editor's build code write a scene as a build writes it, in a
 /// standalone worker that imports the scene and everything it refers to,
-/// with every assembly of the project's Editor compilation loaded.
+/// with every assembly of the project's Editor compilation loaded. With
+/// `with_dependencies`, what the scene refers to (but the engine's own
+/// resources) is written into a second file, which the scene refers to.
 pub fn write_scene_objects(
     ctx: &Context,
     build: &Build,
     with_dependencies: bool,
-) -> Result<PlayerObjects> {
+) -> Result<WrittenScene> {
     let started = Instant::now();
     let sources = open_sources(&build.project)?;
     mkdir_all(&build.output, 0o700)?;
@@ -1355,36 +1377,25 @@ pub fn write_scene_objects(
         run.files
             .iter()
             .find(|(file, _)| file == name)
-            .map(|(_, data)| data.as_slice())
+            .map(|(_, data)| data.clone())
     };
     let Some(primary) = file("") else {
         bail!("the worker's build left no report");
     };
-    let report = read_report(primary)?;
-    let Some(player) = file(PLAYER_FILE) else {
-        bail!("the worker's build left no file");
+    let report = read_report(&primary)?;
+    let Some(scene) = file(PLAYER_FILE) else {
+        bail!("the worker's build left no scene");
     };
-    let (objects, names) = read_serialized_with_externals(player)?;
-    let mut externals = Vec::with_capacity(names.len());
-    let mut external_paths = BTreeMap::new();
-    for name in names.iter().filter(|_| !with_dependencies) {
-        let Some(known) = report.externals.iter().find(|known| known.file == *name) else {
-            bail!("the written scene refers to {name}, which the build's report does not list");
-        };
-        if let Some(path) = sources.path_of(&known.guid) {
-            external_paths.insert(known.guid.clone(), path.to_string());
-        }
-        externals.push(known.clone());
+    let dependencies = file(DEPENDENCIES_FILE);
+    if with_dependencies != dependencies.is_some() {
+        bail!("the worker's build left no file of what the scene refers to");
     }
-    Ok(PlayerObjects {
-        objects,
-        externals,
-        external_paths,
+    Ok(WrittenScene {
+        scene,
+        dependencies,
         report,
-        ingredients: BTreeMap::new(),
         imports: run.imports,
         seconds: started.elapsed().as_secs_f64(),
-        database_seconds: run.database_seconds,
     })
 }
 

@@ -243,6 +243,13 @@ pub fn read_of_class(file: &[u8], class_id: i32) -> Result<Vec<Read>> {
     Ok(read_objects(file, Some(class_id))?.0)
 }
 
+/// The path names of the files a file refers to, in the order of its
+/// external references, whatever its objects are: a scene's behaviours take
+/// their script types from another file.
+pub fn external_paths(file: &[u8]) -> Result<Vec<String>> {
+    Ok(read_objects(file, Some(i32::MIN))?.1)
+}
+
 fn read_objects(file: &[u8], only: Option<i32>) -> Result<(Vec<Read>, Vec<String>)> {
     let be32 = |at: usize| {
         file.get(at..at + 4)
@@ -341,7 +348,9 @@ fn read_objects(file: &[u8], only: Option<i32>) -> Result<(Vec<Read>, Vec<String
             script: None,
         });
     }
-    if only.is_some() {
+    // Only the external references of a file are asked for.
+    let names_only = only == Some(i32::MIN);
+    if only.is_some() && !names_only {
         return Ok((objects, Vec::new()));
     }
     let script_count = le32(&mut at)? as usize;
@@ -349,6 +358,9 @@ fn read_objects(file: &[u8], only: Option<i32>) -> Result<(Vec<Read>, Vec<String
     for _ in 0..script_count {
         at = (at + 3) & !3;
         let row = take(&mut at, 12)?;
+        if names_only {
+            continue;
+        }
         if row[..4] != [0; 4] {
             bail!("SerializedFile takes a script type from another file");
         }

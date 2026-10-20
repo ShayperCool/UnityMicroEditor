@@ -627,6 +627,7 @@ namespace UnityMicroEditor.Raw
             // authored content is built into it and it keeps its own name.
             public Scene Load(bool runInitializers = true, Action commit = null, bool initializePreloads = true, Scene target = default)
             {
+                if (IsNativeScene) return LoadNative(runInitializers, commit, target);
                 Scene previous = SceneManager.GetActiveScene();
                 bool adopted = target.IsValid();
                 RawLifecycle.Scope lifecycle = manifest.lifecycleBarrierVersion == 1 ? RawLifecycle.Begin() : null;
@@ -763,6 +764,7 @@ namespace UnityMicroEditor.Raw
 
             internal void ReleaseOwnedSceneObjects()
             {
+                UnloadNativeScene();
                 // Source callbacks may still use scene resources during shutdown.
                 GameObject resources = resourceLifetime;
                 resourceLifetime = null;

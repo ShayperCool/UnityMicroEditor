@@ -407,6 +407,7 @@ namespace UnityMicroEditor.Worker
             if (!File.Exists(output))
                 throw new InvalidOperationException("the Editor wrote no scene file");
             ctx.SetOutputArtifactFile("player", output);
+            if (withDependencies) ctx.SetOutputArtifactFile("deps", Path.Combine(directory, "deps"));
             report.Append("done\n");
         }
 

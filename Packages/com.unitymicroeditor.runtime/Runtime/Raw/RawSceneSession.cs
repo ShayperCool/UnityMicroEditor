@@ -139,6 +139,7 @@ namespace UnityMicroEditor.Raw
                 try
                 {
                     Scene oldScene = Scene;
+                    bool oldNative = current.IsNativeScene;
                     Scene nextScene = next.Load(false, () =>
                     {
                         LastReloadRestartRequired = true;
@@ -154,7 +155,8 @@ namespace UnityMicroEditor.Raw
                     Scene = nextScene;
                     Revision = revision;
                     ReloadCount++;
-                    PreviousSceneUnload = oldScene.IsValid() && oldScene.isLoaded ? SceneManager.UnloadSceneAsync(oldScene) : null;
+                    // A scene the engine loaded is unloaded with its file when its objects are retired.
+                    PreviousSceneUnload = !oldNative && oldScene.IsValid() && oldScene.isLoaded ? SceneManager.UnloadSceneAsync(oldScene) : null;
                     LastReloadRestartRequired = false;
                     return nextScene;
                 }
@@ -173,7 +175,10 @@ namespace UnityMicroEditor.Raw
                     RawCleanup.Run(current.ReleasePreloadedRootScopes, ref failure);
                 }
                 RawProjectContent.Release(this);
-                RawCleanup.Run(cache.Dispose, ref failure);
+                // A scene the engine loaded is unloaded at the end of the frame
+                // and holds its files until then; a session is disposed as the
+                // Player quits, which releases them.
+                if (current == null || !current.IsNativeScene) RawCleanup.Run(cache.Dispose, ref failure);
                 if (failure != null) throw new InvalidOperationException("Raw content session cleanup failed.", failure);
             }
         }

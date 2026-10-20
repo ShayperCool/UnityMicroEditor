@@ -287,6 +287,21 @@ fn patch_objects(path: &str) -> Vec<Json> {
 }
 
 #[test]
+fn a_scene_in_the_player_format_is_loaded_again_instead_of_patched() {
+    let native = json!({
+        "revision": "old",
+        "objects": [],
+        "nativeScene": {"path": "/s", "sha256": "0", "dependencies": []}
+    });
+    let mut next = native.clone();
+    next["revision"] = json!("next");
+    assert!(patch_make(&native, &next).unwrap().is_none());
+    // Also from a revision of object records to one in the Player format.
+    let old = patch_scene();
+    assert!(patch_make(&old, &next).unwrap().is_none());
+}
+
+#[test]
 fn scene_patch_name_and_pose_contain_only_changed_authored_records() {
     let old = patch_scene();
     let mut next = revised(&old);

@@ -491,6 +491,20 @@ impl NativeProjectImporter {
                 self.build_native_templates(ctx, &templates)?;
                 continue;
             }
+            // A scene the engine loads itself is written by the worker.
+            if let Some(scene) = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<crate::project::NeedsNativeScene>())
+            {
+                if !attempted.insert(format!("scene:{}", scene.key)) {
+                    return Err(wrap(
+                        "the scene in the Player format did not resolve",
+                        error,
+                    ));
+                }
+                self.build_native_scene(ctx, scene)?;
+                continue;
+            }
             let Some(needed) = error
                 .chain()
                 .find_map(|cause| cause.downcast_ref::<NeedsImportError>())

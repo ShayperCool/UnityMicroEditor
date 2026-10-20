@@ -17,6 +17,7 @@ mod material_variant;
 mod mesh;
 mod native;
 mod native_model;
+mod native_scene;
 mod native_template;
 mod native_ui;
 mod netcode;
@@ -47,6 +48,7 @@ pub(crate) use material::editor_version_stamp;
 pub use material_variant::{InspectedMaterial, outdated_material};
 pub use mesh::MESH_VERSION;
 pub use native_model::native_model_graph_sha256;
+pub use native_scene::{NativeScene, NeedsNativeScene, native_scene_mode};
 pub use native_template::{NativeTemplate, NeedsNativeTemplates, UnsupportedNativeReference};
 pub use session::{NeedsImportError, Options, Prepared, RefusedPrefab, Session, manifest_json};
 pub(crate) use shader_sources::shader_without_comments;
@@ -57,8 +59,8 @@ pub use types::{
     CompiledShaderSnapshot, Document, List, NativeContentDependency, NativeContentFile,
     NativeContentObject, NativeContentResource, NativeDeferredBinding, NativeMeshCPUProjection,
     NativeMeshCPURetention, NativeModelGraphObject, NativeModelGraphReference,
-    NativeModelGraphTarget, NativeReplacement, NativeUIBinding, NativeUIBindingProof,
-    PrefabOverrideDiagnostic, RetainedBuiltinShader, ShaderSourceRequirement,
+    NativeModelGraphTarget, NativeReplacement, NativeSceneFile, NativeUIBinding,
+    NativeUIBindingProof, PrefabOverrideDiagnostic, RetainedBuiltinShader, ShaderSourceRequirement,
 };
 pub use upgraded::UpgradedSource;
 pub use value::{Map, Value};

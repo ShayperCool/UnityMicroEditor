@@ -91,6 +91,16 @@ wire_struct! {
     }
 }
 wire_struct! {
+    /// A scene in the Player format, which the engine's own loader loads.
+    /// `dependencies` give the file of each of its external references, in
+    /// the order of its references.
+    pub struct NativeSceneFile {
+        pub path: String,
+        pub sha256: String,
+        pub dependencies: List<NativeContentDependency>,
+    }
+}
+wire_struct! {
     pub struct NativeMeshCPURetention {
         pub file_id: String,
         pub original_is_readable: bool,

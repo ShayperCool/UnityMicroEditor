@@ -278,6 +278,11 @@ pub(crate) struct Inner {
     /// Content derived from part of a source, such as the baked clips of a
     /// model, published under a GUID that no source owns.
     pub derived_native: BTreeMap<String, super::NativeContentFile>,
+    /// Whether the scene is written in the Player format instead of as
+    /// object records (`UME_NATIVE_SCENE=1`).
+    pub native_scene_mode: bool,
+    /// The scene the worker wrote last, for the sources it was made of.
+    pub native_scene: Option<super::NativeScene>,
     pub changed_clip_models: Vec<String>,
     /// The avatar masks the controllers of the last walk refer to.
     pub controller_masks: Vec<String>,
@@ -408,6 +413,8 @@ impl Inner {
             upgraded_sources: BTreeMap::new(),
             player_graphics_settings: BTreeMap::new(),
             derived_native: BTreeMap::new(),
+            native_scene_mode: super::native_scene_mode(),
+            native_scene: None,
             changed_clip_models: Vec::new(),
             controller_masks: Vec::new(),
             package_shaders: Vec::new(),
@@ -695,6 +702,10 @@ impl Inner {
             self.depend(&path)?;
         }
         let scene = self.baseline_text("scenePath");
+        if self.native_scene_mode {
+            let over = self.native_scene_over(&scene)?;
+            return self.publish_revision(output_root, started, scene, over, 0, 0);
+        }
         let (expanded, _) = self.expand(&scene, "", &[])?;
         self.validate(&expanded)?;
         let objects = super::manifest::order_scene_roots(self.manifest_objects(&expanded)?)?;
@@ -710,6 +721,20 @@ impl Inner {
             Value::Array(prepared_assets.imported_bindings),
         );
         self.publish_native_content(&mut over)?;
+        self.publish_revision(output_root, started, scene, over, object_count, asset_count)
+    }
+
+    /// Writes a revision of the manifest with the fields of `over`, or takes
+    /// the one published last when it would hold the same.
+    fn publish_revision(
+        &mut self,
+        output_root: &str,
+        started: Instant,
+        scene: String,
+        mut over: Map,
+        object_count: usize,
+        asset_count: usize,
+    ) -> Result<Prepared> {
         let dependencies: Vec<&Dependency> = self.dependencies.values().collect();
         let dependency_json = value::encode_json(&dependencies)?;
         over.insert(
