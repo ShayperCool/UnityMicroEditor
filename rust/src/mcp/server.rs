@@ -1144,7 +1144,7 @@ fn runtime_tools() -> Vec<StaticTool> {
         static_tool(
             write_tool(
                 "runtime_command",
-                "Run configured Player operations: screenshot,pause,resume,wait_frames,custom,invoke,simulation_pause,simulation_resume,simulation_step,input. screenshot defaults to the full viewport with overlay UI; arguments.mode=camera captures a selected camera with optional width/height. pause affects scaled time; simulation_* uses the installed game-loop gate. invoke calls only public attributed/registered tools. input uses the configured synthetic device path. Supply requestId and current PID/revision; pending/unknown requires retry of the SAME requestId.",
+                "Run configured Player operations: screenshot,pause,resume,wait_frames,custom,invoke,simulation_pause,simulation_resume,simulation_step,input,edit. edit changes the running scene through Unity's runtime API, never the sources: arguments.action is set (rename, active, layer, tag, parent, localPosition/localEulerAngles/localScale, position/eulerAngles), create (name, primitive, parent and the set fields), destroy, add_component (type, values), remove_component (type, index) or set_component (type, index, values: fields or writable properties; vectors as [x,y,z] or {x,y,z}, objects as {path} or {name}); arguments.target names the object by {path} from hierarchy or a unique {name}. screenshot defaults to the full viewport with overlay UI; arguments.mode=camera captures a selected camera with optional width/height. pause affects scaled time; simulation_* uses the installed game-loop gate. invoke calls only public attributed/registered tools. input uses the configured synthetic device path. Supply requestId and current PID/revision; pending/unknown requires retry of the SAME requestId.",
                 false,
                 runtime_input(),
             ),
@@ -1701,9 +1701,8 @@ impl Server {
                 let input: RuntimeInput = Self::decode(tool, raw)?;
                 match input.operation.as_str() {
                     "screenshot" | "pause" | "resume" | "wait_frames" | "custom" | "invoke"
-                    | "simulation_pause" | "simulation_resume" | "simulation_step" | "input" => {
-                        Ok(self.forward_runtime(ctx, "runtime_command", &input.marshal()))
-                    }
+                    | "simulation_pause" | "simulation_resume" | "simulation_step" | "input"
+                    | "edit" => Ok(self.forward_runtime(ctx, "runtime_command", &input.marshal())),
                     _ => Err(typed("unsupported_operation", "unknown runtime command")),
                 }
             }

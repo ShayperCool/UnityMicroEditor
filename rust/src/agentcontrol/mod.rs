@@ -2313,6 +2313,7 @@ fn allowed_operation(operation: &str) -> bool {
             | "simulation_step"
             | "input"
             | "stream"
+            | "edit"
     )
 }
 

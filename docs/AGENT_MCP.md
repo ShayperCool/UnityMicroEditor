@@ -912,6 +912,19 @@ markers. Screenshots require a graphics device and return a PNG path, hash,
 dimensions and frame. Viewport-dependent UI and advancing counters need aligned
 checkpoints for comparisons.
 
+### Change the running scene
+
+`runtime_command(edit)` changes the Player's scene through Unity's public runtime API. Nothing is written to the sources: the change lasts until the scene is loaded again (a source edit, a reload, a restart). `arguments.target` names an object by its `path` as `runtime_query(hierarchy)` lists it, or by a `name` that exactly one object has (`fileId` works where the scene has object records). `arguments.action` is one of:
+
+- `set`: `rename`, `active`, `layer` (number or name), `tag`, `parent` (a reference or `null` for a root, with `worldPositionStays`), `localPosition`, `localEulerAngles`, `localRotation`, `localScale`, `position`, `eulerAngles`, `rotation`.
+- `create`: a new object, empty or a `primitive` (`Cube`, `Sphere`, ...), with `name` and the fields of `set`.
+- `destroy`.
+- `add_component` (`type`, `values`), `remove_component` (`type`, `index` among the components of that class) and `set_component` (`type`, `index`, `values`).
+
+A `type` is a component class by full name, or by name when one loaded class has it. `values` set fields that are public or `[SerializeField]`, and public writable properties, by name: numbers, booleans, text, enums by name or number, vectors and colors as arrays or as objects (`{x,y,z}`, `{r,g,b,a}`; a rotation of three numbers is Euler angles), and objects of the scene as references (`{"path": ...}`), which give the GameObject or its component of the field's class. Assets cannot be named. The reply is the object's snapshot; `destroy` replies with the path it destroyed.
+
+Verified on 2026-10-20 on the sample in a scene the worker wrote: a door renamed and moved, a light added with intensity and color and removed, an obstacle's size and carving set, a cube created under the door from a world position and destroyed by its path.
+
 ## Watch and play in a browser
 
 `remote_session` with `action: start` serves the running game to a browser:

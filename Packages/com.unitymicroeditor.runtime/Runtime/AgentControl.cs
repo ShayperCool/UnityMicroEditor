@@ -419,6 +419,7 @@ namespace UnityMicroEditor
                     return new Dictionary<string, object> { ["hit"] = hit, ["path"] = hit ? AgentRuntimeSnapshot.PathOf(result.collider.transform) : null,
                         ["point"] = hit ? AgentRuntimeSnapshot.Vector(result.point) : null, ["distance"] = hit ? (object)result.distance : null };
                 }
+                case "edit": return AgentRuntimeEdit.Execute(arguments, target => FindObject(target, live), live.DescribeSourceObject);
                 case "custom": return AgentRuntimeCommands.Execute(Text(arguments, "name"), arguments.TryGetValue("parameters", out object parameters) ? parameters : null);
                 default: throw new InvalidOperationException("Unsupported runtime operation: " + operation);
             }
@@ -437,7 +438,8 @@ namespace UnityMicroEditor
                     ["defaultMode"] = "screen", ["screenIncludesOverlayUi"] = true, ["screenSemantics"] = "native_viewport_at_end_of_frame", ["maximumDimension"] = 4096 },
                 ["rootSiblingIndexSemantics"] = "scene_root_enumeration",
                 ["unityVersion"] = Application.unityVersion, ["commands"] = AgentRuntimeCommands.Names(),
-                ["operations"] = new List<object> { "status", "hierarchy", "inspect", "logs", "pause", "resume", "scaled_time_pause", "scaled_time_resume", "simulation_pause", "simulation_resume", "simulation_step", "input", "tools", "invoke", "wait_frames", "screenshot", "raycast", "custom", "stream" } };
+                ["operations"] = new List<object> { "status", "hierarchy", "inspect", "logs", "pause", "resume", "scaled_time_pause", "scaled_time_resume", "simulation_pause", "simulation_resume", "simulation_step", "input", "tools", "invoke", "wait_frames", "screenshot", "raycast", "custom", "stream", "edit" },
+                ["editActions"] = new List<object>(AgentRuntimeEdit.Actions) };
         }
 
         private static List<GameObject> SceneObjects()
@@ -549,12 +551,18 @@ namespace UnityMicroEditor
 
         private static GameObject FindObject(Dictionary<string, object> args, RawSceneLoader.LiveSession live)
         {
-            string path = Text(args, "path"), fileId = Text(args, "fileId"); GameObject found = null;
-            if (string.IsNullOrEmpty(path) && string.IsNullOrEmpty(fileId)) throw new InvalidDataException("Inspect requires a path or source fileId.");
+            string path = Text(args, "path"), fileId = Text(args, "fileId"), name = Text(args, "name"); GameObject found = null;
+            if (string.IsNullOrEmpty(path) && string.IsNullOrEmpty(fileId) && string.IsNullOrEmpty(name))
+                throw new InvalidDataException("An object reference requires a path, a name or a source fileId.");
             foreach (GameObject value in SceneObjects())
             {
-                Dictionary<string, object> source = live.DescribeSourceObject(value);
-                bool match = !string.IsNullOrEmpty(fileId) ? source != null && Text(source, "fileId") == fileId : AgentRuntimeSnapshot.PathOf(value.transform) == path;
+                bool match;
+                if (!string.IsNullOrEmpty(fileId))
+                {
+                    Dictionary<string, object> source = live.DescribeSourceObject(value);
+                    match = source != null && Text(source, "fileId") == fileId;
+                }
+                else match = !string.IsNullOrEmpty(path) ? AgentRuntimeSnapshot.PathOf(value.transform) == path : value.name == name;
                 if (!match) continue;
                 if (found != null) throw new InvalidOperationException("Object reference is ambiguous."); found = value;
             }
