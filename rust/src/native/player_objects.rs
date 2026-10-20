@@ -142,6 +142,8 @@ pub struct Report {
     pub objects: Vec<WrittenObject>,
     /// The objects a scene refers to, written into the file beside it.
     pub dependencies: Vec<WrittenObject>,
+    /// The root GameObject of each included prefab, by GUID.
+    pub include_roots: Vec<(String, i64)>,
     pub externals: Vec<ExternalObject>,
     /// The render pipeline asset of every quality level; empty for none.
     pub quality_pipelines: Vec<String>,
@@ -231,6 +233,11 @@ pub fn parse_report(text: &str) -> Result<Report> {
                 }
             }
             "external" => report.externals.push(external(rest).ok_or_else(malformed)?),
+            "include-root" => {
+                let (guid, id) = rest.split_once(' ').ok_or_else(malformed)?;
+                let id = id.parse().map_err(|_| malformed())?;
+                report.include_roots.push((guid.to_ascii_lowercase(), id));
+            }
             "quality" => {
                 let (_, path) = rest.split_once(' ').ok_or_else(malformed)?;
                 report.quality_pipelines.push(match path {
@@ -1203,73 +1210,6 @@ pub fn write_player_objects(ctx: &Context, build: &Build) -> Result<PlayerObject
     bail!("the build of {} did not settle", build.target)
 }
 
-/// Has a worker write the Player objects of assets the coordinator made
-/// itself (`generated`: the data and `.meta` of each, by logical path),
-/// those of `write` among them, into one file. Nothing of the project's
-/// sources is imported.
-pub fn write_generated_objects(
-    ctx: &Context,
-    build: &Build,
-    generated: BTreeMap<String, (Vec<u8>, Vec<u8>)>,
-    write: &[String],
-) -> Result<PlayerObjects> {
-    let started = Instant::now();
-    mkdir_all(&build.output, 0o700)?;
-    let request = Request {
-        write: write.to_vec(),
-        ..Default::default()
-    }
-    .encode()?;
-    let identity = sha256(format!("{}\0{request}", importer_identity()).as_bytes());
-    let mut generated = generated;
-    generated.insert(
-        REQUEST_PATH.to_string(),
-        (
-            request.into_bytes(),
-            format!("fileFormatVersion: 2\nguid: {}\n", &identity[..32]).into_bytes(),
-        ),
-    );
-    let mut batch = write.to_vec();
-    batch.push(REQUEST_PATH.to_string());
-    let files = BuildFiles {
-        generated,
-        files: Vec::new(),
-    };
-    let output = sysutil::join(&[&build.output, "build-0"]);
-    let run = run(ctx, build, &output, &batch, &BTreeSet::new(), &files, &[])?;
-    let file = |name: &str| {
-        run.files
-            .iter()
-            .find(|(file, _)| file == name)
-            .map(|(_, data)| data.as_slice())
-    };
-    let Some(primary) = file("") else {
-        bail!("the worker's build left no report");
-    };
-    let report = read_report(primary)?;
-    let Some(player) = file(PLAYER_FILE) else {
-        bail!("the worker's build left no file");
-    };
-    let (objects, names) = read_serialized_with_externals(player)?;
-    let mut externals = Vec::with_capacity(names.len());
-    for name in &names {
-        let Some(known) = report.externals.iter().find(|known| known.file == *name) else {
-            bail!("the written file refers to {name}, which the build's report does not list");
-        };
-        externals.push(known.clone());
-    }
-    Ok(PlayerObjects {
-        objects,
-        externals,
-        external_paths: BTreeMap::new(),
-        report,
-        ingredients: BTreeMap::new(),
-        imports: run.imports,
-        seconds: started.elapsed().as_secs_f64(),
-        database_seconds: run.database_seconds,
-    })
-}
-
 /// The assets a scene refers to, each after what it refers to in turn, the
 /// scene last, and the scripts whose classes they need: those of their
 /// objects and the importers of those a script imports. Scripts are not
@@ -1487,134 +1427,6 @@ pub fn write_scene_objects(
         imports: run.imports,
         seconds: started.elapsed().as_secs_f64(),
     })
-}
-
-/// Has a worker load materials as the engine does, which upgrades an older
-/// serialization, and returns each as the Editor writes it as text.
-/// `build.target` is the shader source the materials of `build.users` use,
-/// imported before them with what it is made of, so that the engine finds
-/// it when it sorts their keywords into those the shader declares and
-/// those it does not. Nothing is compiled or written for the Player.
-pub fn save_materials(ctx: &Context, build: &Build) -> Result<Vec<(String, Vec<u8>)>> {
-    if lower_ext(&build.target) != ".shader" {
-        bail!(Unsupported(format!(
-            "a material of an older serialization whose shader {} is not a .shader source",
-            build.target
-        )));
-    }
-    let mut plan = shader_plan(build)?;
-    plan.request = Request {
-        save: build.users.clone(),
-        ..Default::default()
-    };
-    saved_texts(build, save_run(ctx, build, &plan)?)
-}
-
-/// The entries of a render pipeline's global settings (`settings`) that a
-/// Player build keeps, as the pipeline's own build code decides in a worker
-/// whose batch is that of a build of the pipeline's shader `build.target`:
-/// it holds the pipeline's assets, settings and scripts. Also the hash of
-/// every file the decision was made from.
-pub fn player_settings(
-    ctx: &Context,
-    build: &Build,
-    settings: &[String],
-) -> Result<(Vec<SettingsEntry>, BTreeMap<String, String>)> {
-    let mut plan = shader_plan(build)?;
-    for path in settings {
-        if !plan.batch.contains(path) {
-            bail!(
-                "the batch of a build of {} does not hold {path}",
-                build.target
-            );
-        }
-    }
-    plan.request = Request {
-        settings: settings.to_vec(),
-        ..Default::default()
-    };
-    let report = save_run(ctx, build, &plan)?;
-    for path in settings {
-        if !report.settings.iter().any(|entry| entry.path == *path) {
-            bail!("the worker reported no entry of {path}");
-        }
-    }
-    Ok((report.settings, plan.ingredients))
-}
-
-/// The plan of a build of the `.shader` source `build.target`.
-pub(crate) fn shader_plan(build: &Build) -> Result<Plan> {
-    let sources = open_sources(&build.project)?;
-    let reloaded = read_reload_list(&sources, &build.reload_list);
-    let settings = build_settings(&sources, &reloaded)?;
-    let text = sources.read(&build.target)?;
-    plan(
-        &sources,
-        &build.project,
-        &settings,
-        &build.target,
-        &build.users,
-        &[(build.target.as_str(), &text[..])],
-        &[],
-        &|name| Ok(super::host_shaders::editor_builtin_shader_names(&build.editor)?.contains(name)),
-    )
-}
-
-/// Has the engine load and save, as the Editor writes them as text, sources
-/// (`build.users`) that need no other source to load, such as a Mesh of an
-/// older serialization. `build.target` is not used.
-pub fn save_sources(ctx: &Context, build: &Build) -> Result<Vec<(String, Vec<u8>)>> {
-    let mut batch = build.users.clone();
-    batch.push(REQUEST_PATH.to_string());
-    let plan = Plan {
-        batch,
-        request: Request {
-            save: build.users.clone(),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    saved_texts(build, save_run(ctx, build, &plan)?)
-}
-
-/// The texts of a report, each of the sources `build.users` asked for.
-fn saved_texts(build: &Build, report: Report) -> Result<Vec<(String, Vec<u8>)>> {
-    for user in &build.users {
-        if !report.saved.iter().any(|(path, _)| path == user) {
-            bail!("the worker saved no text of {user}");
-        }
-    }
-    Ok(report.saved)
-}
-
-/// One worker run of a plan whose request writes no Player objects.
-fn save_run(ctx: &Context, build: &Build, plan: &Plan) -> Result<Report> {
-    let request = plan.request.encode()?;
-    let identity = sha256(format!("{}\0{request}", importer_identity()).as_bytes());
-    let files = BuildFiles {
-        generated: BTreeMap::from([(
-            REQUEST_PATH.to_string(),
-            (
-                request.into_bytes(),
-                format!("fileFormatVersion: 2\nguid: {}\n", &identity[..32]).into_bytes(),
-            ),
-        )]),
-        files: Vec::new(),
-    };
-    mkdir_all(&build.output, 0o700)?;
-    let run = run(
-        ctx,
-        build,
-        &sysutil::join(&[&build.output, "save"]),
-        &plan.batch,
-        &plan.scripts,
-        &files,
-        &[],
-    )?;
-    let Some((_, primary)) = run.files.iter().find(|(name, _)| name.is_empty()) else {
-        bail!("the worker's run left no report");
-    };
-    read_report(primary)
 }
 
 /// The sources of the shaders a text names itself.

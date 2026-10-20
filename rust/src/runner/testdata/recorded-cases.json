@@ -5885,7 +5885,7 @@
    "",
    "",
    "",
-   "err: unsupported retained built-in Shader identity/version"
+   "err: a retained built-in Shader snapshot is no longer supported"
   ]
  },
  {

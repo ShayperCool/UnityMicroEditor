@@ -535,9 +535,7 @@ pub fn prepare_agent_project_with_native(
         // artifacts stay with the baseline.
         Err(error)
             if error.chain().any(|cause| {
-                cause.is::<project::NeedsImportError>()
-                    || cause.is::<project::NeedsNativeTemplates>()
-                    || cause.is::<project::NeedsNativeScene>()
+                cause.is::<project::NeedsImportError>() || cause.is::<project::NeedsNativeScene>()
             }) =>
         {
             let mut importer = crate::native::NativeProjectImporter::new(
@@ -551,10 +549,6 @@ pub fn prepare_agent_project_with_native(
                 },
                 session.clone(),
             )?;
-            importer.script_assemblies = compiler.script_assemblies();
-            let layouts = compiler.behaviour_layouts(ctx, &types)?;
-            importer.behaviour_code = compiler.behaviour_code.clone();
-            importer.set_behaviour_layouts(ctx, layouts)?;
             importer.prepare(ctx)?
         }
         other => other?,

@@ -9,7 +9,6 @@ mod patch;
 mod player;
 mod prepared;
 mod prune;
-mod refusal;
 mod routes;
 mod watch;
 mod window;
@@ -52,10 +51,7 @@ use crate::{
     flags::FlagSet,
     hotreload::{self, Fallback, Outcome, PlayerCode},
     jsondoc::{self, Target},
-    native::{
-        JsonF64, NativeOptions, NativeProjectImporter, apply_builtin_shaders,
-        stage_native_resources,
-    },
+    native::{JsonF64, NativeOptions, NativeProjectImporter, stage_native_resources},
     project::{self, Prepared, Session, Value, lexpath, value},
     sha256, sysutil,
     util::{atomic_json, canonical_destination, default_unity_editor, lock_session, random_id},
@@ -685,22 +681,6 @@ fn give_up_prefabs(opts: &mut LaunchOptions, session: &Session, dropped: &[Strin
         .emit();
 }
 
-/// Gives up the prefabs added for Addressables that preparing would refuse,
-/// as far as their own sources tell: before their content is imported, and
-/// each on its own. True when there was one.
-fn refuse_addressable_prefabs(opts: &mut LaunchOptions, session: &Session) -> bool {
-    let mut refused: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for path in addressable_prefabs(opts) {
-        if let Some(error) = session.runtime_prefab_refusal(&path) {
-            refused.entry(err_text(&error)).or_default().push(path);
-        }
-    }
-    for (error, paths) in &refused {
-        give_up_prefabs(opts, session, paths, error);
-    }
-    !refused.is_empty()
-}
-
 /// Gives up the prefabs added for Addressables after the session failed to
 /// prepare: the one the error names, else those it refuses now that their
 /// content is imported, else all of them. False when there is none, so the
@@ -727,9 +707,7 @@ fn drop_addressable_prefabs(
         );
         return true;
     }
-    if !refuse_addressable_prefabs(opts, session) {
-        give_up_prefabs(opts, session, &prefabs, &err_text(error));
-    }
+    give_up_prefabs(opts, session, &prefabs, &err_text(error));
     true
 }
 
@@ -871,7 +849,7 @@ impl Steps for Live<'_> {
     fn invalidate(&mut self, paths: &[String]) -> Result<()> {
         self.times.start = Some(Instant::now());
         self.session.invalidate(paths);
-        apply_builtin_shaders(&self.session, &self.opts.builtin_shaders)
+        Ok(())
     }
 
     fn compile(&mut self, ctx: &Context, paths: Option<&[String]>) -> Result<Compiled> {
@@ -952,12 +930,6 @@ impl Steps for Live<'_> {
             return Ok(());
         };
         self.script_types = self.compiler.script_type_names(ctx)?;
-        // A baked controller lays its behaviours out as the new
-        // assemblies declare them.
-        self.native_importer.script_assemblies = self.compiler.script_assemblies();
-        let layouts = self.compiler.behaviour_layouts(ctx, &self.script_types)?;
-        self.native_importer.behaviour_code = self.compiler.behaviour_code.clone();
-        self.native_importer.set_behaviour_layouts(ctx, layouts)?;
         apply_compiled_bindings(&self.session, pending, &self.script_types);
         Ok(())
     }
@@ -1297,7 +1269,6 @@ fn run_session(
     if let Some(compiled) = &initial_compile {
         apply_compiled_bindings(&session, compiled, &script_types);
     }
-    apply_builtin_shaders(&session, &opts.builtin_shaders)?;
     // The importer reads the built-in shaders of the host from the
     // Player's data. A compile copies that data as it is, and the bound
     // of the output removes a compile no Player runs any more, also the
@@ -1305,13 +1276,6 @@ fn run_session(
     let mut native_options = opts.native(&staged_player);
     native_options.seed = baseline.native_import.index.clone();
     let mut native_importer = NativeProjectImporter::new(native_options, session.clone())?;
-    native_importer.script_assemblies = compiler.script_assemblies();
-    let layouts = compiler.behaviour_layouts(ctx, &script_types)?;
-    native_importer.behaviour_code = compiler.behaviour_code.clone();
-    native_importer.set_behaviour_layouts(ctx, layouts)?;
-    // An addressable prefab the raw loader cannot prepare must not stop a
-    // session that runs without it, nor cost the import of its content.
-    refuse_addressable_prefabs(opts, &session);
     let prepared = loop {
         match native_importer.prepare(ctx) {
             Ok(prepared) => break prepared,

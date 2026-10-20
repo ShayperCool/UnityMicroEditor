@@ -405,6 +405,10 @@ namespace UnityMicroEditor.Worker
                 {
                     var ids = ContentBuildInterface.GetPlayerObjectIdentifiersInAsset(new GUID(AssetDatabase.AssetPathToGUID(path)), Target);
                     report.Append("project-asset ").Append(ids.Length).Append(' ').Append(path).Append('\n');
+                    // A prefab is named by its root, as a reference to it holds it.
+                    if (AssetDatabase.LoadMainAssetAtPath(path) is GameObject root
+                        && AssetDatabase.TryGetGUIDAndLocalFileIdentifier(root, out string rootGuid, out long rootId))
+                        report.Append("include-root ").Append(rootGuid).Append(' ').Append(rootId).Append('\n');
                     foreach (var id in ids.Concat(ContentBuildInterface.GetPlayerDependenciesForObjects(ids, Target, null)))
                         if (seen.Add(id)) referenced.Add(id);
                 }

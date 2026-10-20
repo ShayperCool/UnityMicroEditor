@@ -6,13 +6,13 @@ use super::{
     json::{First, members, read_document, set_list, set_strings},
     mkdir_all,
     noop::scene_runtime_equal,
-    os_error, read_file, refusal, text_error, wrap,
+    os_error, read_file, text_error, wrap,
 };
 use crate::{
     cancel::Context,
     compiler::{CompileUpdate, player_assembly_paths},
     jsondoc::{self, Json, Target},
-    native::{NativeProjectImporter, apply_builtin_shaders},
+    native::NativeProjectImporter,
     project::{self, Session, Value},
     registry, sha256, sysutil,
     util::{file_hash, marshal, valid_sha256},
@@ -244,12 +244,6 @@ pub fn prepare_content_routes(
         // before its content is imported.
         let tolerated = refused.is_some() && opts.addressable_content.contains(&guid);
         let directory = sysutil::join(&[&opts.output, "content", &guid]);
-        if let (true, Some(root), Some(refused)) = (tolerated, root, refused.as_deref_mut())
-            && let Some(error) = refusal::remembered(&directory, &root.session, &baseline.manifest)
-        {
-            refused.push((guid, wrap(&format!("prepare content scene {scene}"), error)));
-            continue;
-        }
         if !importers.contains_key(&guid) {
             // Global runtime-addressed prefabs belong to the root session. Follow
             // each additive scene's authored references without duplicating them.
@@ -291,32 +285,10 @@ pub fn prepare_content_routes(
         if let Some(compiled) = compiled {
             apply_compiled_bindings(&session, compiled, script_types);
         }
-        apply_builtin_shaders(&session, &opts.builtin_shaders)?;
-        // What the root session knows of the script assemblies serves the
-        // clips and controllers a content scene bakes too.
-        if let Some(root) = root {
-            cached.importer.script_assemblies = root.script_assemblies.clone();
-            cached.importer.behaviour_code = root.behaviour_code.clone();
-            cached
-                .importer
-                .set_behaviour_layouts(ctx, root.behaviour_layouts.clone())
-                .map_err(|e| wrap(&format!("prepare content scene {scene}"), e))?;
-        }
-        let prepared = match tolerated.then(|| session.scene_refusal()).flatten() {
-            Some(error) => Err(error),
-            None => cached.importer.prepare(ctx).inspect_err(|error| {
-                if let (true, Some(root)) = (tolerated, root) {
-                    refusal::remember(
-                        &directory,
-                        &root.session,
-                        &session,
-                        &baseline.manifest,
-                        error,
-                    );
-                }
-            }),
-        }
-        .map_err(|e| wrap(&format!("prepare content scene {scene}"), e));
+        let prepared = cached
+            .importer
+            .prepare(ctx)
+            .map_err(|e| wrap(&format!("prepare content scene {scene}"), e));
         let prepared = match (prepared, refused.as_deref_mut()) {
             (Ok(prepared), _) => prepared,
             (Err(error), Some(refused)) if tolerated && ctx.error().is_none() => {
@@ -325,7 +297,6 @@ pub fn prepare_content_routes(
             }
             (Err(error), _) => return Err(error),
         };
-        refusal::forget(&directory);
         let hash = file_hash(&prepared.manifest)?;
         routes
             .scenes

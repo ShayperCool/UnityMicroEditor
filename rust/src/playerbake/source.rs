@@ -1,30 +1,6 @@
 //! Typed reads of authored Unity YAML values.
-use super::unsupported;
 use anyhow::{Result, bail};
-use serde_json::{Map, Value};
-
-static NULL: Value = Value::Null;
-
-pub(crate) fn get<'a>(map: &'a Map<String, Value>, key: &str) -> &'a Value {
-    map.get(key).unwrap_or(&NULL)
-}
-
-pub(crate) fn object<'a>(value: &'a Value, what: &str) -> Result<&'a Map<String, Value>> {
-    match value {
-        Value::Object(map) => Ok(map),
-        _ => bail!("{what} is not a mapping"),
-    }
-}
-
-/// An absent or empty sequence reads as no items.
-pub(crate) fn list<'a>(value: &'a Value, what: &str) -> Result<&'a [Value]> {
-    match value {
-        Value::Array(items) => Ok(items),
-        Value::Null => Ok(&[]),
-        Value::String(text) if text.is_empty() => Ok(&[]),
-        _ => bail!("{what} is not a sequence"),
-    }
-}
+use serde_json::Value;
 
 /// The scalar as Unity wrote it.
 pub(crate) fn text(value: &Value) -> Result<String> {
@@ -35,43 +11,4 @@ pub(crate) fn text(value: &Value) -> Result<String> {
         Value::String(text) => text.clone(),
         _ => bail!("expected a scalar"),
     })
-}
-
-pub(crate) fn float(value: &Value, what: &str) -> Result<f32> {
-    let text = text(value)?;
-    Ok(match text.as_str() {
-        "" => 0.0,
-        "Infinity" | "inf" | "+Infinity" => f32::INFINITY,
-        "-Infinity" | "-inf" => f32::NEG_INFINITY,
-        "NaN" | "nan" => return Err(unsupported(format!("{what} is not a number"))),
-        // Parsed directly to single precision, as Unity reads it.
-        other => match other.parse::<f32>() {
-            Ok(number) => number,
-            Err(_) => bail!("{what} is not a float: {other:?}"),
-        },
-    })
-}
-
-pub(crate) fn int(value: &Value, what: &str) -> Result<i64> {
-    let text = text(value)?;
-    if text.is_empty() {
-        return Ok(0);
-    }
-    match text.parse::<i64>() {
-        Ok(number) => Ok(number),
-        Err(_) => bail!("{what} is not an integer: {text:?}"),
-    }
-}
-
-pub(crate) fn flag(value: &Value, what: &str) -> Result<bool> {
-    Ok(int(value, what)? != 0)
-}
-
-/// Whether an object reference is `{fileID: 0}` or absent.
-pub(crate) fn null_reference(value: &Value) -> Result<bool> {
-    match value {
-        Value::Null => Ok(true),
-        Value::Object(map) => Ok(text(get(map, "fileID"))? == "0" || map.is_empty()),
-        _ => bail!("expected an object reference"),
-    }
 }

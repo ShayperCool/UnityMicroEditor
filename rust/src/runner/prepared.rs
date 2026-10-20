@@ -11,9 +11,7 @@ use super::{
 use crate::{
     ENGINE_VERSION,
     jsondoc::{self, Json, Member, Target},
-    native::{
-        resolve_project_import_source, stage_native_resources, verify_builtin_shader_snapshot,
-    },
+    native::{resolve_project_import_source, stage_native_resources},
     project::{
         BUILTIN_RESOURCE_GUID, CompiledShaderSnapshot, NativeContentDependency,
         NativeContentObject, RetainedBuiltinShader, validate_shader_source_requirements,
@@ -528,8 +526,10 @@ pub fn validate_prepared_scene(
     if scene.builtin_shader_snapshots.len() > 1 {
         bail!("duplicate prepared retained built-in Shader snapshot");
     }
+    if !scene.builtin_shader_snapshots.is_empty() {
+        bail!("a retained built-in Shader snapshot is no longer supported");
+    }
     for snapshot in &scene.builtin_shader_snapshots {
-        verify_builtin_shader_snapshot(snapshot)?;
         let found = scene.native_content.iter().any(|content| {
             content.guid == snapshot.guid
                 && content.path == snapshot.content.path

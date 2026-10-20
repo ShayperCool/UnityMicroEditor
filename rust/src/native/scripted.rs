@@ -190,12 +190,6 @@ pub fn script_register(editor: &str) -> Result<Arc<Vec<u8>>> {
     Ok(register)
 }
 
-/// The source formats a package's `ScriptedImporter` is verified for, by
-/// lower-case extension with its dot.
-pub fn scripted_profile(extension: &str) -> bool {
-    extension == ".inputactions"
-}
-
 /// The projects whose `Library` may hold an Editor compilation of `project`:
 /// the one the tool compiled without an Editor, the tool's own staging clone,
 /// the project itself.
@@ -473,20 +467,6 @@ pub fn scene_environment(
         ..Default::default()
     };
     environment(project, &selection, Purpose::Build)
-}
-
-/// The environment in which the inspectors of materials run: the assemblies
-/// of the scripts named by file (the inspectors; one no package compiles is
-/// left out, and the engine then finds no class of that name), those of the
-/// given scripts (the importers of the shaders) and every assembly of an
-/// immutable package that refers to one of the latter, since the targets and
-/// nodes of a shader graph are classes of such assemblies. Files of any
-/// immutable package can be placed in its context.
-pub fn inspection_environment(
-    project: &str,
-    selection: &ScriptSelection,
-) -> Result<ScriptEnvironment> {
-    environment(project, selection, Purpose::Inspectors)
 }
 
 /// Where the Editor compilation of a project found each package, as

@@ -10,8 +10,8 @@
 //! the same engine, which also supplies the managers a build derives (scripts,
 //! resources, build settings) and the asset references.
 use super::{
-    native::{hex_items, scalar},
     source::text,
+    text_values::{hex_items, scalar},
     typetree::{TypeTree, Val},
 };
 use anyhow::{Context, Result, bail};

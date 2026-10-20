@@ -1,7 +1,5 @@
 //! A scene the import worker writes in the Player format, which the Player
-//! loads with the engine's own loader instead of building it from the
-//! manifest's object records. Chosen with `UME_NATIVE_SCENE=1` while it
-//! replaces the raw loader.
+//! loads with the engine's own loader.
 use super::{
     NativeContentFile, NativeSceneFile,
     session::Inner,
@@ -10,11 +8,6 @@ use super::{
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
-
-/// Whether sessions write their scenes in the Player format.
-pub fn native_scene_mode() -> bool {
-    std::env::var_os("UME_NATIVE_SCENE").is_some_and(|value| value == "1")
-}
 
 /// The scene a preparation needs in the Player format, by what it is made
 /// of: the hash of the scene and of every asset it reaches, with their
@@ -48,6 +41,8 @@ pub struct NativeScene {
     /// The local ID in the first content file of each source object it
     /// holds, by `<GUID>/<local ID>`.
     pub objects: std::collections::BTreeMap<String, String>,
+    /// The local ID of the root GameObject of each included prefab, by GUID.
+    pub roots: std::collections::BTreeMap<String, String>,
 }
 
 /// Text sources above this size are read without the cache.
@@ -195,7 +190,7 @@ impl Inner {
     /// Names where the worker wrote the render pipeline asset and the
     /// preloaded assets, which the manifest names by their sources: in the
     /// file of what the scene refers to.
-    fn native_project_objects(&mut self, written: &NativeScene, over: &mut Map) -> Result<()> {
+    fn native_project_objects(&self, written: &NativeScene, over: &mut Map) -> Result<()> {
         let file = &written.content[0].guid;
         let mut sources = vec![(
             self.baseline_text("renderPipelineGuid"),
@@ -209,21 +204,12 @@ impl Inner {
                 ));
             }
         }
-        // A prefab the game asks for by address is named by its root.
+        // A prefab the game asks for by address is named by its root, as
+        // the worker found it.
         for path in self.extra_assets.clone() {
             let guid = self.guid_of(&path).to_string();
-            let (objects, _) = self
-                .expand(&path, "", &[])
-                .map_err(super::session::RefusedPrefab::wrap(&path))?;
-            let roots: Vec<String> = objects
-                .iter()
-                .filter(|o| {
-                    super::expand::transform(o.class_id) && value::file_id(o.get("m_Father")) == "0"
-                })
-                .map(|o| value::file_id(o.get("m_GameObject")).into_owned())
-                .collect();
-            let [root] = &roots[..] else {
-                anyhow::bail!("runtime-addressed prefab needs exactly one root: {path}");
+            let Some(root) = written.roots.get(&guid) else {
+                anyhow::bail!("the worker found no root GameObject of the addressed prefab {path}");
             };
             sources.push((guid, root.clone()));
         }
@@ -319,11 +305,6 @@ impl super::Session {
             }
         }
         Ok(paths)
-    }
-
-    /// Whether this session writes its scene in the Player format.
-    pub fn native_scene_mode(&self) -> bool {
-        self.lock().native_scene_mode
     }
 
     /// Holds a scene the worker wrote, for the preparation whose sources

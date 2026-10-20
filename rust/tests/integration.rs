@@ -3,7 +3,6 @@ mod authoring;
 mod formats;
 mod graph;
 mod mcp;
-mod playerbake;
 mod regressions;
 mod runtimeartifact;
 mod shader;

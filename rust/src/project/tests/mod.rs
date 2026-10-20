@@ -1,15 +1,11 @@
-//! Tests of the raw scene preparation session.
+//! Tests of the scene preparation session.
 use super::{
     Options, Session,
     value::{self, Map, Value},
 };
 use std::{fs, path::Path};
 
-mod discovery;
-mod imported;
-mod native;
 mod session;
-mod sources;
 
 pub(crate) const FIXTURE_GUID: &str = "11111111111111111111111111111111";
 pub(crate) const FIXTURE_SCENE: &str = "%YAML 1.1
@@ -102,20 +98,10 @@ pub(crate) fn fixture_with(
     }
 }
 
-/// `{err:#}`: the full `a: b` chain of a wrapped error.
-pub(crate) fn message(error: &anyhow::Error) -> String {
-    format!("{error:#}")
-}
-
 /// The decoded `dataJson` of a manifest object.
 pub(crate) fn data_json(object: &Value) -> Map {
     match value::parse_use_number(&value::str(object.field("dataJson"))).unwrap() {
         Value::Object(map) => map,
         _ => Map::new(),
     }
-}
-
-/// Converts literal JSON (number literals kept verbatim) into a session value.
-pub(crate) fn json(value: serde_json::Value) -> Value {
-    value::parse_use_number(&value.to_string()).unwrap()
 }

@@ -1,6 +1,5 @@
 //! The C# compiler pipeline. Cache keys, manifests and command lines are persisted formats.
 mod baseline;
-mod behaviours;
 mod cli;
 mod compile;
 mod graph;
@@ -23,7 +22,6 @@ mod sys;
 #[cfg(test)]
 mod tests;
 
-pub use behaviours::BehaviourCode;
 pub use cli::run_compiler_prepare_cli;
 pub use compile::{
     assembly_needs_compile, compiler_manifest, deduplicate_references, dirty_assemblies,
@@ -604,8 +602,6 @@ pub struct Compiler {
     pub netcode_processed: NilMap<bool>,
     pub baseline_player: String,
     pub startup_complete: bool,
-    /// What runs the code of the script classes that were last laid out.
-    pub behaviour_code: BehaviourCode,
     /// Where the time of the last `compile` went.
     pub last_phases: Phases,
     /// The file map of the baseline Player directory, kept by every clone

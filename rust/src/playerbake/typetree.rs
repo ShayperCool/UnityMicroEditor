@@ -7,18 +7,6 @@ use std::borrow::Cow;
 /// Unity's common type-tree string table, as stored in the pinned Player.
 static COMMON_STRINGS: &[u8] = include_bytes!("engine/common-strings.bin");
 
-/// The offset of a string in the common table, if the table holds it.
-pub(super) fn common_string(text: &str) -> Option<u32> {
-    let mut offset = 0;
-    for entry in COMMON_STRINGS.split(|&byte| byte == 0) {
-        if entry == text.as_bytes() && offset < COMMON_STRINGS.len() {
-            return Some(offset as u32);
-        }
-        offset += entry.len() + 1;
-    }
-    None
-}
-
 #[derive(Debug, Clone)]
 pub struct Node {
     pub type_name: String,

@@ -56,12 +56,6 @@ fn execute() -> Result<()> {
         "project-import" => {
             unity_micro_editor::native::run_project_import_cli(&args.collect::<Vec<_>>())?
         }
-        "material-inspect" => {
-            unity_micro_editor::native::run_material_inspect_cli(&args.collect::<Vec<_>>())?
-        }
-        "native-adopt" => {
-            unity_micro_editor::native::run_native_adopt_cli(&args.collect::<Vec<_>>())?
-        }
         "native-environment" => {
             unity_micro_editor::native::run_native_environment_cli(&args.collect::<Vec<_>>())?
         }
@@ -94,12 +88,6 @@ fn execute() -> Result<()> {
                 "{}",
                 unity_micro_editor::native::debug_build_environment(project, scripts)?
             );
-        }
-        "shader-extract" => {
-            unity_micro_editor::runtimeartifact::shader_extract_command(&args.collect::<Vec<_>>())?
-        }
-        "builtin-shader" => {
-            unity_micro_editor::runtimeartifact::builtin_shader_command(&args.collect::<Vec<_>>())?
         }
         // Clients of the Unity Editor reference in `Integrations/EditorParity`.
         name if name.starts_with("parity-") => {

@@ -51,34 +51,6 @@ pub(crate) fn builtin_guid(guid: &str) -> bool {
     guid == "0000000000000000e000000000000000" || guid == "0000000000000000f000000000000000"
 }
 
-/// Visits every map carrying `fileID`, in sorted key order, with its property path.
-pub(crate) fn visit_references(value: &Value, path: &str, visit: &mut dyn FnMut(&str, &Map)) {
-    match value {
-        Value::Object(map) => visit_map(map, path, visit),
-        Value::Array(items) => {
-            for (index, item) in items.iter().enumerate() {
-                visit_references(item, &format!("{path}[{index}]"), visit);
-            }
-        }
-        _ => {}
-    }
-}
-pub(crate) fn visit_map(map: &Map, path: &str, visit: &mut dyn FnMut(&str, &Map)) {
-    if map.contains_key("fileID") {
-        visit(path, map);
-        return;
-    }
-    for (key, item) in map {
-        if !matches!(item, Value::Object(_) | Value::Array(_)) {
-            continue;
-        }
-        if path.is_empty() {
-            visit_references(item, key, visit);
-        } else {
-            visit_references(item, &format!("{path}.{key}"), visit);
-        }
-    }
-}
 pub(crate) fn visit_references_mut(
     value: &mut Value,
     path: &str,

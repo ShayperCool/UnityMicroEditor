@@ -55,20 +55,7 @@ pub struct RefusedPrefab {
     pub path: String,
     cause: anyhow::Error,
 }
-impl RefusedPrefab {
-    /// Names the prefab in an error of its preparation. A source that has to
-    /// be imported first is not a refusal: that error stays as it is.
-    pub(crate) fn wrap(path: &str) -> impl FnOnce(anyhow::Error) -> anyhow::Error + '_ {
-        move |cause| match cause.chain().any(|cause| cause.is::<NeedsImportError>()) {
-            true => cause,
-            false => RefusedPrefab {
-                path: path.into(),
-                cause,
-            }
-            .into(),
-        }
-    }
-}
+impl RefusedPrefab {}
 impl std::fmt::Display for RefusedPrefab {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "runtime prefab {}", self.path)
@@ -268,26 +255,11 @@ pub(crate) struct Inner {
     pub index_dirty: bool,
     pub explicit_sources: HashMap<String, String>,
     pub native_overlays: BTreeMap<String, NativeReplacement>,
-    /// The material variants of shaders with an inspector as a build
-    /// writes them, by GUID, each with its fields.
-    pub inspected_materials: BTreeMap<String, (super::InspectedMaterial, Map)>,
-    /// Sources of an older serialization as the engine saved them, by GUID.
-    pub upgraded_sources: BTreeMap<String, (super::UpgradedSource, Map)>,
-    /// Which entries of global settings assets a Player build keeps, by GUID.
-    pub player_graphics_settings: BTreeMap<String, super::PlayerGraphicsSettings>,
     /// Content derived from part of a source, such as the baked clips of a
     /// model, published under a GUID that no source owns.
     pub derived_native: BTreeMap<String, super::NativeContentFile>,
-    /// Whether the scene is written in the Player format instead of as
-    /// object records (`UME_NATIVE_SCENE=1`).
-    pub native_scene_mode: bool,
     /// The scene the worker wrote last, for the sources it was made of.
     pub native_scene: Option<super::NativeScene>,
-    pub changed_clip_models: Vec<String>,
-    /// The avatar masks the controllers of the last walk refer to.
-    pub controller_masks: Vec<String>,
-    /// The shaders of packages that materials of the last walk name.
-    pub package_shaders: Vec<String>,
     /// Catalog ScriptableObject sources edited since the catalog was built,
     /// each with whether it is loaded from its authored text instead.
     pub authored_scriptables: HashMap<String, bool>,
@@ -337,9 +309,6 @@ pub(crate) fn override_key(
     property: &str,
 ) -> String {
     [path, instance, guid, id, property].join("\0")
-}
-pub(crate) fn file_identity(path: &str) -> Result<Identity> {
-    Identity::read(Path::new(path))
 }
 /// True when the path does not exist.
 fn missing(path: &str) -> bool {
@@ -409,15 +378,8 @@ impl Inner {
             index_dirty: true,
             explicit_sources: HashMap::new(),
             native_overlays: BTreeMap::new(),
-            inspected_materials: BTreeMap::new(),
-            upgraded_sources: BTreeMap::new(),
-            player_graphics_settings: BTreeMap::new(),
             derived_native: BTreeMap::new(),
-            native_scene_mode: super::native_scene_mode(),
             native_scene: None,
-            changed_clip_models: Vec::new(),
-            controller_masks: Vec::new(),
-            package_shaders: Vec::new(),
             authored_scriptables: HashMap::new(),
             extra_assets: Vec::new(),
             ignored_diagnostics: Vec::new(),
@@ -432,9 +394,6 @@ impl Inner {
     }
     pub fn critical_of(&self, path: &str) -> &str {
         self.critical.get(path).map_or("", String::as_str)
-    }
-    pub fn script_type(&self, guid: &str) -> &str {
-        self.script_types.get(guid).map_or("", String::as_str)
     }
     pub fn baseline_text(&self, key: &str) -> String {
         str(get(&self.baseline, key)).into_owned()
@@ -702,26 +661,8 @@ impl Inner {
             self.depend(&path)?;
         }
         let scene = self.baseline_text("scenePath");
-        if self.native_scene_mode {
-            let over = self.native_scene_over(&scene)?;
-            return self.publish_revision(output_root, started, scene, over, 0, 0);
-        }
-        let (expanded, _) = self.expand(&scene, "", &[])?;
-        self.validate(&expanded)?;
-        let objects = super::manifest::order_scene_roots(self.manifest_objects(&expanded)?)?;
-        let object_count = objects.len();
-        let prepared_assets = self.prepare_assets(&expanded)?;
-        drop(expanded);
-        let asset_count = prepared_assets.assets.len();
-        let mut over = Map::new();
-        over.insert("objects".into(), Value::Array(objects));
-        over.insert("assets".into(), Value::Array(prepared_assets.assets));
-        over.insert(
-            "importedAssetBindings".into(),
-            Value::Array(prepared_assets.imported_bindings),
-        );
-        self.publish_native_content(&mut over)?;
-        self.publish_revision(output_root, started, scene, over, object_count, asset_count)
+        let over = self.native_scene_over(&scene)?;
+        self.publish_revision(output_root, started, scene, over, 0, 0)
     }
 
     /// Writes a revision of the manifest with the fields of `over`, or takes
@@ -998,50 +939,6 @@ impl Session {
     /// Publishes `revisions/<id>/scene.json` under `output_root`.
     pub fn prepare(&self, output_root: &str) -> Result<Prepared> {
         self.lock().prepare(output_root)
-    }
-
-    /// Why preparing would refuse the session's scene, as far as the scene
-    /// and the prefabs it instantiates tell without imported content: an
-    /// object of a class the loader has no adapter for, say. `None` when it
-    /// would not, or when only imported content can tell.
-    pub fn scene_refusal(&self) -> Option<anyhow::Error> {
-        self.refusal(|s| {
-            let scene = s.baseline_text("scenePath");
-            let (objects, _) = s.expand(&scene, "", &[])?;
-            s.validate(&objects)
-        })
-    }
-
-    /// The same for a runtime-addressed prefab of the session.
-    pub fn runtime_prefab_refusal(&self, path: &str) -> Option<anyhow::Error> {
-        self.refusal(|s| {
-            let (objects, _) = s.expand(path, "", &[])?;
-            s.validate(&objects)?;
-            let roots = objects
-                .iter()
-                .filter(|o| super::expand::transform(o.class_id))
-                .filter(|o| value::file_id(o.get("m_Father")) == "0")
-                .count();
-            if roots != 1 {
-                bail!("runtime-addressed prefab needs exactly one root: {path}");
-            }
-            Ok(())
-        })
-    }
-
-    fn refusal(&self, check: impl FnOnce(&mut Inner) -> Result<()>) -> Option<anyhow::Error> {
-        let mut s = self.lock();
-        // What a check reads is not what the next preparation depends on.
-        let observed = std::mem::take(&mut s.cache.observed);
-        let stats = std::mem::take(&mut s.cache.stats);
-        let dependencies = std::mem::take(&mut s.dependencies);
-        let result = s.index_guids().and_then(|()| check(&mut s));
-        s.cache.observed = observed;
-        s.cache.stats = stats;
-        s.dependencies = dependencies;
-        result
-            .err()
-            .filter(|error| !error.chain().any(|cause| cause.is::<NeedsImportError>()))
     }
 
     /// Every source the last preparation read, with the hash of what it

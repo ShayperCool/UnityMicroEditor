@@ -1,11 +1,41 @@
-use super::{
-    Reader, be32, be64,
-    builtin_shader::{ReadAt, read_at},
-    le16, le32, le64, req, text,
-};
-use anyhow::{Result, bail};
+use super::{Reader, be32, be64, le16, le32, le64, req, text};
+use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+
+/// What the lighting reader reads from: a file or bytes in memory.
+pub trait ReadAt {
+    fn read_exact_at(&self, buffer: &mut [u8], offset: u64) -> std::io::Result<()>;
+}
+impl ReadAt for [u8] {
+    fn read_exact_at(&self, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
+        let source = usize::try_from(offset)
+            .ok()
+            .and_then(|offset| self.get(offset..))
+            .and_then(|rest| rest.get(..buffer.len()))
+            .ok_or(std::io::ErrorKind::UnexpectedEof)?;
+        buffer.copy_from_slice(source);
+        Ok(())
+    }
+}
+impl ReadAt for Vec<u8> {
+    fn read_exact_at(&self, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
+        self.as_slice().read_exact_at(buffer, offset)
+    }
+}
+impl ReadAt for std::fs::File {
+    fn read_exact_at(&self, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
+        std::os::unix::fs::FileExt::read_exact_at(self, buffer, offset)
+    }
+}
+
+fn read_at<R: ReadAt + ?Sized>(input: &R, size: usize, offset: i64) -> Result<Vec<u8>> {
+    let mut buffer = vec![0u8; size];
+    input
+        .read_exact_at(&mut buffer, offset as u64)
+        .context("native resource ends before its declared data")?;
+    Ok(buffer)
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

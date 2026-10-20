@@ -72,7 +72,7 @@ impl NativeProjectImporter {
         );
         let key = sha256(
             format!(
-                "native-scene-v3\0{}\0{}\0{scripts}\0{}",
+                "native-scene-v4\0{}\0{}\0{scripts}\0{}",
                 importer_identity(),
                 self.environment_sha256,
                 needed.key
@@ -131,12 +131,12 @@ impl NativeProjectImporter {
         for (name, data) in &resources {
             let path = sysutil::join(&[&directory, name]);
             if std::fs::metadata(&path).is_err() {
-                super::mesh_cpu::write_immutable_native_mesh_file(&path, data)?;
+                super::support::write_immutable_file(&path, data)?;
             }
         }
         let path = sysutil::join(&[&directory, "dependencies"]);
         if std::fs::metadata(&path).is_err() {
-            super::mesh_cpu::write_immutable_native_mesh_file(&path, &dependencies.file)?;
+            super::support::write_immutable_file(&path, &dependencies.file)?;
         }
         let mut content = NativeContentFile {
             guid: dependencies_guid.clone(),
@@ -229,6 +229,7 @@ impl NativeProjectImporter {
             content: vec![content],
             published,
             objects,
+            roots: dependencies.roots.clone(),
         });
         Ok(())
     }
@@ -296,6 +297,12 @@ impl NativeProjectImporter {
                 file: dependencies,
                 objects,
                 sources,
+                roots: written
+                    .report
+                    .include_roots
+                    .iter()
+                    .map(|(guid, id)| (guid.clone(), id.to_string()))
+                    .collect(),
                 ..Default::default()
             },
             written.resources,

@@ -1,46 +1,28 @@
-//! The native import coordinator: owned import contexts, the DataStore service
-//! and AssetImportWorker protocol driver, UDS artifact extraction and the
-//! validated native cache that feeds a `project::Session`.
-mod adopt;
+//! The native import coordinator: owned import contexts, the DataStore
+//! service and AssetImportWorker protocol driver, the worker that writes
+//! scenes in the Player format, the shaders built beside them and the
+//! validated cache that feeds a `project::Session`.
 mod artifact;
 mod artifactdb;
-mod atlas;
 mod baked;
-mod batch;
 mod build_settings;
 mod built_store;
-mod builtin_shader;
 mod context;
 mod datastore;
 pub mod editor_compilation;
 mod environment;
-mod graphics_settings;
 mod host_shaders;
 mod import;
 mod importer;
-mod inspector;
-mod material_variant;
-mod mesh_cpu;
 mod native_scene;
-mod native_template;
-mod pipeline_models;
 mod player_objects;
 mod probe;
 mod scene_worker;
 mod scripted;
-mod shader_cache;
 mod shader_compiler;
-mod supplies;
 mod support;
-mod texture_profile;
-mod ui;
-mod upgrade;
-mod warm;
 
-pub use adopt::{read_cold_adoption_report, run_native_adopt_cli, validate_adoption_file};
 pub use artifact::{ArtifactExtraction, MAX_ARTIFACT_BYTES, UdsArtifactStore};
-pub use batch::{NATIVE_IMPORT_BATCH_SIZE, cold_native_profile, order_native_batch};
-pub use builtin_shader::{apply_builtin_shaders, verify_builtin_shader_snapshot};
 pub use context::{
     ContextExtras, ProjectImportContext, ProjectImportSource, create_project_import_context,
     resolve_project_import_source, verify_project_import_sources,
@@ -59,10 +41,6 @@ pub use importer::{
     NativeOptions, NativeProjectImporter, native_index, project_native_store,
     stage_native_resources, valid_native_guid,
 };
-pub use inspector::{
-    InspectedMaterial, Inspection, InspectionOptions, MaterialInspection, VERIFIED_GRAPH_PACKAGE,
-    VERIFIED_INSPECTORS, inspect_material_variants, inspection_cache, run_material_inspect_cli,
-};
 pub use player_objects::{
     Build as PlayerBuild, ExternalObject as PlayerExternalObject, Plan as PlayerBuildPlan,
     PlayerObjects, Report as PlayerObjectReport, Request as PlayerObjectRequest, WrittenScene,
@@ -73,14 +51,8 @@ pub use probe::{
     FrameEvidence, ImportEvidence, NativeImportJob, ProbeOptions, ProbeReport, capture_frame,
     receive_message, rss_kib, run_probe, validate_worker_version,
 };
-pub use shader_cache::verify_compiled_shader_cache;
 pub use shader_compiler::ShaderCompiler;
 pub use support::{JsonF64, is_canceled, is_not_exist};
-pub use texture_profile::{
-    native_texture_needs_warm, validate_native_configuration, warm_texture_configuration,
-};
-pub use ui::parse_native_ui_bindings;
-pub use warm::{WarmNativeArtifact, extract_warm_native_ui};
 
 #[cfg(test)]
 mod tests;
