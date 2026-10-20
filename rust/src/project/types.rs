@@ -98,6 +98,19 @@ wire_struct! {
         pub path: String,
         pub sha256: String,
         pub dependencies: List<NativeContentDependency>,
+        /// Objects the manifest names by their source that a content file of
+        /// the scene holds: the render pipeline asset, the preloaded assets.
+        #[serde(skip_serializing_if = "List::is_empty_list")]
+        pub aliases: List<NativeSceneAlias>,
+    }
+}
+wire_struct! {
+    /// A source object and where a content file holds it.
+    pub struct NativeSceneAlias {
+        pub guid: String,
+        pub file_id: String,
+        pub file: String,
+        pub local_id: String,
     }
 }
 wire_struct! {

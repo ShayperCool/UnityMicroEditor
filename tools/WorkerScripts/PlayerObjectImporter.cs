@@ -19,6 +19,8 @@
 //   settings <asset path> a render pipeline's global settings, whose entries a Player build keeps or strips is
 //                        reported as "settings kept|stripped <managed reference ID> <type> <path>". A request
 //                        that only asks this writes no Player objects.
+//   include <asset path> with a scene: an asset whose objects go into the file beside it though the scene does not
+//                        refer to it (the render pipeline asset, the preloaded assets a build holds)
 //   revision <n>         ignored: a request kept by a worker that lives on is changed so that it is imported again
 //   scene <asset path>   a scene, written as a build writes it: prefab instances unpacked, EditorOnly objects
 //                        left out, with the scene's settings managers. A request that writes a scene writes
@@ -330,28 +332,99 @@ namespace UnityMicroEditor.Worker
             return ids;
         }
 
+        // Runs a write with the callbacks a build runs on shaders. The
+        // scriptable build pipeline package starts them the same way: the
+        // entry is not public, and without it a build through
+        // ContentBuildInterface runs no IPreprocessShaders, so a shader is
+        // written with every variant it declares.
+        static T WithBuildCallbacks<T>(List<RenderPipelineAsset> pipelines, StringBuilder report, Func<T> write)
+        {
+            var interfaces = typeof(Editor).Assembly.GetType("UnityEditor.Build.BuildPipelineInterfaces", false);
+            if (interfaces == null)
+                throw new InvalidOperationException("this Editor starts its build callbacks otherwise");
+            var flags = BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public;
+            var callbacks = interfaces.GetNestedType("BuildCallbacks", BindingFlags.NonPublic | BindingFlags.Public);
+            var initialize = interfaces.GetMethod("InitializeBuildCallbacks", flags);
+            var cleanup = interfaces.GetMethod("CleanupBuildCallbacks", flags);
+            if (callbacks == null || initialize == null || cleanup == null)
+                throw new InvalidOperationException("this Editor starts its build callbacks otherwise");
+            object wanted = Enum.ToObject(callbacks, Convert.ToInt32(Enum.Parse(callbacks, "ShaderProcessors")) | Convert.ToInt32(Enum.Parse(callbacks, "ComputeShaderProcessors")));
+            try
+            {
+                Callbacks(interfaces, initialize, wanted, pipelines, report);
+                return write();
+            }
+            finally
+            {
+                cleanup.Invoke(null, null);
+            }
+        }
+
         // A scene as a build writes it. The Editor opens the scene from its
         // source for the build, unpacks its prefab instances and leaves out
         // its EditorOnly objects; every object of another file it refers to
         // is named, like a written asset's, by an external file of its own.
-        static void WriteScene(AssetImportContext ctx, string scene, bool withDependencies, StringBuilder report)
+        static void WriteScene(AssetImportContext ctx, string scene, bool withDependencies, List<string> includes, StringBuilder report)
         {
             var timer = System.Diagnostics.Stopwatch.StartNew();
+            var pipelines = BuildPipelines();
             var settings = new BuildSettings { target = Target, group = BuildTargetGroup.Standalone, buildFlags = ContentBuildFlags.None };
             var usage = new BuildUsageTagSet();
+            Debug.Log("[ume-scene] dependencies of " + scene);
             var info = ContentBuildInterface.CalculatePlayerDependenciesForScene(scene, settings, usage);
+            Debug.Log("[ume-scene] dependencies done");
             report.Append("scene-dependencies ").Append(info.referencedObjects.Count).Append(' ').Append(timer.ElapsedMilliseconds).Append('\n');
-            var global = info.globalUsage | ContentBuildInterface.GetGlobalUsageFromGraphicsSettings();
+            // What a build of the project uses, as the shaders of the
+            // project's own builds take it; the scene's lighting adds its
+            // own modes for its file.
+            var projectGlobal = ContentBuildInterface.GetGlobalUsageFromGraphicsSettings();
+            var global = info.globalUsage | projectGlobal;
             var map = new BuildReferenceMap();
             string directory = Path.Combine("Temp", "ume-player-" + AssetDatabase.AssetPathToGUID(ctx.assetPath));
             Directory.CreateDirectory(directory);
             if (withDependencies)
             {
-                // What the scene refers to, but the engine's own resources,
-                // written into one file beside it, scripts first.
+                // What the scene refers to, but the engine's own resources
+                // and the shaders of the project and its packages, written
+                // into one file beside it, scripts first. A shader is built
+                // on its own, with every material of the project that uses
+                // it, as the coordinator publishes it: each object of one is
+                // named by the file `ume-asset/<GUID>`, in which it keeps its
+                // local ID.
                 const string Builtin = "0000000000000000e000000000000000";
-                var dependencies = info.referencedObjects.Where(id => id.guid.ToString() != Builtin)
+                const string BuiltinExtra = "0000000000000000f000000000000000";
+                Func<ObjectIdentifier, bool> published = id =>
+                {
+                    string guid = id.guid.ToString();
+                    var type = ContentBuildInterface.GetTypeForObject(id);
+                    return guid != Builtin && guid != BuiltinExtra && (type == typeof(Shader) || type == typeof(ComputeShader));
+                };
+                var referenced = new List<ObjectIdentifier>(info.referencedObjects);
+                var seen = new HashSet<ObjectIdentifier>(referenced);
+                foreach (string path in includes)
+                {
+                    var ids = ContentBuildInterface.GetPlayerObjectIdentifiersInAsset(new GUID(AssetDatabase.AssetPathToGUID(path)), Target);
+                    report.Append("project-asset ").Append(ids.Length).Append(' ').Append(path).Append('\n');
+                    foreach (var id in ids.Concat(ContentBuildInterface.GetPlayerDependenciesForObjects(ids, Target, null)))
+                        if (seen.Add(id)) referenced.Add(id);
+                }
+                foreach (var id in referenced.Where(published))
+                {
+                    string file = "ume-asset/" + id.guid;
+                    map.AddMapping(file, id.localIdentifierInFile, id);
+                    report.Append("published ").Append(id.guid).Append(' ').Append(id.localIdentifierInFile).Append(' ')
+                        .Append(ContentBuildInterface.GetTypeForObject(id).FullName).Append(' ').Append(OneLine(AssetDatabase.GUIDToAssetPath(id.guid))).Append('\n');
+                }
+                var dependencies = referenced.Where(id => id.guid.ToString() != Builtin && !published(id))
                     .OrderBy(id => ContentBuildInterface.GetTypeForObject(id) == typeof(MonoScript) ? 0 : 1).ToList();
+                // What the objects use (a material's keywords, a mesh's
+                // channels), as a build tags the objects of each file it
+                // writes; the scene's own objects tag only what they use
+                // directly, and a shader without usage is written with every
+                // variant it declares.
+                var dependencyIds = dependencies.ToArray();
+                var dependencyUsage = new BuildUsageTagSet();
+                ContentBuildInterface.CalculateBuildUsageTags(dependencyIds, dependencyIds, projectGlobal, dependencyUsage);
                 var depsCommand = new WriteCommand { fileName = "deps", internalName = "ume-deps", serializeObjects = new List<SerializationInfo>() };
                 for (int index = 0; index < dependencies.Count; index++)
                 {
@@ -361,14 +434,15 @@ namespace UnityMicroEditor.Worker
                     var type = ContentBuildInterface.GetTypeForObject(id);
                     report.Append("dependency ").Append(index + 1).Append(' ').Append(type == null ? "?" : type.FullName).Append(' ').Append(id.guid).Append(' ').Append(id.localIdentifierInFile).Append('\n');
                 }
-                var depsResult = ContentBuildInterface.WriteSerializedFile(directory, new WriteParameters
+                Debug.Log("[ume-scene] writing " + dependencies.Count + " dependencies");
+                var depsResult = WithBuildCallbacks(pipelines, report, () => ContentBuildInterface.WriteSerializedFile(directory, new WriteParameters
                 {
                     writeCommand = depsCommand,
                     settings = settings,
-                    globalUsage = global,
-                    usageSet = usage,
+                    globalUsage = projectGlobal,
+                    usageSet = dependencyUsage,
                     referenceMap = map,
-                });
+                }));
                 foreach (var file in depsResult.resourceFiles)
                     report.Append("deps-file ").Append(file.fileAlias).Append(' ').Append(file.serializedFile ? 1 : 0).Append(' ').Append(Path.GetFileName(file.fileName)).Append('\n');
                 foreach (var name in depsResult.externalFileReferences)
@@ -384,7 +458,8 @@ namespace UnityMicroEditor.Worker
             // A scene file is named without an extension: the Editor drops it.
             var command = new WriteCommand { fileName = "scene", internalName = InternalName, serializeObjects = new List<SerializationInfo>() };
             timer.Restart();
-            var result = ContentBuildInterface.WriteSceneSerializedFile(directory, new WriteSceneParameters
+            Debug.Log("[ume-scene] writing the scene");
+            var result = WithBuildCallbacks(pipelines, report, () => ContentBuildInterface.WriteSceneSerializedFile(directory, new WriteSceneParameters
             {
                 scenePath = scene,
                 writeCommand = command,
@@ -392,7 +467,7 @@ namespace UnityMicroEditor.Worker
                 globalUsage = global,
                 usageSet = usage,
                 referenceMap = map,
-            });
+            }));
             report.Append("scene-written ").Append(result.serializedObjects.Count).Append(' ').Append(timer.ElapsedMilliseconds).Append('\n');
             foreach (var written in result.serializedObjects)
             {
@@ -424,6 +499,7 @@ namespace UnityMicroEditor.Worker
             var saved = new List<string>();
             var settings = new List<string>();
             var scenes = new List<string>();
+            var includes = new List<string>();
             bool withDependencies = false;
             foreach (var raw in File.ReadAllLines(ctx.assetPath))
             {
@@ -453,6 +529,10 @@ namespace UnityMicroEditor.Worker
                         settings.Add(value);
                         break;
                     case "revision": break;
+                    case "include":
+                        ctx.DependsOnArtifact(value);
+                        includes.Add(value);
+                        break;
                     case "scene":
                     case "scene-with-dependencies":
                         ctx.DependsOnSourceAsset(value);
@@ -466,7 +546,7 @@ namespace UnityMicroEditor.Worker
             {
                 if (scenes.Count != 1 || written.Count != 0 || embedded.Count != 0 || saved.Count != 0 || settings.Count != 0)
                     throw new InvalidOperationException("a request that writes a scene writes nothing else");
-                WriteScene(ctx, scenes[0], withDependencies, report);
+                WriteScene(ctx, scenes[0], withDependencies, includes, report);
                 return;
             }
             Save(saved, report);
@@ -548,38 +628,16 @@ namespace UnityMicroEditor.Worker
                 report.Append("external ").Append(file).Append(' ').Append(index).Append(' ').Append(type == null ? "?" : type.FullName).Append(' ').Append(OneLine(id.filePath ?? "")).Append('\n');
             }
 
-            // The scriptable build pipeline package starts the build callbacks
-            // the same way: the entry is not public, and without it a build
-            // through ContentBuildInterface runs no IPreprocessShaders.
-            var interfaces = typeof(Editor).Assembly.GetType("UnityEditor.Build.BuildPipelineInterfaces", false);
-            if (interfaces == null)
-                throw new InvalidOperationException("this Editor starts its build callbacks otherwise");
-            var flags = BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public;
-            var callbacks = interfaces.GetNestedType("BuildCallbacks", BindingFlags.NonPublic | BindingFlags.Public);
-            var initialize = interfaces.GetMethod("InitializeBuildCallbacks", flags);
-            var cleanup = interfaces.GetMethod("CleanupBuildCallbacks", flags);
-            if (callbacks == null || initialize == null || cleanup == null)
-                throw new InvalidOperationException("this Editor starts its build callbacks otherwise");
-            object wanted = Enum.ToObject(callbacks, Convert.ToInt32(Enum.Parse(callbacks, "ShaderProcessors")) | Convert.ToInt32(Enum.Parse(callbacks, "ComputeShaderProcessors")));
             string directory = Path.Combine("Temp", "ume-player-" + AssetDatabase.AssetPathToGUID(ctx.assetPath));
             Directory.CreateDirectory(directory);
-            WriteResult result;
-            try
+            WriteResult result = WithBuildCallbacks(pipelines, report, () => ContentBuildInterface.WriteSerializedFile(directory, new WriteParameters
             {
-                Callbacks(interfaces, initialize, wanted, pipelines, report);
-                result = ContentBuildInterface.WriteSerializedFile(directory, new WriteParameters
-                {
-                    writeCommand = command,
-                    settings = new BuildSettings { target = Target, group = BuildTargetGroup.Standalone, buildFlags = ContentBuildFlags.None },
-                    globalUsage = global,
-                    usageSet = usage,
-                    referenceMap = map,
-                });
-            }
-            finally
-            {
-                cleanup.Invoke(null, null);
-            }
+                writeCommand = command,
+                settings = new BuildSettings { target = Target, group = BuildTargetGroup.Standalone, buildFlags = ContentBuildFlags.None },
+                globalUsage = global,
+                usageSet = usage,
+                referenceMap = map,
+            }));
             foreach (var file in result.resourceFiles)
                 report.Append("file ").Append(file.fileAlias).Append(' ').Append(file.serializedFile ? 1 : 0).Append(' ').Append(Path.GetFileName(file.fileName)).Append('\n');
             string output = Path.Combine(directory, command.fileName);

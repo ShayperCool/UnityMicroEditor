@@ -76,6 +76,9 @@ pub struct Request {
     pub scenes: Vec<String>,
     /// A scene written with what it refers to in a file beside it.
     pub scenes_with_dependencies: Vec<String>,
+    /// Assets whose objects go into that file though the scene does not
+    /// refer to them.
+    pub includes: Vec<String>,
 }
 
 impl Request {
@@ -92,6 +95,7 @@ impl Request {
             ("save", &self.save),
             ("settings", &self.settings),
             ("scene", &self.scenes),
+            ("include", &self.includes),
             ("scene-with-dependencies", &self.scenes_with_dependencies),
         ] {
             for path in paths {
@@ -615,6 +619,7 @@ pub fn plan(
         settings: Vec::new(),
         scenes: Vec::new(),
         scenes_with_dependencies: Vec::new(),
+        includes: Vec::new(),
     };
     if plan.batch.len() >= 4000 {
         bail!(Unsupported(format!(
@@ -1266,47 +1271,132 @@ pub fn write_generated_objects(
 }
 
 /// The assets a scene refers to, each after what it refers to in turn, the
-/// scene last. Scripts are not among them: their assemblies are loaded.
-pub(super) fn scene_closure(sources: &Sources, scene: &str) -> Result<Vec<String>> {
+/// scene last, and the scripts whose classes they need: those of their
+/// objects and the importers of those a script imports. Scripts are not
+/// among the assets: their assemblies are loaded.
+pub(super) fn scene_closure(
+    sources: &Sources,
+    scene: &str,
+    includes: &[String],
+) -> Result<SceneClosure> {
     static GUID: std::sync::LazyLock<regex::bytes::Regex> =
         std::sync::LazyLock::new(|| regex::bytes::Regex::new(r"guid: ([0-9a-fA-F]{32})").unwrap());
-    fn visit(
-        sources: &Sources,
-        path: &str,
-        seen: &mut BTreeSet<String>,
-        order: &mut Vec<String>,
-    ) -> Result<()> {
-        if !seen.insert(path.to_string()) {
-            return Ok(());
-        }
-        let Some(physical) = sources.physical(path) else {
-            bail!(Unsupported(format!(
-                "a scene that refers to {path}, which lies in a package outside the project"
-            )));
-        };
-        if stat(&physical)?.is_dir() {
-            return Ok(());
-        }
-        let data = read_file(&physical)?;
-        if data.starts_with(b"%YAML") {
-            for capture in GUID.captures_iter(&data) {
-                let guid = String::from_utf8_lossy(&capture[1]).to_ascii_lowercase();
-                let Some(target) = sources.path_of(&guid) else {
-                    continue;
-                };
-                if lower_ext(target) == ".cs" {
-                    continue;
-                }
-                let target = target.to_string();
-                visit(sources, &target, seen, order)?;
-            }
-        }
-        order.push(path.to_string());
-        Ok(())
+    struct Walk<'a> {
+        sources: &'a Sources,
+        seen: BTreeSet<String>,
+        order: Vec<String>,
+        scripts: BTreeSet<String>,
+        importers: BTreeSet<String>,
     }
-    let (mut seen, mut order) = (BTreeSet::new(), Vec::new());
-    visit(sources, scene, &mut seen, &mut order)?;
-    Ok(order)
+    impl Walk<'_> {
+        fn visit(&mut self, path: &str) -> Result<()> {
+            if !self.seen.insert(path.to_string()) {
+                return Ok(());
+            }
+            let Some(physical) = self.sources.physical(path) else {
+                bail!(Unsupported(format!(
+                    "a scene that refers to {path}, which lies in a package outside the project"
+                )));
+            };
+            if stat(&physical)?.is_dir() {
+                return Ok(());
+            }
+            if let Ok(meta) = read_file(&format!("{physical}.meta"))
+                && let Some(importer) = scripted_importer(&meta)
+            {
+                self.importers.insert(importer);
+            }
+            // A graph reads its sub-graphs and the files it includes.
+            if matches!(lower_ext(path).as_str(), ".shadergraph" | ".shadersubgraph") {
+                for source in graph_sources(self.sources, path)? {
+                    self.visit(&source)?;
+                }
+            }
+            let data = read_file(&physical)?;
+            if data.starts_with(b"%YAML") {
+                for capture in GUID.captures_iter(&data) {
+                    let guid = String::from_utf8_lossy(&capture[1]).to_ascii_lowercase();
+                    let Some(target) = self.sources.path_of(&guid) else {
+                        continue;
+                    };
+                    if lower_ext(target) == ".cs" {
+                        self.scripts.insert(guid);
+                        continue;
+                    }
+                    let target = target.to_string();
+                    self.visit(&target)?;
+                }
+            }
+            self.order.push(path.to_string());
+            Ok(())
+        }
+    }
+    let mut walk = Walk {
+        sources,
+        seen: BTreeSet::new(),
+        order: Vec::new(),
+        scripts: BTreeSet::new(),
+        importers: BTreeSet::new(),
+    };
+    // What a build holds beside the scene goes before it.
+    for include in includes {
+        walk.visit(include)?;
+    }
+    let order = std::mem::take(&mut walk.order);
+    walk.visit(scene)?;
+    let mut order_all = order;
+    order_all.append(&mut walk.order);
+    walk.order = order_all;
+    // As the Editor imports them: a model looks its textures up by path and
+    // its remapped materials by GUID, and an import of what uses a model
+    // refuses one made before them.
+    let phase = |path: &String| match lower_ext(path).as_str() {
+        ".mat" => 1,
+        ".fbx" | ".obj" | ".blend" | ".dae" | ".3ds" | ".max" | ".ma" | ".mb" => 2,
+        ".unity"
+        | ".prefab"
+        | ".asset"
+        | ".controller"
+        | ".overridecontroller"
+        | ".anim"
+        | ".mask"
+        | ".playable"
+        | ".mixer"
+        | ".lighting"
+        | ".spriteatlasv2"
+        | ".terrainlayer"
+        | ".physicmaterial"
+        | ".physicsmaterial2d"
+        | ".rendertexture"
+        | ".cubemap"
+        | ".flare"
+        | ".preset" => 3,
+        _ => 0,
+    };
+    let mut assets = walk.order;
+    assets.sort_by_key(phase);
+    Ok(SceneClosure {
+        assets,
+        scripts: walk.scripts,
+        importers: walk.importers,
+    })
+}
+
+/// What a scene is made of.
+pub(super) struct SceneClosure {
+    /// The assets in the order a worker imports them, the scene last.
+    pub assets: Vec<String>,
+    /// The scripts of their objects, by GUID.
+    pub scripts: BTreeSet<String>,
+    /// The scripted importers of those a script imports, by GUID.
+    pub importers: BTreeSet<String>,
+}
+
+impl SceneClosure {
+    /// The environment the scene is written in.
+    pub fn environment(&self, project: &str) -> Result<super::scripted::ScriptEnvironment> {
+        super::scripted::scene_environment(project, &self.scripts, &self.importers)
+    }
 }
 
 /// A scene the Editor's build code wrote, as the Player loads it.
@@ -1315,6 +1405,9 @@ pub struct WrittenScene {
     pub scene: Vec<u8>,
     /// What it refers to, when written beside it.
     pub dependencies: Option<Vec<u8>>,
+    /// The files of that file's streamed data (textures, sounds), by the
+    /// name it gives them.
+    pub resources: Vec<(String, Vec<u8>)>,
     pub report: Report,
     pub imports: usize,
     pub seconds: f64,
@@ -1335,12 +1428,8 @@ pub fn write_scene_objects(
     mkdir_all(&build.output, 0o700)?;
     let settings = build_settings(&sources, &[])?;
     let mut batch = Vec::new();
-    for path in settings
-        .batch
-        .iter()
-        .cloned()
-        .chain(scene_closure(&sources, &build.target)?)
-    {
+    let closure = scene_closure(&sources, &build.target, &build.users)?;
+    for path in settings.batch.iter().chain(&closure.assets).cloned() {
         if !batch.contains(&path) {
             batch.push(path);
         }
@@ -1370,7 +1459,7 @@ pub fn write_scene_objects(
         files: Vec::new(),
     };
     batch.push(REQUEST_PATH.to_string());
-    let environment = super::scripted::scene_environment(&build.project)?;
+    let environment = closure.environment(&build.project)?;
     let output = sysutil::join(&[&build.output, "build-0"]);
     let run = run_in(ctx, build, &output, &batch, &environment, &files, &[])?;
     let file = |name: &str| {
@@ -1393,6 +1482,7 @@ pub fn write_scene_objects(
     Ok(WrittenScene {
         scene,
         dependencies,
+        resources: Vec::new(),
         report,
         imports: run.imports,
         seconds: started.elapsed().as_secs_f64(),
@@ -1554,6 +1644,7 @@ mod tests {
             settings: vec!["Assets/Settings/Global.asset".into()],
             scenes: vec!["Assets/S.unity".into()],
             scenes_with_dependencies: Vec::new(),
+            includes: Vec::new(),
         };
         assert_eq!(
             request.encode().unwrap(),

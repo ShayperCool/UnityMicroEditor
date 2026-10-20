@@ -74,6 +74,15 @@ pub(super) struct Built {
     pub externals: Vec<String>,
     /// Where those sources lie, by GUID.
     pub external_paths: BTreeMap<String, String>,
+    /// The source object of each published object, as `<GUID>/<local ID>`,
+    /// in the order of `objects`, for a file that holds objects of many
+    /// sources.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
+    /// The names of the files beside it that hold its streamed data, each
+    /// kept as a build of its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -280,6 +289,8 @@ mod tests {
                 "2cbfcd0349c944ee788f6e2919b9d66c".to_string(),
                 "Assets/Screen.shader".to_string(),
             )]),
+            sources: vec!["2cbfcd0349c944ee788f6e2919b9d66c/4800000".into()],
+            resources: Vec::new(),
         };
         let (key, other) = (sha256(b"one"), sha256(b"two"));
         assert_eq!(load(&project, &key), None);

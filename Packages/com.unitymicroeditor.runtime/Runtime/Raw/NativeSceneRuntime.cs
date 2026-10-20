@@ -5,6 +5,7 @@ using Unity.Content;
 using Unity.Loading;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using Object = UnityEngine.Object;
 
 namespace UnityMicroEditor.Raw
 {
@@ -31,6 +32,19 @@ namespace UnityMicroEditor.Raw
                 if (!ValidNativeHash(descriptor.sha256)) throw new InvalidDataException("Native scene descriptor is incomplete.");
                 string path = AssetPath(manifest, descriptor.path);
                 LoadNativeContentFiles();
+                // The objects the manifest names by their sources, as a
+                // content file of the scene holds them.
+                foreach (NativeSceneAliasDescriptor alias in descriptor.aliases ?? Array.Empty<NativeSceneAliasDescriptor>())
+                {
+                    if (alias == null || !assets.TryGetValue(AssetKey(alias.file, alias.localId), out Object held))
+                        throw new InvalidDataException("Native scene alias names no published object: " + (alias == null ? "" : alias.guid + "/" + alias.fileId));
+                    assets[AssetKey(alias.guid, alias.fileId)] = held;
+                }
+                // What a built Player loads before its first scene: the
+                // preloaded assets (which wake as they load) and the render
+                // pipeline with its global settings.
+                LoadPreloadedAssets();
+                ConfigurePipeline();
                 RequireNativeContentHash(path, descriptor.sha256);
                 NativeContentDependencyDescriptor[] declared = descriptor.dependencies ?? Array.Empty<NativeContentDependencyDescriptor>();
                 var dependencies = new NativeArray<ContentFile>(declared.Length, Allocator.Persistent);
@@ -93,5 +107,15 @@ namespace UnityMicroEditor.Raw
         public string path;
         public string sha256;
         public NativeContentDependencyDescriptor[] dependencies;
+        public NativeSceneAliasDescriptor[] aliases;
+    }
+
+    [Serializable]
+    public sealed class NativeSceneAliasDescriptor
+    {
+        public string guid;
+        public string fileId;
+        public string file;
+        public string localId;
     }
 }

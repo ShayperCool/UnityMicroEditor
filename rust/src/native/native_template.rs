@@ -166,6 +166,8 @@ impl NativeProjectImporter {
             objects: listed,
             externals: Vec::new(),
             external_paths: BTreeMap::new(),
+            sources: Vec::new(),
+            resources: Vec::new(),
         })
     }
 }

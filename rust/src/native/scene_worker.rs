@@ -120,12 +120,8 @@ impl SceneWorker {
         let sources = open_sources(&build.project)?;
         let settings = build_settings(&sources, &[])?;
         let mut batch: Vec<String> = Vec::new();
-        for path in settings
-            .batch
-            .iter()
-            .cloned()
-            .chain(scene_closure(&sources, &build.target)?)
-        {
+        let closure = scene_closure(&sources, &build.target, &build.users)?;
+        for path in settings.batch.iter().chain(&closure.assets).cloned() {
             if !batch.contains(&path) {
                 batch.push(path);
             }
@@ -143,9 +139,10 @@ impl SceneWorker {
                 ),
             );
         }
-        let environment = super::scripted::scene_environment(&build.project)?;
+        let environment = closure.environment(&build.project)?;
         let request = Request {
             scenes_with_dependencies: vec![build.target.clone()],
+            includes: build.users.clone(),
             ..Default::default()
         }
         .encode()?;
@@ -188,6 +185,13 @@ impl SceneWorker {
         }
         let warm = state.0.as_mut().unwrap();
         warm.last_used = Instant::now();
+        // The variants the worker compiled serve the next worker too.
+        if !build.shader_cache.is_empty() {
+            let _ = super::import::copy_missing(
+                &sysutil::join(&[warm.worker.project(), "Library/ShaderCache"]),
+                &build.shader_cache,
+            );
+        }
         let written = Self::read(warm)?;
         self.shared.wake.notify_all();
         Event::new("scene-worker-wrote")
@@ -219,7 +223,16 @@ impl SceneWorker {
                     format!("fileFormatVersion: 2\nguid: {request_guid}\n").into_bytes(),
                 ),
             )]),
-            files: Vec::new(),
+            // A graph is imported from the templates of its targets, which
+            // its importer reads as plain files.
+            files: if batch
+                .iter()
+                .any(|path| path.ends_with(".shadergraph") || path.ends_with(".shadersubgraph"))
+            {
+                open_sources(&build.project)?.graph_templates()
+            } else {
+                Vec::new()
+            },
         };
         let mut assets = batch.to_vec();
         assets.push(REQUEST_PATH.to_string());
@@ -237,7 +250,7 @@ impl SceneWorker {
             &BuildImport {
                 environment,
                 files: &files,
-                shader_cache: "",
+                shader_cache: &build.shader_cache,
                 extras: None,
             },
         )?;
@@ -289,7 +302,7 @@ impl SceneWorker {
         }
         warm.revision += 1;
         let directory = output_directory(&project, &warm.request_guid);
-        for name in ["scene", "deps", "report.txt"] {
+        for name in ["scene", "deps", "deps.resS", "deps.resource", "report.txt"] {
             let _ = std::fs::remove_file(sysutil::join(&[&directory, name]));
         }
         replace(
@@ -303,7 +316,7 @@ impl SceneWorker {
             dependent: false,
         });
         warm.worker
-            .import(&ctx.with_timeout(Duration::from_secs(600)), &jobs)?;
+            .import(&ctx.with_timeout(Duration::from_secs(1800)), &jobs)?;
         for (path, hash) in hashes {
             warm.sources.insert(path.clone(), hash.clone());
         }
@@ -314,9 +327,17 @@ impl SceneWorker {
         let directory = output_directory(warm.worker.project(), &warm.request_guid);
         let file = |name: &str| read_file(&sysutil::join(&[&directory, name]));
         let report = parse_report(&String::from_utf8_lossy(&file("report.txt")?))?;
+        let mut resources = Vec::new();
+        for extension in ["resS", "resource"] {
+            let path = sysutil::join(&[&directory, &format!("deps.{extension}")]);
+            if std::fs::metadata(&path).is_ok() {
+                resources.push((format!("ume-deps.{extension}"), read_file(&path)?));
+            }
+        }
         Ok(WrittenScene {
             scene: file("scene")?,
             dependencies: Some(file("deps")?),
+            resources,
             report,
             imports: warm.batch.len(),
             seconds: 0.0,

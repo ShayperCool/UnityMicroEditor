@@ -140,6 +140,9 @@ namespace UnityMicroEditor.Raw
             ActivationOrder(manifest);
             if (manifest.assemblies != null)
                 foreach (string path in manifest.assemblies) AssetPath(manifest, path);
+            // A scene in the Player format names these objects in its own
+            // content files; its load reads them back.
+            if (HasNativeScene(manifest)) return;
             if (!string.IsNullOrEmpty(manifest.renderPipelineGuid))
                 if (!assets.ContainsKey(AssetKey(manifest.renderPipelineGuid, manifest.renderPipelineFileId)))
                     throw new InvalidDataException("Prepared render pipeline asset is missing.");

@@ -1626,6 +1626,8 @@ fn build_source(ctx: &Context, build: &Build, guid: &str) -> Result<built_store:
             .map(|external| external.guid)
             .collect(),
         external_paths,
+        sources: Vec::new(),
+        resources: Vec::new(),
     })
 }
 

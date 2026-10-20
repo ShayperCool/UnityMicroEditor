@@ -470,7 +470,11 @@ impl NativeProjectImporter {
 
     /// Publishes a revision from the sources, importing what they need.
     fn prepare_sources(&mut self, ctx: &Context) -> Result<Prepared> {
-        self.refresh_pending_native(ctx)?;
+        // A scene the worker writes holds what it refers to: nothing of it
+        // is imported or baked beside it.
+        if !self.session.native_scene_mode() {
+            self.refresh_pending_native(ctx)?;
+        }
         let mut attempted = HashSet::new();
         loop {
             let error = match self.session.prepare(&self.opts.output) {

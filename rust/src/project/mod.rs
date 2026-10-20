@@ -59,7 +59,7 @@ pub use types::{
     CompiledShaderSnapshot, Document, List, NativeContentDependency, NativeContentFile,
     NativeContentObject, NativeContentResource, NativeDeferredBinding, NativeMeshCPUProjection,
     NativeMeshCPURetention, NativeModelGraphObject, NativeModelGraphReference,
-    NativeModelGraphTarget, NativeReplacement, NativeSceneFile, NativeUIBinding,
+    NativeModelGraphTarget, NativeReplacement, NativeSceneAlias, NativeSceneFile, NativeUIBinding,
     NativeUIBindingProof, PrefabOverrideDiagnostic, RetainedBuiltinShader, ShaderSourceRequirement,
 };
 pub use upgraded::UpgradedSource;

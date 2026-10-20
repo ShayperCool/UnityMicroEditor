@@ -42,7 +42,16 @@ pub struct NativeScene {
     pub key: String,
     pub scene: NativeSceneFile,
     pub content: Vec<NativeContentFile>,
+    /// The sources whose objects the scene or its content refer to in the
+    /// files the session publishes for them (the shaders), by GUID.
+    pub published: Vec<String>,
+    /// The local ID in the first content file of each source object it
+    /// holds, by `<GUID>/<local ID>`.
+    pub objects: std::collections::BTreeMap<String, String>,
 }
+
+/// Text sources above this size are read without the cache.
+const LARGE_TEXT: u64 = 16 * 1024 * 1024;
 
 /// The extensions of the text assets whose references the closure follows.
 fn followed(path: &str) -> bool {
@@ -77,7 +86,22 @@ impl Inner {
         static GUID: std::sync::LazyLock<regex::bytes::Regex> = std::sync::LazyLock::new(|| {
             regex::bytes::Regex::new(r"guid: ([0-9a-fA-F]{32})").unwrap()
         });
+        // What the project's settings name is written beside the scene.
         let mut pending = vec![scene.to_string()];
+        let mut guids = vec![self.baseline_text("renderPipelineGuid")];
+        for key in ["preloadedAssets"] {
+            for entry in value::array(value::get(&self.baseline, key)) {
+                if let Value::Object(fields) = entry {
+                    guids.push(value::text(fields, "guid").into_owned());
+                }
+            }
+        }
+        for guid in guids {
+            let path = self.path_of(&guid).to_string();
+            if !path.is_empty() {
+                pending.push(path);
+            }
+        }
         let mut seen = BTreeSet::new();
         while let Some(path) = pending.pop() {
             if !seen.insert(path.clone()) {
@@ -88,7 +112,18 @@ impl Inner {
                 continue;
             }
             let physical = self.source(&path)?;
-            let (content, _) = self.read_text(&physical)?;
+            // A large clip is read past the cache of text sources, which
+            // keeps only files it can hold.
+            let size = std::fs::metadata(&physical)
+                .map_err(|e| super::session::path_error(&physical, e))?
+                .len();
+            let content: std::sync::Arc<[u8]> = if size > LARGE_TEXT {
+                std::fs::read(&physical)
+                    .map_err(|e| super::session::path_error(&physical, e))?
+                    .into()
+            } else {
+                self.read_text(&physical)?.0
+            };
             if !content.starts_with(b"%YAML") {
                 continue;
             }
@@ -125,7 +160,23 @@ impl Inner {
             .into());
         };
         let written = written.clone();
-        for file in &written.content {
+        let mut content = written.content.clone();
+        let mut pending = written.published.clone();
+        let mut included = BTreeSet::new();
+        while let Some(guid) = pending.pop() {
+            if !included.insert(guid.clone()) {
+                continue;
+            }
+            let file = self.published_content(&guid)?;
+            pending.extend(
+                file.dependencies
+                    .iter()
+                    .filter(|dependency| !dependency.global)
+                    .map(|dependency| dependency.guid.clone()),
+            );
+            content.push(file);
+        }
+        for file in &content {
             self.verify_native_artifacts(file)?;
         }
         let mut over = Map::new();
@@ -133,13 +184,123 @@ impl Inner {
         over.insert("assets".into(), Value::Array(Vec::new()));
         over.insert("importedAssetBindings".into(), Value::Array(Vec::new()));
         over.insert("importedAssetPacks".into(), Value::Array(Vec::new()));
-        over.insert("nativeContentFiles".into(), value::raw(&written.content)?);
-        over.insert("nativeScene".into(), value::raw(&written.scene)?);
+        over.insert("nativeContentFiles".into(), value::raw(&content)?);
+        self.native_project_objects(&written, &mut over)?;
         Ok(over)
     }
 }
 
+impl Inner {
+    /// Names where the worker wrote the render pipeline asset and the
+    /// preloaded assets, which the manifest names by their sources: in the
+    /// file of what the scene refers to.
+    fn native_project_objects(&self, written: &NativeScene, over: &mut Map) -> Result<()> {
+        let file = &written.content[0].guid;
+        let mut sources = vec![(
+            self.baseline_text("renderPipelineGuid"),
+            self.baseline_text("renderPipelineFileId"),
+        )];
+        for entry in value::array(value::get(&self.baseline, "preloadedAssets")) {
+            if let Value::Object(fields) = entry {
+                sources.push((
+                    value::text(fields, "guid").into_owned(),
+                    value::text(fields, "fileId").into_owned(),
+                ));
+            }
+        }
+        let mut scene = written.scene.clone();
+        for (guid, file_id) in sources {
+            if guid.is_empty() {
+                continue;
+            }
+            let Some(local_id) = written.objects.get(&format!("{guid}/{file_id}")) else {
+                anyhow::bail!(
+                    "the worker wrote no object {file_id} of {guid}, which the project's settings name"
+                );
+            };
+            scene.aliases.push(super::NativeSceneAlias {
+                guid,
+                file_id,
+                file: file.clone(),
+                local_id: local_id.clone(),
+            });
+        }
+        over.insert("nativeScene".into(), value::raw(&scene)?);
+        // The global settings a build strips by the pipeline's own rules;
+        // the host Player holds the project's, as its build stripped them.
+        over.insert(
+            "renderPipelineGlobalSettings".into(),
+            Value::Array(Vec::new()),
+        );
+        Ok(())
+    }
+
+    /// The file the session publishes for a source, current with it; one
+    /// that is missing or was made from an older source is imported.
+    fn published_content(&mut self, guid: &str) -> Result<NativeContentFile> {
+        if let Some(file) = self.derived_native.get(guid) {
+            return Ok(file.clone());
+        }
+        let path = self.path_of(guid).to_string();
+        if path.is_empty() {
+            anyhow::bail!(
+                "the scene refers to the published content of {guid}, which no source has"
+            );
+        }
+        let physical = self.source(&path)?;
+        let (_, source) = self.read(&physical, false)?;
+        let meta = self.source(&format!("{path}.meta"))?;
+        let (_, meta) = self.read(&meta, true)?;
+        self.depend(&path)?;
+        let overlay = self
+            .native_overlays
+            .get(guid)
+            .filter(|overlay| overlay.source_sha256 == source && overlay.meta_sha256 == meta)
+            .map(|overlay| (overlay.content.clone(), overlay.ingredient_sha256.clone()));
+        let Some((content, ingredients)) = overlay else {
+            return Err(super::session::needs_import(&path));
+        };
+        for (ingredient, expected) in &ingredients {
+            let physical = self.source(ingredient)?;
+            let (_, actual) = self.read(&physical, ingredient.ends_with(".meta"))?;
+            if actual != *expected {
+                return Err(super::session::needs_import(&path));
+            }
+        }
+        Ok(content)
+    }
+}
+
 impl super::Session {
+    /// The assets a build holds beside the scene, which the project's
+    /// settings name: the render pipeline asset and the preloaded assets, by
+    /// path.
+    pub fn native_scene_includes(&self) -> Result<Vec<String>> {
+        let mut s = self.lock();
+        s.index_guids()?;
+        let mut guids = vec![s.baseline_text("renderPipelineGuid")];
+        for key in ["preloadedAssets"] {
+            for entry in value::array(value::get(&s.baseline, key)) {
+                if let Value::Object(fields) = entry {
+                    guids.push(value::text(fields, "guid").into_owned());
+                }
+            }
+        }
+        let mut paths = Vec::new();
+        for guid in guids {
+            let path = s.path_of(&guid).to_string();
+            if !path.is_empty() && !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        Ok(paths)
+    }
+
+    /// Whether this session writes its scene in the Player format.
+    pub fn native_scene_mode(&self) -> bool {
+        self.lock().native_scene_mode
+    }
+
     /// Holds a scene the worker wrote, for the preparation whose sources
     /// have `scene.key`.
     pub fn set_native_scene(&self, scene: NativeScene) {

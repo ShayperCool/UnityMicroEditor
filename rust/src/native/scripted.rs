@@ -349,9 +349,14 @@ pub struct ScriptSelection {
     /// writes the serialized data of; their assemblies are loaded, those of
     /// the project too.
     pub elements: BTreeSet<String>,
-    /// Whether every assembly the compilation left behind is loaded, those
-    /// of the project too: the classes of a scene's scripts.
+    /// Whether the scripts may be the project's own, and an assembly of a
+    /// package the project holds in place is loaded without its sources:
+    /// the classes of a scene's scripts.
     pub all: bool,
+    /// Of the scripts, the scripted importers: every script of their
+    /// assemblies and of those they refer to is an asset, since an
+    /// importer adds objects of any of their classes.
+    pub importers: BTreeSet<String>,
 }
 
 /// The full names of the custom elements a UXML document creates: each tag
@@ -452,10 +457,18 @@ pub fn build_environment(project: &str, scripts: &BTreeSet<String>) -> Result<Sc
     environment(project, &selection, Purpose::Build)
 }
 
-/// The environment in which a scene is written: every assembly of the
-/// project's Editor compilation, so that the classes of its scripts load.
-pub fn scene_environment(project: &str) -> Result<ScriptEnvironment> {
+/// The environment in which a scene is written: the assemblies of the
+/// project's Editor compilation that define the given scripts (the classes
+/// of the scene's objects and the importers of its assets), with those they
+/// refer to.
+pub fn scene_environment(
+    project: &str,
+    scripts: &BTreeSet<String>,
+    importers: &BTreeSet<String>,
+) -> Result<ScriptEnvironment> {
     let selection = ScriptSelection {
+        scripts: scripts.union(importers).cloned().collect(),
+        importers: importers.clone(),
         all: true,
         ..Default::default()
     };
@@ -593,15 +606,20 @@ fn read_environment(
     {
         bail!("no compiled package assembly is made from a script {missing}");
     }
+    let mut of_importers: Vec<usize> = Vec::new();
     'search: for (index, assembly) in assemblies.iter().enumerate() {
         if wanted.is_empty() {
             break;
         }
         for source in &assembly.source_files {
-            let Some(directory) = package_root(source).and_then(|root| {
+            let directory = package_root(source).and_then(|root| {
                 packages
                     .get(root)
                     .map(|directory| format!("{directory}{}", &source[root.len()..]))
+            });
+            // A scene's scripts may be the project's own.
+            let Some(directory) = directory.or_else(|| {
+                (selection.all && source.starts_with("Assets/")).then(|| source.clone())
             }) else {
                 continue;
             };
@@ -614,13 +632,20 @@ fn read_environment(
             {
                 selected.insert(index);
                 of_scripts.insert(index);
+                if selection.importers.contains(&guid) {
+                    of_importers.push(index);
+                }
                 if wanted.is_empty() {
                     break 'search;
                 }
             }
         }
     }
-    if let Some(missing) = wanted.first() {
+    // A scene may hold a behaviour whose script is missing, as the Editor
+    // keeps it.
+    if let Some(missing) = wanted.first()
+        && !selection.all
+    {
         bail!("no compiled package assembly defines the importer script {missing}");
     }
     // The assembly that defines each element of a document.
@@ -682,28 +707,6 @@ fn read_environment(
             if selected.contains(&index) || assembly.name.contains(['/', '\\', '\0']) {
                 continue;
             }
-            if selection.all {
-                // A package the project holds in place can change under a
-                // compilation; only the project's own scripts and
-                // immutable packages are taken.
-                let placed = assembly.source_files.iter().all(|source| {
-                    source.starts_with("Assets/")
-                        || package_root(source)
-                            .and_then(|root| packages.get(root))
-                            .is_some_and(|directory| directory.starts_with("Library/PackageCache/"))
-                });
-                if placed
-                    && stat(&sysutil::join(&[
-                        &library,
-                        "Library/ScriptAssemblies",
-                        &format!("{}.dll", assembly.name),
-                    ]))
-                    .is_ok()
-                {
-                    selected.insert(index);
-                }
-                continue;
-            }
             // An assembly the compilation lists but did not leave behind
             // defines nothing a worker could load.
             let Ok(code) = read_file(&sysutil::join(&[
@@ -732,6 +735,45 @@ fn read_environment(
             }
         }
     }
+    // The assemblies of the importers, those of immutable packages that
+    // refer to them (the targets and nodes of a shader graph, whose
+    // importer adds objects of their classes), and those they refer to.
+    let importer_assemblies: BTreeSet<usize> = of_importers.iter().copied().collect();
+    if !importer_assemblies.is_empty() {
+        let immutable = |source: &String| {
+            package_root(source)
+                .and_then(|root| packages.get(root))
+                .is_some_and(|directory| directory.starts_with("Library/PackageCache/"))
+        };
+        for (index, assembly) in assemblies.iter().enumerate() {
+            if !importer_assemblies.contains(&index)
+                && !assembly.name.contains(['/', '\\', '\0'])
+                && assembly
+                    .references
+                    .iter()
+                    .any(|reference| importer_assemblies.contains(reference))
+                && assembly.source_files.iter().all(immutable)
+                && stat(&sysutil::join(&[
+                    &library,
+                    "Library/ScriptAssemblies",
+                    &format!("{}.dll", assembly.name),
+                ]))
+                .is_ok()
+            {
+                of_importers.push(index);
+            }
+        }
+    }
+    let mut whole: BTreeSet<usize> = BTreeSet::new();
+    while let Some(index) = of_importers.pop() {
+        if index >= assemblies.len() {
+            bail!("Editor compilation record {record_path} refers to an unknown assembly");
+        }
+        if whole.insert(index) {
+            of_importers.extend(assemblies[index].references.iter().copied());
+        }
+    }
+    selected.extend(whole.iter().copied());
     let mut environment = ScriptEnvironment {
         library: library.clone(),
         ..Default::default()
@@ -785,6 +827,18 @@ fn read_environment(
             .iter()
             .chain((!assembly.asmdef.is_empty()).then_some(&assembly.asmdef))
         {
+            // A scene needs the scripts its objects name as assets, with
+            // every other script of their assemblies: the worker ties a
+            // script to its class among the scripts of its assembly, and
+            // with some of them missing it ties it to another class. The
+            // assemblies they refer to are loaded without their scripts.
+            if selection.all
+                && !whole.contains(&index)
+                && !of_scripts.contains(&index)
+                && !source.starts_with("Assets/")
+            {
+                continue;
+            }
             let directory = package_root(source).and_then(|root| {
                 packages
                     .get(root)
