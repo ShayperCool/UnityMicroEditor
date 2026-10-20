@@ -1986,9 +1986,9 @@ impl Server {
                     "additionalProperties": false,
                     "properties": {
                         "path": {"type": "string", "minLength": 1, "maxLength": 2048},
-                        "fileId": {"type": "string", "minLength": 1, "maxLength": 2048},
+                        "name": {"type": "string", "minLength": 1, "maxLength": 2048},
                     },
-                    "oneOf": [{"required": ["path"]}, {"required": ["fileId"]}],
+                    "oneOf": [{"required": ["path"]}, {"required": ["name"]}],
                 });
                 required.push("target");
             }

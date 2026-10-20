@@ -65,7 +65,6 @@ namespace UnityMicroEditor
             private int exceptions;
             private int sceneIndex = -1;
             private AsyncOperation sceneLoad;
-            private CliPlayContent content;
             private bool loadRequested;
             private bool rawLoaded;
             private UnityMicroEditor.Raw.RawSceneLoader.LiveSession rawSession;
@@ -109,9 +108,7 @@ namespace UnityMicroEditor
                     if (!string.IsNullOrEmpty(options.CodeReloadRequestPath)) codeReload = new CodeReload(options.CodeReloadRequestPath);
                     if (options.TargetFrameRate.HasValue) Application.targetFrameRate = options.TargetFrameRate.Value;
                     if (options.NoVsync) QualitySettings.vSyncCount = 0;
-                    if (string.IsNullOrEmpty(options.RawManifestPath) && !string.IsNullOrEmpty(options.ContentManifestPath))
-                        content = CliPlayContent.Open(options.ContentManifestPath, options.Scene);
-                    else if (string.IsNullOrEmpty(options.RawManifestPath) && !string.IsNullOrEmpty(options.Scene))
+                    if (string.IsNullOrEmpty(options.RawManifestPath) && !string.IsNullOrEmpty(options.Scene))
                         sceneIndex = ResolveScene(options.Scene);
                     PlayerLoopSystem loop = PlayerLoop.GetCurrentPlayerLoop();
                     FrameLoop.Remove(ref loop, typeof(FrameMarker));
@@ -182,13 +179,7 @@ namespace UnityMicroEditor
                     pendingReload = request;
                     reloadStartedAt = Time.realtimeSinceStartupAsDouble;
                     lock (logLock) { reloadErrors = errors; reloadExceptions = exceptions; }
-                    if (!string.IsNullOrEmpty(request.patch))
-                    {
-                        if (!Path.IsPathRooted(request.patch) || request.patchSha256 == null || request.patchSha256.Length != 64)
-                            throw new InvalidDataException("Raw patch path or hash is invalid.");
-                        rawSession.ApplyPatch(Path.GetFullPath(request.patch), request.patchSha256, request.revision);
-                    }
-                    else rawSession.Reload(Path.GetFullPath(request.manifest), request.manifestSha256);
+                    rawSession.Reload(Path.GetFullPath(request.manifest), request.manifestSha256);
                 }
                 catch (Exception exception)
                 {
@@ -246,20 +237,7 @@ namespace UnityMicroEditor
                 {
                     if (!string.IsNullOrEmpty(options.RawManifestPath) && !rawLoaded) return;
                     Scene active = SceneManager.GetActiveScene();
-                    if (content != null)
-                    {
-                        if (!loadRequested)
-                        {
-                            loadRequested = true;
-                            sceneLoad = content.LoadScene();
-                            if (sceneLoad == null) throw new InvalidOperationException("Unity did not start the external content scene load.");
-                            return;
-                        }
-                        if (!sceneLoad.isDone) return;
-                        if (!content.Matches(active))
-                            throw new InvalidOperationException("The external content scene finished loading but is not active.");
-                    }
-                    else if (sceneIndex >= 0 && active.buildIndex != sceneIndex)
+                    if (sceneIndex >= 0 && active.buildIndex != sceneIndex)
                     {
                         if (!loadRequested)
                         {
@@ -274,7 +252,7 @@ namespace UnityMicroEditor
                         return;
                     }
                     if (!active.IsValid() || !active.isLoaded || (sceneLoad != null && !sceneLoad.isDone)) return;
-                    if (pendingReload != null && (rawSession.PreviousSceneUnload == null || rawSession.PreviousSceneUnload.isDone))
+                    if (pendingReload != null)
                         CompleteRawReload(null);
                     frames++;
                     if (frames == 1) WriteReady(active);
@@ -319,9 +297,9 @@ namespace UnityMicroEditor
                     engineVersion = Application.unityVersion,
                     scene = SceneReport.Capture(active),
                     contentManifestPath = options.ContentManifestPath ?? string.Empty,
-                    contentRevisionManifestPath = content == null ? string.Empty : content.ManifestPath,
-                    contentScenePath = content == null ? string.Empty : content.ScenePath,
-                    contentRevision = content == null ? string.Empty : content.Revision,
+                    contentRevisionManifestPath = string.Empty,
+                    contentScenePath = string.Empty,
+                    contentRevision = string.Empty,
                     targetFrameRate = Application.targetFrameRate,
                     vSyncCount = QualitySettings.vSyncCount,
                     graphicsDeviceType = SystemInfo.graphicsDeviceType.ToString(),
@@ -405,9 +383,9 @@ namespace UnityMicroEditor
                     report.observedFramesPerSecond = frames > 1 && report.afterReadyElapsedSeconds > 0 ? (frames - 1) / report.afterReadyElapsedSeconds : 0;
                     report.readyReportPath = options.ReadyPath;
                     report.contentManifestPath = options.ContentManifestPath ?? string.Empty;
-                    report.contentRevisionManifestPath = content == null ? string.Empty : content.ManifestPath;
-                    report.contentScenePath = content == null ? string.Empty : content.ScenePath;
-                    report.contentRevision = content == null ? string.Empty : content.Revision;
+                    report.contentRevisionManifestPath = string.Empty;
+                    report.contentScenePath = string.Empty;
+                    report.contentRevision = string.Empty;
                     report.rawReloadRequestPath = options.RawReloadRequestPath ?? string.Empty;
                     report.pid = System.Diagnostics.Process.GetCurrentProcess().Id;
                     report.rawReloadCount = rawSession == null ? 0 : rawSession.ReloadCount;
@@ -441,7 +419,6 @@ namespace UnityMicroEditor
                         try
                         {
                             if (agentControl != null) agentControl.Dispose();
-                            if (content != null) content.Dispose();
                             if (rawSession != null) rawSession.Dispose();
                         }
                         finally

@@ -19,8 +19,6 @@ namespace UnityMicroEditor.Raw
             private ContentSceneFile nativeScene;
             private bool nativeSceneLoaded;
 
-            internal bool IsNativeScene { get { return HasNativeScene(manifest); } }
-
             // A scene the import worker wrote in the Player format: the engine
             // loads it as a built Player loads its scenes. Its objects wake as
             // the scene integrates at the end of the frame; then it becomes the

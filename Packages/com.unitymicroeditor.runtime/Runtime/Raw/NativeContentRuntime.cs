@@ -19,9 +19,6 @@ namespace UnityMicroEditor.Raw
             internal string Hash;
             internal readonly Dictionary<string, Object> Objects = new Dictionary<string, Object>(StringComparer.Ordinal);
             internal readonly Dictionary<string, Object> ReplacedAssets = new Dictionary<string, Object>(StringComparer.Ordinal);
-            internal readonly Dictionary<string, RawNativeMeshRetention> MeshRetentions = new Dictionary<string, RawNativeMeshRetention>(StringComparer.Ordinal);
-            internal readonly List<Object> OwnedUIObjects = new List<Object>();
-            internal string UIIdentity;
             internal NativeContentHandle[] Dependencies;
             // Set while the file loads: what its readback checks, and the
             // dependencies handed to the load, which live until it is done.
@@ -49,7 +46,6 @@ namespace UnityMicroEditor.Raw
                 }
                 if (unloadIndex < 0) return;
                 NativeContentHandle handle = cache.RetiredContentFiles[unloadIndex];
-                NativeUIRuntime.Release(handle.OwnedUIObjects);
                 if (handle.File.IsValid && !handle.File.UnloadAsync().WaitForCompletion(10000))
                     throw new InvalidOperationException("Retired native ContentFile unload timed out.");
                 cache.RetiredContentFiles.RemoveAt(unloadIndex);
@@ -83,7 +79,6 @@ namespace UnityMicroEditor.Raw
                     if (!referenced) { unload = candidate; break; }
                 }
                 if (unload == null) throw new InvalidOperationException("Native ContentFile lifetime dependencies contain a cycle.");
-                NativeUIRuntime.Release(unload.OwnedUIObjects);
                 if (unload.File.IsValid && !unload.File.UnloadAsync().WaitForCompletion(10000))
                     throw new InvalidOperationException("Native ContentFile unload timed out.");
                 remaining.Remove(unload);
@@ -141,7 +136,6 @@ namespace UnityMicroEditor.Raw
                         nativeCache.ContentFiles[item.Key] = next;
                         nativeCache.LoadCount++;
                     }
-                    RegisterNativeMeshRetention(loaded.Values);
                 }
                 catch (Exception loadFailure)
                 {
@@ -149,7 +143,6 @@ namespace UnityMicroEditor.Raw
                     for (int index = created.Count - 1; index >= 0; index--)
                     {
                         NativeContentHandle failed = created[index];
-                        RawCleanup.Run(() => NativeUIRuntime.Release(failed.OwnedUIObjects), ref cleanupFailure);
                         if (failed.File.IsValid)
                             RawCleanup.Run(() => failed.File.UnloadAsync().WaitForCompletion(10000), ref cleanupFailure);
                         if (failed.PendingDependencies.IsCreated) failed.PendingDependencies.Dispose();
@@ -228,8 +221,6 @@ namespace UnityMicroEditor.Raw
                     }
                     if (nativeCache.ContentFiles.TryGetValue(descriptor.guid, out NativeContentHandle cached)
                         && cached.Hash == descriptor.sha256 && NativeContentObjectsMatch(cached, descriptor)
-                        && cached.UIIdentity == NativeUIRuntime.Identity(descriptor)
-                        && NativeMeshRetentionMatches(cached, descriptor)
                         && NativeContentDependenciesMatch(cached.Dependencies, dependencies))
                     {
                         loaded.Add(descriptor.guid, cached);
@@ -238,7 +229,7 @@ namespace UnityMicroEditor.Raw
                     string path = AssetPath(manifest, descriptor.path);
                     RequireNativeContentHash(path, descriptor.sha256);
                     ValidateNativeContentResources(descriptor, path);
-                    var handle = new NativeContentHandle { Hash = descriptor.sha256, Dependencies = dependencies, UIIdentity = NativeUIRuntime.Identity(descriptor) };
+                    var handle = new NativeContentHandle { Hash = descriptor.sha256, Dependencies = dependencies };
                     created.Add(handle);
                     handle.File = ContentLoadInterface.LoadContentFileAsync(ContentNamespace.Default, path, nativeDependencies);
                     handle.Pending = descriptor;
@@ -304,14 +295,6 @@ namespace UnityMicroEditor.Raw
                                 throw new InvalidDataException("Direct native audio failed to load its data: " + descriptor.guid);
                             handle.Objects.Add(AssetKey(descriptor.guid, entry.fileId), value);
                         }
-                        NativeUIRuntime.Prepare(descriptor, handle.Objects, (guid, fileID) =>
-                        {
-                            NativeContentHandle target = guid == descriptor.guid ? handle : loaded[guid];
-                            if (!target.Objects.TryGetValue(AssetKey(guid, fileID), out Object value))
-                                throw new InvalidDataException("Native UI target local ID was not published: " + guid + "/" + fileID);
-                            return value;
-                        }, handle.OwnedUIObjects);
-                        InitializeNativeMeshRetention(handle, descriptor);
                     }
                     lock (errorLock)
                         if (nativeErrors != 0) throw new InvalidDataException("Native ContentFile emitted errors: " + nativeFailure);
@@ -372,8 +355,6 @@ namespace UnityMicroEditor.Raw
                         || !long.TryParse(entry.fileId, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out long id) || id == 0
                         || id.ToString(CultureInfo.InvariantCulture) != entry.fileId || !keys.Add(entry.fileId))
                         throw new InvalidDataException("Native ContentFile object identity is invalid.");
-                ValidateNativeMeshRetention(descriptor);
-                NativeUIRuntime.Validate(descriptor);
             }
 
             private static bool ValidNativeGUID(string guid)

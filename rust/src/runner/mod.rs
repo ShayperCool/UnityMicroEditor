@@ -5,7 +5,6 @@ mod addressables;
 mod commands;
 mod json;
 mod noop;
-mod patch;
 mod player;
 mod prepared;
 mod prune;
@@ -24,10 +23,6 @@ mod tests;
 
 pub use addressables::AddressableRoute;
 pub use noop::{normalize_scene_dependencies, scene_runtime_equal};
-pub use patch::{
-    SCENE_ROOTS_CLASS, decode_patch_json, make_scene_patch, patch_integer, patch_reference,
-    patch_value_equal,
-};
 pub use player::{
     Player, READY_BUDGET, ReadyBudget, ReloadAck, process_cpu, require_hardware_graphics,
     require_player_report, start_player, wait_reload_ack,
@@ -1066,7 +1061,7 @@ impl Steps for Live<'_> {
         }
         let data = read_file(&next.manifest)?;
         let id = random_id();
-        let mut reload = value::map([
+        let reload = value::map([
             ("schemaVersion", Value::Int(1)),
             ("requestId", id.as_str().into()),
             ("manifest", next.manifest.as_str().into()),
@@ -1081,12 +1076,6 @@ impl Steps for Live<'_> {
                 Value::Int(unix_milliseconds(window.changed_wall)),
             ),
         ]);
-        if let Some((patch, patch_hash)) =
-            make_scene_patch(&self.prepared.manifest, &next.manifest)?
-        {
-            reload.insert("patch".into(), patch.into());
-            reload.insert("patchSha256".into(), patch_hash.into());
-        }
         stage_native_resources(&next.manifest, &self.run_directory)?;
         atomic_json(
             &self.request,

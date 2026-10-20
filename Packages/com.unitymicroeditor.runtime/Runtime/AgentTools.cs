@@ -77,7 +77,7 @@ namespace UnityMicroEditor
         public static string InvokeJson(string name, string parametersJson, GameObject target = null)
         { return RawJson.Write(Invoke(name, RawJson.Parse(parametersJson), target)); }
 
-        internal static Dictionary<string, object> Describe(Func<UnityEngine.Object, Dictionary<string, object>> identity = null)
+        internal static Dictionary<string, object> Describe()
         {
             RequireMainThread(); Discover();
             var values = new List<object>(); var errors = new List<object>(discoveryErrors);
@@ -103,7 +103,6 @@ namespace UnityMicroEditor
                     {
                         var target = new Dictionary<string, object> { ["path"] = AgentRuntimeSnapshot.PathOf(component.transform), ["enabled"] = component.enabled,
                             ["activeInHierarchy"] = component.gameObject.activeInHierarchy };
-                        if (identity != null) { target["source"] = identity(component.gameObject); target["componentSource"] = identity(component); }
                         targets.Add(target);
                     }
                     if (targets.Count == 0) continue;

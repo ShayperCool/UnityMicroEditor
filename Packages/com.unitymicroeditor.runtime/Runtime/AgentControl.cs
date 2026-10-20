@@ -55,7 +55,7 @@ namespace UnityMicroEditor
     /// <summary>Public API readbacks shared by Editor comparisons and the Player bridge.</summary>
     public static class AgentRuntimeSnapshot
     {
-        public static Dictionary<string, object> Capture(GameObject value, Func<Object, Dictionary<string, object>> identity = null)
+        public static Dictionary<string, object> Capture(GameObject value)
         {
             if (value == null) throw new ArgumentNullException(nameof(value));
             Transform transform = value.transform;
@@ -64,7 +64,6 @@ namespace UnityMicroEditor
             {
                 if (component == null) { components.Add(new Dictionary<string, object> { ["type"] = "missing_script" }); continue; }
                 var entry = new Dictionary<string, object> { ["type"] = component.GetType().FullName, ["fields"] = Fields(component) };
-                if (identity != null) entry["source"] = identity(component);
                 components.Add(entry);
             }
             var result = new Dictionary<string, object>
@@ -76,7 +75,6 @@ namespace UnityMicroEditor
                 ["localRotation"] = QuaternionValue(transform.localRotation), ["localScale"] = Vector(transform.localScale),
                 ["components"] = components,
             };
-            if (identity != null) result["source"] = identity(value);
             return result;
         }
 
@@ -366,11 +364,11 @@ namespace UnityMicroEditor
                     if (offset < 0 || limit < 1 || limit > 500) throw new InvalidDataException("Hierarchy page exceeds supported bounds.");
                     var values = new List<object>();
                     for (long index = offset; index < objects.Count && values.Count < limit; index++)
-                        values.Add(AgentRuntimeSnapshot.Capture(objects[(int)index], live.DescribeSourceObject));
+                        values.Add(AgentRuntimeSnapshot.Capture(objects[(int)index]));
                     return new Dictionary<string, object> { ["objects"] = values, ["total"] = objects.Count,
                         ["offset"] = offset, ["nextOffset"] = offset + values.Count < objects.Count ? (object)(offset + values.Count) : null };
                 }
-                case "inspect": return AgentRuntimeSnapshot.Capture(FindObject(arguments, live), live.DescribeSourceObject);
+                case "inspect": return AgentRuntimeSnapshot.Capture(FindObject(arguments, live));
                 case "logs":
                 {
                     long after = Integer(arguments, "afterSequence"); var values = new List<object>();
@@ -389,12 +387,12 @@ namespace UnityMicroEditor
                     if (paused) { Time.timeScale = previousTimeScale; paused = false; } return Status();
                 case "simulation_pause": simulation.Pause(); return Status();
                 case "simulation_resume": simulation.Resume(); return Status();
-                case "tools": return AgentRuntimeTools.Describe(live.DescribeSourceObject);
+                case "tools": return AgentRuntimeTools.Describe();
                 case "invoke":
                 {
                     GameObject target = null;
                     if (arguments.TryGetValue("target", out object targetValue))
-                    { if (!(targetValue is Dictionary<string, object> targetArgs)) throw new InvalidDataException("Tool target must be an object path/source identity."); target = FindObject(targetArgs, live); }
+                    { if (!(targetValue is Dictionary<string, object> targetArgs)) throw new InvalidDataException("Tool target must be an object path or name."); target = FindObject(targetArgs, live); }
                     return AgentRuntimeTools.Invoke(Text(arguments, "name"), arguments.TryGetValue("parameters", out object toolParameters) ? toolParameters : new Dictionary<string, object>(), target);
                 }
                 case "input":
@@ -419,7 +417,7 @@ namespace UnityMicroEditor
                     return new Dictionary<string, object> { ["hit"] = hit, ["path"] = hit ? AgentRuntimeSnapshot.PathOf(result.collider.transform) : null,
                         ["point"] = hit ? AgentRuntimeSnapshot.Vector(result.point) : null, ["distance"] = hit ? (object)result.distance : null };
                 }
-                case "edit": return AgentRuntimeEdit.Execute(arguments, target => FindObject(target, live), live.DescribeSourceObject);
+                case "edit": return AgentRuntimeEdit.Execute(arguments, target => FindObject(target, live));
                 case "custom": return AgentRuntimeCommands.Execute(Text(arguments, "name"), arguments.TryGetValue("parameters", out object parameters) ? parameters : null);
                 default: throw new InvalidOperationException("Unsupported runtime operation: " + operation);
             }
@@ -551,19 +549,12 @@ namespace UnityMicroEditor
 
         private static GameObject FindObject(Dictionary<string, object> args, RawSceneLoader.LiveSession live)
         {
-            string path = Text(args, "path"), fileId = Text(args, "fileId"), name = Text(args, "name"); GameObject found = null;
-            if (string.IsNullOrEmpty(path) && string.IsNullOrEmpty(fileId) && string.IsNullOrEmpty(name))
-                throw new InvalidDataException("An object reference requires a path, a name or a source fileId.");
+            string path = Text(args, "path"), name = Text(args, "name"); GameObject found = null;
+            if (string.IsNullOrEmpty(path) && string.IsNullOrEmpty(name))
+                throw new InvalidDataException("An object reference requires a path or a name.");
             foreach (GameObject value in SceneObjects())
             {
-                bool match;
-                if (!string.IsNullOrEmpty(fileId))
-                {
-                    Dictionary<string, object> source = live.DescribeSourceObject(value);
-                    match = source != null && Text(source, "fileId") == fileId;
-                }
-                else match = !string.IsNullOrEmpty(path) ? AgentRuntimeSnapshot.PathOf(value.transform) == path : value.name == name;
-                if (!match) continue;
+                if (!string.IsNullOrEmpty(path) ? AgentRuntimeSnapshot.PathOf(value.transform) != path : value.name != name) continue;
                 if (found != null) throw new InvalidOperationException("Object reference is ambiguous."); found = value;
             }
             return found == null ? throw new InvalidOperationException("Object reference was not found.") : found;

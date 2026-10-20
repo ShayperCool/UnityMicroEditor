@@ -120,13 +120,13 @@ fn runtime_boundary_allows_only_honest_read_operations() {
     let (_, good) = call(
         &server,
         "runtime_query",
-        json!({"operation": "inspect", "arguments": {"fileId": "9223372036854775807"}, "expectedPid": 123, "expectedRevision": "runtime-revision"}),
+        json!({"operation": "inspect", "arguments": {"name": "9223372036854775807"}, "expectedPid": 123, "expectedRevision": "runtime-revision"}),
     );
     {
         let (name, input) = &*received.lock().unwrap();
         assert!(good["success"] == true && name == "runtime_query");
         assert_eq!(input["expectedPid"], 123);
-        assert_eq!(input["arguments"]["fileId"], "9223372036854775807");
+        assert_eq!(input["arguments"]["name"], "9223372036854775807");
     }
     received.lock().unwrap().0.clear();
     let (result, bad) = call(&server, "runtime_query", json!({"operation": "pause"}));
@@ -904,7 +904,7 @@ fn dynamic_component_binding_rejects_ambiguous_target_and_invalid_catalog() {
     let data = &discovered["data"]["result"];
     assert_eq!(data["mcpRegisteredCount"], 1, "{data}");
     assert_eq!(data["mcpCatalogErrors"].as_array().unwrap().len(), 1);
-    for target in [None, Some(json!({"path": "Root", "fileId": "1"}))] {
+    for target in [None, Some(json!({"path": "Root", "name": "Root"}))] {
         let mut arguments = json!({"parameters": {}, "requestId": "run-component"});
         if let Some(target) = target {
             arguments["target"] = target;

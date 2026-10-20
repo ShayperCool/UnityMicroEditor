@@ -10,18 +10,16 @@ namespace UnityMicroEditor.Raw
     internal sealed class RawReloadIdentity
     {
         private readonly Dictionary<string, string> assemblies;
-        private readonly Dictionary<string, string> packs;
         private readonly string projectRoot;
 
-        internal RawReloadIdentity(string projectRoot, Dictionary<string, string> assemblies, Dictionary<string, string> packs)
-        { this.projectRoot = projectRoot; this.assemblies = assemblies; this.packs = packs; }
+        internal RawReloadIdentity(string projectRoot, Dictionary<string, string> assemblies)
+        { this.projectRoot = projectRoot; this.assemblies = assemblies; }
 
         internal void RequireCompatible(RawReloadIdentity next)
         {
             if (next == null || projectRoot != next.projectRoot)
                 throw new InvalidDataException("A live reload cannot switch source projects; restart the Player.");
             RequireEqual(assemblies, next.assemblies, "source assemblies");
-            RequireEqual(packs, next.packs, "native importer packs");
         }
 
         private static void RequireEqual(Dictionary<string, string> expected, Dictionary<string, string> actual, string name)

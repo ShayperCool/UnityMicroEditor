@@ -38,7 +38,6 @@ namespace UnityMicroEditor.Raw
             public int NativeLoadCount => cache.LoadCount;
             public int NativeObjectCount => cache.Assets.Count;
             public string NativeIdentityDigest => cache.IdentityDigest();
-            public AsyncOperation PreviousSceneUnload { get; private set; }
             public void ReleaseRetiredNativeFiles() { ReleaseRetiredNativeContent(cache); }
 
             internal LiveSession(RawSceneManifest manifest, string manifestPath)
@@ -46,11 +45,11 @@ namespace UnityMicroEditor.Raw
 
             internal void LoadInitial(RawSceneManifest manifest)
             {
-                var types = LoadScriptTypes(manifest);
+                LoadScriptAssemblies(manifest);
                 InvokeRuntimeInitializers(manifest, 4);
                 InvokeRuntimeInitializers(manifest, 2);
                 InvokeRuntimeInitializers(manifest, 3);
-                current = new ImportContext(manifest, types, cache);
+                current = new ImportContext(manifest, cache);
                 CurrentRevision = Revision;
                 Scene = current.Load();
             }
@@ -74,7 +73,7 @@ namespace UnityMicroEditor.Raw
                 using (var stream = new MemoryStream(bytes, false))
                 using (var reader = new StreamReader(stream, Encoding.UTF8, true)) manifest = ParseManifest(reader.ReadToEnd());
                 identity.RequireCompatible(CaptureIdentity(manifest));
-                var context = new ImportContext(manifest, LoadScriptTypes(manifest), cache);
+                var context = new ImportContext(manifest, cache);
                 Scene loaded = context.Load(false, null, false, target);
                 unloading.Remove(loaded);
                 additive.Add(loaded, context);
@@ -97,7 +96,6 @@ namespace UnityMicroEditor.Raw
                 unloading[scene] = null;
                 Exception failure = null;
                 RawCleanup.Run(context.ReleaseOwnedSceneObjects, ref failure);
-                RawCleanup.Run(context.ReleasePreloadedRootScopes, ref failure);
                 RawCleanup.Run(() => unloading[scene] = scene.IsValid() && scene.isLoaded
                     ? SceneManager.UnloadSceneAsync(scene) : null, ref failure);
                 if (failure != null) throw new InvalidOperationException("Raw content scene cleanup failed.", failure);
@@ -132,14 +130,12 @@ namespace UnityMicroEditor.Raw
                 using (var stream = new MemoryStream(bytes, false))
                 using (var reader = new StreamReader(stream, Encoding.UTF8, true)) manifest = ParseManifest(reader.ReadToEnd());
                 identity.RequireCompatible(CaptureIdentity(manifest));
-                var next = new ImportContext(manifest, LoadScriptTypes(manifest), cache);
+                var next = new ImportContext(manifest, cache);
                 string oldRevision = CurrentRevision;
                 string revision = ManifestRevision(manifestPath);
                 CurrentRevision = revision;
                 try
                 {
-                    Scene oldScene = Scene;
-                    bool oldNative = current.IsNativeScene;
                     Scene nextScene = next.Load(false, () =>
                     {
                         LastReloadRestartRequired = true;
@@ -148,15 +144,12 @@ namespace UnityMicroEditor.Raw
                         Exception failure = null;
                         RawCleanup.Run(RetireAdditiveScenes, ref failure);
                         RawCleanup.Run(current.ReleaseOwnedSceneObjects, ref failure);
-                        RawCleanup.Run(current.ReleasePreloadedRootScopes, ref failure);
                         if (failure != null) throw new InvalidOperationException("Previous raw scene cleanup failed.", failure);
                     });
                     current = next;
                     Scene = nextScene;
                     Revision = revision;
                     ReloadCount++;
-                    // A scene the engine loaded is unloaded with its file when its objects are retired.
-                    PreviousSceneUnload = !oldNative && oldScene.IsValid() && oldScene.isLoaded ? SceneManager.UnloadSceneAsync(oldScene) : null;
                     LastReloadRestartRequired = false;
                     return nextScene;
                 }
@@ -170,15 +163,12 @@ namespace UnityMicroEditor.Raw
                 Exception failure = null;
                 RawCleanup.Run(RetireAdditiveScenes, ref failure);
                 if (current != null)
-                {
                     RawCleanup.Run(current.ReleaseOwnedSceneObjects, ref failure);
-                    RawCleanup.Run(current.ReleasePreloadedRootScopes, ref failure);
-                }
                 RawProjectContent.Release(this);
                 // A scene the engine loaded is unloaded at the end of the frame
                 // and holds its files until then; a session is disposed as the
                 // Player quits, which releases them.
-                if (current == null || !current.IsNativeScene) RawCleanup.Run(cache.Dispose, ref failure);
+                if (current == null) RawCleanup.Run(cache.Dispose, ref failure);
                 if (failure != null) throw new InvalidOperationException("Raw content session cleanup failed.", failure);
             }
         }
@@ -197,14 +187,7 @@ namespace UnityMicroEditor.Raw
                     if (assemblies.ContainsKey(name)) throw new InvalidDataException("Duplicate source assembly identity: " + name);
                     assemblies.Add(name, RawReloadIdentity.HashFile(path));
                 }
-            var packs = new Dictionary<string, string>(StringComparer.Ordinal);
-            if (manifest.importedAssetPacks != null)
-                foreach (ImportedAssetPack pack in manifest.importedAssetPacks)
-                {
-                    string path = AssetPath(manifest, pack.bundlePath);
-                    packs.Add(path, pack.sha256.ToLowerInvariant() + ":" + pack.crc + ":" + pack.registryAsset);
-                }
-            return new RawReloadIdentity(Path.GetFullPath(manifest.projectRoot), assemblies, packs);
+            return new RawReloadIdentity(Path.GetFullPath(manifest.projectRoot), assemblies);
         }
 
         private sealed class NativeAssetCache : IDisposable
@@ -212,7 +195,6 @@ namespace UnityMicroEditor.Raw
             internal readonly Dictionary<string, NativeContentHandle> ContentFiles = new Dictionary<string, NativeContentHandle>(StringComparer.Ordinal);
             internal readonly List<NativeContentHandle> RetiredContentFiles = new List<NativeContentHandle>();
             internal readonly Dictionary<string, Object> Assets = new Dictionary<string, Object>(StringComparer.Ordinal);
-            internal readonly List<AssetBundle> Bundles = new List<AssetBundle>();
             internal bool Loaded;
             internal int LoadCount;
             internal string IdentityDigest()
@@ -230,9 +212,18 @@ namespace UnityMicroEditor.Raw
             public void Dispose()
             {
                 ReleaseNativeContentCache(this);
-                foreach (AssetBundle bundle in Bundles) if (bundle != null) bundle.Unload(true);
-                Bundles.Clear(); Assets.Clear(); Loaded = false;
+                Assets.Clear(); Loaded = false;
             }
+        }
+    }
+
+    internal static class RawCleanup
+    {
+        // Runs every cleanup step; the first failure is reported after all ran.
+        internal static void Run(Action cleanup, ref Exception failure)
+        {
+            try { cleanup(); }
+            catch (Exception exception) { if (failure == null) failure = exception; }
         }
     }
 }

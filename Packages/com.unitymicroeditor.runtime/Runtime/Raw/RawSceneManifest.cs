@@ -13,23 +13,12 @@ namespace UnityMicroEditor.Raw
         public string projectRoot;
         public bool supported;
         public string[] assemblies;
-        public int lifecycleBarrierVersion;
-        public string[] lifecycleBarrierAssemblies;
-        public string importedAssetCatalog;
-        public ImportedAssetPack[] importedAssetPacks;
         public NativeContentFileDescriptor[] nativeContentFiles;
         public NativeSceneFileDescriptor nativeScene;
         public string renderPipelineGuid;
         public string renderPipelineFileId;
         public RawAssetReference[] preloadedAssets;
-        public RawRenderPipelineGlobalSettings[] renderPipelineGlobalSettings;
         public RawRuntimeInitializer[] runtimeInitializers;
-        public ImportedAssetBinding[] importedAssetBindings;
-        public int scriptableObjectBarrierVersion;
-        public bool emptyBuiltinLightingDataVerified;
-        public RawSceneObject[] objects;
-        public RawSceneAsset[] assets;
-        public RawSceneDiagnostic[] diagnostics;
     }
 
     [Serializable]
@@ -41,23 +30,6 @@ namespace UnityMicroEditor.Raw
     }
 
     [Serializable]
-    public sealed class RawRenderPipelineGlobalSettings
-    {
-        public string pipelineTypeName;
-        public string guid;
-        public string fileId;
-    }
-
-    [Serializable]
-    public sealed class ImportedAssetPack
-    {
-        public string bundlePath;
-        public uint crc;
-        public string sha256;
-        public string registryAsset;
-    }
-
-    [Serializable]
     public sealed class NativeContentFileDescriptor
     {
         public string guid;
@@ -66,27 +38,8 @@ namespace UnityMicroEditor.Raw
         public NativeContentObjectDescriptor[] objects;
         public NativeContentResourceDescriptor[] resources;
         public NativeContentDependencyDescriptor[] dependencies;
-        public NativeMeshCpuRetentionDescriptor[] meshCpuRetention;
-        public NativeUIBindingDescriptor[] uiBindings;
         // Shaders a build compiled no program of: unsupported in a Player too.
         public string[] programlessShaders;
-    }
-
-    [Serializable]
-    public sealed class NativeUIBindingDescriptor
-    {
-        public string ownerFileId;
-        public string propertyPath;
-        public string targetGuid;
-        public string targetFileId;
-        public string managedReferenceId;
-    }
-
-    [Serializable]
-    public sealed class NativeMeshCpuRetentionDescriptor
-    {
-        public string fileId;
-        public bool originalIsReadable;
     }
 
     [Serializable]
@@ -112,95 +65,11 @@ namespace UnityMicroEditor.Raw
     }
 
     [Serializable]
-    public sealed class ImportedAssetBinding
-    {
-        public string ownerGuid;
-        public string ownerFileId;
-        public string propertyPath;
-        public string targetGuid;
-        public string targetFileId;
-    }
-
-    [Serializable]
-    public sealed class RawSceneObject
-    {
-        public string fileId;
-        public int classId;
-        public string gameObjectId;
-        public string sourcePath;
-        public string guid;
-        public string typeName;
-        public string dataJson;
-        public string scalarDataJson;
-        public RawSceneReference[] references;
-        public bool skipMissingScript;
-        // A GameObject with components the loader has no adapter for is a
-        // copy of a template the import worker built: the ContentFile and the
-        // GameObject in it. Each such component is the template's component
-        // at this position (the Transform is 0).
-        public string templateGuid;
-        public string templateFileId;
-        public int templateComponent;
-    }
-
-    [Serializable]
-    public sealed class RawSceneReference
-    {
-        public string property;
-        public string fileId;
-        public string guid;
-        public int type;
-    }
-
-    [Serializable]
-    public sealed class RawSceneAsset
-    {
-        public string guid;
-        public string path;
-        public string name;
-        public string kind;
-        public string fileId;
-        public int classId;
-        public string typeName;
-        public string dataJson;
-        public string importerJson;
-        public RawSceneReference[] references;
-        public string shaderName;
-        public Color color = Color.white;
-        public string textureGuid;
-        public string textureFileId;
-        public Vector2 textureScale = Vector2.one;
-        public Vector2 textureOffset;
-        public int materialMode;
-        public string rootFileId;
-        public RawSceneObject[] objects;
-        public RawPrefabAlias[] objectAliases;
-        public int executionOrder;
-    }
-
-    [Serializable]
     public sealed class RawRuntimeInitializer
     {
         public string assembly;
         public string typeName;
         public string methodName;
         public int phase;
-    }
-
-    [Serializable]
-    public sealed class RawPrefabAlias
-    {
-        public string fileId;
-        public string objectId;
-    }
-
-    [Serializable]
-    public sealed class RawSceneDiagnostic
-    {
-        public string severity;
-        public string code;
-        public string path;
-        public string fileId;
-        public string message;
     }
 }

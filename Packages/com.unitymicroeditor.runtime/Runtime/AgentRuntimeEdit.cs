@@ -17,8 +17,7 @@ namespace UnityMicroEditor
     {
         internal static string[] Actions = { "set", "create", "destroy", "add_component", "remove_component", "set_component" };
 
-        internal static object Execute(Dictionary<string, object> arguments, Func<Dictionary<string, object>, GameObject> find,
-            Func<Object, Dictionary<string, object>> identity)
+        internal static object Execute(Dictionary<string, object> arguments, Func<Dictionary<string, object>, GameObject> find)
         {
             string action = Text(arguments, "action");
             GameObject target;
@@ -65,7 +64,7 @@ namespace UnityMicroEditor
                 default:
                     throw new InvalidDataException("Edit action must be one of: " + string.Join(", ", Actions) + ".");
             }
-            return AgentRuntimeSnapshot.Capture(target, identity);
+            return AgentRuntimeSnapshot.Capture(target);
         }
 
         private static GameObject Target(Dictionary<string, object> arguments, Func<Dictionary<string, object>, GameObject> find)

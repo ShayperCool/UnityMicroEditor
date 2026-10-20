@@ -1,7 +1,7 @@
 //! Deciding whether a new revision changes anything a Player loads.
-use super::{patch::parse_document, read_file};
+use super::read_file;
 use crate::{
-    project::{Map, Value, lexpath::rune_lower},
+    project::{Map, Value, lexpath::rune_lower, value},
     sysutil,
 };
 use anyhow::{Result, bail};
@@ -35,8 +35,8 @@ pub fn scene_runtime_equal(previous: &str, next: &str) -> Result<bool> {
     Ok(decode(previous)? == decode(next)?)
 }
 
-/// Authored scenes and prefabs are fully represented in the runtime graph. Other
-/// dependencies can hold file-backed content that a scene patch cannot reload.
+/// An authored scene or prefab changes the scene the worker writes, whose own
+/// hash the manifest holds; its source hash alone changes nothing.
 pub fn normalize_scene_dependencies(value: &mut Value) {
     let Value::Array(dependencies) = value else {
         return;
@@ -53,5 +53,20 @@ pub fn normalize_scene_dependencies(value: &mut Value) {
             dependency.remove("sha256");
             dependency.remove("bytes");
         }
+    }
+}
+
+/// Decodes a whole document, keeping number literals verbatim.
+fn parse_document(data: &[u8]) -> Result<Value> {
+    let (value, used) = value::parse_json(data, true)?;
+    match data[used..]
+        .iter()
+        .find(|byte| !matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+    {
+        None => Ok(value),
+        Some(&byte) => bail!(
+            "invalid character {:?} after top-level value",
+            char::from(byte)
+        ),
     }
 }

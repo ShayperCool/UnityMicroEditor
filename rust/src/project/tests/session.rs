@@ -537,7 +537,7 @@ fn a_scene_is_asked_for_by_its_sources_and_published_once_written() {
     assert_eq!(manifest["objects"].as_array().unwrap().len(), 0);
     // An edit of the scene asks for it again under another key.
     write_fixture_file(&fixture.scene, FIXTURE_SCENE.replace("Original", "Edited"));
-    fixture.session.invalidate(&[fixture.scene.clone()]);
+    fixture.session.invalidate(std::slice::from_ref(&fixture.scene));
     let (_, edited) = needed(&fixture);
     assert_ne!(edited, key);
 }

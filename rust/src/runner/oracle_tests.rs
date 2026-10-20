@@ -117,46 +117,10 @@ impl Run {
                 std::os::unix::fs::symlink(&args[0], self.path(&args[1])).unwrap();
                 String::new()
             }
-            "patch" => result(
-                make_scene_patch(&self.path(&args[0]), &self.path(&args[1])).map(|patch| {
-                    match patch {
-                        None => "none".into(),
-                        Some((path, hash)) => {
-                            let data = fs::read(&path).unwrap();
-                            format!(
-                                "patch {path} {} {}",
-                                hash == sha256(&data),
-                                String::from_utf8(data).unwrap().trim_end_matches('\n')
-                            )
-                        }
-                    }
-                }),
-            ),
             "noop" => result(
                 scene_runtime_equal(&self.path(&args[0]), &self.path(&args[1]))
                     .map(|equal| equal.to_string()),
             ),
-            "integer" => args
-                .iter()
-                .map(|text| match decode_patch_json(text.as_bytes()) {
-                    Ok(value) => patch_integer(&value).to_string(),
-                    Err(_) => "err".into(),
-                })
-                .collect::<Vec<_>>()
-                .join(" "),
-            "equal" => {
-                // Raw members: an empty one only equals an empty one.
-                let (a, b) = (args[0].as_bytes(), args[1].as_bytes());
-                let equal = if a.is_empty() || b.is_empty() {
-                    a.len() == b.len()
-                } else {
-                    match (decode_patch_json(a), decode_patch_json(b)) {
-                        (Ok(a), Ok(b)) => patch_value_equal(&a, &b),
-                        _ => false,
-                    }
-                };
-                equal.to_string()
-            }
             "arguments" => {
                 let (runner, game) = split_game_arguments(&args);
                 let validate = match validate_game_arguments(&game) {
