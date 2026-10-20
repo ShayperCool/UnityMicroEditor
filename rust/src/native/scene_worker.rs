@@ -246,6 +246,23 @@ struct Shared {
     wake: Condvar,
 }
 
+/// The scene worker of a project, which every session of the process that
+/// writes a scene of it shares: one worker at a time holds the project's
+/// library, and the scenes of a session (its own, its content scenes) are
+/// written one after the other.
+pub(crate) fn for_project(project: &str) -> Arc<SceneWorker> {
+    static WORKERS: std::sync::LazyLock<Mutex<BTreeMap<String, std::sync::Weak<SceneWorker>>>> =
+        std::sync::LazyLock::new(Default::default);
+    let mut workers = WORKERS.lock().unwrap_or_else(|error| error.into_inner());
+    workers.retain(|_, worker| worker.strong_count() > 0);
+    if let Some(worker) = workers.get(project).and_then(std::sync::Weak::upgrade) {
+        return worker;
+    }
+    let worker = Arc::new(SceneWorker::default());
+    workers.insert(project.to_string(), Arc::downgrade(&worker));
+    worker
+}
+
 /// Writes scenes with a worker that lives on between them.
 pub(crate) struct SceneWorker {
     shared: Arc<Shared>,

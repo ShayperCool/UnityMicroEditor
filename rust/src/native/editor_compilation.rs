@@ -55,6 +55,9 @@ const FRAMEWORK: [&str; 17] = [
 
 struct References {
     framework: Vec<String>,
+    /// The BCL extensions' targeting pack, which Bee gives every assembly
+    /// (`System.Runtime.CompilerServices.Unsafe` among them).
+    extensions: Vec<String>,
     editor_modules: Vec<String>,
     runtime_modules: Vec<String>,
     extras: Vec<String>,
@@ -72,10 +75,11 @@ fn references(editor: &str, engine: &[String]) -> References {
         "Facades/*.dll",
     ])));
     // Bee adds the BCL extensions' targeting pack to every assembly.
-    framework.extend(crate::compiler::sys_glob(&sysutil::join(&[
+    let extensions = crate::compiler::sys_glob(&sysutil::join(&[
         &data,
         "BCLExtensions/TargetingPacks/netstandard2.1/ref/*.dll",
-    ])));
+    ]));
+    framework.extend(extensions.iter().cloned());
     let modules = sysutil::join(&[&data, "Managed/UnityEngine"]);
     let all: Vec<String> = crate::compiler::sys_glob(&sysutil::join(&[&modules, "UnityE*.dll"]))
         .into_iter()
@@ -103,6 +107,7 @@ fn references(editor: &str, engine: &[String]) -> References {
     ])));
     References {
         framework,
+        extensions,
         editor_modules: all,
         runtime_modules,
         extras,
@@ -244,7 +249,12 @@ pub fn ensure(
         }
         let mut refs: Vec<String> = match exported.editor_only {
             true => known.framework.clone(),
-            false => graph.base_references.to_vec(),
+            false => graph
+                .base_references
+                .iter()
+                .cloned()
+                .chain(known.extensions.iter().cloned())
+                .collect(),
         };
         if !config.config.no_engine_references {
             refs.extend(match exported.editor_only {

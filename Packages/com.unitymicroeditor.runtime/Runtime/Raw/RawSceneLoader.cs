@@ -630,7 +630,7 @@ namespace UnityMicroEditor.Raw
             // authored content is built into it and it keeps its own name.
             public Scene Load(bool runInitializers = true, Action commit = null, bool initializePreloads = true, Scene target = default)
             {
-                if (IsNativeScene) return LoadNative(runInitializers, commit, target);
+                if (IsNativeScene) return LoadNative(runInitializers, commit, initializePreloads, target);
                 Scene previous = SceneManager.GetActiveScene();
                 bool adopted = target.IsValid();
                 RawLifecycle.Scope lifecycle = manifest.lifecycleBarrierVersion == 1 ? RawLifecycle.Begin() : null;
@@ -753,6 +753,7 @@ namespace UnityMicroEditor.Raw
 
             internal bool TryGetPrefab(string guid, out GameObject prefab)
             {
+                if (IsNativeScene) return TryGetNativePrefab(guid, out prefab);
                 prefab = null;
                 foreach (RawSceneAsset asset in manifest.assets ?? Array.Empty<RawSceneAsset>())
                 {

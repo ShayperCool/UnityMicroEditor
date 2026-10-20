@@ -25,9 +25,11 @@ namespace UnityMicroEditor.Raw
             // loads it as a built Player loads its scenes. Its objects wake as
             // the scene integrates at the end of the frame; then it becomes the
             // active scene, which gives it its lighting settings.
-            private Scene LoadNative(bool runInitializers, Action commit, Scene target)
+            // A content scene is loaded beside the session's scene; one built
+            // into a scene another owner loaded (an Addressables request)
+            // gives its roots to that scene once they woke.
+            private Scene LoadNative(bool runInitializers, Action commit, bool main, Scene target)
             {
-                if (target.IsValid()) throw new InvalidOperationException("A scene in the Player format is not built into another scene.");
                 NativeSceneFileDescriptor descriptor = manifest.nativeScene;
                 if (!ValidNativeHash(descriptor.sha256)) throw new InvalidDataException("Native scene descriptor is incomplete.");
                 string path = AssetPath(manifest, descriptor.path);
@@ -43,8 +45,11 @@ namespace UnityMicroEditor.Raw
                 // What a built Player loads before its first scene: the
                 // preloaded assets (which wake as they load) and the render
                 // pipeline with its global settings.
-                LoadPreloadedAssets();
-                ConfigurePipeline();
+                if (main)
+                {
+                    LoadPreloadedAssets();
+                    ConfigurePipeline();
+                }
                 RequireNativeContentHash(path, descriptor.sha256);
                 NativeContentDependencyDescriptor[] declared = descriptor.dependencies ?? Array.Empty<NativeContentDependencyDescriptor>();
                 var dependencies = new NativeArray<ContentFile>(declared.Length, Allocator.Persistent);
@@ -77,19 +82,33 @@ namespace UnityMicroEditor.Raw
                 finally { dependencies.Dispose(); }
                 if (nativeScene.Status != SceneLoadingStatus.WaitingForIntegrate && nativeScene.Status != SceneLoadingStatus.Complete)
                     throw new InvalidDataException("Native scene failed to load (" + nativeScene.Status + "): " + path);
-                scene = nativeScene.Scene;
+                Scene loadedScene = nativeScene.Scene;
+                scene = target.IsValid() ? target : loadedScene;
                 bool initializers = runInitializers;
                 UnityEngine.Events.UnityAction<Scene, LoadSceneMode> integrated = null;
                 integrated = (loaded, mode) =>
                 {
-                    if (loaded != scene) return;
+                    if (loaded != loadedScene) return;
                     SceneManager.sceneLoaded -= integrated;
-                    SceneManager.SetActiveScene(scene);
+                    if (target.IsValid())
+                        foreach (GameObject root in loadedScene.GetRootGameObjects()) SceneManager.MoveGameObjectToScene(root, target);
+                    if (main) SceneManager.SetActiveScene(loadedScene);
                     if (initializers) InvokeRuntimeInitializers(manifest, 0);
                 };
                 SceneManager.sceneLoaded += integrated;
                 nativeScene.IntegrateAtEndOfFrame();
                 return scene;
+            }
+
+            // A prefab the game asks for by address: the content files of the
+            // scene hold it under the source its alias names.
+            private bool TryGetNativePrefab(string guid, out GameObject prefab)
+            {
+                prefab = null;
+                foreach (NativeSceneAliasDescriptor alias in manifest.nativeScene.aliases ?? Array.Empty<NativeSceneAliasDescriptor>())
+                    if (alias != null && alias.guid == guid && assets.TryGetValue(AssetKey(alias.guid, alias.fileId), out Object value) && value is GameObject root)
+                    { prefab = root; return true; }
+                return false;
             }
 
             private void UnloadNativeScene()

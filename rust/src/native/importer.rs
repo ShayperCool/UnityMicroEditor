@@ -105,7 +105,7 @@ pub struct NativeProjectImporter {
     pub(crate) prepared_once: bool,
     /// The worker that writes scenes in the Player format, started when
     /// one is first written.
-    pub(crate) scene_worker: std::sync::OnceLock<super::scene_worker::SceneWorker>,
+    pub(crate) scene_worker: std::sync::OnceLock<Arc<super::scene_worker::SceneWorker>>,
 }
 
 /// What a published revision was made of; see `unchanged_revision`.

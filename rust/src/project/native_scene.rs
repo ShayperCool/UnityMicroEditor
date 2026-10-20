@@ -102,6 +102,7 @@ impl Inner {
                 pending.push(path);
             }
         }
+        pending.extend(self.extra_assets.iter().cloned());
         let mut seen = BTreeSet::new();
         while let Some(path) = pending.pop() {
             if !seen.insert(path.clone()) {
@@ -194,7 +195,7 @@ impl Inner {
     /// Names where the worker wrote the render pipeline asset and the
     /// preloaded assets, which the manifest names by their sources: in the
     /// file of what the scene refers to.
-    fn native_project_objects(&self, written: &NativeScene, over: &mut Map) -> Result<()> {
+    fn native_project_objects(&mut self, written: &NativeScene, over: &mut Map) -> Result<()> {
         let file = &written.content[0].guid;
         let mut sources = vec![(
             self.baseline_text("renderPipelineGuid"),
@@ -207,6 +208,24 @@ impl Inner {
                     value::text(fields, "fileId").into_owned(),
                 ));
             }
+        }
+        // A prefab the game asks for by address is named by its root.
+        for path in self.extra_assets.clone() {
+            let guid = self.guid_of(&path).to_string();
+            let (objects, _) = self
+                .expand(&path, "", &[])
+                .map_err(super::session::RefusedPrefab::wrap(&path))?;
+            let roots: Vec<String> = objects
+                .iter()
+                .filter(|o| {
+                    super::expand::transform(o.class_id) && value::file_id(o.get("m_Father")) == "0"
+                })
+                .map(|o| value::file_id(o.get("m_GameObject")).into_owned())
+                .collect();
+            let [root] = &roots[..] else {
+                anyhow::bail!("runtime-addressed prefab needs exactly one root: {path}");
+            };
+            sources.push((guid, root.clone()));
         }
         let mut scene = written.scene.clone();
         for (guid, file_id) in sources {
@@ -291,6 +310,12 @@ impl super::Session {
             let path = s.path_of(&guid).to_string();
             if !path.is_empty() && !paths.contains(&path) {
                 paths.push(path);
+            }
+        }
+        // The prefabs the game asks for by address.
+        for path in &s.extra_assets {
+            if !paths.contains(path) {
+                paths.push(path.clone());
             }
         }
         Ok(paths)

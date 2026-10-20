@@ -259,7 +259,7 @@ impl NativeProjectImporter {
         };
         let written = self
             .scene_worker
-            .get_or_init(Default::default)
+            .get_or_init(|| super::scene_worker::for_project(&self.opts.project))
             .write(ctx, &build)?;
         let Some(dependencies) = written.dependencies else {
             bail!("the worker wrote nothing the scene refers to");
