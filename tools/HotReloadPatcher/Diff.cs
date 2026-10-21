@@ -1127,7 +1127,7 @@ internal sealed partial class Differ
             var closure = Old(method);
             if (closure.Types.Any(t => o.IsStateMachine(t)))
                 Add("method_removed", id, Actions.Note).Notes.Add((Codes.RunningCoroutinesKeepOldCode,
-                    $"{Authored(id)} was removed or renamed; a coroutine, iterator or async call of it that is already running keeps running its old code until it ends."));
+                    $"{id} was removed or renamed; a coroutine, iterator or async call of it that is already running keeps running its old code until it ends."));
             return;
         }
         // The engine keeps calling the loaded message. An empty replacement equals "no such method"
@@ -1260,32 +1260,19 @@ internal sealed partial class Differ
             if (name == ".ctor")
                 change.Notes.Add((Codes.ConstructorAppliesToNewObjects, $"{id} and the instance field initializers apply to objects constructed after the patch; existing objects keep their values."));
             if (StaleStateMachines(oc, nc))
-                change.Notes.Add((Codes.RunningCoroutinesKeepOldCode, $"Calls of {Authored(id)} made after the patch run the new code; a coroutine, iterator or async call that is already running finishes on the old code."));
+                change.Notes.Add((Codes.RunningCoroutinesKeepOldCode, $"Calls of {id} made after the patch run the new code; a coroutine, iterator or async call that is already running finishes on the old code."));
             bool lambdasOnly = MapLambdas(change, id, oh, nh, oc, nc);
             // The engine, the start-up and Netcode call some methods once for what exists, and a
             // method only they call runs no more often. An edit that lies only in lambdas the
             // method made, each redirected, reaches the delegates it subscribed: it is live
             // (builder6-8).
-            if (!lambdasOnly && OnceNote(nh, Authored(id)) is { } once) change.Notes.Insert(0, once);
+            if (!lambdasOnly && OnceNote(nh, id) is { } once) change.Notes.Insert(0, once);
         }
     }
 
     static string Short(byte[] hash) => Convert.ToHexString(hash, 0, 8).ToLowerInvariant();
 
     // ---- methods that run once ---------------------------------------------------------------
-
-    /// The member a user wrote for one the lifecycle rewrite generated: its body of `Awake`,
-    /// `OnEnable`, `OnDisable` or `OnDestroy` lives in `__UnityPlay_<message>` (with trailing
-    /// underscores when the name was taken). Notes name what the user can find in the source.
-    internal static string Authored(string id)
-    {
-        int at = id.IndexOf("::__UnityPlay_", StringComparison.Ordinal);
-        if (at < 0) return id;
-        int start = at + "::__UnityPlay_".Length, paren = id.IndexOf('(', start);
-        if (paren < 0) return id;
-        string message = id[start..paren].TrimEnd('_');
-        return message is "Awake" or "OnEnable" or "OnDisable" or "OnDestroy" ? id[..(at + 2)] + message + id[paren..] : id;
-    }
 
     /// `TypeInitialized`: a static constructor, which runs when its type is first used.
     /// `Constructed`: a constructor, which runs the field initializers too, once per object.
@@ -1311,13 +1298,12 @@ internal sealed partial class Differ
         // NetworkManager by reference (builder6-1).
         if (netcode && Netcode.SpawnCallback(name) && Netcode.Networked(a, t)) return Once.Spawned;
         if (d.DecodeSignature(a.Plain, null).ParameterTypes.Length != 0) return Once.None;
-        string message = name.StartsWith("__UnityPlay_", StringComparison.Ordinal) ? name["__UnityPlay_".Length..].TrimEnd('_') : name;
         // Start of a MonoBehaviour, Awake of a MonoBehaviour or a ScriptableObject: once per object.
         // An overload with parameters and the Start of another class are methods of the game.
-        if (message == "Start" && unity(t).Starts) return Once.Started;
-        if (message == "Awake" && unity(t).Awakes) return Once.Started;
+        if (name == "Start" && unity(t).Starts) return Once.Started;
+        if (name == "Awake" && unity(t).Awakes) return Once.Started;
         // OnEnable runs when an object is enabled, and for an asset when it is loaded.
-        if (message == "OnEnable" && unity(t) is { Kind: not UnityKind.No } info)
+        if (name == "OnEnable" && unity(t) is { Kind: not UnityKind.No } info)
             return info.Root is "UnityEngine.ScriptableObject" or "UnityEngine.StateMachineBehaviour" ? Once.Loaded : Once.Enabled;
         if ((name == "OnAfterDeserialize" || name.EndsWith(".ISerializationCallbackReceiver.OnAfterDeserialize", StringComparison.Ordinal))
             && Implements(workspace, a, t, "UnityEngine.ISerializationCallbackReceiver"))
@@ -1591,7 +1577,7 @@ internal sealed partial class Differ
                 else
                 {
                     kinds.Add(kind);
-                    if (!IsBridge(a.MD.GetString(a.MD.GetMethodDefinition(caller).Name))) from.Add(Authored(a.MemberId(caller)) + suffix);
+                    if (!IsBridge(a.MD.GetString(a.MD.GetMethodDefinition(caller).Name))) from.Add(a.MemberId(caller) + suffix);
                 }
             }
     }
@@ -1796,9 +1782,9 @@ internal sealed partial class Differ
         }
         change.Lambdas = pairs;
         if (unmatched)
-            change.Notes.Add((Codes.LambdaNotRemapped, $"Lambdas or local functions of {Authored(id)} were edited, added or removed and an old one cannot be redirected to its new version (the code that creates it changed too, or what it captures changed); delegates created before the patch keep the old body."));
+            change.Notes.Add((Codes.LambdaNotRemapped, $"Lambdas or local functions of {id} were edited, added or removed and an old one cannot be redirected to its new version (the code that creates it changed too, or what it captures changed); delegates created before the patch keep the old body."));
         else if (byReference)
-            change.Notes.Add((Codes.LambdaNotRemapped, $"A local function of {Authored(id)} takes its captured variables by reference; code of {Authored(id)} that is already running keeps calling the old version."));
+            change.Notes.Add((Codes.LambdaNotRemapped, $"A local function of {id} takes its captured variables by reference; code of {id} that is already running keeps calling the old version."));
         return !pairing.Conflict && !pairing.Own && !unmatched && !byReference && pairs.Count > 0;
     }
 

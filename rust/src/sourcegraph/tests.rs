@@ -759,16 +759,7 @@ fn source_graph_new_asmdef_package_and_body_change_sdk() {
     let bridge_source = write_graph_file(
         &project,
         "Temp/Bridge.cs",
-        r#"using System; using UnityEngine;
-namespace UnityMicroEditor.Raw {
-[AttributeUsage(AttributeTargets.Assembly)] public sealed class RawLifecycleInstrumentedAttribute : Attribute { public RawLifecycleInstrumentedAttribute(int version) {} }
-[AttributeUsage(AttributeTargets.Assembly)] public sealed class RawScriptableObjectInstrumentedAttribute : Attribute { public RawScriptableObjectInstrumentedAttribute(int version) {} }
-public static class RawLifecycle { public enum Phase { Awake, OnEnable, OnDisable, OnDestroy }
-public static bool ShouldCollect(MonoBehaviour value,Phase phase) => false;
-public static bool ShouldCollect(ScriptableObject value,Phase phase) => false;
-public static void Enqueue(MonoBehaviour value,Phase phase,Action callback,int order) {}
-public static void Enqueue(ScriptableObject value,Phase phase,Action callback,int order) {}
-} }"#,
+        r#"namespace UnityMicroEditor { public sealed class InvokeOnHotReloadAttribute : System.Attribute {} }"#,
     );
     fs::DirBuilder::new()
         .recursive(true)

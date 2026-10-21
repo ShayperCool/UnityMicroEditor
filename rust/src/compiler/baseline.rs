@@ -57,9 +57,9 @@ impl Compiler {
                     assembly.name
                 );
             }
-            assembly.lifecycle_barrier = self.proofs.value(&assembly.name);
-            if !valid_lifecycle_proof(&assembly.lifecycle_barrier, &assembly.name)
-                || !lifecycle_sources_match(&assembly.lifecycle_barrier, &assembly.sources)
+            assembly.lifecycle = self.proofs.value(&assembly.name);
+            if !valid_lifecycle_proof(&assembly.lifecycle, &assembly.name)
+                || !lifecycle_sources_match(&assembly.lifecycle, &assembly.sources)
             {
                 bail!(
                     "accepted compiler graph lacks lifecycle proof: {}",

@@ -210,8 +210,7 @@ namespace Game
         public static void Wait() { Waited++; }
 
         [InvokeOnHotReloadLocal]
-        private void OnEnable() { __UnityPlay_OnEnable(); }
-        private void __UnityPlay_OnEnable() { Enabled = "enabled0"; }
+        private void OnEnable() { Enabled = "enabled0"; }
 
         // A callback that rebuilds what it shows may destroy an object the same pass still lists:
         // at once, or at the end of the frame, until which the object exists.
@@ -222,41 +221,6 @@ namespace Game
             if (Closes != null) UnityEngine.Object.DestroyImmediate(Closes);
             if (Fades != null) UnityEngine.Object.Destroy(Fades);
         }
-    }
-
-    // The helper of the lifecycle rewrite is `__UnityPlay_OnEnable_` here, because the game
-    // declares the shorter name itself. A method that only starts like a helper is none, and
-    // a method that is no lifecycle callback has none.
-    public class Crowded : MonoBehaviour
-    {
-        public string Enabled = "";
-        public int Own, Later, Fooed;
-
-        [InvokeOnHotReloadLocal]
-        private void OnEnable() { __UnityPlay_OnEnable_(); }
-        private void __UnityPlay_OnEnable_() { Enabled = "crowded0"; }
-        private void __UnityPlay_OnEnable() { Own++; }
-        private void __UnityPlay_OnEnableLater() { Later++; }
-
-        [InvokeOnHotReloadLocal]
-        private void Foo() { Fooed++; }
-        private void __UnityPlay_Foo() { }
-    }
-
-    // A virtual lifecycle callback: an object whose class overrides it runs its own.
-    public class Panel : MonoBehaviour
-    {
-        public string Seen = "";
-
-        [InvokeOnHotReloadLocal]
-        protected virtual void OnEnable() { __UnityPlay_OnEnable(); }
-        private void __UnityPlay_OnEnable() { Seen += "panel0;"; }
-    }
-
-    public class QuietPanel : Panel
-    {
-        protected override void OnEnable() { __UnityPlay_OnEnable(); }
-        private void __UnityPlay_OnEnable() { Seen += "quiet;"; }
     }
 
     public class Plain

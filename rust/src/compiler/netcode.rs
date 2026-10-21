@@ -360,15 +360,9 @@ impl Compiler {
         let processed = join(&[folder, "Netcode", &format!("{}.dll", assembly.name)]);
         sys::mkdir_all(&sysutil::dir(&processed))?;
         let mut lifecycle_methods: Vec<String> = proof
-            .methods
+            .runtime_initializers
             .iter()
-            .map(|method| format!("{}.{}", method.type_name, method.phase))
-            .chain(
-                proof
-                    .runtime_initializers
-                    .iter()
-                    .map(|method| format!("{}.{}", method.type_name, method.method_name)),
-            )
+            .map(|method| format!("{}.{}", method.type_name, method.method_name))
             .collect();
         lifecycle_methods.sort();
         let request = join(&[folder, "netcode-request.json"]);

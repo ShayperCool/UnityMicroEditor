@@ -6,7 +6,7 @@ use std::{
 };
 use unity_micro_editor::{ENGINE_PROFILE, graph::SourceProject, yaml};
 
-const USAGE: &str = "usage: unity-micro-editor <run|mcp|auto-prepare|build-project|resolve-packages|cache-component-defaults|project-import|native-adopt|native-environment|source-graph|compiler-source-prepare|compiler-prepare|prepare-project|engine-profile-capture|version> [flags]";
+const USAGE: &str = "usage: unity-micro-editor <run|mcp|auto-prepare|build-project|resolve-packages|cache-component-defaults|project-import|native-environment|source-graph|compiler-source-prepare|compiler-prepare|prepare-project|engine-profile-capture|version> [flags]";
 
 fn execute() -> Result<()> {
     let mut args = env::args().skip(1);

@@ -1,8 +1,5 @@
 //! Tests of the scene preparation session.
-use super::{
-    Options, Session,
-    value::{self, Map, Value},
-};
+use super::{Options, Session};
 use std::{fs, path::Path};
 
 mod session;
@@ -95,13 +92,5 @@ pub(crate) fn fixture_with(
         project,
         scene,
         _guard: guard,
-    }
-}
-
-/// The decoded `dataJson` of a manifest object.
-pub(crate) fn data_json(object: &Value) -> Map {
-    match value::parse_use_number(&value::str(object.field("dataJson"))).unwrap() {
-        Value::Object(map) => map,
-        _ => Map::new(),
     }
 }

@@ -453,7 +453,7 @@ internal static class Program
             .Noted("running_coroutines_keep_old_code Edits.Wiring::Makers()"),
         ["RECORD_WITH"] = Patch().Redirects("changed Edits.Figures::Grow(Edits.Figure)"),
         // The note names the Awake the user wrote, not the helper the lifecycle rewrite moved its body into.
-        ["LIFECYCLE_BODY"] = Patch().Redirects("changed Edits.Behaviour1::__UnityPlay_Awake()").Noted("started_objects_keep_state Edits.Behaviour1::Awake()"),
+        ["LIFECYCLE_BODY"] = Patch().Redirects("changed Edits.Behaviour1::Awake()").Noted("started_objects_keep_state Edits.Behaviour1::Awake()"),
         // Start of an engine object ran for the objects that exist; a plain class has no such method.
         ["START_BODY"] = Patch().Redirects("changed Edits.Starting::Start()", "changed Edits.PlainStarting::Start()").Noted("started_objects_keep_state Edits.Starting::Start()"),
         ["CHANGE_CONST"] = Patch().Redirects("changed Edits.Consts::Use()"),
@@ -489,9 +489,9 @@ internal static class Program
         // Methods that ran once for what exists, and methods only they call.
         ["ONCE_INITIALIZER"] = Patch().Redirects("changed Edits.BootC::Init()", "changed Edits.BootC::Register()")
             .Noted("runtime_initializer_changed Edits.BootC::Init()", "runtime_initializer_changed Edits.BootC::Register()"),
-        ["ONCE_ENABLE"] = Patch().Redirects("changed Edits.Listener::__UnityPlay_OnEnable()", "changed Edits.Listener::__UnityPlay_OnDisable()")
+        ["ONCE_ENABLE"] = Patch().Redirects("changed Edits.Listener::OnEnable()", "changed Edits.Listener::OnDisable()")
             .Noted("started_objects_keep_state Edits.Listener::OnEnable()"),
-        ["ONCE_ASSET"] = Patch().Redirects("changed Edits.Settings::__UnityPlay_OnEnable()").Noted("started_objects_keep_state Edits.Settings::OnEnable()"),
+        ["ONCE_ASSET"] = Patch().Redirects("changed Edits.Settings::OnEnable()").Noted("started_objects_keep_state Edits.Settings::OnEnable()"),
         ["ONCE_DESERIALIZED"] = Patch().Redirects("changed Edits.Table::OnAfterDeserialize()").Noted("started_objects_keep_state Edits.Table::OnAfterDeserialize()"),
         // Bonus() is called by Update as well, and Rebuild() has an attribute a framework calls it
         // by: they run again, and get no note.

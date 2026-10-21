@@ -1056,10 +1056,6 @@ impl Session {
         let list = assemblies.map_or(Value::Null, |items| {
             Value::Array(items.iter().map(|a| a.as_str().into()).collect())
         });
-        if number(get(&s.baseline, "lifecycleBarrierVersion")) == 1 {
-            s.baseline
-                .insert("lifecycleBarrierAssemblies".into(), list.clone());
-        }
         s.baseline.insert("assemblies".into(), list);
         if let Some(initializers) = initializers {
             s.baseline

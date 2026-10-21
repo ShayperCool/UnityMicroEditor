@@ -174,8 +174,8 @@ pub struct CompileAssembly {
     pub references: NilVec<String>,
     #[serde(rename = "assemblyInputHash", deserialize_with = "nz")]
     pub assembly_input_hash: String,
-    #[serde(rename = "lifecycleBarrier", deserialize_with = "nz")]
-    pub lifecycle_barrier: LifecycleProof,
+    #[serde(rename = "lifecycle", deserialize_with = "nz")]
+    pub lifecycle: LifecycleProof,
     #[serde(
         rename = "netcodePostprocessor",
         deserialize_with = "nz",
@@ -194,6 +194,9 @@ pub struct CompileAssembly {
     pub lifecycle_helper: String,
 }
 
+/// What the lifecycle helper verified of an assembly's sources: the
+/// `[RuntimeInitializeOnLoadMethod]` bridges it added and the primary
+/// MonoScript class of each source file.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LifecycleProof {
@@ -201,32 +204,10 @@ pub struct LifecycleProof {
     pub schema_version: i64,
     #[serde(deserialize_with = "nz")]
     pub verified: bool,
-    pub phases: NilVec<String>,
-    #[serde(rename = "scriptableObjectBarrier", deserialize_with = "nz")]
-    pub scriptable_object_barrier: bool,
     #[serde(rename = "runtimeInitializers")]
     pub runtime_initializers: NilVec<RuntimeInitializer>,
-    #[serde(deserialize_with = "nz")]
-    pub callbacks: i64,
-    pub methods: NilVec<LifecycleCallback>,
     #[serde(rename = "scriptTypes", skip_serializing_if = "NilMap::skip")]
     pub script_types: NilMap<String>,
-}
-
-/// Untagged, so its JSON keys are the field names.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "PascalCase")]
-pub struct LifecycleCallback {
-    #[serde(rename = "Type", deserialize_with = "nz")]
-    pub type_name: String,
-    #[serde(deserialize_with = "nz")]
-    pub phase: String,
-    #[serde(deserialize_with = "nz")]
-    pub source: String,
-    #[serde(deserialize_with = "nz")]
-    pub order: i64,
-    #[serde(deserialize_with = "nz")]
-    pub synthetic: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -317,8 +298,6 @@ pub struct AssemblyConfig {
     pub sources: NilVec<String>,
     pub dependencies: NilVec<String>,
     pub defines: NilVec<String>,
-    #[serde(rename = "nativeBaseAssemblies")]
-    pub native_base: NilVec<String>,
     #[serde(deserialize_with = "nz")]
     pub config: AssemblyOptions,
 }
@@ -464,8 +443,6 @@ struct GraphAssemblyWire {
     sources: NilVec<String>,
     dependencies: NilVec<String>,
     defines: NilVec<String>,
-    #[serde(rename = "nativeBaseAssemblies")]
-    native_base: NilVec<String>,
     #[serde(deserialize_with = "nz")]
     config: AssemblyOptions,
     #[serde(deserialize_with = "nz")]
@@ -500,7 +477,6 @@ impl From<GraphAssemblyWire> for CompilerGraphAssembly {
                 sources: wire.sources,
                 dependencies: wire.dependencies,
                 defines: wire.defines,
-                native_base: wire.native_base,
                 config: wire.config,
             },
             path: wire.path,
@@ -522,7 +498,6 @@ impl From<CompilerGraphAssembly> for GraphAssemblyWire {
             sources: assembly.config.sources,
             dependencies: assembly.config.dependencies,
             defines: assembly.config.defines,
-            native_base: assembly.config.native_base,
             config: assembly.config.config,
             path: assembly.path,
             sha256: assembly.sha256,

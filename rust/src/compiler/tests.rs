@@ -256,10 +256,8 @@ fn compiler_binding_documents_merge() {
 
 fn valid_proof() -> LifecycleProof {
     LifecycleProof {
-        schema_version: 1,
+        schema_version: 2,
         verified: true,
-        scriptable_object_barrier: true,
-        phases: strs(&["Awake", "OnEnable", "OnDisable", "OnDestroy"]),
         ..Default::default()
     }
 }
@@ -940,68 +938,6 @@ fn compiler_preparation_project_version_uses_exact_lines() {
 }
 
 #[test]
-fn compiler_native_bases_require_verified_direct_package_dependency() {
-    let (_guard, project) = temp();
-    let managed = join(&[&project, "Managed"]);
-    let host = write_graph_file(
-        &project,
-        "Managed/Package.Runtime.dll",
-        "verified native DLL fixture",
-    );
-    let named = |name: &str| AssemblyConfig {
-        name: name.into(),
-        ..Default::default()
-    };
-    let mut compiler = Compiler {
-        manifest: CompileManifest {
-            compiler_inputs: NilMap::from([(host.clone(), hash(&host))]),
-            scripts: NilVec::from([CompileScript {
-                assembly: "Package.Runtime".into(),
-                host_provided: true,
-                ..Default::default()
-            }]),
-            ..Default::default()
-        },
-        configs: NilMap::from([
-            (
-                "Game",
-                AssemblyConfig {
-                    dependencies: strs(&["Package.Runtime"]),
-                    ..named("Game")
-                },
-            ),
-            ("Other", named("Other")),
-        ]),
-        configuration_hashes: NilMap::make(),
-        ..Default::default()
-    };
-    compiler.approve_prepared_native_bases(&managed).unwrap();
-    assert!(
-        compiler.configs["Game"].native_base.to_vec() == ["Package.Runtime"]
-            && compiler.configs["Other"].native_base.is_empty(),
-        "verified native bases were not limited to direct dependencies: {:?}",
-        compiler.configs
-    );
-    compiler.configs.insert(
-        "Other",
-        AssemblyConfig {
-            native_base: strs(&["Package.Runtime"]),
-            ..named("Other")
-        },
-    );
-    assert!(
-        compiler.approve_prepared_native_bases(&managed).is_err(),
-        "native base outside explicit assembly dependencies was approved"
-    );
-    compiler.configs.insert("Other", named("Other"));
-    sys::write(&host, b"changed native DLL").unwrap();
-    assert!(
-        compiler.approve_prepared_native_bases(&managed).is_err(),
-        "native base with changed deployment digest was approved"
-    );
-}
-
-#[test]
 fn compiler_native_only_manifest_requires_explicit_proof() {
     let inputs = || NilMap::from([("input", "digest".to_string())]);
     let script = |assembly: &str, host_provided: bool| {
@@ -1482,16 +1418,7 @@ fn compiler_new_mono_behaviour_and_restart_sdk() {
     fs::set_permissions(&player, fs::Permissions::from_mode(0o700)).unwrap();
     let managed = join(&[&sysutil::dir(&player), "Host_Data/Managed"]);
     let bridge = join(&[&managed, "UnityMicroEditor.dll"]);
-    let bridge_text = r#"using System; using UnityEngine; namespace UnityMicroEditor.Raw {
-[AttributeUsage(AttributeTargets.Assembly)] public sealed class RawLifecycleInstrumentedAttribute : Attribute { public RawLifecycleInstrumentedAttribute(int version) {} }
-[AttributeUsage(AttributeTargets.Assembly)] public sealed class RawScriptableObjectInstrumentedAttribute : Attribute { public RawScriptableObjectInstrumentedAttribute(int version) {} }
-public static class RawLifecycle {
- public enum Phase { Awake, OnEnable, OnDisable, OnDestroy }
- public static bool ShouldCollect(MonoBehaviour target, Phase phase) => false;
- public static bool ShouldCollect(ScriptableObject target, Phase phase) => false;
- public static void Enqueue(MonoBehaviour target, Phase phase, Action callback, int order) {}
- public static void Enqueue(ScriptableObject target, Phase phase, Action callback, int order) {}
-}}"#;
+    let bridge_text = r#"namespace UnityMicroEditor { public sealed class InvokeOnHotReloadAttribute : System.Attribute {} }"#;
     compile(&bridge, bridge_text, &[]);
     let package_text = r#"namespace Package.First { public class Known : UnityEngine.MonoBehaviour {} }
 namespace Package.Second { [UnityEngine.DefaultExecutionOrder(-5000)] public class Known : UnityEngine.MonoBehaviour {
@@ -1715,22 +1642,6 @@ namespace Package.Second { [UnityEngine.DefaultExecutionOrder(-5000)] public cla
         error.contains("lacks exported MonoScript type Package.EditorOnlyMissing"),
         "missing native package type was accepted or concealed with Editor DLL: {error}"
     );
-    // A verified native package does not make its private lifecycle messages
-    // callable. Never bypass this boundary with reflection or a lost callback.
-    let private_package = package_text.replace("protected virtual void", "private void");
-    write_graph_file(&project, &known_package, &private_package);
-    compile(&package_host, &private_package, &[]);
-    compile(
-        &package_editor,
-        &format!("{private_package}{editor_only_text}"),
-        &[],
-    );
-    republish(&mut graph, Some("Package.Second.Known"));
-    let error = prepare(&baseline).unwrap_err().to_string();
-    assert!(
-        error.contains("inaccessible; a public/protected bridge is required"),
-        "private native callback was accepted or silently dropped: {error}"
-    );
     write_graph_file(&project, &known_package, package_text);
     compile(&package_host, package_text, &[]);
     compile(
@@ -1771,25 +1682,6 @@ namespace Package.Second { [UnityEngine.DefaultExecutionOrder(-5000)] public cla
         Compiler::new(&project, &baseline, &prepared.player, &editor, &cache).unwrap();
     // As a watched session compiles, unless UME_COMPILER_COLD=1.
     accepted.serve(&cache);
-    assert_eq!(
-        accepted.configs["Assembly-CSharp"].native_base.to_vec(),
-        ["Package.Runtime"],
-        "restart lost the verified native package base allowlist"
-    );
-    for phase in ["Awake", "OnDestroy"] {
-        assert!(
-            accepted.proofs["Assembly-CSharp"]
-                .methods
-                .iter()
-                .any(|callback| {
-                    callback.type_name == "Baseline.Known"
-                        && callback.phase == phase
-                        && callback.synthetic
-                        && callback.order == -5000
-                }),
-            "protected inherited native {phase} lacks delayed source-owned wrapper proof"
-        );
-    }
     let types = accepted.script_type_names(&ctx).unwrap();
     assert_eq!(
         types.at("10000000000000000000000000000005"),
@@ -1825,13 +1717,8 @@ namespace Package.Second { [UnityEngine.DefaultExecutionOrder(-5000)] public cla
     );
     let proof = accepted.proofs["Assembly-CSharp"].clone();
     assert!(
-        proof.methods.iter().any(|callback| {
-            callback.source == added
-                && callback.type_name == "AgentAdded.Known"
-                && callback.phase == "Awake"
-                && callback.order == 12
-        }),
-        "new authored MonoBehaviour lacks lifecycle/execution-order proof: {proof:?}"
+        proof.script_types.get(&added).map(String::as_str) == Some("AgentAdded.Known"),
+        "new authored MonoBehaviour lacks its script type proof: {proof:?}"
     );
     // Publishing a new baseline must carry the accepted DLL SHA, expanded
     // source set, GUID/type binding and proof rather than the initial plan.
@@ -2321,7 +2208,7 @@ fn code_revision_fixture() -> (TempDir, Compiler, NilMap<String>) {
                 name: "Game".into(),
                 sha256: hash(&dll),
                 sources: NilVec::from([source]),
-                lifecycle_barrier: proof.clone(),
+                lifecycle: proof.clone(),
                 ..Default::default()
             }]),
             compiler_inputs: sources.clone(),
@@ -3680,18 +3567,7 @@ fn compiler_lifecycle_service_matches_one_shot_sdk() {
     let bridge_source = write_graph_file(
         &root,
         "bridge/Bridge.cs",
-        r#"using System; using UnityEngine; namespace UnityMicroEditor.Raw {
-[AttributeUsage(AttributeTargets.Assembly)] public sealed class RawLifecycleInstrumentedAttribute : Attribute { public RawLifecycleInstrumentedAttribute(int version) {} }
-[AttributeUsage(AttributeTargets.Assembly)] public sealed class RawScriptableObjectInstrumentedAttribute : Attribute { public RawScriptableObjectInstrumentedAttribute(int version) {} }
-public static class RawLifecycle {
- public enum Phase { Awake, OnEnable, OnDisable, OnDestroy }
- public static bool ShouldCollect(MonoBehaviour target, Phase phase) => false;
- public static bool ShouldCollect(ScriptableObject target, Phase phase) => false;
- public static void Enqueue(MonoBehaviour target, Phase phase, Action callback, int order) {}
- public static void Enqueue(ScriptableObject target, Phase phase, Action callback, int order) {}
- public static bool IsActiveAndEnabled(Behaviour target) => true;
- public static void SetActive(GameObject target, bool value) {}
-}}"#,
+        r#"namespace UnityMicroEditor { public sealed class InvokeOnHotReloadAttribute : System.Attribute {} }"#,
     );
     let bridge = join(&[&root, "bridge/UnityMicroEditor.dll"]);
     let mut arguments = vec![

@@ -9,12 +9,6 @@ namespace UnityMicroEditor.HotReload
     // reference to this tool: InvokeOnHotReload and OnHotReload run after every applied patch,
     // InvokeOnHotReloadLocal runs a method when its own body changed. Only what the loaded game
     // assemblies declare is found; an attribute on a method added by a patch is not visible.
-    //
-    // The lifecycle rewrite of the compiler turns Awake, OnEnable, OnDisable and OnDestroy of an
-    // engine object into an entry that keeps the attributes and a helper __UnityPlay_<name> that
-    // holds the body. A patch replaces the helper, so a local attribute on such a method stands for
-    // its helper as well. What runs then is the entry, as the engine calls it: an object whose class
-    // overrides the method runs its own, like any other virtual method with the attribute.
     internal sealed class Callbacks
     {
         private sealed class Callback
@@ -32,8 +26,6 @@ namespace UnityMicroEditor.HotReload
         }
 
         private const BindingFlags Declared = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance | BindingFlags.DeclaredOnly;
-        private const string LifecycleHelper = "__UnityPlay_";
-        private static readonly string[] LifecyclePhases = { "Awake", "OnEnable", "OnDisable", "OnDestroy" };
 
         private readonly Host host;
         private readonly Dictionary<Assembly, Scan> scans = new Dictionary<Assembly, Scan>();
@@ -56,14 +48,11 @@ namespace UnityMicroEditor.HotReload
                     if (callback.TakesPatches) arguments = new[] { patches ?? (patches = host.Patches(changes)) };
                     Call(callback.Method, arguments);
                 }
-            // An entry and its helper may both have changed: the method still runs once.
-            var ran = new HashSet<MethodBase>();
             foreach (Change change in changes)
             {
                 // The original carries the redirect, so invoking it runs the new body.
                 MethodBase patched = change.Original;
                 if (change.Removed || patched == null || !ScanOf(patched.Module.Assembly).Local.TryGetValue(patched.MetadataToken, out MethodInfo method)) continue;
-                if (!ran.Add(method)) continue;
                 if (method.GetParameters().Length != 0) Skip(method, "A method that runs when it was patched takes no parameters.");
                 else Call(method, null);
             }
@@ -125,29 +114,11 @@ namespace UnityMicroEditor.HotReload
                         }
                     }
                     catch (Exception) { continue; }   // an attribute whose type does not load is not one of ours
-                    if (local)
-                    {
-                        scan.Local[method.MetadataToken] = method;
-                        MethodInfo helper = Helper(method, methods);
-                        if (helper != null) scan.Local[helper.MetadataToken] = method;
-                    }
+                    if (local) scan.Local[method.MetadataToken] = method;
                     if (global) scan.Global.Add(Describe(method));
                 }
             }
             return scan;
-        }
-
-        // Only the four callbacks of an engine object have a helper. The rewrite appends underscores
-        // until the name is free, so the helper is the longest match.
-        private MethodInfo Helper(MethodInfo entry, MethodInfo[] methods)
-        {
-            if (entry.IsStatic || entry.GetParameters().Length != 0 || Array.IndexOf(LifecyclePhases, entry.Name) < 0 || !host.Enumerable(entry.DeclaringType)) return null;
-            string name = LifecycleHelper + entry.Name;
-            MethodInfo helper = null;
-            foreach (MethodInfo method in methods)
-                if (!method.IsStatic && method.Name.StartsWith(name, StringComparison.Ordinal) && method.Name.Substring(name.Length).Trim('_').Length == 0
-                    && method.GetParameters().Length == 0 && (helper == null || method.Name.Length > helper.Name.Length)) helper = method;
-            return helper;
         }
 
         private Callback Describe(MethodInfo method)

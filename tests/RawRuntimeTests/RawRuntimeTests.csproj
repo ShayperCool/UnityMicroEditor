@@ -9,7 +9,5 @@
     <Compile Include="../../Packages/com.unitymicroeditor.runtime/Runtime/Raw/RawReloadIdentity.cs" Link="RawReloadIdentity.cs" />
     <Compile Include="../../Packages/com.unitymicroeditor.runtime/Runtime/Raw/RawJson.cs" Link="RawJson.cs" />
     <Compile Include="../../Packages/com.unitymicroeditor.runtime/Runtime/CliPlayArguments.cs" Link="CliPlayArguments.cs" />
-    <Compile Include="../../Packages/com.unitymicroeditor.runtime/Runtime/Raw/RawActivationPlanner.cs" Link="RawActivationPlanner.cs" />
-    <Compile Include="../../Packages/com.unitymicroeditor.runtime/Runtime/Raw/RawLifecycleQueue.cs" Link="RawLifecycleQueue.cs" />
   </ItemGroup>
 </Project>

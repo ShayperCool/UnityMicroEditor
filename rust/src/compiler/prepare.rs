@@ -461,7 +461,6 @@ pub fn prepare_compiler_graph_with(
         compiler.filter_prepared_host_scripts(ctx, &helper, &graph)?;
     }
     compiler.validate_prepared_host_scripts(ctx, &helper, &managed, &graph)?;
-    compiler.approve_prepared_native_bases(&managed)?;
     if !own_graph
         && (compiler.manifest.native_only
             || ordered.iter().any(|assembly| {
@@ -613,7 +612,7 @@ pub fn prepare_compiler_graph_with(
         assembly.path = join(&[&managed, &format!("{}.dll", assembly.name)]);
         assembly.sha256 = file_hash(&dll)?;
         assembly.assembly_input_hash = sysutil::base(&sysutil::dir(&dll));
-        assembly.lifecycle_barrier = proof.clone();
+        assembly.lifecycle = proof.clone();
         assembly.lifecycle_helper = compiler.helper_key.clone();
         if needs_netcode(&assembly)
             && let Some(processor) = &compiler.netcode
@@ -748,52 +747,6 @@ fn valid_source_root(path: &str, source: &str) -> bool {
 }
 
 impl Compiler {
-    /// A verified package MonoScript assembly may
-    /// supply protected/public lifecycle methods to a gameplay subclass. The
-    /// SDK generates a source-owned wrapper around those calls; it still
-    /// rejects inaccessible private native callbacks. This runs only after
-    /// source/profile, native type, slot and DLL digest proofs.
-    pub fn approve_prepared_native_bases(&mut self, managed: &str) -> Result<()> {
-        let mut verified = BTreeSet::new();
-        for script in &self.manifest.scripts {
-            if !script.host_provided {
-                continue;
-            }
-            let host = join(&[managed, &format!("{}.dll", script.assembly)]);
-            let expected = self.manifest.compiler_inputs.at(&host);
-            if expected.is_empty() || !file_hash(&host).is_ok_and(|actual| actual == expected) {
-                bail!(
-                    "native lifecycle base lacks its verified package DLL digest: {}",
-                    script.assembly
-                );
-            }
-            verified.insert(script.assembly.clone());
-        }
-        for name in self.configs.keys().cloned().collect::<Vec<_>>() {
-            let mut config = self.configs.value(&name);
-            for claimed in &config.native_base {
-                if !verified.contains(claimed) || !config.dependencies.contains(claimed) {
-                    bail!(
-                        "native lifecycle base {claimed} is outside the verified package dependencies of {name}"
-                    );
-                }
-            }
-            let mut native_base = NilVec::nil();
-            for dependency in &config.dependencies {
-                if verified.contains(dependency) && !native_base.contains(dependency) {
-                    native_base.push(dependency.clone());
-                }
-            }
-            native_base.sort();
-            config.native_base = native_base;
-            let configuration = canonical_configuration(&config)?;
-            self.configuration_hashes
-                .insert(&name, sha256(&configuration));
-            self.configs.insert(name, config);
-        }
-        Ok(())
-    }
-
     /// GetClass returns the Editor's type even for
     /// runtime asmdef sources wrapped in UNITY_EDITOR. Resolve active
     /// declarations with the public Player profile before requiring native

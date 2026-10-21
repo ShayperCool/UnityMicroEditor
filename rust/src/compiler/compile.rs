@@ -2,8 +2,7 @@
 //! incremental compilation and the Roslyn/lifecycle helper invocations.
 use super::{
     AssemblyConfig, CompileAssembly, CompileManifest, CompileUpdate, CompiledCache, Compiler,
-    LifecycleCallback, LifecycleProof, NilMap, NilVec, PlayerMap, RuntimeInitializer, float_layout,
-    join,
+    LifecycleProof, NilMap, NilVec, PlayerMap, RuntimeInitializer, float_layout, join,
     netcode::needs_netcode,
     nilable::{nz, unmarshal},
     player_data,
@@ -12,7 +11,7 @@ use super::{
 use crate::{
     cancel::Context,
     project::{is_owned_cache_path, lexpath::rune_lower},
-    registry, sha256, sysutil,
+    sha256, sysutil,
     util::{
         atomic_json, canonical_destination, file_hash, marshal, micro_editor_root, read_json_file,
         valid_sha256, within_directory,
@@ -265,13 +264,7 @@ pub fn equal_strings(first: &[String], second: &[String]) -> bool {
 }
 
 pub fn valid_lifecycle_proof(proof: &LifecycleProof, name: &str) -> bool {
-    let mut phases: Vec<&str> = proof.phases.iter().map(String::as_str).collect();
-    phases.sort_unstable();
-    if proof.schema_version != 1
-        || !proof.verified
-        || !proof.scriptable_object_barrier
-        || phases != ["Awake", "OnDestroy", "OnDisable", "OnEnable"]
-    {
+    if proof.schema_version != 2 || !proof.verified {
         return false;
     }
     if proof.runtime_initializers.iter().any(|initializer| {
@@ -279,19 +272,6 @@ pub fn valid_lifecycle_proof(proof: &LifecycleProof, name: &str) -> bool {
             || initializer.type_name.is_empty()
             || initializer.method_name.is_empty()
             || !(0..=4).contains(&initializer.phase)
-    }) {
-        return false;
-    }
-    if proof.callbacks != proof.methods.len() as i64 {
-        return false;
-    }
-    if proof.methods.iter().any(|method| {
-        method.type_name.is_empty()
-            || method.source.is_empty()
-            || !matches!(
-                method.phase.as_str(),
-                "Awake" | "OnEnable" | "OnDisable" | "OnDestroy"
-            )
     }) {
         return false;
     }
@@ -308,10 +288,6 @@ pub fn lifecycle_sources_match(proof: &LifecycleProof, sources: &[String]) -> bo
         .script_types
         .iter()
         .all(|(source, name)| !name.is_empty() && sources.contains(source))
-        && proof
-            .methods
-            .iter()
-            .all(|callback| sources.contains(&callback.source))
 }
 
 pub fn editor_source(filename: &str) -> bool {
@@ -410,12 +386,6 @@ struct LifecycleRequest<'a> {
     assembly_name: &'a str,
     #[serde(rename = "Defines")]
     defines: &'a NilVec<String>,
-    #[serde(rename = "ExecutionOrders")]
-    execution_orders: &'a BTreeMap<String, i32>,
-    #[serde(rename = "MarkerPath")]
-    marker_path: &'a str,
-    #[serde(rename = "NativeBaseAssemblies")]
-    native_base_assemblies: &'a NilVec<String>,
     /// The content of every reference as the driver checked it: a served
     /// helper keeps reference metadata under it and reads a reference it
     /// does not hold, which must have this content. A one-shot run reads
@@ -446,10 +416,6 @@ struct WireProof {
     schema_version: i64,
     #[serde(deserialize_with = "nz")]
     verified: bool,
-    phases: NilVec<String>,
-    #[serde(deserialize_with = "nz")]
-    scriptable_object_barrier: bool,
-    callbacks: NilVec<LifecycleCallback>,
     runtime_initializers: NilVec<WireInitializer>,
     script_types: NilMap<String>,
 }
@@ -635,11 +601,11 @@ impl Compiler {
                     && (!needs_netcode(assembly) || !valid_sha256(&assembly.netcode_postprocessor))
                 || !assembly.lifecycle_helper.is_empty()
                     && !valid_sha256(&assembly.lifecycle_helper)
-                || !valid_lifecycle_proof(&assembly.lifecycle_barrier, &assembly.name)
-                || !lifecycle_sources_match(&assembly.lifecycle_barrier, &assembly.sources)
+                || !valid_lifecycle_proof(&assembly.lifecycle, &assembly.name)
+                || !lifecycle_sources_match(&assembly.lifecycle, &assembly.sources)
             {
                 bail!(
-                    "compiler baseline assembly lacks verified lifecycle barrier: {}",
+                    "compiler baseline assembly lacks a verified lifecycle proof: {}",
                     assembly.name
                 );
             }
@@ -663,7 +629,7 @@ impl Compiler {
             compiler.current_dlls.insert(&assembly.name, dll);
             compiler
                 .proofs
-                .insert(&assembly.name, assembly.lifecycle_barrier.clone());
+                .insert(&assembly.name, assembly.lifecycle.clone());
             compiler
                 .accepted_dll_hashes
                 .insert(&assembly.name, assembly.sha256.clone());
@@ -1074,8 +1040,8 @@ impl Compiler {
         }
         let managed = sysutil::dir(self.current_dlls.at(&assembly.name));
         if self.manifest.backend == "authored_source" {
-            // Instrumented SDK output requires the source-owned lifecycle marker
-            // and public barrier ABI, independently of authored assembly imports.
+            // The runtime bridge the host carries: game code may use its
+            // public attributes (`AgentTool`, the hot reload callbacks).
             refs.push(join(&[&managed, "UnityMicroEditor.dll"]));
             refs.extend(config.compiler_references.iter().cloned());
             for dependency in &assembly.references {
@@ -1916,7 +1882,6 @@ impl Compiler {
         let folder = join(&[staging, "Compile", &assembly.name]);
         sys::mkdir_all(&folder)?;
         let mut sources = Vec::new();
-        let mut execution_orders: BTreeMap<String, i32> = BTreeMap::new();
         for (index, source) in assembly.sources.iter().enumerate() {
             sources.push(LifecycleSource {
                 path: snapshots.get(source).cloned().unwrap_or_default(),
@@ -1928,17 +1893,7 @@ impl Compiler {
                     &sysutil::base(source),
                 ]),
             });
-            if let Ok(data) = sys::read(&format!("{source}.meta")) {
-                let properties = registry::meta_properties(&data)?;
-                if let Some(Ok(value)) = properties
-                    .get("MonoImporter.executionOrder")
-                    .map(|value| <[u8; 4]>::try_from(value.as_slice()))
-                {
-                    execution_orders.insert(source.clone(), i32::from_le_bytes(value));
-                }
-            }
         }
-        let marker = join(&[&folder, "UnityPlayLifecycleMarker.cs"]);
         let request = join(&[&folder, "lifecycle-request.json"]);
         atomic_json(
             &request,
@@ -1946,9 +1901,6 @@ impl Compiler {
                 allow_unsafe: config.config.allow_unsafe,
                 assembly_name: &assembly.name,
                 defines: &config.defines,
-                execution_orders: &execution_orders,
-                marker_path: &marker,
-                native_base_assemblies: &config.native_base,
                 reference_hashes: &reference_hashes,
                 references: refs,
                 sources: &sources,
@@ -1963,11 +1915,7 @@ impl Compiler {
         let mut proof = LifecycleProof {
             schema_version: wire.schema_version,
             verified: wire.verified,
-            phases: wire.phases,
-            scriptable_object_barrier: wire.scriptable_object_barrier,
             runtime_initializers: NilVec::make(),
-            callbacks: wire.callbacks.len() as i64,
-            methods: wire.callbacks,
             script_types: wire.script_types,
         };
         for initializer in wire.runtime_initializers.into_vec() {
@@ -2022,7 +1970,6 @@ impl Compiler {
         arguments.push(format!("-generatedfilesout:{generated}"));
         arguments.push(format!("-additionalfile:{additional}"));
         arguments.extend(sources.iter().map(|source| source.output_path.clone()));
-        arguments.push(marker);
         let response = join(&[&folder, &format!("{}.rsp", assembly.name)]);
         let mut text = String::new();
         for argument in &arguments {

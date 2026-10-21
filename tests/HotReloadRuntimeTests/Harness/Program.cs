@@ -58,7 +58,7 @@ internal static class Program
     private static int passed, failed, requests, fillers;
     private static MethodInfo[] fill;
     private static long generation, applied;
-    private static Patch patch1, patch2, patchCore, patchDenied, patchStale, patchBroken, patchShapes, patchIslands, patchLazy, patchEager, patchLocal, patchBulk, patchMenu1, patchMenu2, patchHelpers;
+    private static Patch patch1, patch2, patchCore, patchDenied, patchStale, patchBroken, patchShapes, patchIslands, patchLazy, patchEager, patchLocal, patchBulk, patchMenu1, patchMenu2;
     // Methods whose first eight bytes every check of "nothing was written" compares, and those bytes as the JIT compiled them.
     private static readonly List<MethodBase> watched = new List<MethodBase>();
     private static readonly List<long> compiled = new List<long>();
@@ -88,7 +88,6 @@ internal static class Program
         patchDenied = Load("Game.HotReload.Denied"); patchStale = Load("Game.HotReload.Stale"); patchBroken = Load("Game.HotReload.Broken"); patchShapes = Load("Game.HotReload.Shapes");
         patchIslands = Load("Game.HotReload.Islands"); patchLazy = Load("Game.HotReload.Lazy"); patchEager = Load("Game.HotReload.Eager"); patchLocal = Load("Game.HotReload.Local");
         patchBulk = Load("Game.HotReload.Bulk"); patchMenu1 = Load("Game.HotReload.Menu1"); patchMenu2 = Load("Game.HotReload.Menu2");
-        patchHelpers = Load("Game.HotReload.Helpers");
         // The bridge reads the applier from bytes on the first valid request. No file of its name is on the search path.
         applierPath = Path.Combine(output, "applier", "UnityMicroEditor.HotReload.dll");
         applierHash = Hash(applierPath);
@@ -382,7 +381,7 @@ internal static class Program
     {
         Console.WriteLine("callbacks follow a change in what only the patch defines");
         MethodBase build = Method(typeof(Menu), "Build"), rebuild = Method(typeof(Menu), "Rebuild"), keep = Method(typeof(Menu), "Keep"),
-            count = Method(typeof(Menu), "Count"), enable = Method(typeof(Menu), "__UnityPlay_OnEnable"), steady = Method(typeof(Menu), "Steady"),
+            count = Method(typeof(Menu), "Count"), enable = Method(typeof(Menu), "OnEnable"), steady = Method(typeof(Menu), "Steady"),
             walk = Method(typeof(Menu), "Walk"), stroll = Method(typeof(Menu), "Stroll"), wait = Method(typeof(Menu), "Wait");
         Menu shown = new Menu(), closed = new Menu(), fading = new Menu();
         Func<Patch, string, List<object>> menus = (patch, space) => new List<object> { Target("Game", patch,
@@ -395,7 +394,7 @@ internal static class Program
         Applied(ack, generation, 9, 0, "the first of two generations with the same members");
         Equal(shown.Shown + "/" + Menu.Rebuilt + "/" + Menu.Kept + "/" + Menu.Counted, "click1/10/1/1", "a first redirect runs every local callback with its new body");
         Equal(Menu.Steadied + "/" + Menu.Walked + "/" + Menu.Strolled + "/" + Menu.Waited, "7/3/1/10", "also those whose helpers call themselves, call each other or are async");
-        Equal(shown.Enabled + "/" + closed.Enabled, "enabled1/enabled1", "a local attribute on a lifecycle entry runs the helper that holds its body, on every live object");
+        Equal(shown.Enabled + "/" + closed.Enabled, "enabled1/enabled1", "a local attribute on a lifecycle callback runs its new body on every live object");
         Equal(shown.Refreshed + "/" + closed.Refreshed, "1/1", "the instance callback ran on both objects");
 
         // The same generation again, as a comment in the source makes it: nothing the Player runs
@@ -427,31 +426,6 @@ internal static class Program
         Equal(shown.Shown + "/" + Menu.Rebuilt + "/" + Menu.Kept + "/" + Menu.Counted + "/" + shown.Enabled, "click0/111/2/7/enabled0", "the local callbacks of a restore ran the original bodies");
         Equal(Menu.Steadied + "/" + Menu.Walked + "/" + Menu.Strolled + "/" + Menu.Waited, "8/34/12/111", "all of them");
         UnityEngine.Object.DestroyImmediate(shown);
-
-        Console.WriteLine("which method is the helper of a lifecycle callback");
-        var crowd = new Crowded();
-        Panel panel = new Panel(), quiet = new QuietPanel();
-        MethodBase helper = Method(typeof(Crowded), "__UnityPlay_OnEnable_"), own = Method(typeof(Crowded), "__UnityPlay_OnEnable"),
-            later = Method(typeof(Crowded), "__UnityPlay_OnEnableLater"), fooHelper = Method(typeof(Crowded), "__UnityPlay_Foo"),
-            panelHelper = Method(typeof(Panel), "__UnityPlay_OnEnable");
-        ack = Send(++generation, new List<object> { Target("Game", patchHelpers,
-            Detour(helper, patchHelpers, "Patch.Helpers.Crowds::Helper"), Detour(panelHelper, patchHelpers, "Patch.Helpers.Crowds::PanelEnable")) });
-        Applied(ack, generation, 2, 0, "the helpers of two lifecycle callbacks");
-        Equal(crowd.Enabled + "/" + crowd.Own + "/" + crowd.Later, "crowded1/0/0", "the helper is the name the rewrite made free with underscores, not a shorter or a longer one the game declares");
-        Equal(panel.Seen + "/" + quiet.Seen, "panel1;/quiet;", "a virtual callback runs as the engine calls it: an object whose class overrides it runs its own body");
-
-        crowd.Enabled = string.Empty;
-        ack = Send(++generation, new List<object> { Target("Game", patchHelpers,
-            Detour(helper, patchHelpers, "Patch.Helpers.Crowds::Helper"), Detour(panelHelper, patchHelpers, "Patch.Helpers.Crowds::PanelEnable"),
-            Detour(own, patchHelpers, "Patch.Helpers.Crowds::Own"), Detour(later, patchHelpers, "Patch.Helpers.Crowds::Later"),
-            Detour(fooHelper, patchHelpers, "Patch.Helpers.Crowds::FooHelper")) });
-        Applied(ack, generation, 5, 0, "three methods that only look like helpers");
-        Equal(crowd.Enabled + "/" + crowd.Own + "/" + crowd.Later + "/" + crowd.Fooed, "/0/0/0", "a method named like a helper is no callback, and a method that is no lifecycle callback has no helper");
-        Applied(Send(++generation, new List<object>()), generation, 0, 5, "restored");
-        Equal(crowd.Enabled + "/" + crowd.Fooed, "crowded0/0", "the restore of a helper runs its callback with the original body");
-        UnityEngine.Object.DestroyImmediate(crowd);
-        UnityEngine.Object.DestroyImmediate(panel);
-        UnityEngine.Object.DestroyImmediate(quiet);
     }
 
     // ------------------------------------------------------------------ first redirects

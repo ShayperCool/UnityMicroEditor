@@ -466,13 +466,7 @@ pub fn prepare_agent_project_with_native(
     let mut initializers: Vec<RuntimeInitializer> = Vec::new();
     for assembly in accepted_compiler.assemblies.iter() {
         assemblies.push(Any::from(assembly.path.clone()));
-        initializers.extend(
-            assembly
-                .lifecycle_barrier
-                .runtime_initializers
-                .iter()
-                .cloned(),
-        );
+        initializers.extend(assembly.lifecycle.runtime_initializers.iter().cloned());
     }
     let empty = || Any::Array(Vec::new());
     let mut seed = obj([
@@ -491,11 +485,8 @@ pub fn prepare_agent_project_with_native(
         ),
         ("objects", empty()),
         ("assets", empty()),
-        ("assemblies", assemblies.clone().into()),
+        ("assemblies", assemblies.into()),
         ("sourceDependencies", empty()),
-        ("lifecycleBarrierVersion", 1.into()),
-        ("lifecycleBarrierAssemblies", assemblies.into()),
-        ("scriptableObjectBarrierVersion", 1.into()),
         ("runtimeInitializers", value::raw(&initializers)?),
         (
             "emptyBuiltinLightingDataVerified",

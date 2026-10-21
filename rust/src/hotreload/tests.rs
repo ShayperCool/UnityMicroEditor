@@ -1936,29 +1936,7 @@ fn hot_reload_compiled_revisions_sdk() {
     let bridge = sysutil::join(&[&managed, "UnityMicroEditor.dll"]);
     compile(
         &bridge,
-        r#"using System; using UnityEngine; namespace UnityMicroEditor.Raw {
-[AttributeUsage(AttributeTargets.Assembly)] public sealed class RawLifecycleInstrumentedAttribute : Attribute { public RawLifecycleInstrumentedAttribute(int version) {} }
-[AttributeUsage(AttributeTargets.Assembly)] public sealed class RawScriptableObjectInstrumentedAttribute : Attribute { public RawScriptableObjectInstrumentedAttribute(int version) {} }
-public static class RawLifecycle {
- public enum Phase { Awake, OnEnable, OnDisable, OnDestroy }
- public static bool ShouldCollect(MonoBehaviour target, Phase phase) => false;
- public static bool ShouldCollect(ScriptableObject target, Phase phase) => false;
- public static void Enqueue(MonoBehaviour target, Phase phase, Action callback, int order) {}
- public static void Enqueue(ScriptableObject target, Phase phase, Action callback, int order) {}
- public static bool IsActiveAndEnabled(Behaviour target) => true;
- public static void SetActive(GameObject target, bool value) {}
-}
-public static class RawPrefabTransforms {
- public static Transform Root(Transform target) => target;
- public static Component GetComponentInChildren(Component target, Type type) => null;
- public static Component GetComponentInChildren(Component target, Type type, bool includeInactive) => null;
- public static Component GetComponentInChildren(GameObject target, Type type) => null;
- public static Component GetComponentInChildren(GameObject target, Type type, bool includeInactive) => null;
- public static T GetComponentInChildren<T>(Component target) => default;
- public static T GetComponentInChildren<T>(Component target, bool includeInactive) => default;
- public static T GetComponentInChildren<T>(GameObject target) => default;
- public static T GetComponentInChildren<T>(GameObject target, bool includeInactive) => default;
-}}"#,
+        r#"namespace UnityMicroEditor { public sealed class InvokeOnHotReloadAttribute : System.Attribute {} }"#,
         &[],
     );
     file(
@@ -2799,10 +2777,8 @@ fn hot_reload_netcode_sdk() {
             panic!("compile {assembly} {symbol}: {error}");
         }
         let proof = LifecycleProof {
-            schema_version: 1,
+            schema_version: 2,
             verified: true,
-            scriptable_object_barrier: true,
-            phases: NilVec::from(["Awake", "OnEnable", "OnDisable", "OnDestroy"].as_slice()),
             ..Default::default()
         };
         let unit = CompileAssembly {
@@ -3014,10 +2990,8 @@ fn hot_reload_netcode_sdk() {
     fs::copy(&source, &copy).unwrap();
     fs::copy(source.replace(".dll", ".pdb"), copy.replace(".dll", ".pdb")).unwrap();
     let proof = LifecycleProof {
-        schema_version: 1,
+        schema_version: 2,
         verified: true,
-        scriptable_object_barrier: true,
-        phases: NilVec::from(["Awake", "OnEnable", "OnDisable", "OnDestroy"].as_slice()),
         ..Default::default()
     };
     let unit = CompileAssembly {

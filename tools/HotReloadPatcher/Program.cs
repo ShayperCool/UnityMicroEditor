@@ -402,7 +402,7 @@ internal static class Program
                 foreach (var c in outcome.Changes)
                     // A note names what the user wrote: Awake, not the lifecycle rewrite's helper.
                     foreach (var (code, message) in c.Notes)
-                        outcome.Notes.Add((code, Differ.Authored(c.Member), message, c.Revision, code == Codes.SerializedFieldNotRestored ? c.Holders : null));
+                        outcome.Notes.Add((code, c.Member, message, c.Revision, code == Codes.SerializedFieldNotRestored ? c.Holders : null));
         long emitMs = watch.ElapsedMilliseconds;
         return Result(request, outcomes, verdict, readMs, diffMs, emitMs);
     }

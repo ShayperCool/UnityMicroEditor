@@ -68,8 +68,8 @@ internal static class Netcode
     }
 
     /// A member the post-processor adds to a class. Its names start with two underscores, which
-    /// the language reserves; `__UnityPlay_` is the lifecycle rewrite's, and those are compared
-    /// like methods the user wrote.
+    /// the language reserves; `__UnityPlay_` names the start-up bridges of the lifecycle
+    /// compiler, which are compared like methods the user wrote.
     public static bool Generated(string name) => name.StartsWith("__", StringComparison.Ordinal) && !name.StartsWith("__UnityPlay_", StringComparison.Ordinal);
 
     /// Callbacks Netcode runs once for an object that is spawned.

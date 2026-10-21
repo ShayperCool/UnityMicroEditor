@@ -1050,9 +1050,7 @@ namespace Edits
     {
         public int ticks;
 
-        // What the lifecycle rewrite makes of a user's Awake: the wrapper, and the body in a helper.
-        private void Awake() { __UnityPlay_Awake(); }
-        private void __UnityPlay_Awake()
+        private void Awake()
         {
 #if CASE_LIFECYCLE_BODY
             ticks = 2;
@@ -1068,8 +1066,7 @@ namespace Edits
         private void FixedUpdate() { ticks += 2; }
 #endif
 #if CASE_ADD_LIFECYCLE
-        private void OnEnable() { __UnityPlay_OnEnable(); }
-        private void __UnityPlay_OnEnable() { ticks += 3; }
+        private void OnEnable() { ticks += 3; }
 #endif
 #if CASE_ADD_ENGINE_METHOD
         // Not a message of the engine's list, and no string of this assembly names it: an input
@@ -1177,14 +1174,13 @@ namespace Edits
         public static void __UnityPlay_RuntimeInitialize_9() { Init(); }
     }
 
-    // What the lifecycle rewrite makes of OnEnable and OnDisable. Enabled objects do not run
-    // OnEnable again; a changed OnDisable runs, and does not remove what the old OnEnable added.
+    // Enabled objects do not run OnEnable again; a changed OnDisable runs, and does not remove
+    // what the old OnEnable added.
     public class Listener : MonoBehaviour
     {
         public static event Action Scored;
         public int hits;
-        private void OnEnable() { __UnityPlay_OnEnable(); }
-        private void __UnityPlay_OnEnable()
+        private void OnEnable()
         {
 #if CASE_ONCE_ENABLE
             Scored += OnBonus;
@@ -1192,8 +1188,7 @@ namespace Edits
             Scored += OnScored;
 #endif
         }
-        private void OnDisable() { __UnityPlay_OnDisable(); }
-        private void __UnityPlay_OnDisable()
+        private void OnDisable()
         {
 #if CASE_ONCE_ENABLE
             Scored -= OnBonus;
@@ -1209,8 +1204,7 @@ namespace Edits
     public class Settings : ScriptableObject
     {
         public int limit;
-        private void OnEnable() { __UnityPlay_OnEnable(); }
-        private void __UnityPlay_OnEnable()
+        private void OnEnable()
         {
 #if CASE_ONCE_ASSET
             limit = 9;
