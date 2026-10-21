@@ -44,6 +44,7 @@ struct Warm {
     /// The hash of each of those sources and of its `.meta`.
     sources: BTreeMap<String, (String, String)>,
     environment: String,
+    assemblies: String,
     request: String,
     request_guid: String,
     revision: u64,
@@ -54,8 +55,13 @@ impl Drop for Warm {
     fn drop(&mut self) {
         self.worker.stop();
         let library = sysutil::join(&[self.worker.project(), "Library"]);
-        if let Err(error) = keep_library(&self.project, &library, &self.environment, &self.sources)
-        {
+        if let Err(error) = keep_library(
+            &self.project,
+            &library,
+            &self.environment,
+            &self.assemblies,
+            &self.sources,
+        ) {
             Event::new("scene-library-not-kept")
                 .with("reason", &format!("{error:#}"))
                 .emit();
@@ -67,6 +73,13 @@ impl Drop for Warm {
 /// a script's object depends on.
 fn environment_key(environment: &super::scripted::ScriptEnvironment) -> String {
     sha256(format!("{}\0{}", environment.sha256, environment.scripts.join("\0")).as_bytes())
+}
+
+/// The assemblies loaded, by name: their asset postprocessors take part in
+/// the import of a model, image or sound, which an edit of a script's body
+/// leaves as it is.
+fn assemblies_key(environment: &super::scripted::ScriptEnvironment) -> String {
+    sha256(environment.assemblies.join("\0").as_bytes())
 }
 
 /// What a worker leaves in its context's `Library` that a later worker
@@ -82,6 +95,9 @@ struct LibraryState {
     /// The assemblies and scripts the imports were made with.
     #[serde(default)]
     environment: String,
+    /// The assemblies loaded when they were made.
+    #[serde(default)]
+    assemblies: String,
     sources: BTreeMap<String, (String, String)>,
 }
 
@@ -174,6 +190,7 @@ fn keep_library(
     project: &str,
     context_library: &str,
     environment: &str,
+    assemblies: &str,
     sources: &BTreeMap<String, (String, String)>,
 ) -> Result<()> {
     let directory = library_directory(project);
@@ -194,6 +211,7 @@ fn keep_library(
         &LibraryState {
             schema_version: 1,
             environment: environment.to_string(),
+            assemblies: assemblies.to_string(),
             sources: sources.clone(),
         },
     )
@@ -201,9 +219,9 @@ fn keep_library(
 
 /// Whether a source's import depends on nothing a script or another asset
 /// changes, so that an import of the same source and `.meta` is taken as
-/// it is: models, images, sounds, videos and fonts. Any other import is
-/// taken when the scripts are those it was made with and nothing it refers
-/// to changed.
+/// it is while the same assemblies are loaded: models, images, sounds,
+/// videos and fonts. Any other import is taken when the scripts are those
+/// it was made with and nothing it refers to changed.
 fn kept_as_imported(path: &str) -> bool {
     matches!(
         super::support::lower_ext(path).as_str(),
@@ -477,6 +495,7 @@ impl SceneWorker {
         let library = sysutil::join(&[&opts.context, "Library"]);
         let kept = take_library(&build.project, &library);
         let environment_key = environment_key(environment);
+        let assemblies = assemblies_key(environment);
         let changed = changed_assets(sources, batch, hashes, &kept.sources);
         let paths: BTreeMap<&str, &str> = opts
             .project_context
@@ -497,7 +516,8 @@ impl SceneWorker {
                     return true;
                 };
                 !(!changed.contains(*path)
-                    && (kept_as_imported(path) || kept.environment == environment_key))
+                    && ((kept_as_imported(path) && kept.assemblies == assemblies)
+                        || kept.environment == environment_key))
             })
             .cloned()
             .collect();
@@ -510,14 +530,26 @@ impl SceneWorker {
         let mut worker = match WarmWorker::start(&opts) {
             Ok(worker) => worker,
             Err(error) => {
-                let _ = keep_library(&build.project, &library, &kept.environment, &sources);
+                let _ = keep_library(
+                    &build.project,
+                    &library,
+                    &kept.environment,
+                    &kept.assemblies,
+                    &sources,
+                );
                 return Err(error);
             }
         };
         if let Err(error) = worker.import(&ctx.with_timeout(build.timeout), &jobs) {
             // What the library held stays for the next worker.
             worker.stop();
-            let _ = keep_library(&build.project, &library, &kept.environment, &sources);
+            let _ = keep_library(
+                &build.project,
+                &library,
+                &kept.environment,
+                &kept.assemblies,
+                &sources,
+            );
             return Err(error);
         }
         sources.extend(
@@ -531,6 +563,7 @@ impl SceneWorker {
             batch: assets,
             sources,
             environment: environment_key,
+            assemblies,
             request: request.to_string(),
             request_guid: request_guid.to_string(),
             revision: 0,
