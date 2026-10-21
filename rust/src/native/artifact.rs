@@ -165,3 +165,9 @@ impl UdsArtifactStore {
         (proof, result)
     }
 }
+
+impl crate::engine::ArtifactStore for UdsArtifactStore {
+    fn extract(&self, hash: &[u8], output: &str) -> (ArtifactExtraction, Result<()>) {
+        UdsArtifactStore::extract(self, hash, output)
+    }
+}

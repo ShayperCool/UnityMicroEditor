@@ -5,6 +5,7 @@ use std::{
 };
 use unity_micro_editor::{
     cache::SourceCache,
+    engine::unity6000_6 as w,
     lmdb::{self, Image, Record, Tables},
     paths, protocol as p, registry, yaml,
 };
@@ -111,16 +112,16 @@ impl Read for ShortReader<'_> {
 #[test]
 fn worker_frames_handle_partial_io_and_native_handshake_quirk() {
     let mut writer = Chunks(Vec::new());
-    p::write_frame(&mut writer, &p::handshake()).unwrap();
+    p::write_frame(&mut writer, &w::handshake()).unwrap();
     assert_eq!(&writer.0[..9], b"\0\x05\0\0\0\0\0\0\0");
     assert_eq!(writer.0.len(), 16);
     assert_eq!(
         p::read_frame(&mut ShortReader(&writer.0)).unwrap(),
-        p::handshake()
+        w::handshake()
     );
     let frame = p::Frame {
         kind: 1,
-        payload: p::initialize(24),
+        payload: w::initialize(24),
     };
     let mut writer = Chunks(Vec::new());
     p::write_frame(&mut writer, &frame).unwrap();
@@ -141,10 +142,10 @@ fn worker_addresses_match_unity_guid_nibble_order() {
     );
     assert_eq!(p::guid_text(&wire), "0123456789abcdef0123456789abcdef");
     assert!(p::guid_wire("xyz").is_err());
-    let address = p::import_address("0123456789abcdef0123456789abcdef", -1, [0; 16]).unwrap();
-    assert_eq!(p::create_default_asset(&address).unwrap()[0], 19);
-    assert!(p::shutdown("bad\0reason").is_err());
-    let complete = p::import_complete(
+    let address = w::import_address("0123456789abcdef0123456789abcdef", -1, [0; 16]).unwrap();
+    assert_eq!(w::create_default_asset(&address).unwrap()[0], 19);
+    assert!(w::shutdown("bad\0reason").is_err());
+    let complete = w::import_complete(
         &address,
         0,
         [0; 16],
@@ -173,7 +174,7 @@ fn captured_worker_messages_match_the_pinned_native_profile() {
     let mut input = &wire[..];
     let hello = p::read_frame(&mut input).unwrap();
     assert_eq!(
-        p::worker_hello(&hello.payload).unwrap(),
+        w::worker_hello(&hello.payload).unwrap(),
         "AssetImportWorkerProbe"
     );
     let prepared = p::read_frame(&mut input).unwrap();
@@ -181,11 +182,11 @@ fn captured_worker_messages_match_the_pinned_native_profile() {
     let data = bytes_from_hex(
         "f2ea8044e695c3e1ad7a114fc05bb18f1b1d4525ba076b6a969e8b3e0c9b21151104000000000000000000000000000000000000000000001104000000000000000000000000000000000000000000000100000001000000180000000100000034000000010000006000000001000000000000001c0000005b56b146b94ebabb3511413bb5772f5e000000000000000000",
     );
-    let metadata = p::artifact_metadata(&data).unwrap();
+    let metadata = w::artifact_metadata(&data).unwrap();
     assert_eq!(metadata.output_id, "f2ea8044e695c3e1ad7a114fc05bb18f");
     assert_eq!(
         metadata.address,
-        p::import_address("b1d15452ab70b6a669e9b8e3c0b91251", 1041, [0; 16]).unwrap()
+        w::import_address("b1d15452ab70b6a669e9b8e3c0b91251", 1041, [0; 16]).unwrap()
     );
     assert_eq!(metadata.files.len(), 1);
     assert_eq!(metadata.files[0].kind, 0);
@@ -194,16 +195,16 @@ fn captured_worker_messages_match_the_pinned_native_profile() {
         unity_micro_editor::hex(&metadata.files[0].hash),
         "5b56b146b94ebabb3511413bb5772f5e"
     );
-    assert!(p::artifact_metadata(&data[..143]).is_err());
+    assert!(w::artifact_metadata(&data[..143]).is_err());
     let mut bad = data;
     p::put_u32(&mut bad, 116, 1000);
-    assert!(p::artifact_metadata(&bad).is_err());
+    assert!(w::artifact_metadata(&bad).is_err());
 }
 
 #[test]
 fn import_response_checks_aligned_dependency_strides_and_blob_bounds() {
-    let first = p::import_address("0123456789abcdef0123456789abcdef", 1041, [0; 16]).unwrap();
-    let second = p::import_address("fedcba9876543210fedcba9876543210", 1020, [0; 16]).unwrap();
+    let first = w::import_address("0123456789abcdef0123456789abcdef", 1041, [0; 16]).unwrap();
+    let second = w::import_address("fedcba9876543210fedcba9876543210", 1020, [0; 16]).unwrap();
     let mut data = vec![0; 128 + 2 * 48];
     data[0] = 20;
     p::put_u32(&mut data, 112, 16);
@@ -211,14 +212,14 @@ fn import_response_checks_aligned_dependency_strides_and_blob_bounds() {
     p::put_u32(&mut data, 120, 3);
     data[128..172].copy_from_slice(&first);
     data[176..220].copy_from_slice(&second);
-    let response = p::import_response(&data).unwrap();
+    let response = w::import_response(&data).unwrap();
     assert_eq!(response.dependencies, [first, second]);
     assert_eq!(response.consistency_failure_count, 3);
-    assert!(p::import_response(&data[..data.len() - 1]).is_err());
+    assert!(w::import_response(&data[..data.len() - 1]).is_err());
     p::put_u32(&mut data, 84, 1);
-    assert!(p::import_response(&data).is_err());
+    assert!(w::import_response(&data).is_err());
     p::put_u32(&mut data, 80, 1000);
-    assert!(p::import_response(&data).is_err());
+    assert!(w::import_response(&data).is_err());
 }
 #[test]
 fn lmdb_roundtrips_branches_and_overflow_with_native_limits() {

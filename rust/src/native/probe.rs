@@ -10,16 +10,10 @@ use super::{
     },
 };
 use crate::{
-    ENGINE_VERSION,
     cancel::{self, Canceled, Context, Flag, Source},
-    lmdb::{self, Record},
-    protocol::{
-        ArtifactMetadata, Frame, ImportAddress, artifact_metadata, handshake, import_address,
-        import_request, import_response, initialize, prepare, read_frame, shutdown,
-        validate_handshake, worker_hello, worker_log, write_frame,
-    },
-    registry::{self, native_hash},
-    sha256, sysutil,
+    engine::{self, Engine, Message, Reply, WorkerLaunch, WorkerProtocol},
+    protocol::{ArtifactMetadata, Frame, ImportRecord, read_frame, write_frame},
+    registry, sha256, sysutil,
 };
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -33,9 +27,6 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-
-const WORKER_PREPARED: u8 = 23;
-const IMPORT_RESPONSE: u8 = 20;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -155,68 +146,6 @@ pub struct NativeImportJob {
     /// packs the sprites of its textures). It is given to a second worker,
     /// started once the results of the first are in the context's ArtifactDB.
     pub dependent: bool,
-}
-
-/// What a worker returned for one import, as the Editor keeps it in its
-/// ArtifactDB: the address, the result ID and the dependency, metadata and
-/// statistics blobs.
-pub(crate) struct ImportRecord {
-    pub address: ImportAddress,
-    pub result: [u8; 16],
-    pub blobs: Vec<Vec<u8>>,
-}
-
-/// Writes the results of a stopped worker into the ArtifactDB that worker
-/// left in the context, as the Editor commits them: each address gets its
-/// result as the current revision. The next worker resolves an artifact
-/// dependency through these tables and reads the files from the DataStore.
-pub(crate) fn commit_import_results(project: &str, records: &[ImportRecord]) -> Result<()> {
-    let path = sysutil::join(&[project, "Library/ArtifactDB"]);
-    let data = std::fs::read(&path).map_err(|e| os_error("read", &path, &e))?;
-    let mut tables = lmdb::Image::open(&data)?.tables()?;
-    let names = [
-        "CurrentRevisions",
-        "ImportAddressToImportResultIDs",
-        "ImportResultIDToArtifactDependencies",
-        "ImportResultIDToArtifactMetaInfo",
-        "ImportResultIDToImportStats",
-    ];
-    if names.iter().any(|name| !tables.contains_key(*name)) || !tables.contains_key("DBVersion") {
-        bail!("worker ArtifactDB lacks the pinned tables");
-    }
-    for record in records {
-        // `ArtifactDBWriteTxn::SetCurrentRevision`: XXH3-128 of the GUID,
-        // the importer ID and the importer hash.
-        let address = &record.address;
-        let key =
-            native_hash(&[&address[..16], &address[16..20], &address[24..40]].concat()).to_vec();
-        let mut current = address[..40].to_vec();
-        current.extend_from_slice(&record.result);
-        let mut history = address[..40].to_vec();
-        history.extend_from_slice(&8u32.to_le_bytes());
-        history.extend_from_slice(&1u32.to_le_bytes());
-        history.extend_from_slice(&record.result);
-        let values = [current, history]
-            .into_iter()
-            .map(|value| (key.clone(), value))
-            .chain(
-                record
-                    .blobs
-                    .iter()
-                    .map(|blob| (record.result.to_vec(), blob.clone())),
-            );
-        for (name, (key, value)) in names.iter().zip(values) {
-            let table = tables.get_mut(*name).unwrap();
-            table.retain(|existing| existing.key != key);
-            table.push(Record { key, value });
-        }
-    }
-    for table in tables.values_mut() {
-        table.sort_by(|a, b| a.key.cmp(&b.key));
-    }
-    let image = lmdb::build(&tables)?;
-    std::fs::write(&path, image).map_err(|e| os_error("write", &path, &e))?;
-    Ok(())
 }
 
 /// The worker connection with socket error texts such as "i/o timeout". The context
@@ -354,6 +283,7 @@ impl Drop for Watcher {
 
 /// What every worker of one run shares.
 struct Pass<'a> {
+    engine: &'static Engine,
     listener: &'a Arc<TcpListener>,
     service: &'a DataStoreService,
     initialize: &'a [u8],
@@ -428,29 +358,33 @@ impl Probe<'_> {
     }
 
     fn with_service(&self, report: &mut ProbeReport) -> Result<()> {
+        let engine = engine::for_worker(self.project, &self.opts.editor)?;
         // A project with PlayerSettings supplies exact graphics values.
         match read_worker_environment(self.project) {
             Ok(environment) => report.environment = Some(environment),
             Err(error) if is_not_exist(&error) => {}
             Err(error) => return Err(error),
         }
-        let (initialize, prepare) = match &report.environment {
-            Some(environment) => (environment.message(16), environment.message(17)),
-            None => (initialize(24), prepare(24)),
-        };
+        let environment = report.environment.as_ref();
+        let (initialize, prepare) = (
+            engine.worker.initialize(environment),
+            engine.worker.prepare(environment),
+        );
         report
             .stages
             .insert("fixtureAndRegistry".into(), Self::seconds(self.started));
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|e| anyhow!("listen tcp 127.0.0.1:0: {}", sysutil::errno_text(&e)))?;
         let listener = Arc::new(listener);
-        let mut service = DataStoreService::new(&self.opts.editor, self.project, &self.logs);
+        let mut service =
+            DataStoreService::new(engine, &self.opts.editor, self.project, &self.logs);
         let stage = Instant::now();
         service.start(self.ctx)?;
         report
             .stages
             .insert("dataStoreReady".into(), Self::seconds(stage));
         let run = Pass {
+            engine,
             listener: &listener,
             service: &service,
             initialize: &initialize,
@@ -481,7 +415,9 @@ impl Probe<'_> {
             bail!("a dependent native import has no job to depend on");
         }
         self.with_worker(report, run, "worker", &first, &mut records)?;
-        commit_import_results(self.project, &records)?;
+        run.engine
+            .asset_database
+            .commit_imports(self.project, &records)?;
         self.with_worker(report, run, "worker-dependent", &dependent, &mut records)
     }
 
@@ -494,7 +430,10 @@ impl Probe<'_> {
         records: &mut Vec<ImportRecord>,
     ) -> Result<()> {
         let Pass {
-            listener, service, ..
+            engine,
+            listener,
+            service,
+            ..
         } = *run;
         let log = sysutil::join(&[&self.logs, &format!("{name}.log")]);
         let stdout = create_new(
@@ -507,28 +446,15 @@ impl Probe<'_> {
             .port();
         let mut command = Command::new(&self.opts.editor);
         command
-            .args([
-                "-adb2",
-                "-batchMode",
-                "-noUpm",
-                "-name",
-                "AssetImportWorkerProbe",
-                "-projectPath",
-                self.project,
-                "-logFile",
-                &log,
-                "-srvPort",
-                &port.to_string(),
-                "-parentPid",
-                &std::process::id().to_string(),
-                "-job-worker-count",
-                &self.opts.job_workers.max(2).to_string(),
-                "-background-job-worker-count",
-                "2",
-                "-nographics",
-                "-noDiagnosticSwitchPersistentStore",
-            ])
-            .args(service.worker_arguments())
+            .args(engine.worker.arguments(&WorkerLaunch {
+                name: "AssetImportWorkerProbe",
+                project: self.project,
+                log: &log,
+                port,
+                parent: std::process::id(),
+                job_workers: self.opts.job_workers,
+                data_store: service.worker_arguments(),
+            }))
             .current_dir(self.project)
             .stdin(Stdio::null())
             .stdout(stdout.try_clone()?)
@@ -550,7 +476,10 @@ impl Probe<'_> {
         report.worker_rss_kib = rss_kib(i64::from(worker.pid));
         if let Some(connection) = &mut connection {
             connection.final_write = Some(Duration::from_secs(1));
-            if let Ok(payload) = shutdown("own coordinator experiment complete") {
+            if let Ok(payload) = engine
+                .worker
+                .shutdown("own coordinator experiment complete")
+            {
                 let _ = write_frame(connection, &Frame { kind: 1, payload });
             }
         }
@@ -604,11 +533,13 @@ impl Probe<'_> {
         records: &mut Vec<ImportRecord>,
     ) -> Result<()> {
         let Pass {
+            engine,
             listener,
             initialize,
             prepare,
             ..
         } = *run;
+        let worker = engine.worker;
         // Context cancellation also releases Accept and reads before their deadline.
         let watcher = Watcher::new(self.ctx, listener);
         let local = listener
@@ -631,25 +562,24 @@ impl Probe<'_> {
             final_write: None,
         });
         let frame = read_frame(connection)?;
-        validate_handshake(&frame)?;
-        write_frame(connection, &handshake())?;
+        if frame != worker.handshake() {
+            bail!("worker protocol name or version does not match");
+        }
+        write_frame(connection, &worker.handshake())?;
         report.stage = "handshake".into();
         report
             .stages
             .insert("workerHandshake".into(), Self::seconds(stage));
         let frame = capture_frame(connection, &self.output, report)?;
-        report.worker_name = worker_hello(&frame.payload)?;
-        validate_worker_version(log)?;
+        report.worker_name = worker.hello(&frame.payload)?;
+        validate_worker_version(engine, log)?;
         stage = Instant::now();
         let application = |payload: &[u8]| Frame {
             kind: 1,
             payload: payload.to_vec(),
         };
         write_frame(connection, &application(initialize))?;
-        let frame = receive_message(connection, &self.output, report, WORKER_PREPARED)?;
-        if frame.kind != 1 || frame.payload.len() != 1 || frame.payload[0] != WORKER_PREPARED {
-            bail!("unexpected initialization reply type {}", frame.payload[0]);
-        }
+        receive_message(connection, &self.output, report, worker, Reply::Prepared)?;
         report.stage = "initialized".into();
         report
             .stages
@@ -660,15 +590,12 @@ impl Probe<'_> {
         for job in jobs {
             stage = Instant::now();
             write_frame(connection, &application(prepare))?;
-            let frame = receive_message(connection, &self.output, report, WORKER_PREPARED)?;
-            if frame.payload.len() != 1 || frame.payload[0] != WORKER_PREPARED {
-                bail!("worker did not prepare next import");
-            }
-            let address = import_address(&job.guid, job.importer, [0; 16])?;
-            write_frame(connection, &application(&import_request(&address, 0)))?;
+            receive_message(connection, &self.output, report, worker, Reply::Prepared)?;
+            let address = worker.import_address(&job.guid, job.importer)?;
+            write_frame(connection, &application(&worker.import_request(&address)))?;
             report.stage = "import-requested".into();
-            let frame = receive_message(connection, &self.output, report, IMPORT_RESPONSE)?;
-            let response = import_response(&frame.payload)?;
+            let frame = receive_message(connection, &self.output, report, worker, Reply::Imported)?;
+            let response = worker.import_response(&frame.payload)?;
             if response.address != address {
                 bail!("import response address differs from request");
             }
@@ -696,7 +623,7 @@ impl Probe<'_> {
             if response.result_id == "0".repeat(32) {
                 bail!("native importer did not return an artifact identity");
             }
-            let metadata = artifact_metadata(&response.artifact_blobs[1])?;
+            let metadata = worker.artifact_metadata(&response.artifact_blobs[1])?;
             if metadata.address != address {
                 bail!("artifact metadata address differs from request");
             }
@@ -706,7 +633,9 @@ impl Probe<'_> {
             // second worker reads is committed once the first has stopped.
             if self.opts.artifact_database {
                 let committing = Instant::now();
-                super::artifactdb::publish(self.project, &response)?;
+                engine
+                    .asset_database
+                    .record_import(self.project, &response)?;
                 report
                     .stages
                     .entry("artifactDatabase".into())
@@ -715,7 +644,9 @@ impl Probe<'_> {
             }
             records.push(ImportRecord {
                 address,
-                result: frame.payload[56..72].try_into()?,
+                result: super::environment::decode_hex(&response.result_id)
+                    .and_then(|id| id.try_into().ok())
+                    .ok_or_else(|| anyhow!("import result identity is invalid"))?,
                 blobs: response.artifact_blobs,
             });
         }
@@ -768,44 +699,44 @@ pub fn capture_frame(
     Ok(frame)
 }
 
-/// Captures frames until one of the expected type arrives; worker log frames
-/// in between are drained and fatal native diagnostics stop the run.
+/// Captures frames until the expected reply arrives; worker log frames in
+/// between are drained and fatal native diagnostics stop the run.
 pub fn receive_message(
     reader: &mut impl Read,
     output: &str,
     report: &mut ProbeReport,
-    expected: u8,
+    worker: &dyn WorkerProtocol,
+    expected: Reply,
 ) -> Result<Frame> {
     loop {
         let frame = capture_frame(reader, output, report)?;
-        let kind = frame.payload[0];
-        if kind == expected {
-            return Ok(frame);
-        }
-        if kind != 2 && kind != 3 {
-            bail!("unsupported worker message type {kind} while awaiting {expected}");
-        }
-        let message = worker_log(&frame.payload)?;
-        if message.contains("Exception:") || message.contains("Assertion failed") {
-            bail!("native importer diagnostic: {message}");
+        match worker.message(&frame.payload)? {
+            Message::Reply(reply) if reply == expected => return Ok(frame),
+            Message::Log(message) => {
+                if message.contains("Exception:") || message.contains("Assertion failed") {
+                    bail!("native importer diagnostic: {message}");
+                }
+            }
+            Message::Reply(reply) => bail!("worker sent {reply:?} while awaiting {expected:?}"),
+            Message::Other(kind) => {
+                bail!("unsupported worker message type {kind} while awaiting {expected:?}")
+            }
         }
     }
 }
 
-pub fn validate_worker_version(log: &str) -> Result<()> {
+/// Whether the worker that wrote `log` runs the engine's release.
+pub fn validate_worker_version(engine: &Engine, log: &str) -> Result<()> {
     let file = File::open(log).map_err(|e| os_error("open", log, &e))?;
     let data = read_limited(file, 128 * 1024, log)?;
-    for line in data.split(|&byte| byte == b'\n') {
-        let Some(rest) = line.strip_prefix(b"Unity Editor version:") else {
-            continue;
-        };
-        let rest = String::from_utf8_lossy(rest);
-        if rest.split_whitespace().next() == Some(ENGINE_VERSION) {
-            return Ok(());
-        }
-        bail!("worker Unity version differs from supported {ENGINE_VERSION}");
+    match engine.worker.logged_version(&data) {
+        Some(version) if version == engine.version => Ok(()),
+        Some(version) => bail!(
+            "worker runs Unity {version}, not the project's Unity {}",
+            engine.version
+        ),
+        None => bail!("worker did not report its Unity version"),
     }
-    bail!("worker did not report its Unity version")
 }
 
 /// `VmRSS` of a live process in KiB; 0 when it cannot be read.
@@ -829,6 +760,7 @@ pub fn rss_kib(pid: i64) -> i64 {
 /// it is stopped or dropped. Each accepted import is recorded in the
 /// context's ArtifactDB at once, so a later import loads it.
 pub(crate) struct WarmWorker {
+    engine: &'static Engine,
     lifetime: Context,
     project: String,
     output: String,
@@ -848,17 +780,22 @@ impl WarmWorker {
         let logs = sysutil::join(&[&output, "logs"]);
         mkdir_all(&logs, 0o700)?;
         let project = opts.context.clone();
-        let (initialize, prepare) = match read_worker_environment(&project) {
-            Ok(environment) => (environment.message(16), environment.message(17)),
-            Err(error) if is_not_exist(&error) => (initialize(24), prepare(24)),
+        let engine = engine::for_worker(&project, &opts.editor)?;
+        let environment = match read_worker_environment(&project) {
+            Ok(environment) => Some(environment),
+            Err(error) if is_not_exist(&error) => None,
             Err(error) => return Err(error),
         };
+        let (initialize, prepare) = (
+            engine.worker.initialize(environment.as_ref()),
+            engine.worker.prepare(environment.as_ref()),
+        );
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|e| anyhow!("listen tcp 127.0.0.1:0: {}", sysutil::errno_text(&e)))?;
         let listener = Arc::new(listener);
-        let mut service = DataStoreService::new(&opts.editor, &project, &logs);
+        let mut service = DataStoreService::new(engine, &opts.editor, &project, &logs);
         service.start(&lifetime)?;
-        let started = Self::spawn(opts, &project, &logs, &listener, &service);
+        let started = Self::spawn(engine, opts, &project, &logs, &listener, &service);
         let (worker, stdout) = match started {
             Ok(started) => started,
             Err(error) => {
@@ -885,6 +822,7 @@ impl WarmWorker {
             .attach(&stream)
             .map_err(|e| anyhow!("{}", sysutil::errno_text(&e)))?;
         let mut warm = Self {
+            engine,
             lifetime: lifetime.clone(),
             project,
             output: output.clone(),
@@ -909,6 +847,7 @@ impl WarmWorker {
     }
 
     fn spawn(
+        engine: &Engine,
         opts: &ProbeOptions,
         project: &str,
         logs: &str,
@@ -923,28 +862,15 @@ impl WarmWorker {
             .port();
         let mut command = Command::new(&opts.editor);
         command
-            .args([
-                "-adb2",
-                "-batchMode",
-                "-noUpm",
-                "-name",
-                "AssetImportWorkerWarm",
-                "-projectPath",
+            .args(engine.worker.arguments(&WorkerLaunch {
+                name: "AssetImportWorkerWarm",
                 project,
-                "-logFile",
-                &log,
-                "-srvPort",
-                &port.to_string(),
-                "-parentPid",
-                &std::process::id().to_string(),
-                "-job-worker-count",
-                &opts.job_workers.max(2).to_string(),
-                "-background-job-worker-count",
-                "2",
-                "-nographics",
-                "-noDiagnosticSwitchPersistentStore",
-            ])
-            .args(service.worker_arguments())
+                log: &log,
+                port,
+                parent: std::process::id(),
+                job_workers: opts.job_workers,
+                data_store: service.worker_arguments(),
+            }))
             .current_dir(project)
             .stdin(Stdio::null())
             .stdout(stdout.try_clone()?)
@@ -975,12 +901,15 @@ impl WarmWorker {
     fn handshake(&mut self, initialize: &[u8], log: &str) -> Result<()> {
         let mut report = self.evidence();
         let frames = self.frames()?;
+        let worker = self.engine.worker;
         let frame = read_frame(&mut self.connection)?;
-        validate_handshake(&frame)?;
-        write_frame(&mut self.connection, &handshake())?;
+        if frame != worker.handshake() {
+            bail!("worker protocol name or version does not match");
+        }
+        write_frame(&mut self.connection, &worker.handshake())?;
         let frame = capture_frame(&mut self.connection, &frames, &mut report)?;
-        worker_hello(&frame.payload)?;
-        validate_worker_version(log)?;
+        worker.hello(&frame.payload)?;
+        validate_worker_version(self.engine, log)?;
         write_frame(
             &mut self.connection,
             &Frame {
@@ -988,16 +917,24 @@ impl WarmWorker {
                 payload: initialize.to_vec(),
             },
         )?;
-        let frame = receive_message(&mut self.connection, &frames, &mut report, WORKER_PREPARED)?;
-        if frame.payload.len() != 1 || frame.payload[0] != WORKER_PREPARED {
-            bail!("unexpected initialization reply type {}", frame.payload[0]);
-        }
+        receive_message(
+            &mut self.connection,
+            &frames,
+            &mut report,
+            worker,
+            Reply::Prepared,
+        )?;
         Ok(())
     }
 
     /// Whether the worker still runs.
     pub(crate) fn alive(&self) -> bool {
         !self.worker.finished() && self.lifetime.error().is_none()
+    }
+
+    /// The release the worker runs.
+    pub(crate) fn engine(&self) -> &'static Engine {
+        self.engine
     }
 
     /// The context the worker imports from.
@@ -1020,21 +957,29 @@ impl WarmWorker {
             kind: 1,
             payload: payload.to_vec(),
         };
+        let worker = self.engine.worker;
         for job in jobs {
             write_frame(&mut self.connection, &application(&self.prepare))?;
-            let frame =
-                receive_message(&mut self.connection, &frames, &mut report, WORKER_PREPARED)?;
-            if frame.payload.len() != 1 || frame.payload[0] != WORKER_PREPARED {
-                bail!("worker did not prepare next import");
-            }
-            let address = import_address(&job.guid, job.importer, [0; 16])?;
+            receive_message(
+                &mut self.connection,
+                &frames,
+                &mut report,
+                worker,
+                Reply::Prepared,
+            )?;
+            let address = worker.import_address(&job.guid, job.importer)?;
             write_frame(
                 &mut self.connection,
-                &application(&import_request(&address, 0)),
+                &application(&worker.import_request(&address)),
             )?;
-            let frame =
-                receive_message(&mut self.connection, &frames, &mut report, IMPORT_RESPONSE)?;
-            let response = import_response(&frame.payload)?;
+            let frame = receive_message(
+                &mut self.connection,
+                &frames,
+                &mut report,
+                worker,
+                Reply::Imported,
+            )?;
+            let response = worker.import_response(&frame.payload)?;
             if response.address != address {
                 bail!("import response address differs from request");
             }
@@ -1051,7 +996,9 @@ impl WarmWorker {
             if response.result_id == "0".repeat(32) {
                 bail!("native importer did not return an artifact identity");
             }
-            super::artifactdb::publish(&self.project, &response)?;
+            self.engine
+                .asset_database
+                .record_import(&self.project, &response)?;
         }
         Ok(jobs.len())
     }
@@ -1062,7 +1009,7 @@ impl WarmWorker {
             return;
         }
         self.connection.final_write = Some(Duration::from_secs(1));
-        if let Ok(payload) = shutdown("warm worker idle") {
+        if let Ok(payload) = self.engine.worker.shutdown("warm worker idle") {
             let _ = write_frame(&mut self.connection, &Frame { kind: 1, payload });
         }
         if !self.worker.done.wait(Some(Duration::from_secs(15))) {

@@ -6,6 +6,7 @@ pub mod cache;
 pub mod cancel;
 pub mod compiler;
 pub mod editorbridge;
+pub mod engine;
 pub mod flags;
 pub mod graph;
 pub mod hashstore;
@@ -29,7 +30,8 @@ pub mod sysutil;
 pub mod util;
 pub mod yaml;
 
-pub const ENGINE_VERSION: &str = "6000.6.3f1";
+/// The verified release, which the formats outside `engine` serve.
+pub const ENGINE_VERSION: &str = engine::unity6000_6::VERSION;
 pub const ENGINE_PROFILE: &str = include_str!("../../engine-profile.json");
 
 pub fn hex(bytes: &[u8]) -> String {

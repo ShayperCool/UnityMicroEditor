@@ -1,4 +1,7 @@
-//! The pinned Linux x64 AssetImportWorker wire format, not a general Unity API.
+//! The AssetImportWorker transport and what its messages are made of: frames,
+//! relative blobs and the wire form of a GUID, which every supported release
+//! shares, and the decoded results. What each message says is a release's own
+//! (`engine`).
 use crate::hex;
 use anyhow::{Context, Result, bail, ensure};
 use std::io::{Read, Write};
@@ -9,19 +12,6 @@ pub type ImportAddress = [u8; 44];
 pub struct Frame {
     pub kind: u8,
     pub payload: Vec<u8>,
-}
-pub fn handshake() -> Frame {
-    Frame {
-        kind: 0,
-        payload: b"AIW\x01\0\x01\0".to_vec(),
-    }
-}
-pub fn validate_handshake(frame: &Frame) -> Result<()> {
-    ensure!(
-        *frame == handshake(),
-        "worker protocol name or version does not match"
-    );
-    Ok(())
 }
 /// Fills the buffer completely: "EOF" before the first byte, "unexpected EOF" after it.
 fn read_full(input: &mut impl Read, buffer: &mut [u8]) -> Result<()> {
@@ -65,7 +55,7 @@ pub fn read_frame(input: &mut impl Read) -> Result<Frame> {
 pub fn write_frame(output: &mut impl Write, frame: &Frame) -> Result<()> {
     let n = match frame.kind {
         0 => {
-            validate_handshake(frame)?;
+            ensure!(frame.payload.len() == 7, "handshake length is invalid");
             5
         }
         1 => {
@@ -115,7 +105,7 @@ pub fn put_u32(data: &mut [u8], field: usize, n: u32) {
 pub fn put_u64(data: &mut [u8], field: usize, n: u64) {
     data[field..field + 8].copy_from_slice(&n.to_le_bytes());
 }
-fn relative_start(data: &[u8], field: usize) -> Result<usize> {
+pub fn relative_start(data: &[u8], field: usize) -> Result<usize> {
     let offset = u32_at(data, field)? as i32 as i64;
     let start = field as i64 + offset;
     ensure!(
@@ -168,44 +158,6 @@ pub fn blob_array(data: &[u8], field: usize, stride: usize) -> Result<(&[u8], us
         _ => bail!("blob array points outside payload"),
     }
 }
-pub fn worker_hello(data: &[u8]) -> Result<String> {
-    ensure!(
-        data.len() >= 8 && data[0] == 0,
-        "expected WorkerHello message"
-    );
-    blob_string(data, 4)
-}
-pub fn worker_log(data: &[u8]) -> Result<String> {
-    ensure!(
-        data.len() >= 12 && matches!(data[0], 2 | 3),
-        "expected worker log message"
-    );
-    ensure!(
-        data[0] != 3 || data.len() >= 80,
-        "console log fixed part is incomplete"
-    );
-    blob_string(data, 8)
-}
-pub fn shutdown(reason: &str) -> Result<Vec<u8>> {
-    ensure!(!reason.contains('\0'), "shutdown reason is invalid");
-    let mut data = vec![0; 8];
-    data[0] = 1;
-    put_u32(&mut data, 4, 4);
-    data.extend_from_slice(reason.as_bytes());
-    data.push(0);
-    Ok(data)
-}
-pub fn initialize(target: i32) -> Vec<u8> {
-    let mut data = vec![0; 96];
-    data[0] = 16;
-    put_u32(&mut data, 4, target as u32);
-    data
-}
-pub fn prepare(target: i32) -> Vec<u8> {
-    let mut data = initialize(target);
-    data[0] = 17;
-    data
-}
 pub fn guid_wire(text: &str) -> Result<[u8; 16]> {
     ensure!(
         text.len() == 32,
@@ -229,81 +181,13 @@ pub fn guid_wire(text: &str) -> Result<[u8; 16]> {
 pub fn guid_text(bytes: &[u8]) -> String {
     hex(&bytes.iter().map(|b| b.rotate_left(4)).collect::<Vec<_>>())
 }
-fn address_hash(data: &mut ImportAddress) -> Result<()> {
-    let mut hash = xxhash_rust::xxh32::xxh32(&data[..16], u32_at(data, 16)?);
-    hash ^= u32_at(data, 24)?
-        .wrapping_add(hash << 6)
-        .wrapping_add(hash >> 2)
-        .wrapping_add(0x9e3779b9);
-    put_u32(data, 40, hash);
-    Ok(())
-}
-pub fn import_address(guid: &str, importer: i32, importer_hash: [u8; 16]) -> Result<ImportAddress> {
-    let mut data = [0; 44];
-    data[..16].copy_from_slice(&guid_wire(guid)?);
-    put_u32(&mut data, 16, importer as u32);
-    data[24..40].copy_from_slice(&importer_hash);
-    address_hash(&mut data)?;
-    Ok(data)
-}
-pub fn import_request(address: &ImportAddress, flags: u32) -> Vec<u8> {
-    let mut data = vec![0; 64];
-    data[0] = 18;
-    data[8..52].copy_from_slice(address);
-    put_u32(&mut data, 56, flags);
-    data
-}
-pub fn create_default_asset(address: &ImportAddress) -> Result<Vec<u8>> {
-    ensure!(
-        u32_at(address, 16)? as i32 == -1,
-        "DefaultAsset requires importer ID -1"
-    );
-    let mut data = vec![0; 56];
-    data[0] = 19;
-    data[8..52].copy_from_slice(address);
-    Ok(data)
-}
-pub fn schedule_import(data: &[u8]) -> Result<ImportAddress> {
-    ensure!(
-        data.len() == 56 && data[0] == 21,
-        "expected ScheduleImport message"
-    );
-    Ok(data[8..52].try_into()?)
-}
-pub fn import_complete(
-    address: &ImportAddress,
-    state: u32,
-    result_id: [u8; 16],
-    paths: &[String],
-    flag: bool,
-) -> Result<Vec<u8>> {
-    ensure!(
-        paths.len() <= (MAX_FRAME_PAYLOAD - 96) / 4,
-        "too many dependency artifact paths"
-    );
-    let mut data = vec![0; 96 + paths.len() * 4];
-    data[0] = 22;
-    data[8..52].copy_from_slice(address);
-    put_u32(&mut data, 56, state);
-    data[64..80].copy_from_slice(&result_id);
-    data[88] = u8::from(flag);
-    if !paths.is_empty() {
-        put_u32(&mut data, 80, 16);
-        put_u32(&mut data, 84, paths.len() as u32);
-    }
-    for (i, path) in paths.iter().enumerate() {
-        ensure!(!path.contains('\0'), "dependency artifact path is invalid");
-        ensure!(
-            data.len() + path.len() < MAX_FRAME_PAYLOAD,
-            "dependency artifact paths exceed frame limit"
-        );
-        let field = 96 + i * 4;
-        let relative = data.len() - field;
-        put_u32(&mut data, field, relative as u32);
-        data.extend_from_slice(path.as_bytes());
-        data.push(0);
-    }
-    Ok(data)
+/// What a worker returned for one import, as the Editor keeps it in its
+/// ArtifactDB: the address, the result ID and the dependency, metadata and
+/// statistics blobs.
+pub struct ImportRecord {
+    pub address: ImportAddress,
+    pub result: [u8; 16],
+    pub blobs: Vec<Vec<u8>>,
 }
 #[derive(Debug, PartialEq)]
 pub struct ImportResponse {
@@ -317,42 +201,6 @@ pub struct ImportResponse {
     pub dependencies: Vec<ImportAddress>,
     pub consistency_failure_count: i32,
 }
-pub fn import_response(data: &[u8]) -> Result<ImportResponse> {
-    ensure!(
-        data.len() >= 128 && data[0] == 20,
-        "expected complete ImportResponse fixed part"
-    );
-    let error_message = blob_string(data, 76)?;
-    let (_, count) = blob_array(data, 80, 4)?;
-    let mut paths = Vec::with_capacity(count);
-    if count > 0 {
-        let start = relative_start(data, 80)?;
-        for i in 0..count {
-            paths.push(blob_string(data, start + i * 4)?);
-        }
-    }
-    let mut artifact_blobs = Vec::new();
-    for field in [88, 96, 104] {
-        artifact_blobs.push(blob_array(data, field, 1)?.0.to_vec());
-    }
-    let (deps, _) = blob_array(data, 112, 48)?;
-    Ok(ImportResponse {
-        address: data[8..52].try_into()?,
-        result_id: hex(&data[56..72]),
-        error_code: data[72],
-        flag: data[73] != 0,
-        error_message,
-        paths,
-        artifact_blobs,
-        dependencies: deps
-            .as_chunks::<48>()
-            .0
-            .iter()
-            .map(|b| b[..44].try_into().unwrap())
-            .collect(),
-        consistency_failure_count: u32_at(data, 120)? as i32,
-    })
-}
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ArtifactFile {
     pub kind: u32,
@@ -365,35 +213,6 @@ pub struct ArtifactMetadata {
     pub output_id: String,
     pub address: ImportAddress,
     pub files: Vec<ArtifactFile>,
-}
-pub fn artifact_metadata(data: &[u8]) -> Result<ArtifactMetadata> {
-    ensure!(
-        data.len() >= 112,
-        "ArtifactMetaInfo fixed part is incomplete"
-    );
-    let mut address = [0; 44];
-    address[..20].copy_from_slice(&data[16..36]);
-    address[24..40].copy_from_slice(&data[40..56]);
-    address_hash(&mut address)?;
-    let (_, count) = blob_array(data, 88, 32)?;
-    let mut files = Vec::with_capacity(count);
-    if count > 0 {
-        let start = relative_start(data, 88)?;
-        for i in 0..count {
-            let f = start + i * 32;
-            files.push(ArtifactFile {
-                kind: u32_at(data, f)?,
-                name: blob_string(data, f + 4)?,
-                hash: data[f + 8..f + 24].try_into()?,
-                inline_data: blob_array(data, f + 24, 1)?.0.to_vec(),
-            });
-        }
-    }
-    Ok(ArtifactMetadata {
-        output_id: hex(&data[..16]),
-        address,
-        files,
-    })
 }
 impl Default for ArtifactMetadata {
     fn default() -> Self {

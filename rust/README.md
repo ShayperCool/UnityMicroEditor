@@ -21,7 +21,8 @@ embeds `../engine-profile.json`.
 | `editorbridge/`, `agentcontrol/` | Client of the Editor mailbox; Player control, journal and routing |
 | `mcp/` | The MCP server over stdio and Streamable HTTP, on the `rmcp` crate |
 | `remote/` | `remote_session`: Player link, H.264 encoding, the viewer page, its WebSocket and WebRTC (`str0m`) transports, the publish command. `native/nvenc` holds the C source that drives the NVIDIA encoder, built by `build.rs` |
-| `lmdb`, `protocol`, `registry` | The stopped-LMDB reader, the import worker wire format, the owned `SourceAssetDB` |
+| `engine/` | The supported Unity releases: a project's `ProjectVersion.txt` selects one, the installation must report the same version, and each release implements its own worker messages, DataStore service and asset database writes (`unity6000_6.rs`) |
+| `lmdb`, `protocol`, `registry` | The stopped-LMDB reader, the import worker transport (frames, blobs, decoded results), the owned `SourceAssetDB` |
 | `native/` | Native import coordinator: the import worker, the warm scene worker and its project library, DataStore, and the content the Player loads |
 | `compiler/` | Roslyn driver, script type inventory, Netcode post-processing, host staging |
 | `sourcegraph/` | The Player assembly graph derived from `.asmdef`/`.asmref` and the engine profile |

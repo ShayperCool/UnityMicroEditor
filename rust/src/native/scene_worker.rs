@@ -593,7 +593,10 @@ impl SceneWorker {
                 bail!("{path} changed while it was read");
             }
             replace(&sysutil::join(&[&project, path]), &data)?;
-            crate::registry::update_source(&project, path)?;
+            warm.worker
+                .engine()
+                .asset_database
+                .update_source(&project, path)?;
             let guid = sources
                 .guid_of(path)
                 .ok_or_else(|| anyhow!("{path} has no GUID"))?;
@@ -612,7 +615,10 @@ impl SceneWorker {
             &sysutil::join(&[&project, REQUEST_PATH]),
             format!("{}revision {}\n", warm.request, warm.revision).as_bytes(),
         )?;
-        crate::registry::update_source(&project, REQUEST_PATH)?;
+        warm.worker
+            .engine()
+            .asset_database
+            .update_source(&project, REQUEST_PATH)?;
         jobs.push(NativeImportJob {
             guid: warm.request_guid.clone(),
             importer: -1,

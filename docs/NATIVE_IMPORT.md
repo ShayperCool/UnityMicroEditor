@@ -4,6 +4,16 @@ Scenes and everything they refer to are imported by Unity's own AssetImportWorke
 
 Only Unity `6000.6.3f1` on Linux x64 is supported. The coordinator starts `Unity` in AssetImportWorker mode and a separate `Unity.DataStore` from the installed engine. The importers themselves stay inside Unity's executable.
 
+### Unity releases
+
+The worker's messages, its command line, the DataStore service and the asset databases both of them read are private to a release. Each supported release has its own implementation of them in `rust/src/engine/` (`unity6000_6.rs` for `6000.6.3f1`), listed in `engine::ENGINES`. The coordinator reaches them only through the release's `Engine`:
+
+- The project's `ProjectSettings/ProjectVersion.txt` selects the release. A release without an entry is refused with the list of supported ones: `Unity 6000.0.71f1 is not supported (supported: 6000.6.3f1)`.
+- Before a context is made, the installation is asked with `Unity -version` (once per executable). It has to run the project's release, otherwise the run stops with `the project is Unity A, but <path> is Unity B`. The worker's log is checked for the same version after it starts.
+- The release gives the worker's command line and messages (`WorkerProtocol`), the DataStore's executable, command line, readiness and stored files (`DataStoreProtocol`), and the writes to `SourceAssetDB` and `ArtifactDB` (`AssetDatabase`). Its `environment_revision` is part of every cached import's key, so imports of two releases are never mixed.
+
+Adding a release is a module of its own whose protocols were compared with that release, and its entry in the list. What lies outside the worker is still that of `6000.6.3f1` alone and checks for it: the Player's serialized files and type trees (`playerbake`), shader programs and the `UnityShaderCompiler` protocol, the importer script that runs inside the worker (`tools/WorkerScripts/PlayerObjectImporter.cs`), the source graph and the compiler.
+
 ## Commands
 
 Import selected files into a new owned context:
@@ -32,7 +42,7 @@ The hidden `scene-objects --project P --editor E --scene S --output DIR [--with-
 
 A session does not import assets one by one. It asks the scene worker for its scene ([Scenes in the Player format](#scenes-in-the-player-format)), which imports the scene and everything it refers to in one context and writes the scene and its dependencies as a build does. The one kind of source a session builds and publishes on its own is a shader (`.shader`, `.shadergraph`, `.compute`, see [Shaders](#shaders)); any other source that the session reports as changed is refused with `the session builds only shaders`.
 
-Each published shader records an `environmentSha256`. The fingerprint covers the pinned protocol revision, the Unity path, the exact SHA-256 of `ProjectSettings.asset`, the parsed settings and the wire environment. An index with no fingerprint, or a different one, is skipped and its shaders are built again. Changing this environment while a runner is live requires restarting the runner.
+Each published shader records an `environmentSha256`. The fingerprint covers the release's environment revision, the Unity path, the exact SHA-256 of `ProjectSettings.asset`, the parsed settings and the wire environment. An index with no fingerprint, or a different one, is skipped and its shaders are built again. Changing this environment while a runner is live requires restarting the runner.
 
 ## How an import works
 
@@ -356,7 +366,9 @@ The coordinator lives in `rust/src/native/`, with the wire format, LMDB reader a
 | `rust/src/native/built_store.rs` | Written scenes and shader builds kept for the project (`built-sources`) |
 | `rust/src/native/probe.rs` | One AssetImportWorker run, and a worker kept alive |
 | `rust/src/registry.rs` | The owned SourceAssetDB and native source hashes |
-| `rust/src/protocol.rs` | Wire format, requests, responses and `ArtifactMetaInfo` |
+| `rust/src/engine/mod.rs` | The supported releases, how a project and an installation select one, and the protocols each release implements |
+| `rust/src/engine/unity6000_6.rs` | `6000.6.3f1`: worker messages and command line, `ArtifactMetaInfo`, DataStore service, asset database writes |
+| `rust/src/protocol.rs` | The worker transport: frames, blobs, GUID wire form and decoded results |
 | `rust/src/native/datastore.rs` | DataStore namespace, readiness and shutdown |
 | `rust/src/lmdb.rs` | Reading a stopped LMDB without a native library; committing a revision to a live one |
 | `rust/src/native/artifact.rs` | Extracting stored files and checking content keys |

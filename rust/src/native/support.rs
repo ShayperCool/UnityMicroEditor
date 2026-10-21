@@ -187,13 +187,6 @@ impl Event {
         crate::util::emit_event(&self.0);
     }
 }
-/// True when `needle` occurs in `haystack`; an empty needle always does.
-pub(crate) fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
-    needle.is_empty()
-        || haystack
-            .windows(needle.len())
-            .any(|window| window == needle)
-}
 /// A `null` JSON value leaves a field at its default value.
 pub(crate) fn nul<'de, D: Deserializer<'de>, T: Deserialize<'de> + Default>(
     deserializer: D,

@@ -4,9 +4,11 @@
 //! them for the results it accepted.
 use crate::{
     lmdb::{self, Record, Tables},
-    protocol::{ImportAddress, ImportResponse, blob_array, blob_string, u32_at},
+    protocol::{ImportAddress, ImportRecord, ImportResponse, blob_array, blob_string, u32_at},
+    registry::native_hash,
+    sysutil,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 
 const CURRENT_REVISIONS: &str = "CurrentRevisions";
 const RESULT_IDS: &str = "ImportAddressToImportResultIDs";
@@ -111,4 +113,57 @@ pub fn publish(project: &str, response: &ImportResponse) -> Result<u64> {
     let path = crate::sysutil::join(&[project, "Library", "ArtifactDB"]);
     lmdb::commit(&path, |tables| record(tables, response))
         .with_context(|| format!("commit import result to {path}"))
+}
+
+/// Writes the results of a stopped worker into the ArtifactDB that worker
+/// left in the context, as the Editor commits them: each address gets its
+/// result as the current revision. The next worker resolves an artifact
+/// dependency through these tables and reads the files from the DataStore.
+pub fn commit(project: &str, records: &[ImportRecord]) -> Result<()> {
+    let path = sysutil::join(&[project, "Library/ArtifactDB"]);
+    let data = std::fs::read(&path).with_context(|| format!("read {path}"))?;
+    let mut tables = lmdb::Image::open(&data)?.tables()?;
+    let names = [
+        CURRENT_REVISIONS,
+        RESULT_IDS,
+        DEPENDENCIES,
+        META_INFO,
+        IMPORT_STATS,
+    ];
+    if names.iter().any(|name| !tables.contains_key(*name)) || !tables.contains_key("DBVersion") {
+        bail!("worker ArtifactDB lacks the pinned tables");
+    }
+    for record in records {
+        // `ArtifactDBWriteTxn::SetCurrentRevision`: XXH3-128 of the GUID,
+        // the importer ID and the importer hash.
+        let address = &record.address;
+        let key =
+            native_hash(&[&address[..16], &address[16..20], &address[24..40]].concat()).to_vec();
+        let mut current = address[..40].to_vec();
+        current.extend_from_slice(&record.result);
+        let mut history = address[..40].to_vec();
+        history.extend_from_slice(&8u32.to_le_bytes());
+        history.extend_from_slice(&1u32.to_le_bytes());
+        history.extend_from_slice(&record.result);
+        let values = [current, history]
+            .into_iter()
+            .map(|value| (key.clone(), value))
+            .chain(
+                record
+                    .blobs
+                    .iter()
+                    .map(|blob| (record.result.to_vec(), blob.clone())),
+            );
+        for (name, (key, value)) in names.iter().zip(values) {
+            let table = tables.get_mut(*name).unwrap();
+            table.retain(|existing| existing.key != key);
+            table.push(Record { key, value });
+        }
+    }
+    for table in tables.values_mut() {
+        table.sort_by(|a, b| a.key.cmp(&b.key));
+    }
+    let image = lmdb::build(&tables)?;
+    std::fs::write(&path, image).with_context(|| format!("write {path}"))?;
+    Ok(())
 }

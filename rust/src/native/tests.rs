@@ -1,19 +1,24 @@
 //! Tests of the native import coordinator.
 use super::{
-    probe::{ImportRecord, commit_import_results},
+    artifactdb::commit as commit_import_results,
     support::{is_canceled, text},
     *,
 };
 use crate::{
     ENGINE_VERSION,
     cancel::Context,
+    engine::{
+        Reply,
+        unity6000_6::{environment_message, import_address},
+        verified,
+    },
     lmdb::{self, Record, Tables},
     project::{
         NativeContentFile, NativeContentObject, NativeContentResource, NativeReplacement, Options,
         Session,
     },
     protocol::{
-        ArtifactFile, ArtifactMetadata, Frame, blob_array, blob_string, import_address, write_frame,
+        ArtifactFile, ArtifactMetadata, Frame, ImportRecord, blob_array, blob_string, write_frame,
     },
     registry::{self, native_hash},
     sha256,
@@ -97,7 +102,14 @@ fn receive_message_drains_both_native_log_kinds() {
     ]);
     let output = Temp::new();
     let mut report = ProbeReport::default();
-    let frame = receive_message(&mut reader, &output.1, &mut report, 23).unwrap();
+    let frame = receive_message(
+        &mut reader,
+        &output.1,
+        &mut report,
+        verified().worker,
+        Reply::Prepared,
+    )
+    .unwrap();
     assert!(frame.kind == 1 && frame.payload == [23]);
     assert!(remaining(&reader) == 0 && report.frames.len() == 3);
     for evidence in &report.frames {
@@ -115,7 +127,14 @@ fn receive_message_rejects_native_fatal_diagnostics() {
         let mut reader = worker_wire_fixture(&[worker_log_fixture(3, diagnostic), vec![23]]);
         let output = Temp::new();
         let mut report = ProbeReport::default();
-        let error = receive_message(&mut reader, &output.1, &mut report, 23).unwrap_err();
+        let error = receive_message(
+            &mut reader,
+            &output.1,
+            &mut report,
+            verified().worker,
+            Reply::Prepared,
+        )
+        .unwrap_err();
         assert!(text(&error).contains(diagnostic), "{error:#}");
         assert!(remaining(&reader) != 0 && report.frames.len() == 1);
     }
@@ -131,7 +150,11 @@ fn worker_version_must_match_supported_installation() {
         let root = Temp::new();
         let path = root.path("worker.log");
         write(&path, log);
-        assert_eq!(validate_worker_version(&path).is_ok(), valid, "{log}");
+        assert_eq!(
+            validate_worker_version(verified(), &path).is_ok(),
+            valid,
+            "{log}"
+        );
     }
 }
 
@@ -163,7 +186,7 @@ fn data_store_readiness_rejects_client_shutdown_and_error_logs() {
         let root = Temp::new();
         let path = root.path("service.log");
         write(&path, log);
-        let evidence = read_data_store_log(&path).unwrap();
+        let evidence = read_data_store_log(verified(), &path).unwrap();
         assert_eq!(evidence.ready_logged, ready, "{name}: {evidence:?}");
     }
 }
@@ -171,7 +194,7 @@ fn data_store_readiness_rejects_client_shutdown_and_error_logs() {
 #[test]
 fn data_store_missing_log_is_pending() {
     let root = Temp::new();
-    let evidence = read_data_store_log(&root.path("missing.log")).unwrap();
+    let evidence = read_data_store_log(verified(), &root.path("missing.log")).unwrap();
     assert!(!evidence.ready_logged);
 }
 
@@ -179,6 +202,7 @@ fn data_store_missing_log_is_pending() {
 fn data_store_canceled_start_creates_nothing() {
     let root = Temp::new();
     let mut service = DataStoreService::new(
+        verified(),
         &root.path("Unity"),
         &root.path("context"),
         &root.path("logs"),
@@ -196,8 +220,12 @@ fn data_store_missing_executable_does_not_create_context() {
     let root = Temp::new();
     let installation = root.path("Editor");
     fs::create_dir(&installation).unwrap();
-    let mut service =
-        DataStoreService::new(&installation, &root.path("context"), &root.path("logs"));
+    let mut service = DataStoreService::new(
+        verified(),
+        &installation,
+        &root.path("context"),
+        &root.path("logs"),
+    );
     assert!(service.start(&background()).is_err());
     assert!(!exists(&service.context));
 }
@@ -205,7 +233,7 @@ fn data_store_missing_executable_does_not_create_context() {
 #[test]
 fn data_store_ready_log_requires_running_process() {
     let root = Temp::new();
-    let service = DataStoreService::new("", "", &root.1);
+    let service = DataStoreService::new(verified(), "", "", &root.1);
     write(
         &service.service_log(),
         "Initialising UDS system complete:\n  - System type: Service\nStarting Unity Data Store Application\n",
@@ -224,7 +252,10 @@ fn worker_environment_preserves_source_graphics_settings_and_native_dependencies
             && environment.graphics_api_mask == 1 << 17
             && environment.shader_precision_model == 0
     );
-    let (initialize, prepare) = (environment.message(16), environment.message(17));
+    let (initialize, prepare) = (
+        environment_message(&environment, 16),
+        environment_message(&environment, 17),
+    );
     assert!(initialize[0] == 16 && prepare[0] == 17 && initialize[1..] == prepare[1..]);
     let word = |at: usize| u32::from_le_bytes(initialize[at..at + 4].try_into().unwrap());
     assert!(
@@ -273,7 +304,7 @@ fn worker_environment_preserves_source_graphics_settings_and_native_dependencies
     assert!(
         environment.graphics_api_mask == 1 << 21
             && environment.shader_precision_model == 1
-            && environment.message(16)[104] == 2
+            && environment_message(&environment, 16)[104] == 2
     );
 }
 
@@ -1108,7 +1139,7 @@ fn artifact_database_records_follow_the_editor_layout() {
     let mut tables = Tables::new();
     for id in [[0x11u8; 16], [0x22; 16], [0x11; 16]] {
         let frame = import_response_fixture(&address, &id, &meta);
-        let response = crate::protocol::import_response(&frame).unwrap();
+        let response = crate::engine::unity6000_6::import_response(&frame).unwrap();
         artifactdb::record(&mut tables, &response).unwrap();
     }
     let key = artifactdb::address_key(&address).to_vec();

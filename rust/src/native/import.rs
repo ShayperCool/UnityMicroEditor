@@ -1,7 +1,6 @@
 //! `project-import`: an owned context, one worker run and validated artifacts.
 use super::{
     ArtifactExtraction, JsonF64, NativeImportJob, ProbeOptions, ProbeReport, ProjectImportContext,
-    UdsArtifactStore,
     context::{
         BuildFiles, ContextExtras, create_build_import_context, create_scripted_import_context,
     },
@@ -377,6 +376,9 @@ fn prepare_run(
     extras: &ImportExtras,
     build: Option<&BuildImport<'_>>,
 ) -> Result<(ProbeOptions, ProjectImportContext)> {
+    // Before anything is read from the installation: it has to run the
+    // project's release, whose protocol the worker is driven with.
+    crate::engine::for_worker(&opts.project, &opts.editor)?;
     let scripts = match build {
         Some(build) => Some(build.environment.clone()),
         None => importer_environment(&opts.project, assets, extras)?,
@@ -509,7 +511,9 @@ fn prepare_run(
             script: true,
         });
     }
-    let registry = registry::write(input)?;
+    let registry = crate::engine::supported(&prepared.unity_version)?
+        .asset_database
+        .write_sources(input)?;
     opts.context = prepared.project.clone();
     opts.registry = Some(registry);
     opts.project_context = Some(prepared.clone());
@@ -620,8 +624,9 @@ fn extract(
     if report.worker_exit != "exit 0" || report.imports.len() != prepared.imported().count() {
         bail!("project artifact extraction requires all imports and a stopped worker");
     }
-    let store =
-        UdsArtifactStore::open(&sysutil::join(&[&prepared.project, "Library", "DataStore"]))?;
+    let store = crate::engine::supported(&prepared.unity_version)?
+        .data_store
+        .artifacts(&sysutil::join(&[&prepared.project, "Library", "DataStore"]))?;
     let artifacts = sysutil::join(&[output, "artifacts"]);
     mkdir(&artifacts, 0o700)?;
     for (index, source) in prepared.imported().enumerate() {

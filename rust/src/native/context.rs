@@ -6,7 +6,6 @@ use super::support::{
     abs, check, eval_symlinks, mkdir, mkdir_all, os_error, read_file, wrap, write_file,
 };
 use crate::{
-    ENGINE_VERSION,
     cancel::Context,
     hex, jsondoc,
     registry::{meta_guid, project_registry_path},
@@ -745,16 +744,11 @@ fn create(
     if !sysutil::stat(&version_path).is_ok_and(|info| info.size <= 64 * 1024) {
         bail!("source ProjectVersion.txt exceeds supported bounds");
     }
-    let pinned = format!("m_EditorVersion: {ENGINE_VERSION}");
-    let matched = read_file(&version_path).is_ok_and(|version| {
-        // Each line is compared with surrounding white space trimmed.
-        String::from_utf8_lossy(&version)
-            .split('\n')
-            .any(|line| line.trim() == pinned)
-    });
-    if !matched {
-        bail!("source project Unity version differs from supported worker installation");
-    }
+    // The worker of the context speaks the protocol of the project's release.
+    let engine = read_file(&version_path)
+        .and_then(|text| crate::engine::project_version_of(&text))
+        .and_then(|version| crate::engine::supported(&version))
+        .map_err(|error| anyhow!("source project: {error:#}"))?;
     source_files.insert("ProjectSettings/ProjectVersion.txt".into(), version_path);
     // These native settings files contain source configuration, never
     // pre-imported binary state. Importer settings remain in exact .meta.
@@ -801,7 +795,7 @@ fn create(
         schema_version: 1,
         source_project,
         project: project.clone(),
-        unity_version: ENGINE_VERSION.into(),
+        unity_version: engine.version.into(),
         assets: Some(selected),
         source_hashes: Some(BTreeMap::new()),
         source_bytes: 0,

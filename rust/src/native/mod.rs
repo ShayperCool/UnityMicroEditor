@@ -3,7 +3,7 @@
 //! scenes in the Player format, the shaders built beside them and the
 //! validated cache that feeds a `project::Session`.
 mod artifact;
-mod artifactdb;
+pub(crate) mod artifactdb;
 mod baked;
 mod build_settings;
 mod built_store;
@@ -29,8 +29,8 @@ pub use context::{
 };
 pub use datastore::{DataStoreLogEvidence, DataStoreService, DataStoreStatus, read_data_store_log};
 pub use environment::{
-    WORKER_ENVIRONMENT_REVISION, WorkerEnvironment, native_environment_fingerprint,
-    parse_worker_environment, read_worker_environment, run_native_environment_cli,
+    WorkerEnvironment, native_environment_fingerprint, parse_worker_environment,
+    read_worker_environment, run_native_environment_cli,
 };
 pub use import::{
     ImportExtras, ProjectImportContent, ProjectImportedAsset, ProjectImportedFile,

@@ -1,14 +1,13 @@
-//! The pinned 6000.6.3f1 Linux standalone importer profile. Automatic Linux
-//! graphics APIs were observed as OpenGLCore 17 and Vulkan 21; of them a
-//! project that lists none is imported for OpenGLCore alone, the API the
-//! Player runs on. Project values are read from exact copied source, never
-//! from an Editor cache.
+//! The Linux standalone import environment of a project, which the worker's
+//! Initialize message carries (`engine`). Automatic Linux graphics APIs were
+//! observed as OpenGLCore 17 and Vulkan 21; of them a project that lists none
+//! is imported for OpenGLCore alone, the API the Player runs on. Project
+//! values are read from exact copied source, never from an Editor cache.
 use super::support::{nul, read_file, stat, text, wrap};
 use crate::{
-    ENGINE_VERSION,
+    engine,
     flags::FlagSet,
     project::{Value, parse_unity_yaml, value::get},
-    protocol::{initialize, put_u32},
     sha256, sysutil, util,
 };
 use anyhow::{Result, anyhow, bail};
@@ -49,15 +48,6 @@ pub struct WorkerEnvironment {
     pub editor_settings_sha256: String,
 }
 
-/// `NormalMapEncoding::DXT5nm`, the Linux standalone default.
-const NORMAL_MAP_DXT5NM: u32 = 1;
-/// `LightmapEncodingQuality::High` and `HDRCubemapEncodingQuality::High`,
-/// the Linux standalone defaults.
-const ENCODING_QUALITY_HIGH: u32 = 2;
-
-/// Bump this revision whenever the pinned importer wire environment changes.
-pub const WORKER_ENVIRONMENT_REVISION: &str = "6000.6.3f1-linux-native-environment-v3";
-
 pub fn run_native_environment_cli(args: &[String]) -> Result<()> {
     let mut flags = FlagSet::new("native-environment");
     flags.string("project", ".", "source Unity project root");
@@ -81,7 +71,7 @@ pub fn run_native_environment_cli(args: &[String]) -> Result<()> {
         environment: &'a WorkerEnvironment,
     }
     let mut data = util::marshal(&Output {
-        revision: WORKER_ENVIRONMENT_REVISION,
+        revision: engine::supported(&environment.unity_version)?.environment_revision,
         sha256: fingerprint,
         environment: &environment,
     })?;
@@ -92,10 +82,11 @@ pub fn run_native_environment_cli(args: &[String]) -> Result<()> {
 
 pub fn native_environment_fingerprint(project: &str, editor: &str) -> Result<String> {
     let environment = read_worker_environment(project)?;
+    let engine = engine::supported(&environment.unity_version)?;
     let data = util::marshal(&environment)?;
-    let mut payload = format!("{WORKER_ENVIRONMENT_REVISION}\0{editor}\0").into_bytes();
+    let mut payload = format!("{}\0{editor}\0", engine.environment_revision).into_bytes();
     payload.extend_from_slice(&data);
-    payload.extend_from_slice(&environment.message(16));
+    payload.extend_from_slice(&engine.worker.initialize(Some(&environment)));
     Ok(sha256(&payload))
 }
 
@@ -109,22 +100,13 @@ pub fn read_worker_environment(project: &str) -> Result<WorkerEnvironment> {
     // The settings as a context holds them, so that the project and a
     // context made from it name one environment.
     let data = context_player_settings(&read_file(&filename)?);
-    let version = read_file(&sysutil::join(&[
-        project,
-        "ProjectSettings/ProjectVersion.txt",
-    ]));
-    let pinned = format!("m_EditorVersion: {ENGINE_VERSION}");
-    let contains = |haystack: &[u8], needle: &str| {
-        haystack
-            .windows(needle.len())
-            .any(|window| window == needle.as_bytes())
-    };
-    if !version.is_ok_and(|version| {
-        contains(&version, &format!("{pinned}\n")) || contains(&version, &format!("{pinned}\r\n"))
-    }) {
-        bail!("native worker environment requires pinned project Unity version");
-    }
+    // The project's release selects the worker's protocol.
+    let version = engine::project_version(project)
+        .map_err(|error| anyhow!("native worker environment: {error:#}"))?;
+    let engine = engine::supported(&version)
+        .map_err(|error| anyhow!("native worker environment: {error:#}"))?;
     let mut environment = parse_worker_environment(&data)?;
+    environment.unity_version = engine.version.into();
     environment.settings_sha256 = sha256(&data);
     let editor = read_editor_settings(project)?;
     environment.bc7_compressor = editor.bc7_compressor;
@@ -227,7 +209,7 @@ pub fn parse_worker_environment(data: &[u8]) -> Result<WorkerEnvironment> {
         _ => bail!("native worker PlayerSettings shader precision is missing or unsupported"),
     };
     let mut environment = WorkerEnvironment {
-        unity_version: ENGINE_VERSION.into(),
+        unity_version: crate::ENGINE_VERSION.into(),
         build_target: 24,
         subtarget: 2,
         color_space: color,
@@ -415,57 +397,4 @@ pub(crate) fn decode_hex(text: &str) -> Option<Vec<u8>> {
             Some((high << 4 | low) as u8)
         })
         .collect()
-}
-
-impl WorkerEnvironment {
-    /// The Initialize (16) or Prepare (17) message carrying this environment.
-    pub fn message(&self, kind: u8) -> Vec<u8> {
-        let mut payload = initialize(self.build_target as i32);
-        payload[0] = kind;
-        put_u32(&mut payload, 8, self.subtarget);
-        payload[24] = 1; // The pinned worker enables texture import compression.
-        put_u32(&mut payload, 28, self.color_space);
-        put_u32(&mut payload, 32, self.graphics_api_mask);
-        put_u32(&mut payload, 36, 1); // Unity 6 latest scripting runtime.
-        // Each value is what the pinned Editor registers for the key
-        // (`RefreshInternalV2`): a setting plus one in the first byte of a
-        // Hash128, so that zero stays "not registered". An importer that
-        // asks for a key the message lacks aborts the worker.
-        let one = |value: u32| [1u8.wrapping_add(value as u8), 0];
-        let keys: [(&str, [u8; 2]); 11] = [
-            (
-                "graphics/shader-precision-model",
-                one(self.shader_precision_model),
-            ),
-            // Linux cannot require the Metal renderpass fallback.
-            ("graphics/metal-needs-renderpass-fbfetch-fallback", one(0)),
-            // Valid marker, optional log2(maxSize)+1 and compression
-            // override. This coordinator uses no overrides.
-            ("graphics/texture-import-overrides", one(0)),
-            (
-                "graphics/default-texture-compression-format",
-                one(self.default_texture_compression_format),
-            ),
-            ("graphics/texture-platform-settings", one(0)),
-            ("graphics/active-color-space", one(1 + self.color_space)),
-            ("graphics/normal-map-encoding", one(NORMAL_MAP_DXT5NM)),
-            ("graphics/lightmap-encoding", one(ENCODING_QUALITY_HIGH)),
-            ("graphics/hdr-cubemap-encoding", one(ENCODING_QUALITY_HIGH)),
-            // Valid marker, then the effective compressor.
-            ("graphics/bc7-compressor", [1, self.bc7_compressor as u8]),
-            ("2d/spriteatlas-import-mode", one(self.sprite_atlas_v2)),
-        ];
-        put_u32(&mut payload, 44, 96 - 44);
-        put_u32(&mut payload, 48, keys.len() as u32);
-        payload.resize(96 + keys.len() * 24, 0);
-        for (index, (key, value)) in keys.iter().enumerate() {
-            let start = 96 + index * 24;
-            let relative = (payload.len() - start) as u32;
-            put_u32(&mut payload, start, relative);
-            payload[start + 8..start + 10].copy_from_slice(value);
-            payload.extend_from_slice(key.as_bytes());
-            payload.push(0);
-        }
-        payload
-    }
 }

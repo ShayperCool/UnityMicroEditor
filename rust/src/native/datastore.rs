@@ -1,10 +1,10 @@
 //! One native storage service in an isolated scratch directory.
 use super::support::{
-    abs, bytes_contain, context_error, join, mkdir_all, os_error, read_limited, stat, wrap,
-    write_file,
+    abs, context_error, join, mkdir_all, os_error, read_limited, stat, wrap, write_file,
 };
 use crate::{
     cancel::{self, Context, Flag, Source},
+    engine::{DataStoreProtocol, Engine},
     sysutil,
 };
 use anyhow::{Result, anyhow, bail};
@@ -96,8 +96,9 @@ impl Waiter {
 
 /// Owns one native storage service. Stop attached import workers before
 /// stopping the service.
-#[derive(Default)]
 pub struct DataStoreService {
+    engine: &'static Engine,
+    protocol: &'static dyn DataStoreProtocol,
     pub editor: String,
     pub context: String,
     pub logs: String,
@@ -137,7 +138,7 @@ pub struct DataStoreStatus {
     pub log_evidence: DataStoreLogEvidence,
 }
 
-pub fn read_data_store_log(path: &str) -> Result<DataStoreLogEvidence> {
+pub fn read_data_store_log(engine: &Engine, path: &str) -> Result<DataStoreLogEvidence> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -146,31 +147,24 @@ pub fn read_data_store_log(path: &str) -> Result<DataStoreLogEvidence> {
         Err(error) => return Err(os_error("open", path, &error)),
     };
     let text = read_limited(file, 128 * 1024, path)?;
-    let has = |needle: &str| bytes_contain(&text, needle.as_bytes());
-    let mut evidence = DataStoreLogEvidence {
-        initialized: has("Initialising UDS system complete:"),
-        service: has("  - System type: Service"),
-        application_started: has("Starting Unity Data Store Application"),
-        shutdown_logged: has("Unity Data Store Application Complete")
-            || has("Shut down UDS service system complete"),
-        startup_error_logged: has("[Error]"),
-        ready_logged: false,
-    };
-    evidence.ready_logged = evidence.initialized
-        && evidence.service
-        && evidence.application_started
-        && !evidence.shutdown_logged
-        && !evidence.startup_error_logged;
-    Ok(evidence)
+    Ok(engine.data_store.log_evidence(&text))
 }
 
 impl DataStoreService {
-    pub fn new(editor: &str, context: &str, logs: &str) -> Self {
+    pub fn new(engine: &'static Engine, editor: &str, context: &str, logs: &str) -> Self {
         Self {
+            engine,
+            protocol: engine.data_store,
             editor: editor.into(),
             context: context.into(),
             logs: logs.into(),
-            ..Default::default()
+            namespace: String::new(),
+            pid: 0,
+            process: None,
+            stdout: None,
+            started: false,
+            forced: false,
+            ready_time: Duration::ZERO,
         }
     }
     pub(crate) fn service_log(&self) -> String {
@@ -180,32 +174,15 @@ impl DataStoreService {
         sysutil::join(&[&self.logs, "datastore-service-stdout.log"])
     }
     pub fn worker_arguments(&self) -> Vec<String> {
-        vec!["-shared-postfix".into(), self.namespace.clone()]
+        self.protocol.worker_arguments(&self.namespace)
     }
     pub(crate) fn arguments(&self) -> Vec<String> {
-        [
-            "--memory-size",
-            "1073741824",
-            "--shared-postfix",
-            &self.namespace,
-            "--working-directory",
-            "Library/DataStore",
-            "--silent-console",
-            "--shutdown-grace",
-            "0",
-            "--client-process-check",
-            "0",
-            "--uds-log-file",
-            &self.service_log(),
-            "--debug-log",
-            "2",
-        ]
-        .map(String::from)
-        .to_vec()
+        self.protocol
+            .arguments(&self.namespace, &self.service_log())
     }
 
     pub fn status(&self) -> Result<DataStoreStatus> {
-        let evidence = read_data_store_log(&self.service_log())?;
+        let evidence = read_data_store_log(self.engine, &self.service_log())?;
         let running = self.process.as_ref().is_some_and(|p| !p.finished());
         Ok(DataStoreStatus {
             pid: self.pid,
@@ -241,7 +218,7 @@ impl DataStoreService {
         } else {
             sysutil::dir(&editor)
         };
-        let executable = sysutil::join(&[&installation, "Data", "Tools", "Unity.DataStore"]);
+        let executable = self.protocol.executable(&installation);
         let info = stat(&executable).map_err(|e| wrap("Unity.DataStore executable", e))?;
         if !info.is_regular() || info.mode & 0o111 == 0 {
             bail!("Unity.DataStore must be a regular executable");
@@ -368,11 +345,7 @@ impl DataStoreService {
             let Ok(name) = entry.file_name().into_string() else {
                 continue;
             };
-            let rest = name.strip_prefix("sem.").unwrap_or(&name);
-            if rest
-                .strip_prefix("udsMem")
-                .is_some_and(|rest| rest.starts_with(&self.namespace))
-            {
+            if self.protocol.owns_shared_memory(&name, &self.namespace) {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
