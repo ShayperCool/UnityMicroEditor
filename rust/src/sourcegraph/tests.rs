@@ -1007,3 +1007,46 @@ fn any_platform_is_the_unnamed_any_entry_alone() {
     assert!(options::read_editor_plugin(&legacy, &[]).unwrap().enabled);
     assert!(options::read_source_plugin(&legacy, &[]).unwrap().enabled);
 }
+
+#[test]
+fn editor_test_runner_users_get_nunit_with_overridden_references() {
+    let plugin = |path: &str| SourcePlugin {
+        path: path.into(),
+        enabled: true,
+        ..Default::default()
+    };
+    let plugins = BTreeMap::from([
+        (
+            "nunit.framework.dll".to_string(),
+            plugin("/nunit.framework.dll"),
+        ),
+        (
+            "Newtonsoft.Json.dll".to_string(),
+            plugin("/Newtonsoft.Json.dll"),
+        ),
+    ]);
+    let config = |dependencies: &[&str]| AssemblyConfig {
+        name: "Overridden".into(),
+        dependencies: strs(dependencies),
+        config: crate::compiler::AssemblyOptions {
+            override_references: true,
+            precompiled: strs(&["Newtonsoft.Json.dll"]),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    assert_eq!(
+        editor_plugin_references(&config(&["UnityEditor.TestRunner"]), &plugins, "/editor")
+            .to_vec(),
+        vec![
+            "/Newtonsoft.Json.dll".to_string(),
+            "/nunit.framework.dll".to_string()
+        ],
+        "an assembly that refers to the test runner compiles against NUnit"
+    );
+    assert_eq!(
+        editor_plugin_references(&config(&["UnityEngine.UI"]), &plugins, "/editor").to_vec(),
+        vec!["/Newtonsoft.Json.dll".to_string()],
+        "one that does not gets only what it names"
+    );
+}

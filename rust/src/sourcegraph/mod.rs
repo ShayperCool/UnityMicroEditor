@@ -1224,6 +1224,17 @@ fn editor_plugin_references(
                 }
             }
         }
+        // One that refers to the test runner gets NUnit besides those it
+        // names (`com.unity.ide.visualstudio`'s, which names only
+        // Newtonsoft.Json; the Editor's compilation record, 6000.6.3f1).
+        if config
+            .dependencies
+            .iter()
+            .any(|name| name == "UnityEngine.TestRunner" || name == "UnityEditor.TestRunner")
+            && let Some(plugin) = plugins.get("nunit.framework.dll")
+        {
+            result.push(plugin.path.clone());
+        }
     } else {
         for plugin in plugins.values() {
             if !plugin.explicit {
