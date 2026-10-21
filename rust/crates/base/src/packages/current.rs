@@ -98,8 +98,7 @@ pub fn load_current(
             "git" => {
                 let mut proof_root = &p.path;
                 if p.proof == "upm_fingerprinted_cache_copy" {
-                    if !inside(&project_cache, &p.path) || !commit_pattern().is_match(&p.revision)
-                    {
+                    if !inside(&project_cache, &p.path) || !commit_pattern().is_match(&p.revision) {
                         bail!("Git materialized copy outside explicit project cache");
                     }
                     continue;

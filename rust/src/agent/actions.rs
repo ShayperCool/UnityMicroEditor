@@ -208,14 +208,14 @@ pub fn install_agent_package(project: &str) -> Result<()> {
     if let Some(installed) = dependencies.get(NAME) {
         let same = *installed == Any::String(expected.clone())
             || matches!(installed, Any::String(location)
-                if location.strip_prefix("file:").is_some_and(|physical| {
-                    let physical = if sysutil::is_abs(physical) {
-                        physical.to_string()
-                    } else {
-                        join(&[project, "Packages", physical])
-                    };
-                    lexpath::eval_symlinks(&physical).is_ok_and(|canonical| canonical == package_root)
-                }));
+            if location.strip_prefix("file:").is_some_and(|physical| {
+                let physical = if sysutil::is_abs(physical) {
+                    physical.to_string()
+                } else {
+                    join(&[project, "Packages", physical])
+                };
+                lexpath::eval_symlinks(&physical).is_ok_and(|canonical| canonical == package_root)
+            }));
         if !same {
             return Err(fail(
                 "package_conflict",
@@ -228,7 +228,7 @@ pub fn install_agent_package(project: &str) -> Result<()> {
     }
     // The packages the runtime package needs from the project's release line,
     // unless the project declares them itself.
-    for (name, version) in crate::engine::of_project(project)?.runtime_dependencies {
+    for (name, version) in crate::packages::runtime_dependencies(project)? {
         if !dependencies.contains_key(*name) {
             dependencies.insert((*name).into(), (*version).into());
             changed = true;

@@ -56,7 +56,7 @@ impl Options {
     /// The Player host is always built with it, while the target manifest
     /// stays as authored.
     pub fn with_runtime_package(mut self, project: &str) -> anyhow::Result<Self> {
-        for (name, version) in crate::engine::of_project(project)?.runtime_dependencies {
+        for (name, version) in runtime_dependencies(project)? {
             self.provided_versions
                 .insert(name.to_string(), version.to_string());
         }
@@ -70,6 +70,42 @@ impl Options {
             .insert(RUNTIME_PACKAGE.into(), format!("file:{root}"));
         Ok(self)
     }
+}
+
+/// The packages of each Unity release line that the runtime package is built
+/// with: its asmdef references their assemblies, and a host carries them for
+/// projects that use them.
+const RUNTIME_DEPENDENCIES: &[(&str, &[(&str, &str)])] = &[
+    (
+        "6000.6.",
+        &[
+            ("com.unity.render-pipelines.core", "17.6.0"),
+            ("com.unity.collections", "6.6.0"),
+        ],
+    ),
+    // SRP Core of this line brings Burst along; a host for a project that
+    // uses neither needs neither, and one that does declares them itself.
+    ("6000.0.", &[]),
+];
+
+/// The packages the runtime package needs in the release line of the Unity
+/// version `project` was last opened with.
+pub fn runtime_dependencies(
+    project: &str,
+) -> anyhow::Result<&'static [(&'static str, &'static str)]> {
+    use anyhow::Context as _;
+    let path = crate::sysutil::join(&[project, "ProjectSettings/ProjectVersion.txt"]);
+    let text = std::fs::read(&path).with_context(|| format!("read {path}"))?;
+    let version = String::from_utf8_lossy(&text)
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("m_EditorVersion:"))
+        .map(|version| version.trim().to_string())
+        .with_context(|| format!("{path} names no m_EditorVersion"))?;
+    RUNTIME_DEPENDENCIES
+        .iter()
+        .find(|(line, _)| version.starts_with(line))
+        .map(|(_, dependencies)| *dependencies)
+        .with_context(|| format!("the runtime package has no dependencies for Unity {version}"))
 }
 
 /// Authored manifests, locks and registry documents may spell an unset field as `null`.

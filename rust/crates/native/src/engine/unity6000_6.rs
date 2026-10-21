@@ -22,10 +22,6 @@ pub static ENGINE: Engine = Engine {
     version: VERSION,
     revision: "45d8eee7de74",
     environment_revision: "6000.6.3f1-linux-native-environment-v3",
-    runtime_dependencies: &[
-        ("com.unity.render-pipelines.core", "17.6.0"),
-        ("com.unity.collections", "6.6.0"),
-    ],
     worker: &Unity6000_6,
     data_store: &Unity6000_6,
     asset_database: &Unity6000_6,
