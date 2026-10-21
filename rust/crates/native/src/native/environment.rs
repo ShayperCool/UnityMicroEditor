@@ -105,6 +105,7 @@ pub fn read_worker_environment(project: &str) -> Result<WorkerEnvironment> {
         .map_err(|error| anyhow!("native worker environment: {error:#}"))?;
     let engine = engine::supported(&version)
         .map_err(|error| anyhow!("native worker environment: {error:#}"))?;
+    engine.worker.check_project(project)?;
     let mut environment = parse_worker_environment(&data)?;
     environment.unity_version = engine.version.into();
     environment.settings_sha256 = sha256(&data);

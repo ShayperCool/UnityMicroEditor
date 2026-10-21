@@ -334,7 +334,7 @@ impl Resolver<'_> {
         let mut result: Option<Package> = None;
         for path in paths {
             let mut text = Vec::new();
-            open(&join(&[&path, "package.json"]))?
+            open(join(&[&path, "package.json"]))?
                 .take(1 << 20)
                 .read_to_end(&mut text)?;
             let manifest: serde_json::Value = serde_json::from_slice(&text)?;

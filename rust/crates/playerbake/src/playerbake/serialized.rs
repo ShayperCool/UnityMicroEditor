@@ -243,6 +243,102 @@ pub fn read_of_class(file: &[u8], class_id: i32) -> Result<Vec<Read>> {
     Ok(read_objects(file, Some(class_id))?.0)
 }
 
+/// The local IDs of the objects of one native class, in the order of the
+/// file's object table, out of a file of format 23 (6000.6) or 22 (6000.0,
+/// whose type trees are skipped by their sizes rather than read).
+pub fn local_ids_of_class(file: &[u8], class_id: i32) -> Result<Vec<i64>> {
+    let version = file
+        .get(8..12)
+        .map(|b| u32::from_be_bytes(b.try_into().unwrap()));
+    if version != Some(22) {
+        return Ok(read_of_class(file, class_id)?
+            .iter()
+            .map(|object| object.local_id)
+            .collect());
+    }
+    let be32 = |at: usize| {
+        file.get(at..at + 4)
+            .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
+    };
+    let be64 = |at: usize| {
+        file.get(at..at + 8)
+            .map(|b| u64::from_be_bytes(b.try_into().unwrap()))
+    };
+    let (Some(0), Some(meta_size), Some(size), Some(data_offset)) =
+        (file.get(16).copied(), be32(20), be64(24), be64(32))
+    else {
+        bail!("not a little-endian SerializedFile v22");
+    };
+    let meta_end = 48 + meta_size as usize;
+    if size != file.len() as u64 || meta_end as u64 > data_offset || data_offset > size {
+        bail!("SerializedFile header bounds are invalid");
+    }
+    let mut at = 48;
+    let take = |at: &mut usize, count: usize| -> Result<&[u8]> {
+        let Some(bytes) = file
+            .get(*at..at.saturating_add(count))
+            .filter(|_| *at + count <= meta_end)
+        else {
+            bail!("SerializedFile metadata is truncated");
+        };
+        *at += count;
+        Ok(bytes)
+    };
+    let le32 = |at: &mut usize| -> Result<u32> {
+        Ok(u32::from_le_bytes(take(at, 4)?.try_into().unwrap()))
+    };
+    while take(&mut at, 1)?[0] != 0 {}
+    le32(&mut at)?; // Target platform.
+    if take(&mut at, 1)?[0] != 1 {
+        bail!("SerializedFile has no inline type trees");
+    }
+    let type_count = le32(&mut at)? as usize;
+    if type_count > 4096 {
+        bail!("SerializedFile type count is invalid");
+    }
+    let mut classes = Vec::with_capacity(type_count);
+    for _ in 0..type_count {
+        let header = take(&mut at, 7)?;
+        let class = i32::from_le_bytes(header[..4].try_into().unwrap());
+        let script = i16::from_le_bytes([header[5], header[6]]);
+        // A script's ID precedes the type hash of a behaviour.
+        take(&mut at, if class == SCRIPT_CLASS { 32 } else { 16 })?;
+        // The nodes of the tree, 32 bytes each, then its strings.
+        let nodes = le32(&mut at)? as usize;
+        let strings = le32(&mut at)? as usize;
+        if nodes > 1 << 20 {
+            bail!("SerializedFile type tree is invalid");
+        }
+        take(&mut at, nodes * 32 + strings)?;
+        let held = le32(&mut at)? as usize;
+        if held > 4096 {
+            bail!("SerializedFile type dependency count is invalid");
+        }
+        take(&mut at, 4 * held)?;
+        classes.push(class == class_id && script < 0);
+    }
+    let object_count = le32(&mut at)? as usize;
+    let mut ids = Vec::new();
+    for _ in 0..object_count {
+        at = (at + 3) & !3;
+        let row = take(&mut at, 24)?;
+        let local_id = i64::from_le_bytes(row[..8].try_into().unwrap());
+        let offset = u64::from_le_bytes(row[8..16].try_into().unwrap());
+        let length = u32::from_le_bytes(row[16..20].try_into().unwrap()) as u64;
+        let index = u32::from_le_bytes(row[20..24].try_into().unwrap()) as usize;
+        let inside = data_offset
+            .checked_add(offset)
+            .is_some_and(|start| start + length <= size);
+        let (true, Some(wanted)) = (inside, classes.get(index)) else {
+            bail!("SerializedFile object bounds are invalid");
+        };
+        if *wanted {
+            ids.push(local_id);
+        }
+    }
+    Ok(ids)
+}
+
 /// The path names of the files a file refers to, in the order of its
 /// external references, whatever its objects are: a scene's behaviours take
 /// their script types from another file.
@@ -388,4 +484,64 @@ fn read_objects(file: &[u8], only: Option<i32>) -> Result<(Vec<Read>, Vec<String
         externals.push(String::from_utf8_lossy(&file[start..at - 1]).into_owned());
     }
     Ok((objects, externals))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file of format 22 as 6000.0 writes its resources: two native
+    /// types with their trees, three objects.
+    fn version_22() -> Vec<u8> {
+        let mut meta = b"6000.0.71f1\0".to_vec();
+        meta.extend_from_slice(&(-2i32).to_le_bytes());
+        meta.push(1);
+        meta.extend_from_slice(&2u32.to_le_bytes());
+        for class in [115i32, 1] {
+            meta.extend_from_slice(&class.to_le_bytes());
+            meta.extend_from_slice(&[0, 0xff, 0xff]);
+            meta.extend_from_slice(&[7; 16]);
+            meta.extend_from_slice(&1u32.to_le_bytes());
+            meta.extend_from_slice(&3u32.to_le_bytes());
+            meta.extend_from_slice(&[0; 32]);
+            meta.extend_from_slice(b"ab\0");
+            meta.extend_from_slice(&0u32.to_le_bytes());
+        }
+        meta.extend_from_slice(&3u32.to_le_bytes());
+        for (local_id, index) in [(11993i64, 0u32), (5, 1), (11995, 0)] {
+            while !(48 + meta.len()).is_multiple_of(4) {
+                meta.push(0);
+            }
+            meta.extend_from_slice(&local_id.to_le_bytes());
+            meta.extend_from_slice(&0u64.to_le_bytes());
+            meta.extend_from_slice(&4u32.to_le_bytes());
+            meta.extend_from_slice(&index.to_le_bytes());
+        }
+        let data_offset = 48 + meta.len() as u64;
+        let mut file = vec![0; 48];
+        file[8..12].copy_from_slice(&22u32.to_be_bytes());
+        file[20..24].copy_from_slice(&(meta.len() as u32).to_be_bytes());
+        file[24..32].copy_from_slice(&(data_offset + 4).to_be_bytes());
+        file[32..40].copy_from_slice(&data_offset.to_be_bytes());
+        file.extend_from_slice(&meta);
+        file.extend_from_slice(&[1, 2, 3, 4]);
+        file
+    }
+
+    #[test]
+    fn local_ids_of_a_class_are_read_from_a_file_of_format_22() {
+        let file = version_22();
+        assert_eq!(local_ids_of_class(&file, 115).unwrap(), [11993, 11995]);
+        assert_eq!(local_ids_of_class(&file, 1).unwrap(), [5]);
+        assert!(local_ids_of_class(&file, 4).unwrap().is_empty());
+        // The trees are skipped by their sizes, so a cut file is refused.
+        assert!(local_ids_of_class(&file[..file.len() - 30], 115).is_err());
+        let mut longer = file.clone();
+        longer.push(0);
+        assert!(local_ids_of_class(&longer, 115).is_err());
+        // Another format goes to the reader of format 23, which refuses it.
+        let mut other = file;
+        other[8..12].copy_from_slice(&21u32.to_be_bytes());
+        assert!(local_ids_of_class(&other, 115).is_err());
+    }
 }

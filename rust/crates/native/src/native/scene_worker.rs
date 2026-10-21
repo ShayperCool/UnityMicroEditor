@@ -57,6 +57,7 @@ impl Drop for Warm {
         self.worker.stop();
         let library = sysutil::join(&[self.worker.project(), "Library"]);
         if let Err(error) = keep_library(
+            self.worker.engine().artifacts.library(),
             &self.project,
             &library,
             &self.environment,
@@ -83,10 +84,6 @@ fn environment_key(environment: &super::scripted::ScriptEnvironment) -> String {
 fn assemblies_key(environment: &super::scripted::ScriptEnvironment) -> String {
     sha256(environment.assemblies.join("\0").as_bytes())
 }
-
-/// What a worker leaves in its context's `Library` that a later worker
-/// starts from: the import results and the store of their artifacts.
-const LIBRARY_PARTS: [&str; 3] = ["ArtifactDB", "ArtifactDB-lock", "DataStore"];
 
 /// The sources whose imports a library holds, with the hashes of each and
 /// of its `.meta` when it was imported.
@@ -254,8 +251,11 @@ fn library_directory(project: &str) -> String {
 }
 
 /// Moves the library of the project into a new context's `Library`; a
-/// library another worker took, or never kept, gives nothing.
-fn take_library(project: &str, context_library: &str) -> LibraryState {
+/// library another worker took, or never kept, gives nothing. `parts` are
+/// what a worker of the release leaves in its context's `Library` that a
+/// later worker starts from: the import results and the store of their
+/// artifacts.
+fn take_library(parts: &[&str], project: &str, context_library: &str) -> LibraryState {
     let directory = library_directory(project);
     let state_path = sysutil::join(&[&directory, "state.json"]);
     let Ok(state) = crate::util::read_json_file::<LibraryState>(&state_path) else {
@@ -265,7 +265,7 @@ fn take_library(project: &str, context_library: &str) -> LibraryState {
     if state.schema_version != 1 || std::fs::remove_file(&state_path).is_err() {
         return LibraryState::default();
     }
-    for part in LIBRARY_PARTS {
+    for part in parts {
         let from = sysutil::join(&[&directory, part]);
         let to = sysutil::join(&[context_library, part]);
         if std::fs::symlink_metadata(&from).is_err() {
@@ -281,6 +281,7 @@ fn take_library(project: &str, context_library: &str) -> LibraryState {
 
 /// Moves a stopped worker's imports back into the project's library.
 fn keep_library(
+    parts: &[&str],
     project: &str,
     context_library: &str,
     environment: &str,
@@ -292,7 +293,7 @@ fn keep_library(
     super::support::mkdir_all(&directory, 0o700)?;
     let state_path = sysutil::join(&[&directory, "state.json"]);
     let _ = std::fs::remove_file(&state_path);
-    for part in LIBRARY_PARTS {
+    for part in parts {
         let from = sysutil::join(&[context_library, part]);
         let to = sysutil::join(&[&directory, part]);
         if std::fs::symlink_metadata(&from).is_err() {
@@ -630,7 +631,10 @@ impl SceneWorker {
         // The imports a worker before it kept: a source imported from the
         // same file and `.meta` is not imported again.
         let library = sysutil::join(&[&opts.context, "Library"]);
-        let kept = take_library(&build.project, &library);
+        let parts = crate::engine::of_project(&opts.context)?
+            .artifacts
+            .library();
+        let kept = take_library(parts, &build.project, &library);
         let environment_key = environment_key(environment);
         let assemblies = assemblies_key(environment);
         let code = Code::of(environment);
@@ -685,6 +689,7 @@ impl SceneWorker {
             Ok(worker) => worker,
             Err(error) => {
                 let _ = keep_library(
+                    parts,
                     &build.project,
                     &library,
                     &kept.environment,
@@ -699,6 +704,7 @@ impl SceneWorker {
             // What the library held stays for the next worker.
             worker.stop();
             let _ = keep_library(
+                parts,
                 &build.project,
                 &library,
                 &kept.environment,

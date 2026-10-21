@@ -285,7 +285,9 @@ impl Drop for Watcher {
 struct Pass<'a> {
     engine: &'static Engine,
     listener: &'a Arc<TcpListener>,
-    service: &'a DataStoreService,
+    /// The release's storage service; none when the worker keeps its
+    /// artifacts in the context itself.
+    service: Option<&'a DataStoreService>,
     initialize: &'a [u8],
     prepare: &'a [u8],
 }
@@ -299,7 +301,8 @@ struct Probe<'a> {
     started: Instant,
 }
 
-/// Runs the DataStore service and one import worker over the prepared context.
+/// Runs the DataStore service (of a release that has one) and one import
+/// worker over the prepared context.
 /// A report is returned together with the error once the run got far enough to
 /// leave evidence behind.
 pub fn run_probe(
@@ -376,25 +379,31 @@ impl Probe<'_> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|e| anyhow!("listen tcp 127.0.0.1:0: {}", sysutil::errno_text(&e)))?;
         let listener = Arc::new(listener);
-        let mut service =
-            DataStoreService::new(engine, &self.opts.editor, self.project, &self.logs);
-        let stage = Instant::now();
-        service.start(self.ctx)?;
-        report
-            .stages
-            .insert("dataStoreReady".into(), Self::seconds(stage));
+        engine.artifacts.prepare(self.project)?;
+        let mut service = engine.data_store.map(|protocol| {
+            DataStoreService::new(protocol, &self.opts.editor, self.project, &self.logs)
+        });
+        if let Some(service) = &mut service {
+            let stage = Instant::now();
+            service.start(self.ctx)?;
+            report
+                .stages
+                .insert("dataStoreReady".into(), Self::seconds(stage));
+        }
         let run = Pass {
             engine,
             listener: &listener,
-            service: &service,
+            service: service.as_ref(),
             initialize: &initialize,
             prepare: &prepare,
         };
-        let result = self.with_workers(report, &run);
-        report.data_store_rss_kib = rss_kib(i64::from(service.pid));
-        let result = join([result.err(), service.stop().err()]);
-        if let Ok(status) = service.status() {
-            report.data_store = Some(status);
+        let mut result = self.with_workers(report, &run).err();
+        if let Some(service) = &mut service {
+            report.data_store_rss_kib = rss_kib(i64::from(service.pid));
+            result = join([result, service.stop().err()]);
+            if let Ok(status) = service.status() {
+                report.data_store = Some(status);
+            }
         }
         result.map_or(Ok(()), Err)
     }
@@ -446,15 +455,19 @@ impl Probe<'_> {
             .port();
         let mut command = Command::new(&self.opts.editor);
         command
-            .args(engine.worker.arguments(&WorkerLaunch {
-                name: "AssetImportWorkerProbe",
-                project: self.project,
-                log: &log,
-                port,
-                parent: std::process::id(),
-                job_workers: self.opts.job_workers,
-                data_store: service.worker_arguments(),
-            }))
+            .args(
+                engine.worker.arguments(&WorkerLaunch {
+                    name: "AssetImportWorkerProbe",
+                    project: self.project,
+                    log: &log,
+                    port,
+                    parent: std::process::id(),
+                    job_workers: self.opts.job_workers,
+                    data_store: service
+                        .map(DataStoreService::worker_arguments)
+                        .unwrap_or_default(),
+                }),
+            )
             .current_dir(self.project)
             .stdin(Stdio::null())
             .stdout(stdout.try_clone()?)
@@ -623,7 +636,7 @@ impl Probe<'_> {
             if response.result_id == "0".repeat(32) {
                 bail!("native importer did not return an artifact identity");
             }
-            let metadata = worker.artifact_metadata(&response.artifact_blobs[1])?;
+            let metadata = engine.artifacts.metadata(self.project, &response)?;
             if metadata.address != address {
                 bail!("artifact metadata address differs from request");
             }
@@ -764,7 +777,7 @@ pub(crate) struct WarmWorker {
     lifetime: Context,
     project: String,
     output: String,
-    service: DataStoreService,
+    service: Option<DataStoreService>,
     connection: Connection,
     worker: Waiter,
     prepare: Vec<u8>,
@@ -773,7 +786,8 @@ pub(crate) struct WarmWorker {
 }
 
 impl WarmWorker {
-    /// Starts the DataStore service and a worker over `opts.context`.
+    /// Starts the release's DataStore service, if it has one, and a worker
+    /// over `opts.context`.
     pub(crate) fn start(opts: &ProbeOptions) -> Result<Self> {
         let lifetime = Context::background().with_cancel();
         let output = abs(&opts.output)?;
@@ -793,13 +807,20 @@ impl WarmWorker {
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|e| anyhow!("listen tcp 127.0.0.1:0: {}", sysutil::errno_text(&e)))?;
         let listener = Arc::new(listener);
-        let mut service = DataStoreService::new(engine, &opts.editor, &project, &logs);
-        service.start(&lifetime)?;
-        let started = Self::spawn(engine, opts, &project, &logs, &listener, &service);
+        engine.artifacts.prepare(&project)?;
+        let mut service = engine
+            .data_store
+            .map(|protocol| DataStoreService::new(protocol, &opts.editor, &project, &logs));
+        if let Some(service) = &mut service {
+            service.start(&lifetime)?;
+        }
+        let started = Self::spawn(engine, opts, &project, &logs, &listener, service.as_ref());
         let (worker, stdout) = match started {
             Ok(started) => started,
             Err(error) => {
-                let _ = service.stop();
+                if let Some(service) = &mut service {
+                    let _ = service.stop();
+                }
                 return Err(error);
             }
         };
@@ -813,7 +834,9 @@ impl WarmWorker {
             Ok(accepted) => accepted,
             Err(error) => {
                 let _ = worker.signal_group(libc::SIGKILL);
-                let _ = service.stop();
+                if let Some(service) = &mut service {
+                    let _ = service.stop();
+                }
                 bail!("worker connection: accept: {}", sysutil::errno_text(&error));
             }
         };
@@ -852,7 +875,7 @@ impl WarmWorker {
         project: &str,
         logs: &str,
         listener: &TcpListener,
-        service: &DataStoreService,
+        service: Option<&DataStoreService>,
     ) -> Result<(Waiter, File)> {
         let log = sysutil::join(&[logs, "worker.log"]);
         let stdout = create_new(&sysutil::join(&[logs, "worker-stdout.log"]), 0o600)?;
@@ -862,15 +885,19 @@ impl WarmWorker {
             .port();
         let mut command = Command::new(&opts.editor);
         command
-            .args(engine.worker.arguments(&WorkerLaunch {
-                name: "AssetImportWorkerWarm",
-                project,
-                log: &log,
-                port,
-                parent: std::process::id(),
-                job_workers: opts.job_workers,
-                data_store: service.worker_arguments(),
-            }))
+            .args(
+                engine.worker.arguments(&WorkerLaunch {
+                    name: "AssetImportWorkerWarm",
+                    project,
+                    log: &log,
+                    port,
+                    parent: std::process::id(),
+                    job_workers: opts.job_workers,
+                    data_store: service
+                        .map(DataStoreService::worker_arguments)
+                        .unwrap_or_default(),
+                }),
+            )
             .current_dir(project)
             .stdin(Stdio::null())
             .stdout(stdout.try_clone()?)
@@ -1003,7 +1030,7 @@ impl WarmWorker {
         Ok(jobs.len())
     }
 
-    /// Asks the worker to stop, then stops the DataStore service.
+    /// Asks the worker to stop, then stops the DataStore service, if any.
     pub(crate) fn stop(&mut self) {
         if self.worker.finished() && self.lifetime.error().is_some() {
             return;
@@ -1020,7 +1047,9 @@ impl WarmWorker {
             }
         }
         self.lifetime.cancel();
-        let _ = self.service.stop();
+        if let Some(service) = &mut self.service {
+            let _ = service.stop();
+        }
     }
 }
 

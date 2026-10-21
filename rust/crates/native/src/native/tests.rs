@@ -186,7 +186,7 @@ fn data_store_readiness_rejects_client_shutdown_and_error_logs() {
         let root = Temp::new();
         let path = root.path("service.log");
         write(&path, log);
-        let evidence = read_data_store_log(verified(), &path).unwrap();
+        let evidence = read_data_store_log(verified().data_store.unwrap(), &path).unwrap();
         assert_eq!(evidence.ready_logged, ready, "{name}: {evidence:?}");
     }
 }
@@ -194,7 +194,8 @@ fn data_store_readiness_rejects_client_shutdown_and_error_logs() {
 #[test]
 fn data_store_missing_log_is_pending() {
     let root = Temp::new();
-    let evidence = read_data_store_log(verified(), &root.path("missing.log")).unwrap();
+    let evidence =
+        read_data_store_log(verified().data_store.unwrap(), &root.path("missing.log")).unwrap();
     assert!(!evidence.ready_logged);
 }
 
@@ -202,7 +203,7 @@ fn data_store_missing_log_is_pending() {
 fn data_store_canceled_start_creates_nothing() {
     let root = Temp::new();
     let mut service = DataStoreService::new(
-        verified(),
+        verified().data_store.unwrap(),
         &root.path("Unity"),
         &root.path("context"),
         &root.path("logs"),
@@ -221,7 +222,7 @@ fn data_store_missing_executable_does_not_create_context() {
     let installation = root.path("Editor");
     fs::create_dir(&installation).unwrap();
     let mut service = DataStoreService::new(
-        verified(),
+        verified().data_store.unwrap(),
         &installation,
         &root.path("context"),
         &root.path("logs"),
@@ -233,7 +234,7 @@ fn data_store_missing_executable_does_not_create_context() {
 #[test]
 fn data_store_ready_log_requires_running_process() {
     let root = Temp::new();
-    let service = DataStoreService::new(verified(), "", "", &root.1);
+    let service = DataStoreService::new(verified().data_store.unwrap(), "", "", &root.1);
     write(
         &service.service_log(),
         "Initialising UDS system complete:\n  - System type: Service\nStarting Unity Data Store Application\n",

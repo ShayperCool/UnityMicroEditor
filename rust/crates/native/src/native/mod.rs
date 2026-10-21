@@ -22,7 +22,10 @@ mod scripted;
 mod shader_compiler;
 mod support;
 
-pub use artifact::{ArtifactExtraction, MAX_ARTIFACT_BYTES, UdsArtifactStore};
+pub use artifact::{
+    ArtifactExtraction, INLINE_ARTIFACT, LibraryArtifactStore, MAX_ARTIFACT_BYTES, STORED_ARTIFACT,
+    UdsArtifactStore,
+};
 pub use context::{
     ContextExtras, ProjectImportContext, ProjectImportSource, create_project_import_context,
     resolve_project_import_source, verify_project_import_sources,

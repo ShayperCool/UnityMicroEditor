@@ -1,21 +1,25 @@
 //! The Unity releases the tool works with, and the private protocols each of
 //! them speaks.
 //!
-//! The import worker, the DataStore service beside it and the asset databases
-//! both of them read are private to Unity, and a release may change any of
-//! them. Every release the tool supports has an [`Engine`] here with its own
-//! implementation of each, checked against that release. A project's
+//! The import worker, where it keeps the artifacts it imports (the DataStore
+//! service of 6000.6, the files of `Library/Artifacts` of 6000.0) and the
+//! asset databases it reads are private to Unity, and a release may change
+//! any of them. Every release the tool supports has an [`Engine`] here with
+//! its own implementation of each, checked against that release. A project's
 //! `ProjectVersion.txt` selects the engine, and an installation runs a worker
 //! only when `Unity -version` reports that same version. A release without an
 //! entry is refused, never driven with another release's protocol.
 //!
-//! Adding a release means a module beside [`unity6000_6`] whose protocols were
-//! checked against that release, and its entry in `ENGINES`. The rest of the
+//! Adding a release means a module beside [`unity6000_6`] and [`unity6000_0`]
+//! whose protocols were checked against that release, and its entry in
+//! `ENGINES`. The rest of the
 //! tool (Player serialized files, shader programs, the source graph, package
 //! resolution) still serves the verified release alone and checks for it.
 use crate::{
     native::{ArtifactExtraction, DataStoreLogEvidence, WorkerEnvironment},
-    protocol::{ArtifactMetadata, Frame, ImportAddress, ImportRecord, ImportResponse},
+    protocol::{
+        ArtifactFile, ArtifactMetadata, Frame, ImportAddress, ImportRecord, ImportResponse,
+    },
     registry,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -27,6 +31,7 @@ use std::{
     time::Duration,
 };
 
+pub mod unity6000_0;
 pub mod unity6000_6;
 
 /// One supported Unity release.
@@ -38,7 +43,10 @@ pub struct Engine {
     /// cached import's key.
     pub environment_revision: &'static str,
     pub worker: &'static dyn WorkerProtocol,
-    pub data_store: &'static dyn DataStoreProtocol,
+    /// The service a worker keeps its artifacts in, which runs beside it;
+    /// `None` when the worker writes them into its context's `Library`.
+    pub data_store: Option<&'static dyn DataStoreProtocol>,
+    pub artifacts: &'static dyn ArtifactStorage,
     pub asset_database: &'static dyn AssetDatabase,
 }
 
@@ -50,7 +58,7 @@ impl std::fmt::Debug for Engine {
 
 /// Every supported release; the first is the verified profile that the rest
 /// of the tool serves.
-static ENGINES: &[&Engine] = &[&unity6000_6::ENGINE];
+static ENGINES: &[&Engine] = &[&unity6000_6::ENGINE, &unity6000_0::ENGINE];
 
 /// The verified release.
 pub fn verified() -> &'static Engine {
@@ -180,7 +188,7 @@ pub struct WorkerLaunch<'a> {
     pub port: u16,
     pub parent: u32,
     pub job_workers: usize,
-    /// What the DataStore service asks of its clients.
+    /// What the DataStore service asks of its clients; empty without one.
     pub data_store: Vec<String>,
 }
 
@@ -224,11 +232,13 @@ pub trait WorkerProtocol: Sync {
     fn import_address(&self, guid: &str, importer: i32) -> Result<ImportAddress>;
     fn import_request(&self, address: &ImportAddress) -> Vec<u8>;
     fn import_response(&self, payload: &[u8]) -> Result<ImportResponse>;
-    /// The metadata blob of an import response.
-    fn artifact_metadata(&self, blob: &[u8]) -> Result<ArtifactMetadata>;
     fn shutdown(&self, reason: &str) -> Result<Vec<u8>>;
     /// The release a worker log names, from its first lines.
     fn logged_version(&self, log: &[u8]) -> Option<String>;
+    /// Refuses a project with settings the release's messages cannot carry.
+    fn check_project(&self, _project: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// The release's storage service that holds import artifacts.
@@ -245,14 +255,31 @@ pub trait DataStoreProtocol: Sync {
     /// Whether a file of `/dev/shm` is shared memory of the service in
     /// `namespace`, which a service stopped by a signal leaves behind.
     fn owns_shared_memory(&self, name: &str, namespace: &str) -> bool;
-    /// The artifacts a stopped service left in `directory`.
-    fn artifacts(&self, directory: &str) -> Result<Box<dyn ArtifactStore>>;
 }
 
-/// The files of imports a DataStore holds.
+/// Where the release keeps the results of a worker's imports, and how the
+/// coordinator reads them.
+pub trait ArtifactStorage: Sync {
+    /// Makes what the worker of the context `project` writes its artifacts
+    /// into, before the worker starts.
+    fn prepare(&self, project: &str) -> Result<()>;
+    /// The metadata of an import the worker answered: the record its
+    /// response carries, or the one the worker committed to the ArtifactDB
+    /// of the context `project` before it answered.
+    fn metadata(&self, project: &str, response: &ImportResponse) -> Result<ArtifactMetadata>;
+    /// The stored files of the context `project`, once its worker and any
+    /// service beside it stopped.
+    fn open(&self, project: &str) -> Result<Box<dyn ArtifactStore>>;
+    /// The entries of a context's `Library` that hold the results of its
+    /// imports: what a scene worker keeps as the project's library.
+    fn library(&self) -> &'static [&'static str];
+}
+
+/// The files of imports a context holds.
 pub trait ArtifactStore {
-    /// Copies the file stored under `hash` to `output`.
-    fn extract(&self, hash: &[u8], output: &str) -> (ArtifactExtraction, Result<()>);
+    /// Copies the content of `file` (its stored file, or the data inline in
+    /// the metadata) to `output`, checking it against its content key.
+    fn extract(&self, file: &ArtifactFile, output: &str) -> (ArtifactExtraction, Result<()>);
 }
 
 /// The release's asset databases a worker reads: the sources it imports and
@@ -271,3 +298,5 @@ pub trait AssetDatabase: Sync {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_6000_0;

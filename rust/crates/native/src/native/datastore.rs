@@ -4,7 +4,7 @@ use super::support::{
 };
 use crate::{
     cancel::{self, Context, Flag, Source},
-    engine::{DataStoreProtocol, Engine},
+    engine::DataStoreProtocol,
     sysutil,
 };
 use anyhow::{Result, anyhow, bail};
@@ -97,7 +97,6 @@ impl Waiter {
 /// Owns one native storage service. Stop attached import workers before
 /// stopping the service.
 pub struct DataStoreService {
-    engine: &'static Engine,
     protocol: &'static dyn DataStoreProtocol,
     pub editor: String,
     pub context: String,
@@ -138,7 +137,10 @@ pub struct DataStoreStatus {
     pub log_evidence: DataStoreLogEvidence,
 }
 
-pub fn read_data_store_log(engine: &Engine, path: &str) -> Result<DataStoreLogEvidence> {
+pub fn read_data_store_log(
+    protocol: &dyn DataStoreProtocol,
+    path: &str,
+) -> Result<DataStoreLogEvidence> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -147,14 +149,20 @@ pub fn read_data_store_log(engine: &Engine, path: &str) -> Result<DataStoreLogEv
         Err(error) => return Err(os_error("open", path, &error)),
     };
     let text = read_limited(file, 128 * 1024, path)?;
-    Ok(engine.data_store.log_evidence(&text))
+    Ok(protocol.log_evidence(&text))
 }
 
 impl DataStoreService {
-    pub fn new(engine: &'static Engine, editor: &str, context: &str, logs: &str) -> Self {
+    /// The service of a release that keeps its artifacts in one
+    /// (`Engine::data_store`).
+    pub fn new(
+        protocol: &'static dyn DataStoreProtocol,
+        editor: &str,
+        context: &str,
+        logs: &str,
+    ) -> Self {
         Self {
-            engine,
-            protocol: engine.data_store,
+            protocol,
             editor: editor.into(),
             context: context.into(),
             logs: logs.into(),
@@ -182,7 +190,7 @@ impl DataStoreService {
     }
 
     pub fn status(&self) -> Result<DataStoreStatus> {
-        let evidence = read_data_store_log(self.engine, &self.service_log())?;
+        let evidence = read_data_store_log(self.protocol, &self.service_log())?;
         let running = self.process.as_ref().is_some_and(|p| !p.finished());
         Ok(DataStoreStatus {
             pid: self.pid,
