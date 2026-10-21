@@ -104,9 +104,50 @@ pub fn replace_managers(player: &str, file: &[u8]) -> Result<String> {
     Ok(managers)
 }
 
+/// A `globalgamemanagers` that holds no manager, for the Players of test
+/// fixtures: a preparation writes the project's settings over it and leaves
+/// it as it is.
+#[cfg(test)]
+pub(crate) fn empty_managers() -> Vec<u8> {
+    // Unity version (empty), target platform, no type trees, no types, no
+    // objects.
+    let meta = [0u8, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let data_offset = 64usize;
+    let mut file = vec![0u8; data_offset];
+    file[8..12].copy_from_slice(&22u32.to_be_bytes());
+    file[20..24].copy_from_slice(&(meta.len() as u32).to_be_bytes());
+    file[24..32].copy_from_slice(&(data_offset as u64).to_be_bytes());
+    file[32..40].copy_from_slice(&(data_offset as u64).to_be_bytes());
+    file[48..48 + meta.len()].copy_from_slice(&meta);
+    file
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_managers_take_the_project_settings_unchanged() {
+        let project = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(project.path().join("ProjectSettings")).unwrap();
+        std::fs::write(
+            project.path().join("ProjectSettings/TagManager.asset"),
+            "%YAML 1.1\n--- !u!78 &1\nTagManager:\n  tags: []\n",
+        )
+        .unwrap();
+        let (file, reports) = playerbake::write_project_managers(
+            project.path(),
+            &empty_managers(),
+            &playerbake::manager_trees().unwrap(),
+        )
+        .unwrap();
+        assert!(reports.is_empty());
+        assert_eq!(
+            playerbake::PlainFile::parse(&file).unwrap().objects.len(),
+            0,
+            "an empty base stays empty"
+        );
+    }
 
     #[test]
     fn only_settings_the_player_alone_reads_leave_the_compiled_graph() {

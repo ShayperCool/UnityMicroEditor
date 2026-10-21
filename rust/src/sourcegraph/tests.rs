@@ -786,6 +786,17 @@ fn source_graph_new_asmdef_package_and_body_change_sdk() {
     arguments.push(bridge_source);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
     compiler_command(&ctx, &project, &tools.dotnet, &arguments).unwrap();
+    // A Player holds the engine's modules, which the runtime bridge is
+    // compiled against.
+    for module in tools.engine_references.iter() {
+        std::os::unix::fs::symlink(module, sysutil::join(&[&managed, &sysutil::base(module)]))
+            .unwrap();
+    }
+    fs::write(
+        sysutil::join(&[&project, "Temp/native/Host_Data/globalgamemanagers"]),
+        crate::compiler::settings::empty_managers(),
+    )
+    .unwrap();
     write_graph_file(
         &project,
         "Temp/native/Host_Data/ScriptingAssemblies.json",

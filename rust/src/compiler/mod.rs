@@ -15,7 +15,7 @@ mod revision;
 mod script_types;
 mod server;
 mod service;
-mod settings;
+pub(crate) mod settings;
 mod source_graph;
 mod stamp;
 mod sys;

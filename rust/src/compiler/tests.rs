@@ -1458,6 +1458,8 @@ namespace Package.Second { [UnityEngine.DefaultExecutionOrder(-5000)] public cla
         "Temp/native-host/Host_Data/ScriptingAssemblies.json",
         r#"{"names":["UnityMicroEditor.dll","Package.Runtime.dll"],"types":[16,16],"fixtureFlag":true}"#,
     );
+    let managers = join(&[&project, "Temp/native-host/Host_Data/globalgamemanagers"]);
+    fs::write(&managers, super::settings::empty_managers()).unwrap();
     let known_text =
         "namespace Baseline { public class Known : Package.Second.Known { public int seed = 3; } }";
     let known = write_graph_file(&project, "Assets/Known.cs", known_text);
@@ -1616,14 +1618,12 @@ namespace Package.Second { [UnityEngine.DefaultExecutionOrder(-5000)] public cla
     let missing_runtime =
         "namespace Package { public class EditorOnlyMissing : UnityEngine.MonoBehaviour {} }";
     let last = graph.scripts.len() - 1;
-    let republish = |graph: &mut CompilerGraphExport, type_name: Option<&str>| {
+    let republish = |graph: &mut CompilerGraphExport, type_name: &str| {
         graph
             .compiler_inputs
             .insert(&package_source, hash(&package_source));
         graph.host_assemblies[0].sha256 = hash(&package_editor);
-        if let Some(type_name) = type_name {
-            graph.scripts[last].type_name = type_name.into();
-        }
+        graph.scripts[last].type_name = type_name.into();
         atomic_json(&graph_file, graph).unwrap();
     };
     write_graph_file(
@@ -1636,7 +1636,7 @@ namespace Package.Second { [UnityEngine.DefaultExecutionOrder(-5000)] public cla
         &format!("{package_text}{editor_only_text}{missing_runtime}"),
         &[],
     );
-    republish(&mut graph, Some("Package.EditorOnlyMissing"));
+    republish(&mut graph, "Package.EditorOnlyMissing");
     let error = prepare(&baseline).unwrap_err().to_string();
     assert!(
         error.contains("lacks exported MonoScript type Package.EditorOnlyMissing"),
@@ -1649,7 +1649,7 @@ namespace Package.Second { [UnityEngine.DefaultExecutionOrder(-5000)] public cla
         &format!("{package_text}{editor_only_text}"),
         &[],
     );
-    republish(&mut graph, None);
+    republish(&mut graph, "Package.Second.Known");
     let prepared = prepare(&baseline).unwrap();
     assert_eq!(
         prepared.compiler.assemblies[0].name, "Assembly-CSharp",
