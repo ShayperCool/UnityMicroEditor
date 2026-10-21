@@ -177,7 +177,7 @@ pub fn script_register(editor: &str) -> Result<Arc<Vec<u8>>> {
         "Data/Resources/unity default resources",
     ]);
     let file = read_file(&path)?;
-    let scripts = crate::playerbake::read_serialized_of_class(&file, 115)
+    let scripts = crate::playerbake::local_ids_of_class(&file, 115)
         .map_err(|error| wrap(&format!("read the scripts of {path}"), error))?;
     if scripts.is_empty() {
         bail!("{path} holds no scripts");
@@ -188,7 +188,7 @@ pub fn script_register(editor: &str) -> Result<Arc<Vec<u8>>> {
     for script in &scripts {
         text.push_str(&format!(
             "  - {{fileID: {}, guid: 0000000000000000e000000000000000, type: 0}}\n",
-            script.local_id
+            script
         ));
     }
     let register = Arc::new(text.into_bytes());

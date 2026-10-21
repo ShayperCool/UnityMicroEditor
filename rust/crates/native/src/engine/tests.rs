@@ -26,10 +26,15 @@ fn a_release_selects_its_own_engine_and_others_are_refused() {
     let engine = supported("6000.6.3f1").unwrap();
     assert_eq!(engine.version, crate::ENGINE_VERSION);
     assert!(std::ptr::eq(engine, verified()));
-    let error = supported("6000.0.71f1").unwrap_err().to_string();
-    assert!(
-        error.contains("6000.0.71f1") && error.contains("6000.6.3f1"),
-        "{error}"
+    assert!(std::ptr::eq(
+        supported("6000.0.71f1").unwrap(),
+        &unity6000_0::ENGINE
+    ));
+    assert_eq!(supported_versions(), "6000.6.3f1, 6000.0.71f1");
+    let error = supported("6000.0.70f1").unwrap_err().to_string();
+    assert_eq!(
+        error,
+        "Unity 6000.0.70f1 is not supported (supported: 6000.6.3f1, 6000.0.71f1)"
     );
 }
 

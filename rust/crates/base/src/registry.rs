@@ -6,6 +6,7 @@ use crate::{
     paths::logical_path,
     protocol::{guid_text, guid_wire, put_u32, put_u64},
     sha256,
+    spooky::Spooky128,
 };
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -86,6 +87,74 @@ struct FileHash {
 pub fn native_hash(data: &[u8]) -> [u8; 16] {
     xxh3_128(data).to_le_bytes()
 }
+/// The hash a release keys source files and its database records with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContentHash {
+    /// XXH3-128, seed 0 (6000.6).
+    Xxh3,
+    /// SpookyHash V2 128, seeds 0 and 0 (6000.0).
+    Spooky,
+}
+impl ContentHash {
+    /// The hash of `data`, the low half first, each half little endian.
+    pub fn of(self, data: &[u8]) -> [u8; 16] {
+        match self {
+            Self::Xxh3 => native_hash(data),
+            Self::Spooky => crate::spooky::hash128(data),
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Self::Xxh3 => "XXH3-128 low64/high64 little endian",
+            Self::Spooky => "SpookyV2-128 low64/high64 little endian",
+        }
+    }
+}
+enum Hasher {
+    Xxh3(Box<Xxh3>),
+    Spooky(Box<Spooky128>),
+}
+impl Hasher {
+    fn new(kind: ContentHash) -> Self {
+        match kind {
+            ContentHash::Xxh3 => Self::Xxh3(Box::new(Xxh3::new())),
+            ContentHash::Spooky => Self::Spooky(Box::default()),
+        }
+    }
+    fn update(&mut self, data: &[u8]) {
+        match self {
+            Self::Xxh3(hash) => hash.update(data),
+            Self::Spooky(hash) => hash.update(data),
+        }
+    }
+    fn digest(&self) -> [u8; 16] {
+        match self {
+            Self::Xxh3(hash) => hash.digest128().to_le_bytes(),
+            Self::Spooky(hash) => hash.digest(),
+        }
+    }
+}
+/// What of a release's `SourceAssetDB` differs between releases. The tables,
+/// their keys and value layouts are the same in 6000.0 and 6000.6.
+#[derive(Clone, Copy, Debug)]
+pub struct Schema {
+    /// The release `ProjectVersion.txt` names.
+    pub unity_version: &'static str,
+    /// The value of the `DBVersion` record.
+    pub db_version: [u8; 4],
+    /// The hash of source files, `.meta` files and lists of children.
+    pub hash: ContentHash,
+    /// Whether a file's modification time is recorded to 100 ns, or to the
+    /// whole second (6000.0, whose worker compares it with what it reads).
+    pub subsecond_times: bool,
+}
+/// The source database of the verified release.
+pub const VERIFIED: Schema = Schema {
+    unity_version: ENGINE_VERSION,
+    db_version: [0xe1, 0xdc, 0xee, 0x6c],
+    hash: ContentHash::Xxh3,
+    subsecond_times: true,
+};
 /// The `Assets` root or the named `Packages/<name>` root of a clean relative logical path.
 pub fn project_registry_path(name: &str) -> Result<String> {
     ensure!(
@@ -154,7 +223,7 @@ pub fn expected_file(
     );
     Ok(expected)
 }
-fn hash_file(path: &Path, maximum: u64, buffer: &mut [u8]) -> Result<FileHash> {
+fn hash_file(path: &Path, maximum: u64, buffer: &mut [u8], schema: &Schema) -> Result<FileHash> {
     let mut file = File::open(path)?;
     let before = file.metadata()?;
     ensure!(
@@ -162,7 +231,7 @@ fn hash_file(path: &Path, maximum: u64, buffer: &mut [u8]) -> Result<FileHash> {
         "source file exceeds registry bounds"
     );
     let identity = Identity::of(&before);
-    let mut hash = Xxh3::new();
+    let mut hash = Hasher::new(schema.hash);
     let mut size = 0u64;
     loop {
         let count = file.read(buffer)?;
@@ -179,11 +248,14 @@ fn hash_file(path: &Path, maximum: u64, buffer: &mut [u8]) -> Result<FileHash> {
             && identity == Identity::of(&fs::symlink_metadata(path)?),
         "source file changed while preparing its registry"
     );
-    let ticks = before.mtime() as i128 * 10_000_000
-        + before.mtime_nsec() as i128 / 100
-        + 621355968000000000i128;
+    let fraction = if schema.subsecond_times {
+        before.mtime_nsec() as i128 / 100
+    } else {
+        0
+    };
+    let ticks = before.mtime() as i128 * 10_000_000 + fraction + 621355968000000000i128;
     Ok(FileHash {
-        hash: hash.digest128().to_le_bytes(),
+        hash: hash.digest(),
         ticks: u64::try_from(ticks)?,
         size,
     })
@@ -436,6 +508,7 @@ fn root_folder(wire: &[u8; 16], logical: &str, physical: &Path) -> Vec<u8> {
 }
 struct Inventory<'a> {
     project: &'a Path,
+    schema: &'a Schema,
     roots: &'a BTreeMap<String, String>,
     entries: BTreeMap<String, Entry>,
     cases: HashMap<String, String>,
@@ -497,7 +570,10 @@ impl Inventory<'_> {
             && asset.directory
             && asset.meta.is_empty()
         {
-            let wire = native_hash(format!("unity-worker-directory-v1\0{}", asset.path).as_bytes());
+            let wire = self
+                .schema
+                .hash
+                .of(format!("unity-worker-directory-v1\0{}", asset.path).as_bytes());
             (wire, guid_text(&wire), Vec::new())
         } else {
             expected_file(
@@ -506,10 +582,10 @@ impl Inventory<'_> {
                 &asset.meta,
                 false,
             )?;
-            let digest = hash_file(&meta_name, 16 * 1024 * 1024, &mut self.buffer)?;
+            let digest = hash_file(&meta_name, 16 * 1024 * 1024, &mut self.buffer, self.schema)?;
             let meta = fs::read(&meta_name)?;
             ensure!(
-                native_hash(&meta) == digest.hash,
+                self.schema.hash.of(&meta) == digest.hash,
                 "source .meta changed while preparing registry"
             );
             let guid = meta_guid(&meta).with_context(|| asset.path.clone())?;
@@ -524,7 +600,7 @@ impl Inventory<'_> {
         if !asset.directory {
             self.hashes.insert(
                 asset.path.clone(),
-                hash_file(&filename, 1024 * 1024 * 1024, &mut self.buffer)?,
+                hash_file(&filename, 1024 * 1024 * 1024, &mut self.buffer, self.schema)?,
             );
         }
         self.entries.insert(
@@ -616,9 +692,13 @@ pub fn publish_new(path: &Path, data: &[u8]) -> Result<()> {
 /// a worker refuses to import a file whose time or size differs from its
 /// record. `logical` is the source's path in the project.
 pub fn update_source(project: &str, logical: &str) -> Result<()> {
+    update_source_with(&VERIFIED, project, logical)
+}
+/// The same for the release `schema` describes.
+pub fn update_source_with(schema: &Schema, project: &str, logical: &str) -> Result<()> {
     let physical = Path::new(project).join(logical);
     let mut buffer = vec![0u8; 128 * 1024];
-    let digest = hash_file(&physical, 1 << 30, &mut buffer)?;
+    let digest = hash_file(&physical, 1 << 30, &mut buffer, schema)?;
     let key = format!("{}\0", logical.to_lowercase()).into_bytes();
     let database = format!("{project}/Library/SourceAssetDB");
     lmdb::commit(&database, |tables| {
@@ -641,14 +721,19 @@ pub fn update_source(project: &str, logical: &str) -> Result<()> {
     Ok(())
 }
 
+/// The source database of a new context of the verified release.
 pub fn write(input: Input) -> Result<Report> {
+    write_with(&VERIFIED, input)
+}
+/// The source database of a new context of the release `schema` describes.
+pub fn write_with(schema: &Schema, input: Input) -> Result<Report> {
     let version = if input.unity_version.is_empty() {
-        ENGINE_VERSION
+        schema.unity_version
     } else {
         &input.unity_version
     };
     ensure!(
-        version == ENGINE_VERSION && !input.assets.is_empty() && input.assets.len() <= 100000,
+        version == schema.unity_version && !input.assets.is_empty() && input.assets.len() <= 100000,
         "registry requires supported Unity version and bounded nonempty source asset set"
     );
     let project = crate::paths::lexical_abs(&input.project)?;
@@ -681,6 +766,7 @@ pub fn write(input: Input) -> Result<Report> {
     }
     let mut inventory = Inventory {
         project: &project,
+        schema,
         roots: &input.roots,
         entries: BTreeMap::new(),
         cases: HashMap::new(),
@@ -712,7 +798,7 @@ pub fn write(input: Input) -> Result<Report> {
     }
     tables.get_mut("DBVersion").unwrap().push(Record {
         key: b"Version\0".to_vec(),
-        value: vec![0xe1, 0xdc, 0xee, 0x6c],
+        value: schema.db_version.to_vec(),
     });
     if !input.roots.is_empty() {
         // The worker reads the root folders again, and with them where a
@@ -825,7 +911,7 @@ pub fn write(input: Input) -> Result<Report> {
         // asset search does.
         entries.sort_by(|a, b| natural_order(a.0, b.0));
         let list: Vec<u8> = entries.iter().flat_map(|(_, wire)| *wire).collect();
-        let mut value = native_hash(&list).to_vec();
+        let mut value = schema.hash.of(&list).to_vec();
         value.extend_from_slice(&list);
         add(
             "GuidToChildren",
@@ -852,7 +938,7 @@ pub fn write(input: Input) -> Result<Report> {
         unity_version: version.into(),
         guid_count: inventory.entries.len(),
         table_counts: tables.iter().map(|(k, v)| (k.clone(), v.len())).collect(),
-        source_hash_algorithm: "XXH3-128 low64/high64 little endian".into(),
+        source_hash_algorithm: schema.hash.name().into(),
         file_hashes: inventory
             .hashes
             .iter()

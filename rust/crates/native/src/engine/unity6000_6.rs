@@ -2,8 +2,8 @@
 //! `Unity.DataStore` service and the asset databases, as observed for this
 //! release. Not a general Unity API.
 use super::{
-    ArtifactStore, AssetDatabase, DataStoreProtocol, Engine, Message, Reply, WorkerLaunch,
-    WorkerProtocol,
+    ArtifactStorage, ArtifactStore, AssetDatabase, DataStoreProtocol, Engine, Message, Reply,
+    WorkerLaunch, WorkerProtocol,
 };
 use crate::{
     hex,
@@ -14,7 +14,7 @@ use crate::{
     },
     registry,
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 
 pub const VERSION: &str = crate::ENGINE_VERSION;
 
@@ -23,7 +23,8 @@ pub static ENGINE: Engine = Engine {
     revision: "45d8eee7de74",
     environment_revision: "6000.6.3f1-linux-native-environment-v3",
     worker: &Unity6000_6,
-    data_store: &Unity6000_6,
+    data_store: Some(&Unity6000_6),
+    artifacts: &Unity6000_6,
     asset_database: &Unity6000_6,
 };
 
@@ -115,23 +116,11 @@ impl WorkerProtocol for Unity6000_6 {
     fn import_response(&self, payload: &[u8]) -> Result<ImportResponse> {
         import_response(payload)
     }
-    fn artifact_metadata(&self, blob: &[u8]) -> Result<ArtifactMetadata> {
-        artifact_metadata(blob)
-    }
     fn shutdown(&self, reason: &str) -> Result<Vec<u8>> {
         shutdown(reason)
     }
     fn logged_version(&self, log: &[u8]) -> Option<String> {
-        log.split(|&byte| byte == b'\n').find_map(|line| {
-            let rest = line.strip_prefix(b"Unity Editor version:")?;
-            Some(
-                String::from_utf8_lossy(rest)
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or_default()
-                    .to_string(),
-            )
-        })
+        logged_version(log)
     }
 }
 
@@ -190,8 +179,32 @@ impl DataStoreProtocol for Unity6000_6 {
             .strip_prefix("udsMem")
             .is_some_and(|rest| rest.starts_with(namespace))
     }
-    fn artifacts(&self, directory: &str) -> Result<Box<dyn ArtifactStore>> {
-        Ok(Box::new(UdsArtifactStore::open(directory)?))
+}
+
+/// The response carries the records of an import; the files are in the
+/// DataStore of the context.
+impl ArtifactStorage for Unity6000_6 {
+    /// The DataStore service makes its directory itself.
+    fn prepare(&self, _project: &str) -> Result<()> {
+        Ok(())
+    }
+    fn metadata(&self, _project: &str, response: &ImportResponse) -> Result<ArtifactMetadata> {
+        artifact_metadata(
+            response
+                .artifact_blobs
+                .get(1)
+                .context("import response lacks its artifact metadata")?,
+        )
+    }
+    fn open(&self, project: &str) -> Result<Box<dyn ArtifactStore>> {
+        Ok(Box::new(UdsArtifactStore::open(&crate::sysutil::join(&[
+            project,
+            "Library",
+            "DataStore",
+        ]))?))
+    }
+    fn library(&self) -> &'static [&'static str] {
+        &["ArtifactDB", "ArtifactDB-lock", "DataStore"]
     }
 }
 
@@ -210,6 +223,19 @@ impl AssetDatabase for Unity6000_6 {
     }
 }
 
+/// The release a worker log names on its `Unity Editor version:` line.
+pub fn logged_version(log: &[u8]) -> Option<String> {
+    log.split(|&byte| byte == b'\n').find_map(|line| {
+        let rest = line.strip_prefix(b"Unity Editor version:")?;
+        Some(
+            String::from_utf8_lossy(rest)
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string(),
+        )
+    })
+}
 pub fn handshake() -> Frame {
     Frame {
         kind: 0,
