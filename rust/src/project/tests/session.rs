@@ -293,6 +293,7 @@ fn a_scene_is_asked_for_by_its_sources_and_published_once_written() {
         published: Vec::new(),
         objects: BTreeMap::new(),
         roots: BTreeMap::new(),
+        assets: BTreeMap::new(),
     });
     let prepared = fixture.session.prepare(&fixture.output).unwrap();
     let manifest: serde_json::Value =
@@ -311,4 +312,109 @@ fn a_scene_is_asked_for_by_its_sources_and_published_once_written() {
         .invalidate(std::slice::from_ref(&fixture.scene));
     let (_, edited) = needed(&fixture);
     assert_ne!(edited, key);
+}
+
+#[test]
+fn an_addressed_asset_is_named_by_the_objects_the_worker_wrote_main_first() {
+    use crate::project::{
+        NativeContentFile, NativeScene, NativeSceneFile, NeedsNativeScene, Options, RefusedPrefab,
+    };
+    let mut fixture = fixture_session();
+    let material = "Assets/Art/Glow.mat";
+    let guid = "55555555555555555555555555555555";
+    write_fixture_file(
+        format!("{}/{material}", fixture.project),
+        "%YAML 1.1\n--- !u!21 &2100000\nMaterial:\n  m_Name: Glow\n",
+    );
+    write_fixture_file(
+        format!("{}/{material}.meta", fixture.project),
+        format!("guid: {guid}\n"),
+    );
+    fixture.session = Session::new(Options {
+        project: fixture.project.clone(),
+        manifest: format!("{}/baseline.json", fixture.project),
+        extra_assets: vec![material.into()],
+        ..Options::default()
+    })
+    .unwrap();
+    let error = fixture.session.prepare(&fixture.output).unwrap_err();
+    let key = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<NeedsNativeScene>())
+        .expect("the session asks for its scene")
+        .key
+        .clone();
+    let store = format!(
+        "{}/Library/UnityMicroEditor/native-store/baked",
+        fixture.project
+    );
+    fs::create_dir_all(&store).unwrap();
+    let write = |name: &str, data: &[u8]| {
+        let path = format!("{store}/{name}");
+        fs::write(&path, data).unwrap();
+        (path, crate::sha256(data))
+    };
+    let (scene_path, scene_sha) = write("scene", b"scene");
+    let (deps_path, deps_sha) = write("dependencies", b"dependencies");
+    let content = NativeContentFile {
+        guid: "44444444444444444444444444444444".into(),
+        path: deps_path,
+        sha256: deps_sha,
+        ..Default::default()
+    };
+    let written = |assets: Vec<&str>| NativeScene {
+        key: key.clone(),
+        scene: NativeSceneFile {
+            path: scene_path.clone(),
+            sha256: scene_sha.clone(),
+            ..Default::default()
+        },
+        content: vec![content.clone()],
+        published: Vec::new(),
+        // The material and a sub-object of it the file holds; a third the
+        // worker reported but left out of the file is not named.
+        objects: BTreeMap::from([
+            (format!("{guid}/2100000"), "7".to_string()),
+            (format!("{guid}/-301"), "8".to_string()),
+        ]),
+        roots: BTreeMap::new(),
+        assets: BTreeMap::from([(
+            guid.to_string(),
+            assets.into_iter().map(String::from).collect(),
+        )]),
+    };
+    fixture
+        .session
+        .set_native_scene(written(vec!["2100000", "999", "-301"]));
+    let prepared = fixture.session.prepare(&fixture.output).unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&prepared.manifest).unwrap()).unwrap();
+    let aliases: Vec<(String, String)> = manifest["nativeScene"]["aliases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|alias| alias["guid"] == guid)
+        .map(|alias| {
+            (
+                alias["fileId"].as_str().unwrap().to_string(),
+                alias["localId"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        aliases,
+        [
+            ("2100000".to_string(), "7".to_string()),
+            ("-301".to_string(), "8".to_string())
+        ]
+    );
+    // An asset of which the file holds nothing is refused by its path, so
+    // that the runner gives up that one asset.
+    fixture.session.set_native_scene(written(vec!["999"]));
+    let error = fixture.session.prepare(&fixture.output).unwrap_err();
+    let refused = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<RefusedPrefab>())
+        .expect("the asset is refused");
+    assert_eq!(refused.path, material);
 }

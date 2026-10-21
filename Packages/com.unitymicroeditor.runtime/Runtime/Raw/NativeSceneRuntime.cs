@@ -98,14 +98,16 @@ namespace UnityMicroEditor.Raw
                 return scene;
             }
 
-            // A prefab the game asks for by address: the content files of the
-            // scene hold it under the source its alias names.
-            private bool TryGetNativePrefab(string guid, out GameObject prefab)
+            // An asset the game asks for by address: the content files of the
+            // scene hold its objects under the source their aliases name, the
+            // main object first (a prefab's root, a texture before its sprites).
+            private bool TryGetNativeAsset(string guid, Type type, out Object asset)
             {
-                prefab = null;
+                asset = null;
                 foreach (NativeSceneAliasDescriptor alias in manifest.nativeScene.aliases ?? Array.Empty<NativeSceneAliasDescriptor>())
-                    if (alias != null && alias.guid == guid && assets.TryGetValue(AssetKey(alias.guid, alias.fileId), out Object value) && value is GameObject root)
-                    { prefab = root; return true; }
+                    if (alias != null && alias.guid == guid && assets.TryGetValue(AssetKey(alias.guid, alias.fileId), out Object value)
+                        && value != null && (type == null || type.IsInstanceOfType(value)))
+                    { asset = value; return true; }
                 return false;
             }
 

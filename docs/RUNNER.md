@@ -41,7 +41,7 @@ unity-micro-editor run \
 | `--no-addressables` | Do not serve the project's Addressables keys from sources; leave them to the host's built content. |
 | `--builtin-shader` | Verified snapshot of a retained built-in shader. Repeatable. |
 
-The addressable scenes and prefabs of the project's Addressables groups are registered automatically and resolved from sources in the Player; see [AGENT_MCP.md](AGENT_MCP.md#addressables-from-sources) for what that covers.
+The addressable scenes and assets of the project's Addressables groups (everything but code and shaders) are registered automatically and resolved from sources in the Player; see [AGENT_MCP.md](AGENT_MCP.md#addressables-from-sources) for what that covers.
 
 Arguments after `--` are passed to the game. Through MCP the same options are the `gameArguments`, `contentScenes`, `contentPrefabs` and `addressables` of `session_control(start)`; its `hotReload: false` is `--no-hot-reload` and its `onUnsupportedEdit` is `--hot-reload-fallback`, which the MCP server sets to `report` unless told otherwise. A rejected update whose error needs a new source graph carries `preparationRequired: true` in its `update-rejected` event: the Player keeps its old code until the project is prepared again.
 

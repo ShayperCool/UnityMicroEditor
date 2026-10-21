@@ -43,6 +43,9 @@ pub struct NativeScene {
     pub objects: std::collections::BTreeMap<String, String>,
     /// The local ID of the root GameObject of each included prefab, by GUID.
     pub roots: std::collections::BTreeMap<String, String>,
+    /// The local IDs of the objects of each other included asset, main
+    /// object first, by GUID.
+    pub assets: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// Text sources above this size are read without the cache.
@@ -204,14 +207,32 @@ impl Inner {
                 ));
             }
         }
-        // A prefab the game asks for by address is named by its root, as
-        // the worker found it.
+        // What the game asks for by address: a prefab or model by its root,
+        // any other asset by those of its objects the file holds (a shader
+        // is published on its own, an editor-only object is left out), the
+        // main one first.
         for path in self.extra_assets.clone() {
             let guid = self.guid_of(&path).to_string();
-            let Some(root) = written.roots.get(&guid) else {
-                anyhow::bail!("the worker found no root GameObject of the addressed prefab {path}");
-            };
-            sources.push((guid, root.clone()));
+            if let Some(root) = written.roots.get(&guid) {
+                sources.push((guid, root.clone()));
+                continue;
+            }
+            let held: Vec<String> = written
+                .assets
+                .get(&guid)
+                .into_iter()
+                .flatten()
+                .filter(|id| written.objects.contains_key(&format!("{guid}/{id}")))
+                .cloned()
+                .collect();
+            if held.is_empty() {
+                return Err(super::RefusedPrefab::new(
+                    &path,
+                    anyhow::anyhow!("the worker wrote no object of the addressed asset"),
+                )
+                .into());
+            }
+            sources.extend(held.into_iter().map(|id| (guid.clone(), id)));
         }
         let mut scene = written.scene.clone();
         for (guid, file_id) in sources {

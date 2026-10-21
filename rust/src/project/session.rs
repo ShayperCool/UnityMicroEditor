@@ -49,16 +49,23 @@ impl std::fmt::Display for NeedsImportError {
     }
 }
 impl std::error::Error for NeedsImportError {}
-/// A runtime prefab a preparation failed in, and why.
+/// A runtime-addressed asset a preparation failed in, and why.
 #[derive(Debug)]
 pub struct RefusedPrefab {
     pub path: String,
     cause: anyhow::Error,
 }
-impl RefusedPrefab {}
+impl RefusedPrefab {
+    pub(crate) fn new(path: &str, cause: anyhow::Error) -> Self {
+        Self {
+            path: path.into(),
+            cause,
+        }
+    }
+}
 impl std::fmt::Display for RefusedPrefab {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "runtime prefab {}", self.path)
+        write!(f, "runtime asset {}", self.path)
     }
 }
 impl std::error::Error for RefusedPrefab {
@@ -806,7 +813,12 @@ impl Session {
             );
         }
         for path in &options.extra_assets {
-            validate_authored_path(path, ".prefab")?;
+            // A prefab, or any other asset the game asks for by address.
+            let extension = lexpath::ext(path);
+            if matches!(extension, "" | ".unity" | ".meta") {
+                bail!("a runtime asset must be an authored asset other than a scene: {path}");
+            }
+            validate_authored_path(path, extension)?;
             s.extra_assets.push(path.clone());
         }
         if !options.native_catalog.is_empty() {

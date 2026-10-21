@@ -876,6 +876,7 @@ fn build_source(ctx: &Context, build: &Build, guid: &str) -> Result<built_store:
         sources: Vec::new(),
         resources: Vec::new(),
         roots: BTreeMap::new(),
+        assets: BTreeMap::new(),
     })
 }
 

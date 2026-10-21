@@ -144,6 +144,8 @@ pub struct Report {
     pub dependencies: Vec<WrittenObject>,
     /// The root GameObject of each included prefab, by GUID.
     pub include_roots: Vec<(String, i64)>,
+    /// The objects of each other included asset, the main one first.
+    pub include_objects: Vec<(String, i64)>,
     pub externals: Vec<ExternalObject>,
     /// The render pipeline asset of every quality level; empty for none.
     pub quality_pipelines: Vec<String>,
@@ -233,10 +235,14 @@ pub fn parse_report(text: &str) -> Result<Report> {
                 }
             }
             "external" => report.externals.push(external(rest).ok_or_else(malformed)?),
-            "include-root" => {
+            "include-root" | "include-object" => {
                 let (guid, id) = rest.split_once(' ').ok_or_else(malformed)?;
                 let id = id.parse().map_err(|_| malformed())?;
-                report.include_roots.push((guid.to_ascii_lowercase(), id));
+                let list = match verb {
+                    "include-root" => &mut report.include_roots,
+                    _ => &mut report.include_objects,
+                };
+                list.push((guid.to_ascii_lowercase(), id));
             }
             "quality" => {
                 let (_, path) = rest.split_once(' ').ok_or_else(malformed)?;

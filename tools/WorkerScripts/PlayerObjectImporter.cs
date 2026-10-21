@@ -20,7 +20,9 @@
 //                        reported as "settings kept|stripped <managed reference ID> <type> <path>". A request
 //                        that only asks this writes no Player objects.
 //   include <asset path> with a scene: an asset whose objects go into the file beside it though the scene does not
-//                        refer to it (the render pipeline asset, the preloaded assets a build holds)
+//                        refer to it (the render pipeline asset, the preloaded assets a build holds, what the
+//                        game asks for by address), reported as "include-root" for a prefab or model and
+//                        "include-object" for each object of any other asset, the main one first
 //   revision <n>         ignored: a request kept by a worker that lives on is changed so that it is imported again
 //   scene <asset path>   a scene, written as a build writes it: prefab instances unpacked, EditorOnly objects
 //                        left out, with the scene's settings managers. A request that writes a scene writes
@@ -360,6 +362,20 @@ namespace UnityMicroEditor.Worker
             }
         }
 
+        // A script object whose class lives in an Editor assembly (URP's
+        // AssetVersion beside a material): a Player has no class for it and
+        // loads nothing, so the game cannot be given it. Every assembly of a
+        // worker references the Editor (runtime code keeps UNITY_EDITOR parts),
+        // so an Editor assembly is told by its name, as Unity's packages and
+        // the project's asmdefs name them.
+        static bool EditorOnly(Type type)
+        {
+            if (type == null || !(typeof(MonoBehaviour).IsAssignableFrom(type) || typeof(ScriptableObject).IsAssignableFrom(type))) return false;
+            string name = type.Assembly.GetName().Name;
+            return name.StartsWith("UnityEditor", StringComparison.Ordinal) || name.StartsWith("Assembly-CSharp-Editor", StringComparison.Ordinal)
+                || name.EndsWith(".Editor", StringComparison.Ordinal) || name.Contains(".Editor.");
+        }
+
         // A scene as a build writes it. The Editor opens the scene from its
         // source for the build, unpacks its prefab instances and leaves out
         // its EditorOnly objects; every object of another file it refers to
@@ -405,10 +421,21 @@ namespace UnityMicroEditor.Worker
                 {
                     var ids = ContentBuildInterface.GetPlayerObjectIdentifiersInAsset(new GUID(AssetDatabase.AssetPathToGUID(path)), Target);
                     report.Append("project-asset ").Append(ids.Length).Append(' ').Append(path).Append('\n');
-                    // A prefab is named by its root, as a reference to it holds it.
-                    if (AssetDatabase.LoadMainAssetAtPath(path) is GameObject root
+                    // A prefab or model is named by its root, as a reference to
+                    // it holds it. Any other asset by its objects, the main
+                    // one first: a texture before its sprites.
+                    var main = AssetDatabase.LoadMainAssetAtPath(path);
+                    if (main is GameObject root
                         && AssetDatabase.TryGetGUIDAndLocalFileIdentifier(root, out string rootGuid, out long rootId))
                         report.Append("include-root ").Append(rootGuid).Append(' ').Append(rootId).Append('\n');
+                    else if (main != null && !EditorOnly(main.GetType())
+                        && AssetDatabase.TryGetGUIDAndLocalFileIdentifier(main, out string mainGuid, out long mainId))
+                    {
+                        report.Append("include-object ").Append(mainGuid).Append(' ').Append(mainId).Append('\n');
+                        foreach (var id in ids)
+                            if (id.localIdentifierInFile != mainId && !EditorOnly(ContentBuildInterface.GetTypeForObject(id)))
+                                report.Append("include-object ").Append(id.guid).Append(' ').Append(id.localIdentifierInFile).Append('\n');
+                    }
                     foreach (var id in ids.Concat(ContentBuildInterface.GetPlayerDependenciesForObjects(ids, Target, null)))
                         if (seen.Add(id)) referenced.Add(id);
                 }

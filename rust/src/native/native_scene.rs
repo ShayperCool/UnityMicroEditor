@@ -145,8 +145,9 @@ impl NativeProjectImporter {
             ..Default::default()
         };
         // The Player reads back the objects the manifest names by their
-        // sources: the root of an included prefab, every object of the other
-        // included assets. The scene finds the others itself; an object of a
+        // sources: the root of an included prefab, the objects the worker
+        // reported of an addressed asset, every object of the other included
+        // assets. The scene finds the others itself; an object of a
         // prefab may be a component whose script the build left missing,
         // which a built Player only warns about.
         let included: Vec<String> = {
@@ -160,10 +161,14 @@ impl NativeProjectImporter {
         for ((file_id, type_name), source) in dependencies.objects.iter().zip(&dependencies.sources)
         {
             let (guid, source_id) = source.split_once('/').unwrap_or((source, ""));
-            let named = dependencies
-                .roots
-                .get(guid)
-                .is_none_or(|root| root == source_id);
+            // Of an addressed asset, what the worker reported it by: a
+            // prefab's root, or the objects of another asset a Player can
+            // load (not an Editor script object beside a material).
+            let named = match (dependencies.roots.get(guid), dependencies.assets.get(guid)) {
+                (Some(root), _) => root == source_id,
+                (None, Some(objects)) => objects.iter().any(|id| id == source_id),
+                (None, None) => true,
+            };
             if named && included.iter().any(|known| known == guid) {
                 content.objects.push(NativeContentObject {
                     file_id: file_id.clone(),
@@ -237,6 +242,7 @@ impl NativeProjectImporter {
             published,
             objects,
             roots: dependencies.roots.clone(),
+            assets: dependencies.assets.clone(),
         });
         Ok(())
     }
@@ -310,6 +316,13 @@ impl NativeProjectImporter {
                     .iter()
                     .map(|(guid, id)| (guid.clone(), id.to_string()))
                     .collect(),
+                assets: written.report.include_objects.iter().fold(
+                    std::collections::BTreeMap::new(),
+                    |mut assets: std::collections::BTreeMap<String, Vec<String>>, (guid, id)| {
+                        assets.entry(guid.clone()).or_default().push(id.to_string());
+                        assets
+                    },
+                ),
                 ..Default::default()
             },
             written.resources,

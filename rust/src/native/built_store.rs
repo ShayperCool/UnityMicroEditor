@@ -87,6 +87,10 @@ pub(super) struct Built {
     /// by the prefab's GUID.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub roots: BTreeMap<String, String>,
+    /// The local IDs of the objects of each other asset the file holds for
+    /// the game to ask for, main object first, by the asset's GUID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub assets: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -296,6 +300,7 @@ mod tests {
             sources: vec!["2cbfcd0349c944ee788f6e2919b9d66c/4800000".into()],
             resources: Vec::new(),
             roots: BTreeMap::new(),
+            assets: BTreeMap::new(),
         };
         let (key, other) = (sha256(b"one"), sha256(b"two"));
         assert_eq!(load(&project, &key), None);

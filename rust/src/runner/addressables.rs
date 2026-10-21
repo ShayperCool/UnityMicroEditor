@@ -1,6 +1,9 @@
 //! The project's Addressables entries, read from its settings and groups the
 //! way the Editor's "Use Asset Database" play mode does: an address, GUID or
 //! label resolves to an authored source asset, with no catalog and no bundles.
+//! A scene is written as a content scene of its own; any other asset (a
+//! prefab, model, material, texture, clip, ScriptableObject and the like) is
+//! written beside the session's scene.
 use super::{os_error, read_file, wrap};
 use crate::{sysutil, yaml::metadata_guid};
 use anyhow::{Result, anyhow, bail};
@@ -27,9 +30,11 @@ pub struct AddressableRoute {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Discovery {
-    /// Scenes and prefabs, ordered by path and address.
+    /// The assets served from sources, ordered by path and address.
     pub entries: Vec<AddressableRoute>,
-    /// Addressable assets of other kinds. They stay with the host's built content.
+    /// Addressable sources no Player object is written for here: code, and
+    /// shaders, which a session publishes on their own. They stay with the
+    /// host's built content.
     pub unsupported: Vec<String>,
     /// The settings and group assets that were read.
     pub sources: Vec<String>,
@@ -133,14 +138,27 @@ struct Declared {
 
 impl Discovery {
     fn add(&mut self, entry: &Declared, guid: &str, address: &str, path: &str) {
-        let scene = match sysutil::ext(path) {
-            ".unity" => true,
-            ".prefab" => false,
-            _ => {
-                self.unsupported.push(path.into());
-                return;
-            }
-        };
+        let extension = sysutil::ext(path).to_ascii_lowercase();
+        if matches!(
+            extension.as_str(),
+            ".cs"
+                | ".asmdef"
+                | ".asmref"
+                | ".dll"
+                | ".so"
+                | ".rsp"
+                | ".shader"
+                | ".compute"
+                | ".shadergraph"
+                | ".shadersubgraph"
+                | ".hlsl"
+                | ".cginc"
+                | ".raytrace"
+        ) {
+            self.unsupported.push(path.into());
+            return;
+        }
+        let scene = extension == ".unity";
         self.entries.push(AddressableRoute {
             guid: guid.into(),
             address: address.into(),
@@ -335,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn groups_resolve_to_scenes_and_prefabs() {
+    fn groups_resolve_to_scenes_and_assets_but_not_code_or_shaders() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().to_str().unwrap();
         std::fs::create_dir_all(format!("{root}/ProjectSettings")).unwrap();
@@ -386,6 +404,8 @@ mod tests {
         asset(root, "Assets/Pack/Enemy.prefab", &guid('e'), "");
         asset(root, "Assets/Pack/Sub/Room.unity", &guid('f'), "");
         asset(root, "Assets/Pack/Sub/Note.txt", &guid('8'), "");
+        asset(root, "Assets/Pack/Sub/Glow.shader", &guid('5'), "");
+        asset(root, "Assets/Pack/Sub/Logic.cs", &guid('6'), "");
         asset(root, "Assets/Pack/Editor/Tool.prefab", &guid('9'), "");
 
         let found = discover(root).unwrap();
@@ -399,11 +419,19 @@ mod tests {
         assert_eq!(
             found.entries,
             [
+                route('d', "icon", &[], "Assets/Art/Icon.png", false),
                 route(
                     'e',
                     "Pack/Enemy.prefab",
                     &["pack"],
                     "Assets/Pack/Enemy.prefab",
+                    false
+                ),
+                route(
+                    '8',
+                    "Pack/Sub/Note.txt",
+                    &["pack"],
+                    "Assets/Pack/Sub/Note.txt",
                     false
                 ),
                 route(
@@ -425,7 +453,7 @@ mod tests {
         );
         assert_eq!(
             found.unsupported,
-            ["Assets/Art/Icon.png", "Assets/Pack/Sub/Note.txt"]
+            ["Assets/Pack/Sub/Glow.shader", "Assets/Pack/Sub/Logic.cs"]
         );
         assert_eq!(
             found.sources,

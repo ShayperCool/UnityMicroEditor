@@ -54,11 +54,11 @@ namespace UnityMicroEditor.Raw
                 Scene = current.Load();
             }
 
-            public bool TryGetPrefab(string guid, out GameObject prefab)
+            public bool TryGetAsset(string guid, Type type, out Object asset)
             {
                 if (disposed) throw new ObjectDisposedException(nameof(LiveSession));
-                prefab = null;
-                return current != null && current.TryGetPrefab(guid, out prefab);
+                asset = null;
+                return current != null && current.TryGetAsset(guid, type, out asset);
             }
 
             public Scene LoadAdditive(string manifestPath, string expectedManifestSha256, Scene target = default)

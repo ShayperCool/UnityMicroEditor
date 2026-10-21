@@ -607,7 +607,7 @@ pub fn run_cli(args: &[String]) -> Result<()> {
     result
 }
 
-/// Adds the project's addressable scenes and prefabs to the content the
+/// Adds the project's addressable scenes and assets to the content the
 /// session prepares. Returns the settings and group assets they came from.
 fn adopt_addressables(opts: &mut LaunchOptions) -> Vec<String> {
     if opts.no_addressables {
@@ -646,7 +646,7 @@ fn adopt_addressables(opts: &mut LaunchOptions) -> Vec<String> {
             .with("paths", &found.unsupported)
             .with(
                 "error",
-                "only scenes and prefabs are served from sources; these stay with the host's built content",
+                "code and shaders are not served from sources; these stay with the host's built content",
             )
             .emit();
     }

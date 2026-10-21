@@ -132,8 +132,12 @@ resolver verified. `hostEvidence` links the immutable source snapshot, Editor
 receipt, package profile and verified host artifacts. The target's authored
 roots are checked on both success and failure.
 
-Addressables content built by the host build stays with the host. When there is
-any, the preparation result lists it in `hostContent`:
+Addressables content built by the host build stays with the host; a session
+serves the project's addressable scenes and assets from sources instead
+([Addressables from sources](#addressables-from-sources)), so the host's copy
+matters only for code and shaders addressed directly and for
+`Addressables.InitializeAsync`. When there is any, the preparation result lists
+it in `hostContent`:
 `addressablesStreamingAssets` (local groups, inside the host's
 `StreamingAssets/aa`, which the session's Player copy contains) and
 `addressablesRemoteBuild` (remote groups, the staging copy's
@@ -838,22 +842,34 @@ on by default. `hotReload` and `onUnsupportedEdit` are described under
 
 A project that uses Addressables gets the counterpart of the Editor's "Use Asset
 Database" play mode. The runner reads the Addressables settings and groups and
-registers every addressable scene and prefab as session content, so
+registers every addressable scene and asset as session content, so
 `contentScenes` and `contentPrefabs` are not needed for them. In the Player a
 locator resolves their address, GUID (`AssetReference`) and labels to the
-authored source. A prefab is written by the scene worker beside the session's
-scene and found by its root; a scene is written as a content scene of its own
-([NATIVE_IMPORT.md](NATIVE_IMPORT.md#scenes-in-the-player-format)). The game calls
+authored source. A scene is written as a content scene of its own
+([NATIVE_IMPORT.md](NATIVE_IMPORT.md#scenes-in-the-player-format)). Any other
+asset (a prefab or model, material, texture, sprite, audio clip, animation,
+controller, ScriptableObject, text asset and the like) is written by the scene
+worker beside the session's scene: a prefab or model is found by its root, any
+other asset by its main object, or by its first object of the requested type,
+so a texture asked for as a `Sprite` gives its sprite. Addressables content
+therefore needs no host rebuild: an edited asset, a new entry, address or label
+takes effect in the next session, and the host's catalog only lets
+`Addressables.InitializeAsync` succeed. The game calls
 `Addressables` as usual. Nothing is downloaded: `GetDownloadSizeAsync` reports 0
 for these keys, and no content build is involved. The watcher treats these
 scenes and prefabs like the session's other content.
 
 Limits:
 
-- Only scenes and prefabs are served from sources. Other addressable assets
-  (materials, textures, audio, ScriptableObjects) stay with the host's built
-  content, which is as old as the host; the runner lists them in an
-  `addressables-skipped` event.
+- Code and shaders (`.cs`, `.asmdef`, `.dll`, `.shader`, `.compute`, shader
+  graphs and includes) are not served from sources: a session publishes
+  shaders on its own. Addressed ones stay with the host's built content, which
+  is as old as the host; the runner lists them in an `addressables-skipped`
+  event.
+- Every addressed asset is written beside the session's scene and loaded with
+  it, as the Editor's "Use Asset Database" mode keeps them at hand; a project
+  with many addressable assets makes the first write of its scene longer and
+  the Player's memory larger.
 - An addressable scene is loaded beside an empty scene of the host, because
   the package's scene handle has to come from its own scene provider, and gives
   its roots to that scene once they woke. The scene therefore reports the
@@ -861,8 +877,18 @@ Limits:
   scene's own empty scene stays loaded beside it until it is unloaded. Loading
   the same location twice at once, and `LoadSceneMode.Single`, are not
   verified.
-- A prefab is requested as a `GameObject`; a component type or a sub-object key
-  (`key[sub]`) is not resolved from sources.
+- A prefab is requested as a `GameObject`; a component type, a sub-object key
+  (`key[sub]`) and a list of an asset's sub-objects (`IList<Sprite>`) are not
+  resolved from sources.
+- An asset the worker writes no object for (an editor-only one) is dropped
+  with an `addressables-skipped` event, and the session is prepared again
+  without it.
+- An object of an addressed asset whose script class lives in an Editor
+  assembly (URP's `AssetVersion` beside a material) is not given to the game: a
+  Player has no class for it. An Editor assembly is told by its name
+  (`UnityEditor*`, `Assembly-CSharp-Editor*`, `*.Editor`, `*.Editor.*`), as
+  Unity's packages and most projects name them; a runtime assembly named so
+  would have its objects left out too.
 - A scene that cannot be prepared is dropped with an `addressables-skipped`
   event and stays with the host's content; the others are served. The
   addressed prefabs are written with the session's scene, so a preparation
@@ -873,7 +899,8 @@ Limits:
   Player has it. Without it the source keys still resolve, but the game sees a
   failed initialization.
 - The keys are read when the session starts. A change of the groups produces an
-  `addressables-changed` event and takes effect in the next session.
+  `addressables-changed` event and takes effect in the next session. The host
+  needs no rebuild for it.
 - The bridge is compiled with this support when the host contains
   `Unity.Addressables`. A host built before this support existed has to be
   rebuilt (`project_prepare` with `rebuildHost: true`, a new `requestId` and

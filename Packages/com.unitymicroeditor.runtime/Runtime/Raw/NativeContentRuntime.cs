@@ -278,7 +278,10 @@ namespace UnityMicroEditor.Raw
                         {
                             long localID = long.Parse(entry.fileId, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
                             Object value = handle.File.GetObject(unchecked((ulong)localID));
-                            if (value == null || value.GetType().FullName != entry.typeName)
+                            // An object of an Editor-only class (an animator controller, an audio
+                            // mixer) has another, runtime class in a Player; only its presence is checked.
+                            bool editorClass = entry.typeName.StartsWith("UnityEditor.", StringComparison.Ordinal);
+                            if (value == null || !editorClass && value.GetType().FullName != entry.typeName)
                                 throw new InvalidDataException("Native ContentFile identity/type readback failed: " + descriptor.guid + "/" + entry.fileId);
                             // A shader a build compiled no program of (every variant stripped) is
                             // unsupported in a built Player as well; nothing draws with it.

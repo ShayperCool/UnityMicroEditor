@@ -86,7 +86,7 @@ namespace UnityMicroEditor.Raw
             public Scene Load(bool runInitializers = true, Action commit = null, bool main = true, Scene target = default)
             { return LoadNative(runInitializers, commit, main, target); }
 
-            internal bool TryGetPrefab(string guid, out GameObject prefab) { return TryGetNativePrefab(guid, out prefab); }
+            internal bool TryGetAsset(string guid, Type type, out Object asset) { return TryGetNativeAsset(guid, type, out asset); }
 
             internal void ReleaseOwnedSceneObjects() { UnloadNativeScene(); }
 

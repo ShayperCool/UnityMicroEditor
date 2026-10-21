@@ -15,8 +15,10 @@ namespace UnityMicroEditor.Raw
     /// <summary>
     /// Serves the project's Addressables keys from authored sources, as the
     /// Editor's "Use Asset Database" play mode does: an address, GUID or label
-    /// resolves to a scene or prefab of the raw session, with no bundles and
-    /// nothing to download. Keys it does not know stay with the host's catalog.
+    /// resolves to a scene or an asset of the raw session (a prefab, material,
+    /// texture or one of its sprites, clip, ScriptableObject and the like),
+    /// with no bundles and nothing to download. Keys it does not know stay
+    /// with the host's catalog.
     /// </summary>
     internal static class RawAddressables
     {
@@ -96,7 +98,6 @@ namespace UnityMicroEditor.Raw
         private sealed class SourceLocator : IResourceLocator
         {
             private readonly Dictionary<string, List<RawProjectContent.Address>> entriesByKey = new Dictionary<string, List<RawProjectContent.Address>>(StringComparer.Ordinal);
-            private readonly Dictionary<RawProjectContent.Address, IResourceLocation> prefabs = new Dictionary<RawProjectContent.Address, IResourceLocation>();
             private readonly HashSet<string> addresses = new HashSet<string>(StringComparer.Ordinal);
             private readonly string providerId;
             private int sceneRequests;
@@ -113,8 +114,6 @@ namespace UnityMicroEditor.Raw
                     addresses.Add(entry.address);
                     Add(entry.address, entry); Add(entry.guid, entry);
                     foreach (string label in entry.labels ?? Array.Empty<string>()) Add(label, entry);
-                    if (!entry.scene)
-                        prefabs.Add(entry, new ResourceLocationBase(entry.address, entry.path, providerId, typeof(GameObject)) { Data = entry });
                 }
             }
 
@@ -136,7 +135,12 @@ namespace UnityMicroEditor.Raw
                 {
                     if (!entry.scene)
                     {
-                        if (type == null || type.IsAssignableFrom(typeof(GameObject))) found.Add(prefabs[entry]);
+                        // The asset's object of the asked type, as the
+                        // session's content holds it: a texture asked as a
+                        // Sprite is found by its sprite.
+                        Type asked = type == null || type == typeof(object) ? null : type;
+                        if (RawProjectContent.TryLoadAsset(entry.guid, asked, out UnityEngine.Object asset))
+                            found.Add(new ResourceLocationBase(entry.address, entry.path, providerId, asked ?? asset.GetType()) { Data = entry });
                     }
                     else if (type == null || type == typeof(object) || type == typeof(SceneInstance))
                     {
@@ -201,17 +205,18 @@ namespace UnityMicroEditor.Raw
                     handle.Complete<IAssetBundleResource>(new NoBundle(), true, null);
                     return;
                 }
-                GameObject prefab = null;
+                UnityEngine.Object asset = null;
                 Exception failure = null;
                 try
                 {
-                    if (!(data is RawProjectContent.Address entry) || !handle.Type.IsAssignableFrom(typeof(GameObject)))
-                        failure = new InvalidOperationException("Sources provide a prefab as a GameObject: " + handle.Location.InternalId + " requested as " + handle.Type);
-                    else if (!RawProjectContent.TryLoadPrefab(entry.guid, out prefab))
-                        failure = new InvalidOperationException("The raw session has no prefab for " + entry.path);
+                    Type asked = handle.Type == null || handle.Type == typeof(object) ? null : handle.Type;
+                    if (!(data is RawProjectContent.Address entry))
+                        failure = new InvalidOperationException("Sources provide no asset for " + handle.Location.InternalId);
+                    else if (!RawProjectContent.TryLoadAsset(entry.guid, asked, out asset))
+                        failure = new InvalidOperationException("The raw session has no " + (asked == null ? "asset" : asked.Name) + " for " + entry.path);
                 }
                 catch (Exception error) { failure = error; }
-                handle.Complete<object>(prefab, failure == null, failure);
+                handle.Complete<object>(asset, failure == null, failure);
             }
         }
     }

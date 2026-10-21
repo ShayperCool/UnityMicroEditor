@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using Object = UnityEngine.Object;
 
 namespace UnityMicroEditor.Raw
 {
@@ -93,7 +94,17 @@ namespace UnityMicroEditor.Raw
         public static bool TryLoadPrefab(string guid, out GameObject prefab)
         {
             prefab = null;
-            return session != null && session.TryGetPrefab(guid, out prefab);
+            if (!TryLoadAsset(guid, typeof(GameObject), out Object asset)) return false;
+            prefab = (GameObject)asset;
+            return true;
+        }
+
+        /// <summary>An addressed asset of the session, or its first sub-object of
+        /// <paramref name="type"/> (a texture's sprite); the main object for null.</summary>
+        public static bool TryLoadAsset(string guid, Type type, out Object asset)
+        {
+            asset = null;
+            return session != null && session.TryGetAsset(guid, type, out asset);
         }
 
         public static AsyncOperation UnloadScene(Scene scene)
