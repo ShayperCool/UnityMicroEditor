@@ -46,6 +46,15 @@ fn data_directory(player: &str) -> String {
     super::player_data(player)
 }
 
+/// Whether the tool writes the settings managers of `project`'s Player: the
+/// manager layouts (`playerbake::manager_trees`) are those of the verified
+/// release. A host of another release keeps the settings it was built with,
+/// which are the project's own when it was built from the project's stage.
+fn writes_managers(project: &str) -> bool {
+    crate::release::project_release(project)
+        .is_ok_and(|release| release == crate::release::verified().version)
+}
+
 /// The `globalgamemanagers` the project's settings give the Player
 /// executable `player`, and what each manager kept of the host. `None` for a
 /// Player prepared without the host's file.
@@ -54,7 +63,7 @@ pub fn project_managers(
     player: &str,
 ) -> Result<Option<(Vec<u8>, Vec<playerbake::ManagerReport>)>> {
     let base = join(&[&data_directory(player), HOST_MANAGERS]);
-    if sys::absent(&base) {
+    if sys::absent(&base) || !writes_managers(project) {
         return Ok(None);
     }
     let base = sys::read(&base)?;
@@ -77,6 +86,9 @@ pub fn player_managers_hash(player: &str) -> Result<String> {
 /// Keeps the host's file of a freshly staged host Player and writes the
 /// project's settings over it. Returns what each manager kept of the host.
 pub fn prepare_managers(project: &str, player: &str) -> Result<Vec<playerbake::ManagerReport>> {
+    if !writes_managers(project) {
+        return Ok(Vec::new());
+    }
     let data = data_directory(player);
     let (managers, base) = (join(&[&data, MANAGERS]), join(&[&data, HOST_MANAGERS]));
     if sys::absent(&base) {

@@ -1,7 +1,7 @@
 //! Game arguments and the immutable additive content routes.
 use super::{
     BaselineBuild, LaunchOptions,
-    addressables::AddressableRoute,
+    addressables::{AddressableRoute, BuildSceneRoute},
     apply_compiled_bindings, assemblies_of,
     json::{First, members, read_document, set_list, set_strings},
     mkdir_all,
@@ -52,6 +52,10 @@ pub struct RawContentRoutes {
     /// Addressable keys served from sources; scenes among them have a route.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub addressables: Vec<AddressableRoute>,
+    /// The Build Settings scenes the host stands in for with empty scenes;
+    /// each has a route.
+    #[serde(rename = "buildScenes", skip_serializing_if = "Vec::is_empty")]
+    pub build_scenes: Vec<BuildSceneRoute>,
 }
 impl RawContentRoutes {
     /// Reads and decodes a route snapshot file.
@@ -66,7 +70,13 @@ impl RawContentRoutes {
         };
         jsondoc::decode_struct(
             root,
-            &["schemaVersion", "project", "scenes", "addressables"],
+            &[
+                "schemaVersion",
+                "project",
+                "scenes",
+                "addressables",
+                "buildScenes",
+            ],
             |index, member| match index {
                 0 => jsondoc::set_int(
                     &mut routes.schema_version,
@@ -81,7 +91,7 @@ impl RawContentRoutes {
                     "array",
                     scene_route,
                 ),
-                _ => {
+                3 => {
                     let mut list = None;
                     let result = set_list(
                         &mut list,
@@ -91,6 +101,18 @@ impl RawContentRoutes {
                         addressable_route,
                     );
                     routes.addressables = list.unwrap_or_default();
+                    result
+                }
+                _ => {
+                    let mut list = None;
+                    let result = set_list(
+                        &mut list,
+                        &member.value,
+                        at("buildScenes"),
+                        "array",
+                        build_scene_route,
+                    );
+                    routes.build_scenes = list.unwrap_or_default();
                     result
                 }
             },
@@ -120,6 +142,31 @@ fn scene_route(route: &mut RawSceneRoute, value: &Json) -> Result<(), String> {
             0 => jsondoc::set_string(&mut route.guid, &member.value, at("scenes.guid")),
             1 => jsondoc::set_string(&mut route.manifest, &member.value, at("scenes.manifest")),
             _ => jsondoc::set_string(&mut route.sha256, &member.value, at("scenes.sha256")),
+        },
+    ));
+    first.finish()
+}
+
+fn build_scene_route(route: &mut BuildSceneRoute, value: &Json) -> Result<(), String> {
+    let at = |field| Target {
+        strukt: "buildSceneRoute",
+        field,
+    };
+    let fields = members(
+        value,
+        Target {
+            strukt: "rawContentRoutes",
+            field: "buildScenes",
+        },
+        "buildSceneRoute",
+    )?;
+    let mut first = First::default();
+    first.note(jsondoc::decode_struct(
+        fields,
+        &["index", "guid"],
+        |index, member| match index {
+            0 => jsondoc::set_int(&mut route.index, &member.value, at("index")),
+            _ => jsondoc::set_string(&mut route.guid, &member.value, at("guid")),
         },
     ));
     first.finish()
@@ -222,8 +269,9 @@ pub fn prepare_content_routes(
         schema_version: 1,
         project: opts.project.clone(),
         // The Player requires a scene list, even an empty one.
-        scenes: (!opts.addressables.is_empty()).then(Vec::new),
+        scenes: (!opts.addressables.is_empty() || !opts.build_scenes.is_empty()).then(Vec::new),
         addressables: opts.addressables.clone(),
+        build_scenes: opts.build_scenes.clone(),
     };
     failed.clear();
     let mut seen = BTreeSet::new();

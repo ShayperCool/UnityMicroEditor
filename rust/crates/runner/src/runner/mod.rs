@@ -89,6 +89,9 @@ pub struct LaunchOptions {
     /// declarations that exist only because of them.
     pub addressables: Vec<AddressableRoute>,
     pub addressable_content: Vec<String>,
+    /// The Build Settings scenes the game may load through `SceneManager`,
+    /// each also a content scene.
+    pub build_scenes: Vec<addressables::BuildSceneRoute>,
     pub no_addressables: bool,
     pub builtin_shaders: Vec<String>,
     pub game_arguments: Vec<String>,
@@ -112,7 +115,9 @@ pub struct LaunchOptions {
 impl LaunchOptions {
     /// Whether the Player gets a content route snapshot.
     pub fn has_content_routes(&self) -> bool {
-        !self.content_scenes.is_empty() || !self.addressables.is_empty()
+        !self.content_scenes.is_empty()
+            || !self.addressables.is_empty()
+            || !self.build_scenes.is_empty()
     }
     /// The part the native importer reads, with the host Player the content
     /// is imported for.
@@ -510,6 +515,7 @@ pub(crate) fn launch_options(args: &[String]) -> Result<LaunchOptions> {
         content_prefabs: flags.get_list("content-prefab"),
         addressables: Vec::new(),
         addressable_content: Vec::new(),
+        build_scenes: Vec::new(),
         no_addressables: flags.get_bool("no-addressables"),
         builtin_shaders: flags.get_list("builtin-shader"),
         game_arguments: game_args,
@@ -655,6 +661,42 @@ fn adopt_addressables(opts: &mut LaunchOptions) -> Vec<String> {
             .emit();
     }
     found.sources
+}
+
+/// Adds the scenes of the project's Build Settings, other than the session's
+/// own, to the content the session prepares. The host stands in for each with
+/// an empty scene of the same name at the same build index, which the
+/// engine loads when the game asks `SceneManager` for it; the bridge then
+/// builds the scene's content into it.
+fn adopt_build_scenes(opts: &mut LaunchOptions, session_scene: &str) {
+    let found = match addressables::build_scenes(&opts.project) {
+        Ok(found) => found,
+        Err(error) => {
+            Event::new("build-scenes-skipped")
+                .with("error", &err_text(&error))
+                .emit();
+            return;
+        }
+    };
+    let mut scenes: BTreeSet<String> = opts
+        .content_scenes
+        .iter()
+        .filter_map(|declaration| parse_content_scene(declaration).ok())
+        .map(|(guid, _)| guid)
+        .collect();
+    opts.build_scenes.clear();
+    for scene in found {
+        // The first scene is the one a Player starts with; the host's own
+        // bootstrap scene stands in for it.
+        if scene.index == 0 || scene.path == session_scene || !valid_scene_guid(&scene.guid) {
+            continue;
+        }
+        if scenes.insert(scene.guid.clone()) {
+            opts.content_scenes
+                .push(format!("{}={}", scene.guid, scene.path));
+        }
+        opts.build_scenes.push(scene);
+    }
 }
 
 /// The prefabs added for Addressables that the session still serves.
@@ -1244,6 +1286,7 @@ fn run_session(
     }
     let script_types = compiler.script_type_names(ctx)?;
     let addressable_sources = adopt_addressables(opts);
+    adopt_build_scenes(opts, &json::scene_path_of(&baseline.manifest)?);
     let assemblies = compiler::player_assembly_paths(&baseline.player, &baseline.manifest)?;
     let initializers = json::read_runtime_initializers(&baseline.manifest)?;
     let session = Arc::new(Session::new(project::Options {

@@ -19,8 +19,12 @@ pub struct SourcePlugin {
     pub constraints: NilVec<String>,
 }
 
-/// The Linux Player state of one managed plugin.
-pub fn read_source_plugin(path: &str, defines: &[String]) -> Result<SourcePlugin> {
+/// The state of one managed plugin in a Player of `player`.
+pub fn read_source_plugin(
+    path: &str,
+    defines: &[String],
+    player: super::CodePlatform,
+) -> Result<SourcePlugin> {
     let mut result = SourcePlugin {
         path: path.to_string(),
         ..Default::default()
@@ -52,14 +56,14 @@ pub fn read_source_plugin(path: &str, defines: &[String]) -> Result<SourcePlugin
                     platform.enabled != 0
                         && !platform
                             .settings
-                            .get("Exclude Linux64")
+                            .get(&format!("Exclude {}", player.plugin_target))
                             .is_some_and(|value| value == "1"),
                 );
             }
             if group == "Any" && target.is_empty() {
                 any_legacy = Some(platform.enabled != 0);
             }
-            if group == "Standalone" && target == "Linux64" {
+            if group == player.plugin_group && target == player.plugin_target {
                 explicit_linux = true;
                 linux_enabled = platform.enabled != 0;
             }

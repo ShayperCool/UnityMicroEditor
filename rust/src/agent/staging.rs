@@ -269,7 +269,8 @@ pub fn sync_staging(ctx: &Context, source: &str, editor: &str) -> Result<(String
     normalize_staged_package_paths(source, &stage)?;
     super::install_agent_package(&stage)?;
     pin_staged_packages(ctx, source, editor, &stage)?;
-    stage_scripting_defines(source, &stage)?;
+    stage_compile_for(source, &stage)?;
+    keep_game_assemblies_out_of_host_builds(ctx, source, &stage)?;
     let staging_marker = join(&[&stage, STAGE_MARKER]);
     if snapshot.files.contains_key(STAGE_MARKER) {
         fs::remove_file(&staging_marker)
@@ -336,12 +337,12 @@ fn pin_staged_packages(ctx: &Context, source: &str, editor: &str, stage: &str) -
 
 /// Gives the stage's Linux Standalone group the scripting define symbols of
 /// the group the project's Player is compiled with
-/// (`sourcegraph::scripting_defines_group`), so that its Editor builds the
+/// (`sourcegraph::compile_for_group`), so that its Editor builds the
 /// host with the symbols the tool compiles with. The entry of that group is
 /// copied as written; the copy keeps the source's timestamp, so an unchanged
 /// selection does not make Unity reimport the settings.
-fn stage_scripting_defines(source: &str, stage: &str) -> Result<()> {
-    let Some(group) = crate::sourcegraph::scripting_defines_group(source)? else {
+fn stage_compile_for(source: &str, stage: &str) -> Result<()> {
+    let Some(group) = crate::sourcegraph::compile_for_group(source)? else {
         return Ok(());
     };
     let from = join(&[source, "ProjectSettings/ProjectSettings.asset"]);
@@ -356,6 +357,62 @@ fn stage_scripting_defines(source: &str, stage: &str) -> Result<()> {
     fs::File::open(&path)
         .and_then(|file| file.set_modified(modified))
         .map_err(|error| sysutil::Error::os("utimens", &path, &error))?;
+    Ok(())
+}
+
+/// The symbol a stage compiled for a device group defines for its Player
+/// builds (the host's and the Addressables content build's).
+const HOST_BUILD_DEFINE: &str = "UNITY_MICRO_EDITOR_HOST_BUILD";
+
+/// For a project compiled for a device group, makes the stage's own
+/// assemblies under `Assets` stay out of the Player builds of its Editor: a
+/// host leaves the game's assemblies out, the tool compiles them, and with
+/// the device's symbols they need assemblies a Linux build does not have.
+/// Each stage asmdef gets the define constraint
+/// `UNITY_EDITOR || !UNITY_MICRO_EDITOR_HOST_BUILD`, so the stage's Editor
+/// still compiles them. The copies keep the sources' timestamps.
+fn keep_game_assemblies_out_of_host_builds(ctx: &Context, source: &str, stage: &str) -> Result<()> {
+    if crate::sourcegraph::compile_for_group(source)?.is_none() {
+        return Ok(());
+    }
+    let constraint = format!("UNITY_EDITOR || !{HOST_BUILD_DEFINE}");
+    walk_dir(&join(&[stage, "Assets"]), &mut |entry: &WalkEntry| {
+        ctx.err()?;
+        if entry.is_dir() || !entry.path.ends_with(".asmdef") {
+            return Ok(Walk::Continue);
+        }
+        let logical = sysutil::rel(stage, entry.path)
+            .ok_or_else(|| anyhow!("Rel: can't make {} relative to {stage}", entry.path))?;
+        let from = join(&[source, &logical]);
+        let data = read_agent_file(&from, 1 << 20)?;
+        let text = String::from_utf8_lossy(&data);
+        let mut definition: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(text.trim_start_matches('\u{feff}'))
+                .map_err(|error| anyhow!("{from}: {error}"))?;
+        let constraints = definition
+            .entry("defineConstraints")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        let Some(list) = constraints.as_array_mut() else {
+            return Err(anyhow!("{from}: defineConstraints is not a list"));
+        };
+        if !list
+            .iter()
+            .any(|value| value.as_str() == Some(constraint.as_str()))
+        {
+            list.push(constraint.clone().into());
+        }
+        let mut encoded = serde_json::to_vec_pretty(&definition)?;
+        encoded.push(b'\n');
+        fs::write(entry.path, encoded)
+            .map_err(|error| sysutil::Error::os("open", entry.path, &error))?;
+        let modified = fs::metadata(&from)
+            .and_then(|info| info.modified())
+            .map_err(|error| sysutil::Error::os("stat", &from, &error))?;
+        fs::File::open(entry.path)
+            .and_then(|file| file.set_modified(modified))
+            .map_err(|error| sysutil::Error::os("utimens", entry.path, &error))?;
+        Ok(Walk::Continue)
+    })?;
     Ok(())
 }
 
@@ -392,8 +449,9 @@ pub(crate) fn with_standalone_defines(text: &str, group: &str) -> Result<String>
     };
     let mut copy: Vec<String> = chosen.iter().map(|line| line.to_string()).collect();
     copy[0] = format!("    Standalone{}", &copy[0][4 + group.len()..]);
-    let platform = crate::sourcegraph::group_platform_defines(group);
-    if !platform.is_empty() {
+    let mut platform = crate::sourcegraph::group_platform_defines(group).to_vec();
+    platform.push(HOST_BUILD_DEFINE);
+    {
         let last = copy.last_mut().unwrap();
         let ending = &last[last.trim_end_matches(['\r', '\n']).len()..];
         let ending = ending.to_string();

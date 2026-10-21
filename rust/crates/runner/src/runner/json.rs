@@ -183,3 +183,19 @@ pub(crate) fn read_runtime_initializers(path: &str) -> Result<Value> {
     .map_err(text_error)?;
     Ok(initializers)
 }
+
+/// The `scenePath` member of a baseline manifest; empty when it has none.
+pub(crate) fn scene_path_of(path: &str) -> Result<String> {
+    let document = read_document(path)?;
+    let mut scene = String::new();
+    let root = members(&document.json, Target::VALUE, "object").map_err(text_error)?;
+    let at = Target {
+        strukt: "",
+        field: "scenePath",
+    };
+    jsondoc::decode_struct(root, &["scenePath"], |_, member| {
+        jsondoc::set_string(&mut scene, &member.value, at)
+    })
+    .map_err(text_error)?;
+    Ok(scene)
+}

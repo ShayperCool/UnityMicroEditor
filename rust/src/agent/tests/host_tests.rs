@@ -780,14 +780,14 @@ fn stage_takes_the_selected_groups_scripting_defines() {
     let settings = "PlayerSettings:\n  scriptingDefineSymbols:\n    Android: A;B\n    Standalone: C\n    iPhone: D\n  additionalCompilerArguments: {}\n";
     assert_eq!(
         crate::agent::staging::with_standalone_defines(settings, "Android").unwrap(),
-        "PlayerSettings:\n  scriptingDefineSymbols:\n    Android: A;B\n    Standalone: A;B;PLATFORM_ANDROID;UNITY_ANDROID;UNITY_ANDROID_API\n    iPhone: D\n  additionalCompilerArguments: {}\n"
+        "PlayerSettings:\n  scriptingDefineSymbols:\n    Android: A;B\n    Standalone: A;B;PLATFORM_ANDROID;UNITY_ANDROID;UNITY_ANDROID_API;UNITY_MICRO_EDITOR_HOST_BUILD\n    iPhone: D\n  additionalCompilerArguments: {}\n"
     );
     // A project without Standalone symbols gets an entry in key order, and a
     // folded value is copied whole.
     let folded = "  scriptingDefineSymbols:\n    Android: A;\n      B\n    iPhone: D\n  x: 1\n";
     assert_eq!(
         crate::agent::staging::with_standalone_defines(folded, "Android").unwrap(),
-        "  scriptingDefineSymbols:\n    Android: A;\n      B\n    Standalone: A;\n      B;PLATFORM_ANDROID;UNITY_ANDROID;UNITY_ANDROID_API\n    iPhone: D\n  x: 1\n"
+        "  scriptingDefineSymbols:\n    Android: A;\n      B\n    Standalone: A;\n      B;PLATFORM_ANDROID;UNITY_ANDROID;UNITY_ANDROID_API;UNITY_MICRO_EDITOR_HOST_BUILD\n    iPhone: D\n  x: 1\n"
     );
     assert!(crate::agent::staging::with_standalone_defines(settings, "WebGL").is_err());
 }

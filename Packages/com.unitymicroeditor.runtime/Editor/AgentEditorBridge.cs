@@ -401,7 +401,25 @@ namespace UnityMicroEditor.Editor
                 Scene scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
                 string scenePath = scratch + "/Bootstrap.unity";
                 if (!EditorSceneManager.SaveScene(scene, scenePath)) throw new IOException("Cannot save exclusive host bootstrap scene.");
-                var buildArguments = new Dictionary<string, object>(arguments) { ["scenes"] = new List<object> { scenePath }, ["development"] = true };
+                // The game loads the scenes of its Build Settings through
+                // SceneManager by name, path or index. An empty scene of the same
+                // name stands in for each at its build index; the raw session
+                // builds the authored scene into it when the engine loads it.
+                var builtScenes = new List<object> { scenePath };
+                var standIns = new List<object>();
+                EditorBuildSettingsScene[] enabledScenes = EditorBuildSettings.scenes.Where(x => x.enabled).ToArray();
+                for (int index = 1; index < enabledScenes.Length; index++)
+                {
+                    string number = index.ToString(CultureInfo.InvariantCulture), folder = scratch + "/BuildScenes";
+                    if (!AssetDatabase.IsValidFolder(folder) && AssetDatabase.CreateFolder(scratch, "BuildScenes").Length == 0) throw new IOException("Cannot create owned stand-in scene folder.");
+                    if (AssetDatabase.CreateFolder(folder, number).Length == 0) throw new IOException("Cannot create owned stand-in scene folder.");
+                    Scene standIn = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
+                    string standInPath = folder + "/" + number + "/" + Path.GetFileNameWithoutExtension(enabledScenes[index].path) + ".unity";
+                    if (!EditorSceneManager.SaveScene(standIn, standInPath)) throw new IOException("Cannot save a stand-in scene: " + standInPath);
+                    builtScenes.Add(standInPath);
+                    standIns.Add(new Dictionary<string, object> { ["index"] = index, ["path"] = enabledScenes[index].path, ["standIn"] = standInPath });
+                }
+                var buildArguments = new Dictionary<string, object>(arguments) { ["scenes"] = builtScenes, ["development"] = true };
                 PlayerSettings.SetManagedStrippingLevel(NamedBuildTarget.Standalone, ManagedStrippingLevel.Disabled);
                 PlayerSettings.stripEngineCode = false; PlayerSettings.runInBackground = true;
                 // Authored preloads are reconstructed by the raw session.
@@ -412,8 +430,14 @@ namespace UnityMicroEditor.Editor
                 PlayerSettings.SetGraphicsAPIs(BuildTarget.StandaloneLinux64, new[] { GraphicsDeviceType.OpenGLCore });
                 HostExcludedAssemblies = excluded;
                 Dictionary<string, object> result = BuildProject(buildArguments, id);
-                if (AgentEditorJson.Write(sourceProfile) != AgentEditorJson.Write(CaptureHostSourceProfile()))
-                    throw new InvalidDataException("Host runtime sources/configuration changed while BuildPipeline executed.");
+                var afterBuild = CaptureHostSourceProfile();
+                // A project's build callbacks may switch which precompiled
+                // plugins a Player build takes (Odin Inspector swaps in its
+                // NoEditor assemblies); the references after the build are the
+                // Player's. Sources and configuration have to stay as they were.
+                if (AgentEditorJson.Write(WithoutReferences(sourceProfile)) != AgentEditorJson.Write(WithoutReferences(afterBuild)))
+                    throw new InvalidDataException("Host runtime sources/configuration changed while BuildPipeline executed: " + ProfileDifference(sourceProfile, afterBuild));
+                sourceProfile = afterBuild;
                 string player = Text(result, "outputPath");
                 string playerData = Path.Combine(Path.GetDirectoryName(player), Path.GetFileNameWithoutExtension(player) + "_Data");
                 var sourceAssemblies = (Dictionary<string, object>)sourceProfile["assemblies"];
@@ -432,7 +456,7 @@ namespace UnityMicroEditor.Editor
 				ReplaceOwned(sourceProof, AgentEditorJson.Write(sourceProfile));
                 result["sourceBuildProof"] = sourceProof; result["sourceBuildProofSha256"] = HashFile(sourceProof);
                 result["purpose"] = "raw_host"; result["excludedGameAssemblies"] = excluded.OrderBy(x => x, StringComparer.Ordinal).ToArray();
-                result["hostDevelopment"] = true;
+                result["hostDevelopment"] = true; result["buildSceneStandIns"] = standIns.ToArray();
                 result["graphicsApi"] = "OpenGLCore"; result["packageProfile"] = HashFile(Path.Combine(Project, "Packages/manifest.json"));
                 return result;
             }
@@ -504,6 +528,42 @@ namespace UnityMicroEditor.Editor
                 entries[name] = new Dictionary<string, object> { ["name"] = name, ["configuration"] = configuration, ["sources"] = hashes, ["references"] = references };
             }
             return new Dictionary<string, object> { ["assemblies"] = entries };
+        }
+
+        private static Dictionary<string, object> WithoutReferences(Dictionary<string, object> profile)
+        {
+            var assemblies = new Dictionary<string, object>();
+            foreach (var entry in (Dictionary<string, object>)profile["assemblies"])
+            {
+                var copy = new Dictionary<string, object>((Dictionary<string, object>)entry.Value);
+                copy.Remove("references");
+                assemblies[entry.Key] = copy;
+            }
+            return new Dictionary<string, object> { ["assemblies"] = assemblies };
+        }
+
+        // The first assembly and member whose captured value differs, for the error.
+        private static string ProfileDifference(Dictionary<string, object> before, Dictionary<string, object> after)
+        {
+            var first = (Dictionary<string, object>)before["assemblies"];
+            var second = (Dictionary<string, object>)after["assemblies"];
+            foreach (string name in first.Keys.Union(second.Keys).OrderBy(x => x, StringComparer.Ordinal))
+            {
+                if (!first.TryGetValue(name, out object a)) return name + " appeared";
+                if (!second.TryGetValue(name, out object b)) return name + " disappeared";
+                var x = (Dictionary<string, object>)a; var y = (Dictionary<string, object>)b;
+                foreach (string part in new[] { "configuration", "sources", "references" })
+                {
+                    var p = (Dictionary<string, object>)x[part]; var q = (Dictionary<string, object>)y[part];
+                    foreach (string key in p.Keys.Union(q.Keys).OrderBy(k => k, StringComparer.Ordinal))
+                    {
+                        string left = p.TryGetValue(key, out object l) ? AgentEditorJson.Write(l) : "<absent>";
+                        string right = q.TryGetValue(key, out object r) ? AgentEditorJson.Write(r) : "<absent>";
+                        if (left != right) return name + " " + part + " " + key + ": " + Bounded(left, 400) + " -> " + Bounded(right, 400);
+                    }
+                }
+            }
+            return "no member differs";
         }
 
         private sealed class PreloadedIdentity

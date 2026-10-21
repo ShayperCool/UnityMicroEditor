@@ -119,8 +119,8 @@ fn read_builtin_resource_object<R: ReadAt + ?Sized>(
     let mut r = Reader::new(&metadata);
     let version = req(
         r.cstring_bytes(64),
-        |version| *version == b"6000.6.3f1",
-        "builtin resource engine version differs from the pinned profile",
+        |version| std::str::from_utf8(version).is_ok_and(crate::release::is_supported),
+        "builtin resource engine version is not a supported release",
     )?;
     req(
         r.u32(),

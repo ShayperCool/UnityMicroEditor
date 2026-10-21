@@ -352,7 +352,12 @@ fn source_plugin_v2_v3_linux_and_constraints() {
     ] {
         let (_directory, root) = temp();
         let path = write_graph_file(&root, "Plugin.dll.meta", metadata);
-        let plugin = read_source_plugin(path.strip_suffix(".meta").unwrap(), &defines).unwrap();
+        let plugin = read_source_plugin(
+            path.strip_suffix(".meta").unwrap(),
+            &defines,
+            super::LINUX_PLAYER,
+        )
+        .unwrap();
         assert_eq!(
             (plugin.enabled, plugin.explicit),
             (enabled, explicit),
@@ -1007,7 +1012,11 @@ fn any_platform_is_the_unnamed_any_entry_alone() {
         "PluginImporter:\n  platformData:\n  - first:\n      '': Any\n    second:\n      enabled: 0\n      settings:\n        Exclude Editor: 1\n        Exclude Linux64: 0\n  - first:\n      Any: \n    second:\n      enabled: 1\n      settings: {}\n  - first:\n      Editor: Editor\n    second:\n      enabled: 0\n      settings: {}\n  - first:\n      Standalone: Linux64\n    second:\n      enabled: 1\n      settings: {}\n",
     );
     assert!(!options::read_editor_plugin(&path, &[]).unwrap().enabled);
-    assert!(options::read_source_plugin(&path, &[]).unwrap().enabled);
+    assert!(
+        options::read_source_plugin(&path, &[], super::LINUX_PLAYER)
+            .unwrap()
+            .enabled
+    );
     // Collections' ILSupport: only the older `Any:` entry, which then counts.
     let legacy = write_graph_file(&project, "Packages/p/ILSupport.dll", "dll");
     write_graph_file(
@@ -1016,7 +1025,11 @@ fn any_platform_is_the_unnamed_any_entry_alone() {
         "PluginImporter:\n  platformData:\n  - first:\n      Any: \n    second:\n      enabled: 1\n      settings: {}\n  - first:\n      Editor: Editor\n    second:\n      enabled: 0\n      settings: {}\n",
     );
     assert!(options::read_editor_plugin(&legacy, &[]).unwrap().enabled);
-    assert!(options::read_source_plugin(&legacy, &[]).unwrap().enabled);
+    assert!(
+        options::read_source_plugin(&legacy, &[], super::LINUX_PLAYER)
+            .unwrap()
+            .enabled
+    );
 }
 
 #[test]

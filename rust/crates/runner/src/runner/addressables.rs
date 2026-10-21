@@ -40,6 +40,43 @@ pub struct Discovery {
     pub sources: Vec<String>,
 }
 
+/// A scene of the project's Build Settings, which a Player loads through
+/// `SceneManager` by its name, path or build index.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct BuildSceneRoute {
+    /// Its build index: the position among the enabled scenes.
+    pub index: i64,
+    pub guid: String,
+    #[serde(skip)]
+    pub path: String,
+}
+
+/// The enabled scenes of `project`'s Build Settings, in build order.
+pub fn build_scenes(project: &str) -> Result<Vec<BuildSceneRoute>> {
+    let path = sysutil::join(&[project, "ProjectSettings/EditorBuildSettings.asset"]);
+    let Ok(data) = std::fs::read(&path) else {
+        return Ok(Vec::new());
+    };
+    let settings = first_object(&data).map_err(|e| wrap(&path, e))?;
+    let mut scenes = Vec::new();
+    for scene in list(field(&settings, "m_Scenes")) {
+        let scene = as_map(scene);
+        let enabled = field(scene, "enabled");
+        if !(enabled.as_i64() == Some(1)
+            || enabled.as_str() == Some("1")
+            || enabled.as_bool() == Some(true))
+        {
+            continue;
+        }
+        scenes.push(BuildSceneRoute {
+            index: scenes.len() as i64,
+            guid: text(field(scene, "guid")).to_ascii_lowercase(),
+            path: text(field(scene, "path")),
+        });
+    }
+    Ok(scenes)
+}
+
 /// Reads the Addressables groups of `project`. A project without Addressables
 /// settings yields an empty discovery.
 pub fn discover(project: &str) -> Result<Discovery> {
@@ -336,6 +373,35 @@ mod tests {
     }
     fn guid(digit: char) -> String {
         digit.to_string().repeat(32)
+    }
+
+    #[test]
+    fn build_scenes_are_the_enabled_ones_in_build_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_str().unwrap();
+        assert!(build_scenes(root).unwrap().is_empty());
+        std::fs::create_dir_all(format!("{root}/ProjectSettings")).unwrap();
+        std::fs::write(
+            format!("{root}/ProjectSettings/EditorBuildSettings.asset"),
+            format!(
+                "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!1045 &1\nEditorBuildSettings:\n  m_ObjectHideFlags: 0\n  serializedVersion: 2\n  m_Scenes:\n  - enabled: 1\n    path: Assets/Scenes/Loading.unity\n    guid: {}\n  - enabled: 0\n    path: Assets/Scenes/Old.unity\n    guid: {}\n  - enabled: 1\n    path: Assets/Scenes/Main.unity\n    guid: {}\n  m_configObjects: {{}}\n",
+                guid('a'),
+                guid('b'),
+                guid('c')
+            ),
+        )
+        .unwrap();
+        let scenes = build_scenes(root).unwrap();
+        assert_eq!(
+            scenes
+                .iter()
+                .map(|scene| (scene.index, scene.guid.clone(), scene.path.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (0, guid('a'), "Assets/Scenes/Loading.unity"),
+                (1, guid('c'), "Assets/Scenes/Main.unity")
+            ]
+        );
     }
 
     #[test]

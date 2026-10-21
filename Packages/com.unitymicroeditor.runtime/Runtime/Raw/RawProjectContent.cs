@@ -16,6 +16,13 @@ namespace UnityMicroEditor.Raw
             public string project;
             public Route[] scenes;
             public Address[] addressables;
+            public BuildScene[] buildScenes;
+        }
+        /// <summary>A scene of the project's Build Settings; the host has an empty scene of its name at its build index.</summary>
+        [Serializable] private sealed class BuildScene
+        {
+            public int index;
+            public string guid;
         }
         [Serializable] private sealed class Route
         {
@@ -39,6 +46,10 @@ namespace UnityMicroEditor.Raw
         private static readonly HashSet<Scene> adopted = new HashSet<Scene>();
         private static readonly Dictionary<string, Route> routes = new Dictionary<string, Route>(StringComparer.Ordinal);
         private static readonly Dictionary<string, Scene> loaded = new Dictionary<string, Scene>(StringComparer.Ordinal);
+        // The authored scene of each build index the host stands in for.
+        private static readonly Dictionary<int, string> buildScenes = new Dictionary<int, string>();
+        // Where the host build keeps its stand-in scenes.
+        private const string StandInFolder = "/BuildScenes/";
 
         internal static void Initialize(string path, RawSceneLoader.LiveSession owner, string project)
         {
@@ -57,10 +68,17 @@ namespace UnityMicroEditor.Raw
             foreach (Address address in value.addressables ?? Array.Empty<Address>())
                 if (address == null || !Hex(address.guid, 32) || string.IsNullOrEmpty(address.address) || string.IsNullOrEmpty(address.path)
                     || address.scene && !validated.ContainsKey(address.guid)) throw new InvalidDataException("Invalid addressable content route.");
-            routes.Clear(); loaded.Clear(); adopted.Clear();
+            var standIns = new Dictionary<int, string>();
+            foreach (BuildScene scene in value.buildScenes ?? Array.Empty<BuildScene>())
+                if (scene == null || scene.index < 1 || !validated.ContainsKey(scene.guid ?? "") || standIns.ContainsKey(scene.index))
+                    throw new InvalidDataException("Invalid build scene route.");
+                else standIns.Add(scene.index, scene.guid);
+            routes.Clear(); loaded.Clear(); adopted.Clear(); buildScenes.Clear();
             foreach (var entry in validated) routes.Add(entry.Key, entry.Value);
+            foreach (var entry in standIns) buildScenes.Add(entry.Key, entry.Value);
             session = owner;
             SceneManager.sceneUnloaded += ReleaseAdopted;
+            SceneManager.sceneLoaded += BuildStandIn;
 #if UNITY_MICRO_EDITOR_ADDRESSABLES
             try { RawAddressables.Install(value.addressables ?? Array.Empty<Address>()); }
             catch { Release(owner); throw; }
@@ -74,6 +92,20 @@ namespace UnityMicroEditor.Raw
                 throw new InvalidOperationException("Scene is not a registered raw content scene: " + guid);
             session.LoadAdditive(route.manifest, route.sha256, target);
             adopted.Add(target);
+        }
+
+        // The engine loaded the host's stand-in for a Build Settings scene, as
+        // the game asked SceneManager: the authored scene is built into it.
+        private static void BuildStandIn(Scene scene, LoadSceneMode mode)
+        {
+            if (session == null || !buildScenes.TryGetValue(scene.buildIndex, out string guid)
+                || scene.path.IndexOf(StandInFolder, StringComparison.Ordinal) < 0 || adopted.Contains(scene)) return;
+            try { LoadSceneInto(guid, scene); }
+            catch (Exception failure)
+            {
+                Debug.LogError("[UnityMicroEditor] Build Settings scene " + scene.name + " could not be built from its source.");
+                Debug.LogException(failure);
+            }
         }
 
         private static void ReleaseAdopted(Scene scene)
@@ -130,7 +162,8 @@ namespace UnityMicroEditor.Raw
             RawAddressables.Uninstall();
 #endif
             SceneManager.sceneUnloaded -= ReleaseAdopted;
-            session = null; routes.Clear(); loaded.Clear(); adopted.Clear();
+            SceneManager.sceneLoaded -= BuildStandIn;
+            session = null; routes.Clear(); loaded.Clear(); adopted.Clear(); buildScenes.Clear();
         }
 
         internal static void ForgetLoadedScenes(RawSceneLoader.LiveSession owner)

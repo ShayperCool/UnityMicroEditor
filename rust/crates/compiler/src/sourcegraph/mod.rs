@@ -295,7 +295,51 @@ fn linux_platform(key: &str) -> bool {
 
 /// Where a project records the build target group whose scripting define
 /// symbols its Player is compiled with.
-pub const SCRIPTING_DEFINES_FILE: &str = "Library/UnityMicroEditor/scripting-defines.json";
+pub const COMPILE_FOR_FILE: &str = "Library/UnityMicroEditor/compile-for.json";
+
+/// The platform the Player's code is compiled for: its name in asmdef
+/// platform lists and its entry in a plugin's `PluginImporter` settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CodePlatform {
+    /// As `includePlatforms` names it.
+    pub asmdef: &'static str,
+    /// The `first` entry of a plugin's platform data: group and target.
+    pub plugin_group: &'static str,
+    pub plugin_target: &'static str,
+}
+
+/// The Linux Standalone Player.
+pub const LINUX_PLAYER: CodePlatform = CodePlatform {
+    asmdef: "LinuxStandalone64",
+    plugin_group: "Standalone",
+    plugin_target: "Linux64",
+};
+
+/// The platform whose assemblies and plugins a project's Player takes: the
+/// Linux Player, or the device of the group it is compiled for
+/// (`compile_for_group`). A game written for a device often keeps its main
+/// assembly to that platform alone.
+pub fn code_platform(project: &str) -> Result<CodePlatform> {
+    Ok(match compile_for_group(project)?.as_deref() {
+        None => LINUX_PLAYER,
+        Some("Android") => CodePlatform {
+            asmdef: "Android",
+            plugin_group: "Android",
+            plugin_target: "Android",
+        },
+        Some("iPhone") => CodePlatform {
+            asmdef: "iOS",
+            plugin_group: "iPhone",
+            plugin_target: "iOS",
+        },
+        Some("WebGL") => CodePlatform {
+            asmdef: "WebGL",
+            plugin_group: "WebGL",
+            plugin_target: "WebGL",
+        },
+        Some(other) => bail!("compiling for the {other} build target group is not supported"),
+    })
+}
 
 /// The platform symbols the Editor defines for a build target group, which
 /// a game written for that platform alone may need to compile. Only the
@@ -318,8 +362,8 @@ pub fn group_platform_defines(group: &str) -> &'static [&'static str] {
 /// (`group_platform_defines`) included, as in the Editor's Play mode. The
 /// Player stays a Linux one: code that calls the device's native plugins
 /// under those symbols fails at run time unless it also checks for the Editor.
-pub fn scripting_defines_group(project: &str) -> Result<Option<String>> {
-    let path = sysutil::join(&[project, SCRIPTING_DEFINES_FILE]);
+pub fn compile_for_group(project: &str) -> Result<Option<String>> {
+    let path = sysutil::join(&[project, COMPILE_FOR_FILE]);
     let content = match read_agent_file(&path, 64 << 10) {
         Ok(content) => content,
         Err(error) if is_not_exist(&error) => return Ok(None),
@@ -363,7 +407,7 @@ pub fn read_source_settings(project: &str) -> Result<SourceSettings> {
     }
     settings.input_handler = int(number(data.get("activeInputHandler")));
     settings.allow_unsafe = number(data.get("allowUnsafeCode")) != 0.0;
-    let group = scripting_defines_group(project)?;
+    let group = compile_for_group(project)?;
     let defines = project::value::object(data.get("scriptingDefineSymbols"));
     let selected = defines.iter().filter(|(platform, _)| match &group {
         Some(group) => platform.as_str() == group,
@@ -438,6 +482,7 @@ pub fn build_source_graph(
     } else {
         project::lexpath::abs(&sysutil::eval_symlinks(&options.project)?)?
     };
+    let platform = code_platform(&project)?;
     let (Some(profile), Some(packages)) = (&options.profile, &options.packages) else {
         bail!(MISMATCH);
     };
@@ -682,7 +727,7 @@ pub fn build_source_graph(
                     }
                     let plugin = match options.editor_domain {
                         true => read_editor_plugin(path, &base)?,
-                        false => read_source_plugin(path, &base)?,
+                        false => read_source_plugin(path, &base, platform)?,
                     };
                     if plugin.enabled && managed_plugin(path) {
                         let name = sysutil::base(path);
@@ -753,11 +798,17 @@ pub fn build_source_graph(
                     && !has(&definition.exclude_platforms, "Editor")
             }
             false => {
-                (definition.include_platforms.is_empty()
-                    || has(&definition.include_platforms, "LinuxStandalone64")
-                    || has(&definition.include_platforms, "Standalone"))
-                    && !has(&definition.exclude_platforms, "LinuxStandalone64")
-                    && !has(&definition.exclude_platforms, "Standalone")
+                if platform == LINUX_PLAYER {
+                    (definition.include_platforms.is_empty()
+                        || has(&definition.include_platforms, "LinuxStandalone64")
+                        || has(&definition.include_platforms, "Standalone"))
+                        && !has(&definition.exclude_platforms, "LinuxStandalone64")
+                        && !has(&definition.exclude_platforms, "Standalone")
+                } else {
+                    (definition.include_platforms.is_empty()
+                        || has(&definition.include_platforms, platform.asmdef))
+                        && !has(&definition.exclude_platforms, platform.asmdef)
+                }
             }
         };
         // The Editor compiles the test framework and what refers to it, but

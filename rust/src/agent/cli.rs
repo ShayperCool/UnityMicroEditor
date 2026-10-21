@@ -168,8 +168,8 @@ pub fn run_mcp_cli(arguments: Vec<String>) -> Result<()> {
 
 /// Records the build target group whose scripting define symbols the
 /// project's Player is compiled with; `Standalone` removes the record.
-fn select_scripting_defines(project: &str, group: &str) -> Result<()> {
-    let path = join(&[project, crate::sourcegraph::SCRIPTING_DEFINES_FILE]);
+fn select_compile_for(project: &str, group: &str) -> Result<()> {
+    let path = join(&[project, crate::sourcegraph::COMPILE_FOR_FILE]);
     if group == "Standalone" {
         return match std::fs::remove_file(&path) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
@@ -178,7 +178,7 @@ fn select_scripting_defines(project: &str, group: &str) -> Result<()> {
             _ => Ok(()),
         };
     }
-    if crate::sourcegraph::scripting_defines_group(project)?.as_deref() == Some(group) {
+    if crate::sourcegraph::compile_for_group(project)?.as_deref() == Some(group) {
         return Ok(());
     }
     crate::util::agent_canonical(&path)?;
@@ -220,7 +220,7 @@ pub fn run_auto_prepare_cli(arguments: Vec<String>) -> Result<()> {
         "build a new host instead of reusing the newest one of an earlier preparation",
     );
     flags.string(
-        "scripting-defines-from",
+        "compile-for",
         "",
         "compile the Player with the scripting define symbols of this build target group (Android, iPhone, ...; Standalone resets); remembered for the project",
     );
@@ -230,9 +230,9 @@ pub fn run_auto_prepare_cli(arguments: Vec<String>) -> Result<()> {
         bail!("auto-prepare requires --project and --scene");
     }
     let project = eval_symlinks(&lexpath::abs(&project)?)?;
-    let group = flags.get_string("scripting-defines-from");
+    let group = flags.get_string("compile-for");
     if !group.is_empty() {
-        select_scripting_defines(&project, &group)?;
+        select_compile_for(&project, &group)?;
     }
     let editor = eval_symlinks(&crate::util::project_unity_editor(
         &flags.get_string("editor"),
