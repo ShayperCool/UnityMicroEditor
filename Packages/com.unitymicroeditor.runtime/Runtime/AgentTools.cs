@@ -175,7 +175,7 @@ namespace UnityMicroEditor
 
         private static void Discover()
         {
-            var assemblies = UnityEngine.Assemblies.CurrentAssemblies.GetLoadedAssemblies();
+            var assemblies = EngineCompat.LoadedAssemblies();
             var selected = new List<Assembly>(); var identities = new List<string>(); string runtimeName = typeof(AgentToolAttribute).Assembly.GetName().Name;
             foreach (Assembly assembly in assemblies)
             {

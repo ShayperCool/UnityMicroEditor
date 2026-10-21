@@ -293,6 +293,52 @@ fn linux_platform(key: &str) -> bool {
     matches!(key, "Standalone" | "LinuxStandalone64" | "1")
 }
 
+/// Where a project records the build target group whose scripting define
+/// symbols its Player is compiled with.
+pub const SCRIPTING_DEFINES_FILE: &str = "Library/UnityMicroEditor/scripting-defines.json";
+
+/// The platform symbols the Editor defines for a build target group, which
+/// a game written for that platform alone may need to compile. Only the
+/// symbols a Linux Player can stand for; the engine stays a Linux one.
+pub fn group_platform_defines(group: &str) -> &'static [&'static str] {
+    match group {
+        "Android" => &["PLATFORM_ANDROID", "UNITY_ANDROID", "UNITY_ANDROID_API"],
+        "iPhone" => &["PLATFORM_IOS", "UNITY_IOS", "UNITY_IPHONE"],
+        "WebGL" => &["PLATFORM_WEBGL", "UNITY_WEBGL"],
+        _ => &[],
+    }
+}
+
+/// The build target group (as `ProjectSettings.asset` names it, `Android`,
+/// `iPhone`, ...) whose scripting define symbols the project's Player is
+/// compiled with instead of the Standalone ones; `None` for Standalone.
+///
+/// A mobile game is often edited with its device as the active target, and
+/// its code compiles only with that group's symbols, its platform symbols
+/// (`group_platform_defines`) included, as in the Editor's Play mode. The
+/// Player stays a Linux one: code that calls the device's native plugins
+/// under those symbols fails at run time unless it also checks for the Editor.
+pub fn scripting_defines_group(project: &str) -> Result<Option<String>> {
+    let path = sysutil::join(&[project, SCRIPTING_DEFINES_FILE]);
+    let content = match read_agent_file(&path, 64 << 10) {
+        Ok(content) => content,
+        Err(error) if is_not_exist(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Selection {
+        schema_version: i64,
+        group: String,
+    }
+    let selection: Selection =
+        serde_json::from_slice(&content).map_err(|error| anyhow!("{path}: {error}"))?;
+    if selection.schema_version != 1 || !symbol(&selection.group) {
+        bail!("{path} names no valid build target group");
+    }
+    Ok(Some(selection.group))
+}
+
 pub fn read_source_settings(project: &str) -> Result<SourceSettings> {
     let mut settings = SourceSettings::default();
     let path = sysutil::join(&[project, "ProjectSettings/ProjectSettings.asset"]);
@@ -317,7 +363,18 @@ pub fn read_source_settings(project: &str) -> Result<SourceSettings> {
     }
     settings.input_handler = int(number(data.get("activeInputHandler")));
     settings.allow_unsafe = number(data.get("allowUnsafeCode")) != 0.0;
-    for (_, value) in platforms("scriptingDefineSymbols") {
+    let group = scripting_defines_group(project)?;
+    let defines = project::value::object(data.get("scriptingDefineSymbols"));
+    let selected = defines.iter().filter(|(platform, _)| match &group {
+        Some(group) => platform.as_str() == group,
+        None => linux_platform(platform),
+    });
+    if let Some(group) = &group
+        && !defines.iter().any(|(platform, _)| platform == group)
+    {
+        bail!("the project's PlayerSettings have no scripting define symbols for {group}");
+    }
+    for (_, value) in selected {
         if let Value::String(text) = value {
             settings.defines.append(
                 text.split([';', ','])
@@ -325,6 +382,13 @@ pub fn read_source_settings(project: &str) -> Result<SourceSettings> {
                     .map(String::from),
             );
         }
+    }
+    if let Some(group) = &group {
+        settings.defines.append(
+            group_platform_defines(group)
+                .iter()
+                .map(|define| define.to_string()),
+        );
     }
     for (_, value) in platforms("additionalCompilerArguments") {
         for argument in project::value::array(value) {

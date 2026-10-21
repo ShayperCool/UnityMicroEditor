@@ -119,8 +119,14 @@ pub fn compile_bridge(
     let addressables = ["Unity.Addressables.dll", "Unity.ResourceManager.dll"]
         .iter()
         .all(|name| !sys::absent(&join(&[managed, name])));
+    // The Editor's version symbols, which the bridge selects engine APIs by.
+    let versions = crate::release::version_defines(&crate::release::installed_version(editor)?)?;
     let mut input =
         format!("unity-play-managed-bridge-v2\0{editor}\0{addressables}\0").into_bytes();
+    for define in &versions {
+        input.extend_from_slice(define.as_bytes());
+        input.push(0);
+    }
     let mut snapshots = Vec::new();
     for path in &sources {
         let contents = sys::read(path)?;
@@ -171,6 +177,7 @@ pub fn compile_bridge(
         if addressables {
             arguments.push("-define:UNITY_MICRO_EDITOR_ADDRESSABLES".into());
         }
+        arguments.extend(versions.iter().map(|define| format!("-define:{define}")));
         arguments.push(format!("-out:{dll}"));
         let mut seen = BTreeSet::new();
         for pattern in [

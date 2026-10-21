@@ -93,7 +93,7 @@ namespace UnityMicroEditor
                 foreach (GameObject root in scene.GetRootGameObjects()) AddLiveRoot(root, roots, seen);
             }
             if (Application.isPlaying)
-                foreach (GameObject value in Object.FindObjectsByType<GameObject>(FindObjectsInactive.Include))
+                foreach (GameObject value in EngineCompat.FindAll<GameObject>())
                 {
                     // SceneManager.sceneCount omits the persistent scene. The
                     // public object query also finds its inactive children.

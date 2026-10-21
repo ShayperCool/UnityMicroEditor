@@ -269,6 +269,7 @@ pub fn sync_staging(ctx: &Context, source: &str, editor: &str) -> Result<(String
     normalize_staged_package_paths(source, &stage)?;
     super::install_agent_package(&stage)?;
     pin_staged_packages(ctx, source, editor, &stage)?;
+    stage_scripting_defines(source, &stage)?;
     let staging_marker = join(&[&stage, STAGE_MARKER]);
     if snapshot.files.contains_key(STAGE_MARKER) {
         fs::remove_file(&staging_marker)
@@ -331,6 +332,98 @@ fn pin_staged_packages(ctx: &Context, source: &str, editor: &str, stage: &str) -
     encoded.push(b'\n');
     fs::write(&path, encoded).map_err(|error| sysutil::Error::os("open", &path, &error))?;
     Ok(())
+}
+
+/// Gives the stage's Linux Standalone group the scripting define symbols of
+/// the group the project's Player is compiled with
+/// (`sourcegraph::scripting_defines_group`), so that its Editor builds the
+/// host with the symbols the tool compiles with. The entry of that group is
+/// copied as written; the copy keeps the source's timestamp, so an unchanged
+/// selection does not make Unity reimport the settings.
+fn stage_scripting_defines(source: &str, stage: &str) -> Result<()> {
+    let Some(group) = crate::sourcegraph::scripting_defines_group(source)? else {
+        return Ok(());
+    };
+    let from = join(&[source, "ProjectSettings/ProjectSettings.asset"]);
+    let path = join(&[stage, "ProjectSettings/ProjectSettings.asset"]);
+    let text = String::from_utf8(read_agent_file(&from, 32 << 20)?)
+        .map_err(|_| anyhow!("{from} is not UTF-8"))?;
+    let staged = with_standalone_defines(&text, &group)?;
+    fs::write(&path, staged).map_err(|error| sysutil::Error::os("open", &path, &error))?;
+    let modified = fs::metadata(&from)
+        .and_then(|info| info.modified())
+        .map_err(|error| sysutil::Error::os("stat", &from, &error))?;
+    fs::File::open(&path)
+        .and_then(|file| file.set_modified(modified))
+        .map_err(|error| sysutil::Error::os("utimens", &path, &error))?;
+    Ok(())
+}
+
+/// `ProjectSettings.asset` with the `Standalone` entry of
+/// `scriptingDefineSymbols` replaced by a copy of `group`'s entry.
+pub(crate) fn with_standalone_defines(text: &str, group: &str) -> Result<String> {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let start = lines
+        .iter()
+        .position(|line| line.trim_end() == "  scriptingDefineSymbols:")
+        .ok_or_else(|| anyhow!("PlayerSettings have no scripting define symbols"))?;
+    // The map's entries are indented by four spaces; a folded value goes on
+    // with deeper lines.
+    let mut entries: Vec<(String, Vec<&str>)> = Vec::new();
+    let mut end = start + 1;
+    while end < lines.len() {
+        let line = lines[end];
+        if let Some(entry) = line.strip_prefix("    ")
+            && !entry.starts_with(' ')
+        {
+            let key = entry.split(':').next().unwrap_or_default().to_string();
+            entries.push((key, vec![line]));
+        } else if line.starts_with("      ") && !entries.is_empty() {
+            entries.last_mut().unwrap().1.push(line);
+        } else {
+            break;
+        }
+        end += 1;
+    }
+    let Some((_, chosen)) = entries.iter().find(|(key, _)| key == group) else {
+        return Err(anyhow!(
+            "the project's PlayerSettings have no scripting define symbols for {group}"
+        ));
+    };
+    let mut copy: Vec<String> = chosen.iter().map(|line| line.to_string()).collect();
+    copy[0] = format!("    Standalone{}", &copy[0][4 + group.len()..]);
+    let platform = crate::sourcegraph::group_platform_defines(group);
+    if !platform.is_empty() {
+        let last = copy.last_mut().unwrap();
+        let ending = &last[last.trim_end_matches(['\r', '\n']).len()..];
+        let ending = ending.to_string();
+        let value = last.trim_end_matches(['\r', '\n']).to_string();
+        let separator = if value.trim_end().ends_with(':') {
+            " "
+        } else {
+            ";"
+        };
+        *last = format!("{value}{separator}{}{ending}", platform.join(";"));
+    }
+    let mut result: String = lines[..=start].concat();
+    let mut placed = false;
+    for (key, entry) in &entries {
+        if key == "Standalone" {
+            result.extend(copy.iter().map(String::as_str));
+            placed = true;
+        } else {
+            if !placed && key.as_str() > "Standalone" {
+                result.extend(copy.iter().map(String::as_str));
+                placed = true;
+            }
+            result.extend(entry.iter().copied());
+        }
+    }
+    if !placed {
+        result.extend(copy.iter().map(String::as_str));
+    }
+    result.push_str(&lines[end..].concat());
+    Ok(result)
 }
 
 /// Removes what the staged `relative` directory holds beyond the snapshot.

@@ -166,6 +166,35 @@ pub fn run_mcp_cli(arguments: Vec<String>) -> Result<()> {
     )
 }
 
+/// Records the build target group whose scripting define symbols the
+/// project's Player is compiled with; `Standalone` removes the record.
+fn select_scripting_defines(project: &str, group: &str) -> Result<()> {
+    let path = join(&[project, crate::sourcegraph::SCRIPTING_DEFINES_FILE]);
+    if group == "Standalone" {
+        return match std::fs::remove_file(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                Err(anyhow!("remove {path}: {error}"))
+            }
+            _ => Ok(()),
+        };
+    }
+    if crate::sourcegraph::scripting_defines_group(project)?.as_deref() == Some(group) {
+        return Ok(());
+    }
+    crate::util::agent_canonical(&path)?;
+    sysutil::mkdir_all(&sysutil::dir(&path))?;
+    atomic_json(
+        &path,
+        &serde_json::json!({"schemaVersion": 1, "group": group}),
+    )?;
+    // Refuse a group the settings do not name before anything is prepared.
+    if let Err(error) = crate::sourcegraph::read_source_settings(project) {
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// The `auto-prepare` command.
 pub fn run_auto_prepare_cli(arguments: Vec<String>) -> Result<()> {
     let mut flags = FlagSet::new("auto-prepare");
@@ -190,12 +219,21 @@ pub fn run_auto_prepare_cli(arguments: Vec<String>) -> Result<()> {
         false,
         "build a new host instead of reusing the newest one of an earlier preparation",
     );
+    flags.string(
+        "scripting-defines-from",
+        "",
+        "compile the Player with the scripting define symbols of this build target group (Android, iPhone, ...; Standalone resets); remembered for the project",
+    );
     flags.parse(arguments)?;
     let (project, scene) = (flags.get_string("project"), flags.get_string("scene"));
     if !flags.args().is_empty() || project.is_empty() || scene.is_empty() {
         bail!("auto-prepare requires --project and --scene");
     }
     let project = eval_symlinks(&lexpath::abs(&project)?)?;
+    let group = flags.get_string("scripting-defines-from");
+    if !group.is_empty() {
+        select_scripting_defines(&project, &group)?;
+    }
     let editor = eval_symlinks(&crate::util::project_unity_editor(
         &flags.get_string("editor"),
         flags.is_set("editor"),

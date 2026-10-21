@@ -56,7 +56,7 @@ namespace UnityMicroEditor.Raw
             {
                 string fullPath = AssetPath(manifest, path);
                 if (Path.GetExtension(fullPath) != ".dll") throw new InvalidDataException("Script assembly is not a DLL: " + path);
-                UnityEngine.Assemblies.CurrentAssemblies.LoadFromPath(fullPath);
+                EngineCompat.LoadFromPath(fullPath);
             }
         }
 

@@ -193,7 +193,7 @@ namespace UnityMicroEditor
         private static void SetField(Type type, object target, string name, object value)
         { FieldInfo field = type.GetField(name, BindingFlags.Public | BindingFlags.Instance); if (field == null || field.IsInitOnly) throw new InvalidOperationException("Public package state field is unavailable: " + name); field.SetValue(target, value); }
         internal static Type PackageType(string fullName, string assemblyName)
-        { foreach (Assembly assembly in UnityEngine.Assemblies.CurrentAssemblies.GetLoadedAssemblies()) if (assembly.GetName().Name == assemblyName) return assembly.GetType(fullName, false); return null; }
+        { foreach (Assembly assembly in EngineCompat.LoadedAssemblies()) if (assembly.GetName().Name == assemblyName) return assembly.GetType(fullName, false); return null; }
         private static Type RequirePackage(string name, string assembly)
         { return PackageType(name, assembly) ?? throw new InvalidOperationException("Input action requires the explicit project package assembly " + assembly + ". Legacy Input and OS input injection are unsupported."); }
         private static string Text(Dictionary<string, object> arguments, string name) { return arguments.TryGetValue(name, out object value) ? value as string ?? string.Empty : string.Empty; }

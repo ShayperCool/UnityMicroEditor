@@ -205,7 +205,7 @@ namespace UnityMicroEditor.Raw
                 {
                     Object value = Assets[key];
                     if (value == null) throw new InvalidDataException("Retained native asset was destroyed: " + key);
-                    text.Append(key).Append(':').Append(value.GetEntityId().ToString()).Append('\n');
+                    text.Append(key).Append(':').Append(EngineCompat.Identity(value)).Append('\n');
                 }
                 using (var hash = SHA256.Create()) return RawReloadIdentity.Hex(hash.ComputeHash(Encoding.UTF8.GetBytes(text.ToString())));
             }

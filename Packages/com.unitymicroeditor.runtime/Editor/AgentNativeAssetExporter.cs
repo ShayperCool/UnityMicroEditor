@@ -883,8 +883,13 @@ namespace UnityMicroEditor.Editor
                     {
                         if (component == null) continue;
                         Object current = component;
+#if UNITY_6000_6_OR_NEWER
                         var visited = new HashSet<EntityId>();
                         while (current != null && visited.Add(current.GetEntityId()))
+#else
+                        var visited = new HashSet<int>();
+                        while (current != null && visited.Add(current.GetInstanceID()))
+#endif
                         {
                             if (AssetDatabase.TryGetGUIDAndLocalFileIdentifier(current, out string guid, out long localId)
                                 && guid == probe.targetGuid && localId.ToString(CultureInfo.InvariantCulture) == probe.targetFileId)
