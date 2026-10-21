@@ -17,12 +17,12 @@ embeds `../engine-profile.json`.
 | `yaml`, `cache`, `graph`, `project/` | Unity YAML, the authored source graph, scene revisions and the `Session` that prepares them |
 | `authoring/` | Revision-checked source edits, journals, receipts and undo |
 | `packages/` | Package resolution: manifest, registry and Git download, archive extraction |
-| `runtimeartifact/` | Readers of native artifacts and serialized files; shader extraction |
+| `runtimeartifact/` | Readers of the built-in lighting data of native artifacts |
 | `editorbridge/`, `agentcontrol/` | Client of the Editor mailbox; Player control, journal and routing |
 | `mcp/` | The MCP server over stdio and Streamable HTTP, on the `rmcp` crate |
 | `remote/` | `remote_session`: Player link, H.264 encoding, the viewer page, its WebSocket and WebRTC (`str0m`) transports, the publish command. `native/nvenc` holds the C source that drives the NVIDIA encoder, built by `build.rs` |
 | `lmdb`, `protocol`, `registry` | The stopped-LMDB reader, the import worker wire format, the owned `SourceAssetDB` |
-| `native/` | Native import coordinator: worker, DataStore, adoption and the runtime content cache |
+| `native/` | Native import coordinator: the import worker, the warm scene worker and its project library, DataStore, and the content the Player loads |
 | `compiler/` | Roslyn driver, script type inventory, Netcode post-processing, host staging |
 | `sourcegraph/` | The Player assembly graph derived from `.asmdef`/`.asmref` and the engine profile |
 | `hotreload/` | C# hot reload: builds of the patch builder and the applier, the documents of a code patch, one attempt against the running Player and the code state of a Player process |
@@ -35,7 +35,7 @@ embeds `../engine-profile.json`.
 
 The public commands are `run`, `mcp`, `auto-prepare`, `build-project`,
 `resolve-packages`, `cache-component-defaults`, `project-import`,
-`native-adopt`, `native-environment`, `source-graph`,
+`native-environment`, `source-graph`,
 `compiler-source-prepare`, `compiler-prepare`, `prepare-project`,
 `engine-profile-capture` and `version`. An unknown command prints the usage
 line and exits with status 2.

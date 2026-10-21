@@ -1,4 +1,4 @@
-# Raw scene preparation
+# Scene preparation
 
 The `authoring` module (`rust/src/authoring/`) also performs revision-checked component and prefab source
 edits, including nested/variant create, overrides, apply/revert and unpack. Native
@@ -21,14 +21,20 @@ engine/native-host profile. Rider/Visual Studio packages use Unity's public
 CompilationPipeline for their assembly inventories; our implementation derives
 target ownership and references directly from source.
 
-The `project` module (`rust/src/project/`) prepares a scene from authored `.unity` and `.prefab` files without
-running the Unity Editor or a Player. The existing C# raw
-loader consumes its schema 1 `scene.json` without an adapter.
+## The session
 
-It currently starts from a validated scene manifest and a compatible cached native
-import catalog. The catalog supplies FBX hierarchies, native object identities,
-URP content and the imported asset packs already used by the host. This module
-does not create those packs or replace the Unity import worker.
+The `project` module (`rust/src/project/`) publishes immutable revisions of a
+scene manifest (`scene.json`) without running the Unity Editor or a Player. It
+does not build the scene itself: the scene is written in the Player format by
+Unity's import worker ([NATIVE_IMPORT.md](NATIVE_IMPORT.md#scenes-in-the-player-format)),
+and the session keys that scene by its sources, checks what it is given and
+writes the manifest that names it.
+
+A session starts from a validated baseline manifest (schema 1, `supported`, the
+same project root, a scene under `Assets`) and, optionally, the native catalog
+of the preparation (same schema, engine version and project). The catalog
+declares the package roots that sources may be read from (`sourceRoots`, each
+under `Packages/`) and the hashes of the sources its content was made from.
 
 ```rust
 use unity_micro_editor::project::{Options, Session};
@@ -44,16 +50,77 @@ let prepared = session.prepare(&output_root)?;
 // prepared.manifest points to a new immutable revisions/<id>/scene.json.
 ```
 
-The caller compiles C#, owns the native importer cache, sends the prepared revision
-to the Player, and publishes its current revision after successful runtime loading.
-`Session::set_managed_bindings` updates DLL paths, script types and runtime initializers after
-a verified compilation. Native source changes return `NeedsImportError` before
-publishing a scene. After importing and adapting the changed source, the caller
-can supply a `NativeReplacement` to `Session::replace_native_content`. The session verifies
-the source and metadata hashes, exact existing object IDs/types, runtime file and
-resource hashes, then publishes its own `nativeContentFiles` overlay. It leaves
-the original manifest and catalog unchanged. Resource mounting belongs to the
-caller. Previously accepted files are checked again before each publication.
+`Options::scene` selects another authored scene on the same baseline, and
+`Options::extra_assets` names the prefabs the game asks for by address, which
+are written beside the scene.
+
+## What `prepare` does
+
+`Session::prepare` (`rust/src/project/session.rs`):
+
+1. Checks the retained built-in shaders the baseline names, indexes the GUIDs of
+   the project's `.meta` files and hashes every source the baseline lists in
+   `sourceDependencies`. A source the catalog recorded with another hash is a
+   `NeedsImportError`.
+2. Calls `native_scene_over` (`rust/src/project/native_scene.rs`). It follows the
+   GUIDs of the scene, the render pipeline asset, the preloaded assets, the
+   addressed prefabs and every text asset they reach, and makes each file and its
+   `.meta` a dependency of the revision. The hash of all of them is the scene's
+   key. When the session does not hold a written scene for that key, it returns
+   `NeedsNativeScene`. Otherwise it takes the written scene's content files and,
+   through their references, the published shaders they need; a shader whose
+   published file is missing or was made from another source, `.meta` or
+   ingredient is a `NeedsImportError`. Every content file is checked: an
+   absolute, clean, non-symlinked path outside the Editor's own `Library` (the
+   tool's `Library/UnityMicroEditor` is allowed), with the recorded SHA-256.
+3. Fills the manifest fields: `nativeScene` (the scene file, its hash, its
+   external files in order and the aliases of the render pipeline asset, the
+   preloaded assets and the addressed prefab roots), `nativeContentFiles`, and
+   empty `objects`, `assets`, `importedAssetBindings`, `importedAssetPacks` and
+   `renderPipelineGlobalSettings`. The manifest holds no object records.
+4. `publish_revision` writes `contentHash` (the SHA-256 of the dependency list),
+   `sourceDependencies`, `ignoredPrefabOverrideDiagnostics`, `projectRoot`,
+   `requiresEditor: false` and `requiresLibrary: false`. It checks that no file
+   the preparation read changed meanwhile (`source changed during preparation,
+   retry`). A manifest that would equal the one published last but for its
+   revision id is that revision again, and nothing is written. Otherwise it
+   writes `revisions/<random id>/scene.json` as a new file.
+
+The caller resolves the two errors and prepares again. The runner's
+`NativeProjectImporter::prepare` (`rust/src/native/importer.rs`) has the scene
+worker write the scene for `NeedsNativeScene` and hands it over with
+`Session::set_native_scene`; for `NeedsImportError` it builds the shader and
+hands it over with `Session::replace_native_content`, which checks the source
+and metadata hashes, that the objects are shaders with valid local IDs, the
+file's hash and that the shaders' dependencies form no cycle. Any other source
+named by `NeedsImportError` is refused: the session builds only shaders. The
+original baseline and catalog are not changed.
+
+The caller compiles C#, sends the prepared revision to the Player, and publishes
+its current revision after successful runtime loading.
+`Session::set_managed_bindings` updates DLL paths, script types and runtime
+initializers after a verified compilation.
+
+## Caches
+
+The first preparation indexes metadata and hashes the source closure. Later
+preparations retain that index and verify file identity using device, inode, size,
+mtime and ctime. Text sources stay in memory. Metadata and directory watcher events
+must call `Session::invalidate`. Changed source files are reread, and all observed identities
+are checked again before writing a revision. The input project's `Library` is never
+read. Cached package sources must be declared in `catalog.sourceRoots`.
+
+`Session::read_identities`, `Session::guid_index_sha256` and
+`Session::configuration_sha256` describe what a preparation was made of. The
+importer records them after a publication, so that a start whose sources did
+not change takes the revision without preparing ([RUNNER.md](RUNNER.md#a-start-whose-sources-did-not-change)).
+
+## Authored YAML
+
+The source tools read authored scenes and prefabs through the same module:
+`rust/src/project/expand.rs` expands nested prefabs and model hierarchies for
+`scene_hierarchy` and the `authored-graph` command. This expansion is not used
+to load a scene in the Player.
 
 Unity writes a plain value such as `Enemy #1` without quotes and reads it back
 whole; checked against `6000.6.3f1`, which also keeps `#lead` and `a  # b`. The
@@ -61,6 +128,19 @@ reader does the same. A comment remains what follows a number, a quoted value
 or a flow value, and a line holding nothing else. A `#` in a plain value folded
 over several lines is rejected. The authoring editor still locates values by
 the YAML rule, so it reads such a name only up to the `#`.
+
+An inherited object of a prefab has the local ID the Editor's import gives it
+(compared with the pinned Editor's prefab artifacts): the ID of its stripped
+document in that prefab, whatever that ID is, and otherwise the instance ID XOR
+the ID the object has in the instance's source asset, without the sign bit.
+When another document of the prefab already has that derived ID, the Editor
+imports the object under an ID the sources do not determine. Such an object is
+expanded, but has no local ID here, as has an object named by two stripped
+documents; a reference to either through an enclosing prefab or scene is
+refused as unresolved. Two objects without stripped documents whose derived IDs
+are equal are refused, and the error names both.
+
+## The `prepare` command
 
 The standalone preparation command is useful for inspecting a revision:
 
@@ -73,76 +153,18 @@ cd $UNITY_MICRO_EDITOR_ROOT
   --output /absolute/project/Library/UnityMicroEditor/revisions
 ```
 
-Scene and prefab support includes nested prefabs and model hierarchies, stripped
-object aliases, inherited IDs, scalar and object-reference overrides, array sizes,
-added/removed components and GameObjects, prefab root naming and Unity 6 root
-ordering. Custom raw ScriptableObjects are reread from source. A new script type
-must be supplied by the compiler. A raw ScriptableObject must contain one class 114
-document. Audio, texture and text asset updates are accepted after native importer adaptation.
-Existing FBX updates additionally require an independently verified reference
-graph and identical authored GameObject, Transform and renderer fields. Geometry
-may change while IDs, types and those fields remain stable. Skinned/Animator
-graphs, topology changes and other native asset profiles need a refreshed catalog.
+It runs the session alone, without an importer: a scene the session does not
+hold in the Player format ends it with `NeedsNativeScene` (`the scene ... is not
+written in the Player format`). Use `run --prepare-only` for a revision with its
+scene written.
 
-An inherited object of a prefab has the local ID the Editor's import gives it
-(compared with the pinned Editor's prefab artifacts): the ID of its stripped
-document in that prefab, whatever that ID is, and otherwise the instance ID XOR
-the ID the object has in the instance's source asset, without the sign bit.
-When another document of the prefab already has that derived ID, the Editor
-imports the object under an ID the sources do not determine. Such an object is
-expanded and loaded, but has no local ID here, as has an object named by two
-stripped documents; a reference to either through an enclosing prefab or scene
-is refused as unresolved. Two objects without stripped documents whose derived
-IDs are equal are refused, and the error names both.
+## Limits
 
-Native dependency discovery scans bounded lines and hashes each entire source.
-The ordinary text/YAML parser bound stays unchanged. Larger `.anim` sources may
-be scanned up to 1 GiB only when a current public raw cooked catalog proves the
-AnimationClip identity, exact source size/SHA256 and metadata SHA256, and its
-registry packs match the baseline and current pack hashes. Discovery still
-follows object references after the ordinary byte limit. An oversized source
-requiring full YAML fallback is rejected; no large parsed graph or source buffer
-is retained.
-
-Native deferred prefab references enter the source asset closure only when their
-exact owner is published as `imported`. The catalog supplies the complete binding
-inventory; preparation selects the active owners, follows target prefab and
-component references recursively, and publishes a deterministic
-`importedAssetBindings` list. Authored ScriptableObjects use their current source
-references. Targets must match the current GUID-to-path index and actual expanded
-prefab object/alias IDs. Cycles are deduplicated, conflicting properties and
-missing targets reject publication, and refreshed prefab roots replace stale
-cached asset keys.
-Existing raw material and texture descriptors can be reused unchanged, but this
-package does not update them.
-
-Missing script components and retained stale prefab overrides are skipped only
-when the catalog contains the matching public Editor observations. Unknown
-components, dangling references, duplicate GUIDs, recursive prefabs and Transform
-cycles are errors. The Player remains responsible for validating the native
-component settings it supports; this package is not a replacement for all Editor
-validation.
-
-The first preparation indexes metadata and hashes the source closure. Later
-preparations retain that index and verify file identity using device, inode, size,
-mtime and ctime. Parsed YAML stays in memory. Metadata and directory watcher events
-must call `Session::invalidate`. Changed source files are reread, and all observed identities
-are checked again before writing a revision. The input project's `Library` is never
-read. Cached package sources must be declared in `catalog.sourceRoots`.
-
-The optional full-scene checks compare every object identity, type, serialized
-field and custom runtime prefab against a previously validated manifest of a real
-project.
-They also copy the source tree with XFS reflinks and change the copied scene,
-leaving the original Assets untouched:
-
-```sh
-cargo test --locked --lib project::
-UNITY_PLAY_PARITY_PROJECT=/absolute/project \
-UNITY_PLAY_PARITY_MANIFEST=/absolute/scene.json \
-UNITY_PLAY_PARITY_CATALOG=/absolute/catalog.json \
-  cargo test --locked --lib project::tests::session::actual_sample_scene -- --nocapture
-```
-
-A repeated preparation of an unchanged project does no source reads and no YAML
-parses.
+- A revision depends on prepared content: a validated baseline, the Editor
+  compilation the worker loads to write the scene, and the shaders the session
+  builds. Without them `prepare` fails with the error that names what is
+  missing; it does not fall back to another way of loading the scene.
+- The session does not validate component settings; the engine reads what the
+  worker wrote, and the Player reports what it refuses.
+- Every source the scene reaches is a dependency of the revision: an edit of any
+  of them asks for a new write of the scene.

@@ -31,12 +31,12 @@ only to a literal loopback IP, rejects cross-origin browser requests and DNS
 rebinding, and supports a bearer token through `--token-file` (at least 32
 characters). Do not expose this source authoring service through a public tunnel.
 
-Raw agent preparation and controller output can persist under the project's
+Agent preparation and controller output can persist under the project's
 `Library/UnityMicroEditor`, for example `Preparation/first/current.json` and
 `Sessions/agent` with explicit `--output`. The controller default is
 `Library/UnityMicroEditor/agent`. Legacy `Temp` paths remain accepted; Unity Editor
 clears that directory on restart. Paths elsewhere in Library or outside the
-project are rejected. Native import, extraction and adoption retain their
+project are rejected. Native import and extraction retain their
 profile-bound owned `Library/UnityMicroEditor` or legacy `Temp` paths; existing catalogs are not migrated.
 
 Source tools are `project_inspect`, `project_capabilities`, `project_inventory`,
@@ -86,15 +86,16 @@ inputs of the first preparation (`rebuildHost`, `hostPlayer`, `nativeCatalog`,
 another `mcp` server of the project holds the session output is refused with
 `session_output_in_use`; see [AGENT_MCP.md](AGENT_MCP.md). Query operations are `status`, `hierarchy`, `inspect`, `logs`, `raycast`
 and `tools`. Commands include `screenshot`, `pause`, `resume`, `wait_frames`,
-`custom`, `invoke`, `simulation_pause`, `simulation_resume`, `simulation_step` and
-`input`. Arguments go in `arguments`; `requestId`, `expectedPid` and
+`custom`, `invoke`, `simulation_pause`, `simulation_resume`, `simulation_step`,
+`input` and `edit` (changes to the running scene through Unity's runtime API,
+never to the sources; see [AGENT_MCP.md](AGENT_MCP.md#change-the-running-scene)). Arguments go in `arguments`; `requestId`, `expectedPid` and
 `expectedRevision` bind a request to a Player generation. The legacy `pause`
 changes scaled time. `simulation_pause`/step use the supported simulation controls
 and report their actual behavior separately from Unity Editor Pause.
 
 `screenshot` defaults to `arguments.mode: "screen"`: the complete viewport at
 its actual size, including overlay UI. `mode: "camera"` accepts a camera
-`target` (source `path` or `fileId`) or `camera` path, with optional `width` and
+`target` (`path` or unique `name`) or `camera` path, with optional `width` and
 `height`; it reports `includesOverlayUi: false`. Both modes require a graphics
 Player and return a PNG path, hash, size and frame. Screen capture completes
 after the end of the frame; preserve the request identity while waiting.
@@ -122,8 +123,8 @@ marks (`afterSequence`), the events a reply lists and the state.
 
 `project_tools` publishes public attributed/registered methods as
 `project.<name>` MCP tools. Their `parameters` follow the project's DTO schema,
-with a required `target` containing either `path` or `fileId` for component
-methods. Mutating methods require `requestId`. Omitted PID/revision guards bind
+with a required `target` containing either the object's hierarchy `path` or
+a `name` that exactly one object has, for component methods. Mutating methods require `requestId`. Omitted PID/revision guards bind
 the call to the catalog generation. The catalog refreshes after ready/update
 waits and `hot_reload(recompile)`, and drops stale tools after updates,
 stop/reset or failed discovery. A code patch keeps the catalog: it changes

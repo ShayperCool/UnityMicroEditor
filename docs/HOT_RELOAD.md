@@ -242,7 +242,7 @@ public sealed class HrCallbacks : MonoBehaviour
     }
 ```
 
-**`[InvokeOnHotReloadLocal]`** runs the parameterless method itself, with its new body, when a patch changed it or restored it: its own code, a lambda or local function in it, its state machine when it is an iterator or `async` method, or a method a patch added that it calls. An instance method runs on every live object. It is the place to build anew what a once-run method made, for example delegates whose lambda changed. On `Awake`, `OnEnable`, `OnDisable` and `OnDestroy` it also stands for the body the lifecycle rewrite moved out of them.
+**`[InvokeOnHotReloadLocal]`** runs the parameterless method itself, with its new body, when a patch changed it or restored it: its own code, a lambda or local function in it, its state machine when it is an iterator or `async` method, or a method a patch added that it calls. An instance method runs on every live object. It is the place to build anew what a once-run method made, for example delegates whose lambda changed.
 
 ```csharp
     [InvokeOnHotReloadLocal]
@@ -267,7 +267,7 @@ Hot reload is framework-agnostic by design: its rules are about C#, the Mono run
 
 The existing support, verified with `com.unity.netcode.gameobjects` 2.13.2. The builder reads from the post-processed images what Netcode registered when the Player started and refuses a change of it: RPCs (`netcode_rpc_changed`), network variables and their read permission where it is written as the argument of their construction (`netcode_variable_changed`), serializers (`netcode_serialization_changed`), other generated start-up code (`netcode_generated_code_changed`), and every edit of an image in a form it does not know, another package version among them (`netcode_assembly`). Everything else, the body of an existing RPC included, is patched; a spawn callback has `spawned_objects_keep_state`. A refusal or restart for a `netcode_*` reason says that the other Players of the game must be restarted on the new code too. A read permission supplied by a property, helper, factory or subclass, and the write permission, are patched with the note of the code that ran them, not refused. [The builder's README](../tools/HotReloadPatcher/README.md#netcode-for-gameobjects) has the table.
 
-Limits of a session itself, with or without hot reload (a generic MonoBehaviour that declares a lifecycle callback, or has no `Awake` in its class chain, cannot be prepared; NGO's scene management and in-scene placed NetworkObjects do not work), are listed under [the session's limits](AGENT_MCP.md#limits-of-a-session).
+Limits of a session itself, with or without hot reload (a scene, prefab or asset edit loads the scene again and its state starts over; NGO's scene management and in-scene placed NetworkObjects do not work), are listed under [the session's limits](AGENT_MCP.md#limits-of-a-session).
 
 ## The agent flow through MCP
 

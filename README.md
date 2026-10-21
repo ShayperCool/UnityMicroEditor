@@ -6,9 +6,9 @@ It runs on Linux with one pinned Unity version. Coverage of Editor features is p
 
 ## How it works
 
-- **Scenes and prefabs.** The tool reads `.unity`, `.prefab`, `.meta`, ScriptableObjects and their dependencies. A C# loader inside the Player builds the scene graph through Unity APIs, restores fields and references, and releases lifecycle callbacks once the graph is ready. Scenes are not baked into AssetBundles.
+- **Scenes and prefabs.** The tool follows a scene's `.unity`, `.prefab`, `.meta`, ScriptableObject and other dependencies by GUID and has Unity's standalone AssetImportWorker import them and write the scene in the Player format with the Editor's own build code, without the Editor. The Player loads that scene with the engine's loader, and the engine runs the lifecycle. Scenes are not baked into AssetBundles. A scene edit writes the scene again and reloads it in the running Player ([docs/NATIVE_IMPORT.md](docs/NATIVE_IMPORT.md#scenes-in-the-player-format)).
 - **Code.** The tool resolves packages and derives the Player assembly graph from `.asmdef`/`.asmref` files. Roslyn from the Unity installation's SDK compiles the assemblies. In a watched session a saved C# edit is patched into the running Player where that can be done exactly, and the game keeps its state; other edits are named with their reason and need a restart of the Player ([C# hot reload](docs/HOT_RELOAD.md)).
-- **Heavy content.** Models, audio, video, textures, text assets and input actions go through Unity's own AssetImportWorker. The coordinator writes a compatible `SourceAssetDB`, verifies the worker's artifacts, and publishes a runtime content cache. A `.shader` of a built-in pipeline project is parsed by the worker and compiled with the engine's own `UnityShaderCompiler`. Some unchanged native content and other compiled shaders come from previously verified Unity output.
+- **Content and shaders.** Models, audio, video, textures, UI and the rest are imported by that worker in the scene's context. The coordinator writes a compatible `SourceAssetDB`, keeps the worker alive between edits and keeps its imports for the project. Shaders are built on their own and published beside the scene: a `.shader` of a built-in pipeline project is parsed by the worker and compiled with the engine's own `UnityShaderCompiler`, and in a render pipeline project the Editor's build code writes shaders, shader graphs and compute shaders in a worker.
 - **Host.** A Mono Player built once per engine and package profile runs all of the above.
 
 ## Requirements
@@ -70,7 +70,7 @@ Guides:
 | `build-project` | Build the project through the real Unity Editor's `BuildPipeline`. |
 | `resolve-packages` | Resolve the project's Unity packages without the Editor. |
 | `cache-component-defaults` | Capture native component defaults once, for Editor-free component attachment. |
-| `project-import`, `native-adopt`, `native-environment` | Import selected assets with the native worker and manage the import cache. |
+| `project-import`, `native-environment` | Import selected assets with the native worker; print the import environment fingerprint. |
 | `source-graph`, `compiler-source-prepare`, `compiler-prepare`, `prepare-project`, `engine-profile-capture` | Individual preparation steps, for diagnostics. |
 | `version` | Print the pinned engine profile. |
 
@@ -103,8 +103,8 @@ Preparation and sessions do not need the package in the game project. To use the
 
 ## Limits
 
-- Small GameObject and Transform edits patch the running Player. Wider scene and prefab edits rebuild the scene. C# changes recompile the affected assemblies; changed method bodies, added non-virtual methods and added fields of classes are patched into the running Player. Every other C# change (a new type, generic code, a new Unity message and the like) needs a restart of the Player: `run` restarts it by itself unless told to wait, and an MCP session reports `full_recompile_required` until `hot_reload` recompiles or the edit is reverted (with `onUnsupportedEdit: "restart"` it restarts the Player by itself). Hot reload runs only in a Mono development Player on Linux x86-64, without JIT inlining. [docs/HOT_RELOAD.md](docs/HOT_RELOAD.md) has the rules and the limits.
-- Fresh import works for FBX, OBJ, COLLADA and Blender models, VP8 `.webm` video, `.inputactions`, and the audio, texture and text source formats and importer settings listed in [docs/NATIVE_IMPORT.md](docs/NATIVE_IMPORT.md): textures in the desktop formats including BC7, with platform overrides, as sprites, normal maps, cubemaps, arrays and volumes, and importer-based sprite atlases (`.spriteatlasv2`) with the sprites they pack. UI and font paths, and texture formats of other platform families, need exact artifacts from an existing Unity import. Video in any other codec or container is not imported on Linux, by this tool or by the Editor, and a `.blend` is converted by Blender, which has to be on `PATH`. Shaders are compiled independently only for the built-in render pipeline, within the limits listed there; general animation import is not done.
+- Scene, prefab and asset edits write the scene again and reload it in the running Player; the scene's state starts over. C# changes recompile the affected assemblies; changed method bodies, added non-virtual methods and added fields of classes are patched into the running Player. Every other C# change (a new type, generic code, a new Unity message and the like) needs a restart of the Player: `run` restarts it by itself unless told to wait, and an MCP session reports `full_recompile_required` until `hot_reload` recompiles or the edit is reverted (with `onUnsupportedEdit: "restart"` it restarts the Player by itself). Hot reload runs only in a Mono development Player on Linux x86-64, without JIT inlining. [docs/HOT_RELOAD.md](docs/HOT_RELOAD.md) has the rules and the limits.
+- Assets are imported by the engine's own importers in the worker; [docs/NATIVE_IMPORT.md](docs/NATIVE_IMPORT.md) lists which formats and settings were compared with the Editor's artifacts. Writing a scene needs an Editor compilation of the project, which a preparation makes or finds. The Player keeps the host's render pipeline global settings and built-in resources. Video other than VP8 `.webm` yields no clip on Linux, by this tool or by the Editor, and a `.blend` is converted by Blender, which has to be on `PATH`. Shaders are delivered within the limits listed there.
 - `build-project` and the MCP `project_build` tool proxy to the real Editor; they are not an independent build pipeline.
 - Editor windows, custom inspectors and EditMode test execution are out of scope.
 
@@ -114,11 +114,11 @@ Preparation and sessions do not need the package in the game project. To use the
 - `Cargo.toml`, `rust/`: the CLI crate; [rust/README.md](rust/README.md) describes its modules.
 - `rust/src/runner/`, `native/`, `compiler/`, `sourcegraph/`, `agent/`: runner, import coordinator, compiler driver and agent commands.
 - `rust/src/project/`: source graph and scene revision preparation. `authoring/` holds revision-checked source edits and `packages/` package resolution.
-- `rust/src/mcp/`, `agentcontrol/`, `editorbridge/`, `runtimeartifact/`: MCP server, Player control, Editor bridge client and native artifact readers.
+- `rust/src/mcp/`, `agentcontrol/`, `editorbridge/`, `runtimeartifact/`: MCP server, Player control, Editor bridge client and the reader of built-in lighting data.
 - `engine-profile.json`: the pinned engine profile embedded in the executable.
-- `Packages/com.unitymicroeditor.runtime/`: the Unity package with the loader, runtime bridge and Editor utilities.
+- `Packages/com.unitymicroeditor.runtime/`: the Unity package with the runtime bridge that loads the worker-written scene, the agent controls and Editor utilities.
 - `HostProject/`: the minimal host project.
-- `tools/`: C# helpers run through the SDK: lifecycle instrumentation, Netcode post-processing, the importer that saves material variants as their inspector leaves them, and the two programs of C# hot reload (`HotReloadPatcher` builds a patch, `HotReloadRuntime` applies it inside the Player).
+- `tools/`: C# helpers run through the SDK: the lifecycle compiler (start-up bridges for `[RuntimeInitializeOnLoadMethod]`, type and declaration facts), Netcode post-processing, the importer the import worker runs to write scenes and shaders (`WorkerScripts`), and the two programs of C# hot reload (`HotReloadPatcher` builds a patch, `HotReloadRuntime` applies it inside the Player).
 - `tests/`: standalone C# regression projects. Rust unit tests sit next to their code, integration tests in `rust/tests/`.
 - `Samples/RawProject/`: a small authored project used as a fixture.
 - `Integrations/EditorParity/`: an isolated Unity Editor reference and the `parity-*` commands for comparing it with the Player.

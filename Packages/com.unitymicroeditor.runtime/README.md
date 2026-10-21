@@ -1,6 +1,6 @@
 # Unity Micro Editor runtime
 
-The shared C# package implements source scene loading, lifecycle barriers, native content delivery, scene patches, runtime reports and the agent control bridge. It has no dependency on any game's assemblies.
+The shared C# package loads the scene the import worker wrote in the Player format with the engine's own loader, together with the content files it refers to, and implements runtime reports and the agent control bridge. It has no dependency on any game's assemblies.
 
 The host project and target projects reference this directory as a local Unity package. It requires SRP Core `17.6.0` and Collections `6.6.0`. The assembly and root namespace are `UnityMicroEditor`. Script `.meta` GUIDs are stable, so component references in authored scenes keep resolving.
 

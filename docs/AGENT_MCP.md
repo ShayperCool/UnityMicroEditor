@@ -53,8 +53,10 @@ source ownership, platform/define/version constraints and compiler options.
 The installed SDK compiles the result. A package-compatible native Mono host and
 its exact engine facts are captured once when no matching profile exists. This
 initial native bootstrap also captures the component-default catalog.
-Supported native dependencies are prepared in an isolated copy. Scene loading
-continues through our source loader; preparation does not bundle authored scenes.
+Supported native dependencies are prepared in an isolated copy. The scene is
+written in the Player format by Unity's standalone import worker and loaded by
+the engine in the Player ([NATIVE_IMPORT.md](NATIVE_IMPORT.md#scenes-in-the-player-format));
+it is not bundled into an AssetBundle.
 
 Preparation starts with checks that need no build: authored metadata identities
 (the issues `project_inspect` lists: a `.meta` without exactly one GUID,
@@ -115,9 +117,8 @@ required. Adding gameplay scripts or changing package and assembly configuration
 uses a fresh source graph and SDK preparation; engine-bound native assembly slots
 and retained content remain verified. Package and assembly configuration changes
 also trigger preparation recovery; ordinary C# compile errors retain the last
-confirmed Player. Public/protected inherited lifecycle callbacks are supported
-only for package assemblies whose sources, DLLs and registrations were verified;
-private inherited callbacks are refused.
+confirmed Player. The engine runs every lifecycle callback itself, inherited
+ones included; the compiler does not rewrite them.
 
 Owned outputs are under the explicit project's `Library/UnityMicroEditor` and
 `Builds/UnityMicroEditor`. Automatic host builds run in the owned staging copy
@@ -840,7 +841,9 @@ Database" play mode. The runner reads the Addressables settings and groups and
 registers every addressable scene and prefab as session content, so
 `contentScenes` and `contentPrefabs` are not needed for them. In the Player a
 locator resolves their address, GUID (`AssetReference`) and labels to the
-authored source, and the raw loader provides the asset. The game calls
+authored source. A prefab is written by the scene worker beside the session's
+scene and found by its root; a scene is written as a content scene of its own
+([NATIVE_IMPORT.md](NATIVE_IMPORT.md#scenes-in-the-player-format)). The game calls
 `Addressables` as usual. Nothing is downloaded: `GetDownloadSizeAsync` reports 0
 for these keys, and no content build is involved. The watcher treats these
 scenes and prefabs like the session's other content.
@@ -851,26 +854,20 @@ Limits:
   (materials, textures, audio, ScriptableObjects) stay with the host's built
   content, which is as old as the host; the runner lists them in an
   `addressables-skipped` event.
-- An addressable scene is built into an empty scene of the host, because the
-  package's scene handle has to come from its own scene provider. The scene
-  therefore reports the host's name and path (`Bootstrap`), not the authored
-  ones, and has one extra root, `Raw scene imported assets`. Loading the same
-  location twice at once, and `LoadSceneMode.Single`, are not verified.
+- An addressable scene is loaded beside an empty scene of the host, because
+  the package's scene handle has to come from its own scene provider, and gives
+  its roots to that scene once they woke. The scene therefore reports the
+  host's name and path (`Bootstrap`), not the authored ones, and the content
+  scene's own empty scene stays loaded beside it until it is unloaded. Loading
+  the same location twice at once, and `LoadSceneMode.Single`, are not
+  verified.
 - A prefab is requested as a `GameObject`; a component type or a sub-object key
   (`key[sub]`) is not resolved from sources.
-- A scene or prefab the raw loader cannot prepare is dropped with an
-  `addressables-skipped` event and stays with the host's content. Each one is
-  dropped on its own; the others are served. A prefab whose own sources hold
-  a component that a native template cannot hold (one that refers to an
-  object outside its GameObject, see NATIVE_IMPORT.md, "Components without a
-  runtime adapter") is dropped before its content is imported. A scene is prepared once: one that fails
-  is left out without preparing the others again. When a scene fails on such
-  an object, the runner records the sources its preparation read, with their
-  hashes, in `<output>/content/<guid>/refusal.json`; the next session leaves
-  the scene out at once while those sources, the project's GUIDs, the
-  baseline and the runner itself are unchanged. A prefab a preparation fails
-  in without naming it, or that only another prefab reaches, still drops all
-  addressable prefabs, as before.
+- A scene that cannot be prepared is dropped with an `addressables-skipped`
+  event and stays with the host's content; the others are served. The
+  addressed prefabs are written with the session's scene, so a preparation
+  that fails while they are part of it drops all of them with one
+  `addressables-skipped` event and is tried again without them.
 - The host needs built Addressables content for `Addressables.InitializeAsync`
   to succeed, as any Player does. A project that builds Addressables with the
   Player has it. Without it the source keys still resolve, but the game sees a
@@ -914,7 +911,7 @@ checkpoints for comparisons.
 
 ### Change the running scene
 
-`runtime_command(edit)` changes the Player's scene through Unity's public runtime API. Nothing is written to the sources: the change lasts until the scene is loaded again (a source edit, a reload, a restart). `arguments.target` names an object by its `path` as `runtime_query(hierarchy)` lists it, or by a `name` that exactly one object has (`fileId` works where the scene has object records). `arguments.action` is one of:
+`runtime_command(edit)` changes the Player's scene through Unity's public runtime API. Nothing is written to the sources: the change lasts until the scene is loaded again (a source edit, a reload, a restart). `arguments.target` names an object by its `path` as `runtime_query(hierarchy)` lists it, or by a `name` that exactly one object has. Objects have no source file IDs at runtime. `arguments.action` is one of:
 
 - `set`: `rename`, `active`, `layer` (number or name), `tag`, `parent` (a reference or `null` for a root, with `worldPositionStays`), `localPosition`, `localEulerAngles`, `localRotation`, `localScale`, `position`, `eulerAngles`, `rotation`.
 - `create`: a new object, empty or a `primitive` (`Cube`, `Sphere`, ...), with `name` and the fields of `set`.
@@ -1043,14 +1040,13 @@ Limits:
 
 These hold for a session with or without hot reload.
 
-- A generic MonoBehaviour (a generic NetworkBehaviour among them) cannot be
-  prepared when it declares `Awake`, `OnEnable`, `OnDisable` or `OnDestroy`
-  ("Lifecycle callbacks on generic engine object classes are unsupported"), or
-  when no class of its chain declares `Awake` ("Synthetic Awake on
-  nested/generic MonoBehaviour classes is unsupported", which holds for a
-  nested MonoBehaviour too). One that declares none of them and inherits
-  `Awake` from a base class is not refused by the rewrite; it is not verified
-  in a session.
+- The scene is written by the import worker from the project's Editor
+  compilation and the host Player supplies the engine's resources and the
+  render pipeline's global settings ([NATIVE_IMPORT.md](NATIVE_IMPORT.md#scenes-in-the-player-format)).
+  A project without an Editor compilation cannot run, and a change of the
+  pipeline's global settings is not seen until the host is built again.
+- A scene, prefab or asset edit loads the written scene again: the scene's
+  state starts over. Only C# edits that hot reload patches keep game state.
 - Netcode for GameObjects, found in Players with
   `com.unity.netcode.gameobjects` 2.13.2: with scene management on, which is
   NGO's default, the host's connection approval fails because the session's

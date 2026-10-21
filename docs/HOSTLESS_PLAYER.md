@@ -14,6 +14,19 @@ Status, 2026-10-16. Three steps are live:
 A host is still built once per project; this document tracks what it is still
 needed for.
 
+Since 2026-10-20 every scene is written in the Player format by the import
+worker and loaded by the engine ([NATIVE_IMPORT.md](NATIVE_IMPORT.md#scenes-in-the-player-format));
+the tool's former scene loader is gone. The dated sections below record what a
+preparation needed at the time. What served only that loader no longer
+applies: the upgrade of older materials and meshes for the session, the
+pipeline's objects loaded as authored ScriptableObjects, the global settings
+the session published with a stripped runtime list (the Player now keeps the
+host's), the adaptation of models of a pipeline project, the restoration of UI
+references, the trust of package ScriptableObjects without lifecycle
+instrumentation, and the Addressables prefabs that loader could not adapt.
+The settings managers, the package builds, the Editor compilation and the
+shader builds still apply.
+
 ## What a host build produces
 
 The Player engine is not built per project. `UnityPlayer.so` of every host is
@@ -271,7 +284,7 @@ With `--host-player`, a cold preparation now runs no Editor:
   `E-inputdata.json` record) under
   `Library/UnityMicroEditor/editor-compilation`. The import worker runs the
   Editor code of packages from there: shader build callbacks, scripted
-  importers and material inspectors. `UME_EDITOR_COMPILATION=0` turns the
+  importers and the scene write. `UME_EDITOR_COMPILATION=0` turns the
   stage off.
 
 What the worker needs from such a compilation:

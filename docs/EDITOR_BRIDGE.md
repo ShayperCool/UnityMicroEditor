@@ -46,7 +46,7 @@ Automatic host preparation invokes `build_host` in the one staging copy of the t
 
 The graph includes public Player and Editor compilation defines, source digests and Editor MonoScript candidates. Public `AssemblyBuilder.defaultDefines` supplies the development profile without building an assembly. The SDK's Roslyn parser proves which exact declarations are active in each profile. Editor-only candidates are excluded, and their source/meta fingerprints remain tracked. Every active runtime candidate must then exist in the host's independently hashed native DLL and registered Mono slot. Editor and Player bytes may differ because of compilation defines; an absent required runtime type still rejects preparation.
 
-Gameplay subclasses can inherit lifecycle messages from verified native package dependencies. The SDK generates source-owned wrappers that call accessible protected/public base methods after graph hydration, retaining the inherited execution order. Private native callbacks reject preparation. The approved package names become part of the immutable compiler configuration used for later edits and restarts.
+Gameplay subclasses inherit lifecycle messages from package base classes as Unity resolves them: the scene is loaded by the engine, which runs every callback itself, and the compiler does not rewrite or wrap lifecycle methods.
 
 Source preparation publishes the accepted DLL hashes, source set, GUID/type bindings and lifecycle proofs into its compiler baseline. It also records the verified NGO postprocessor input key, so a restart reuses processed DLLs while changed processor inputs require a rebuild. The manual `prepare-project --native-catalog <path>` route reuses an existing verified public native catalog without Editor recooking.
 
