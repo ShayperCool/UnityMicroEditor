@@ -75,7 +75,7 @@ tokens when decoding arguments. Integer source fields and replies retain their
 JSON values; an omitted value remains absent.
 
 A configured Player adds `session_control`, `runtime_query`, `runtime_command`,
-`project_tools`, `hot_reload` and `remote_session` (a browser page with the Player's video and
+`project_tools`, `hot_reload` and `remote_session` (a browser page with the Player's video, sound and
 input on a listener of its own; see [AGENT_MCP.md](AGENT_MCP.md)). Start can return `phase: starting`; wait for readiness before
 queries. While start still prepares the project it returns `result_pending` with
 `progress` (stage and Editor log path), and `status`/`wait` report the same

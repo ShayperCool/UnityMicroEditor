@@ -28,12 +28,25 @@ impl Encoder for FakeEncoder {
         "fake"
     }
 }
-fn fake_encoders() -> Arc<Factory> {
-    Arc::new(|_: &Parameters| Ok(Box::new(FakeEncoder(0)) as Box<dyn Encoder>))
+// Writes the first sample of each packet, scaled to a byte.
+struct FakeAudio;
+impl AudioEncoder for FakeAudio {
+    fn encode(&mut self, pcm: &[f32]) -> Result<Vec<u8>, String> {
+        Ok(vec![(pcm[0] * 100.0) as u8])
+    }
+    fn name(&self) -> &'static str {
+        "fake-opus"
+    }
+}
+fn fake_encoders() -> Encoders {
+    Encoders {
+        video: Arc::new(|_: &Parameters| Ok(Box::new(FakeEncoder(0)) as Box<dyn Encoder>)),
+        audio: Arc::new(|| Ok(Box::new(FakeAudio) as Box<dyn AudioEncoder>)),
+    }
 }
 
 // Plays the Player's side of the link: connects when asked, reports its state
-// and answers every line it receives with one 4x2 frame.
+// and answers every line it receives with one 4x2 frame and 20 ms of sound.
 struct FakePlayer {
     lines: mpsc::Sender<Value>,
     requests: Mutex<Vec<Value>>,
@@ -69,6 +82,13 @@ impl Player for FakePlayer {
                     frame.extend_from_slice(&side.to_le_bytes());
                 }
                 frame.extend_from_slice(&[marker; 4 * 2 * 4]);
+                frame.push(b'A');
+                frame.extend_from_slice(&(6u32 + 960 * 2 * 4).to_le_bytes());
+                frame.extend_from_slice(&48_000u32.to_le_bytes());
+                frame.extend_from_slice(&2u16.to_le_bytes());
+                for _ in 0..960 * 2 {
+                    frame.extend_from_slice(&0.25f32.to_le_bytes());
+                }
                 if stream.write_all(&frame).is_err() {
                     return;
                 }
@@ -229,8 +249,13 @@ fn session_links_the_player_encodes_for_viewers_and_returns_their_input() {
     assert_eq!(session.status()["video"]["frames"], 0);
 
     let mut video = shared.video.subscribe();
+    let mut audio = shared.audio.subscribe();
     let viewer = shared.viewer_joined();
     assert_eq!(received.recv().unwrap(), json!({"viewers": 1}));
+    // The first sample of the stream is interpolated from silence.
+    let sound = audio.blocking_recv().unwrap();
+    assert_eq!((sound.wire[0], sound.data()), (2, &[0u8][..]));
+    let first_sound = sound.timestamp;
     let first = video.blocking_recv().unwrap();
     assert!(first.keyframe);
     // flags, epoch 1, timestamp, 4x2, "avc1.640028", then the access unit.
@@ -247,6 +272,12 @@ fn session_links_the_player_encodes_for_viewers_and_returns_their_input() {
         json!({"input": [{"action": "key", "key": "W", "pressed": true}, {"action": "mouse", "normalized": {"x": 0.5, "y": 0.5}}]})
     );
     assert!(!video.blocking_recv().unwrap().keyframe);
+    let sound = audio.blocking_recv().unwrap();
+    assert_eq!(sound.data(), &[25u8]);
+    assert!(
+        sound.timestamp - first_sound <= 25_000,
+        "the second packet follows the first by its 20 ms"
+    );
     shared.viewer_message(r#"{"k":1,"r":1}"#);
     assert_eq!(received.recv().unwrap(), json!({"release": true}));
     assert!(
@@ -261,6 +292,11 @@ fn session_links_the_player_encodes_for_viewers_and_returns_their_input() {
     let status = session.status();
     assert_eq!(status["video"]["encoder"], "fake");
     assert_eq!(status["video"]["codec"], "avc1.640028");
+    assert_eq!(status["audio"]["encoder"], "fake-opus");
+    assert_eq!(
+        (&status["audio"]["sampleRate"], &status["audio"]["channels"]),
+        (&json!(48000), &json!(2))
+    );
     assert_eq!(
         (&status["video"]["width"], &status["video"]["height"]),
         (&json!(4), &json!(2))
@@ -519,4 +555,129 @@ fn webrtc_session_binds_a_media_port_and_answers_only_valid_offers() {
             .viewer_offer(1, json!({"type": "offer", "sdp": "not a description"})),
     );
     assert!(reply.contains("rtcError"), "{reply}");
+
+    // A viewer that asks for video and sound, as the page does, gets both.
+    let mut viewer = str0m::Rtc::builder().build(Instant::now());
+    let mut changes = viewer.sdp_api();
+    for kind in [
+        str0m::media::MediaKind::Video,
+        str0m::media::MediaKind::Audio,
+    ] {
+        changes.add_media(kind, str0m::media::Direction::RecvOnly, None, None, None);
+    }
+    let (offer, _) = changes.apply().unwrap();
+    let reply = runtime.block_on(
+        session
+            .shared
+            .viewer_offer(2, serde_json::to_value(offer).unwrap()),
+    );
+    let answer: Value = serde_json::from_str(&reply).unwrap();
+    let sdp = answer["answer"]["sdp"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{reply}"));
+    assert!(
+        sdp.contains("m=audio") && sdp.contains("opus/48000/2"),
+        "{sdp}"
+    );
+    assert!(
+        sdp.contains("m=video") && sdp.contains("H264/90000"),
+        "{sdp}"
+    );
+}
+
+#[test]
+fn mixdown_brings_any_rate_and_layout_to_48_khz_stereo_packets() {
+    let mut mixdown = Mixdown::default();
+    // A second at 44.1 kHz is a second at 48 kHz: fifty packets of 20 ms.
+    let ramp: Vec<f32> = (0..44_100 * 2)
+        .map(|index| (index / 2) as f32 / 44_100.0)
+        .collect();
+    let packets = mixdown.push(44_100, 2, &ramp);
+    assert_eq!(packets.len(), 50);
+    assert!(packets.iter().all(|packet| packet.len() == 960 * 2));
+    // Linear interpolation keeps a ramp a ramp, one input sample late.
+    let last = packets[49][960 * 2 - 2];
+    assert!((last - 44_098.08 / 44_100.0).abs() < 1e-4, "{last}");
+    // A change of rate or layout starts over.
+    assert!(mixdown.push(48_000, 1, &[0.5; 959]).is_empty());
+    let packets = mixdown.push(48_000, 1, &[0.5; 1]);
+    assert_eq!(packets.len(), 1);
+    assert_eq!(packets[0][2..4], [0.5, 0.5], "mono goes to both sides");
+    // 5.1: front pair, centre and surround pair at -3 dB, no LFE.
+    let mut surround = Mixdown::default();
+    let frame = [0.1, 0.2, 0.3, 0.4, 0.05, 0.06];
+    let packets = surround.push(48_000, 6, &frame.repeat(961));
+    let (left, right) = (packets[0][2], packets[0][3]);
+    assert!((left - (0.1 + 0.707 * (0.3 + 0.05))).abs() < 1e-5, "{left}");
+    assert!(
+        (right - (0.2 + 0.707 * (0.3 + 0.06))).abs() < 1e-5,
+        "{right}"
+    );
+}
+
+#[test]
+fn opus_encodes_a_packet_when_libopus_is_installed() {
+    let Ok(mut encoder) = Opus::open() else {
+        eprintln!("libopus.so.0 is not installed; skipped");
+        return;
+    };
+    let tone: Vec<f32> = (0..960)
+        .flat_map(|index| {
+            let value = (index as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.5;
+            [value, value]
+        })
+        .collect();
+    let packet = encoder.encode(&tone).unwrap();
+    assert!(
+        !packet.is_empty() && packet.len() < 1000,
+        "{}",
+        packet.len()
+    );
+    assert!(encoder.encode(&tone[..10]).is_err());
+}
+
+#[test]
+fn nvenc_spends_what_the_picture_needs_under_the_ceiling() {
+    let (width, height) = (1280u32, 720u32);
+    // Two seconds at 60 fps of a smooth picture, moving one pixel a frame
+    // or standing still; the second second is measured.
+    let rate = |speed: u32| -> Option<f64> {
+        let parameters = Parameters {
+            width,
+            height,
+            fps: 60,
+            bitrate: 12_000_000,
+        };
+        let mut encoder = match hardware(&parameters) {
+            Ok(encoder) => encoder,
+            Err(error) => {
+                eprintln!("skipped: NVENC is unavailable here: {error}");
+                return None;
+            }
+        };
+        let mut bytes = 0;
+        for frame in 0..120u32 {
+            let mut pixels = vec![0u8; (width * height * 4) as usize];
+            for (index, pixel) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let (x, y) = (index as u32 % width + frame * speed, index as u32 / width);
+                let value = ((x / 64 + y / 64) % 2) as u8 * 120 + ((x + y) / 20 % 100) as u8;
+                *pixel = [value, value / 2, 255 - value, 255];
+            }
+            let encoded = encoder
+                .encode(&pixels, frame == 0, frame as u64 * 16_666)
+                .unwrap();
+            if frame >= 60 {
+                bytes += encoded.data.len();
+            }
+        }
+        Some(bytes as f64 * 8.0 / 1e6)
+    };
+    let Some(moving) = rate(1) else { return };
+    let still = rate(0).unwrap();
+    // The rate control alone spent the whole 12 Mbit/s on both.
+    assert!(
+        moving < 4.0,
+        "a slowly moving picture took {moving:.2} Mbit/s"
+    );
+    assert!(still < 0.5, "a still picture took {still:.2} Mbit/s");
 }

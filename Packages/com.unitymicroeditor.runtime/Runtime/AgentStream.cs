@@ -17,10 +17,12 @@ using UnityMicroEditor.Raw;
 namespace UnityMicroEditor
 {
     /// <summary>
-    /// Sends the viewport as raw frames to the tool's remote session server over a loopback
-    /// connection the Player opens, and applies the input that comes back through
-    /// <see cref="AgentInput"/>. The server encodes the video. Capture and readback use
-    /// public APIs on the main thread; socket I/O runs on the link's own threads.
+    /// Sends the viewport as raw frames and the audio mix as samples to the tool's remote
+    /// session server over a loopback connection the Player opens, and applies the input that
+    /// comes back through <see cref="AgentInput"/>. The server encodes video and sound.
+    /// Capture and readback use public APIs on the main thread, the audio arrives on the
+    /// audio thread through <see cref="AgentAudioTap"/>; socket I/O runs on the link's own
+    /// threads.
     /// </summary>
     internal sealed class AgentStream : IDisposable
     {
@@ -28,6 +30,8 @@ namespace UnityMicroEditor
         // A readback completes a few frames after it was requested, so several are in
         // flight at the full frame rate.
         private const int MaximumReadbacks = 4, MaximumQueuedFrames = 2;
+        // About a second of audio waits for the writer before the oldest is dropped.
+        private const int MaximumQueuedAudio = 48;
         private readonly AgentInput input;
         private readonly Func<AgentCaptureRunner> runner;
         private readonly int pid = System.Diagnostics.Process.GetCurrentProcess().Id;
@@ -43,6 +47,10 @@ namespace UnityMicroEditor
         private bool pendingRelease;
         private long captureErrors, inputEvents, inputErrors;
         private string lastError, lastInputError, sentState;
+        private AgentAudioTap audioTap;
+        private double nextListenerCheck;
+        private volatile int sampleRate;
+        private string audioState = "no AudioListener";
 
         internal AgentStream(AgentInput input, Func<AgentCaptureRunner> runner) { this.input = input; this.runner = runner; }
 
@@ -87,6 +95,8 @@ namespace UnityMicroEditor
                 ["fps"] = fps, ["maxWidth"] = maximumWidth,
                 ["frameSize"] = new Dictionary<string, object> { ["width"] = frameWidth, ["height"] = frameHeight },
                 ["asyncReadback"] = SystemInfo.supportsAsyncGPUReadback,
+                ["audio"] = new Dictionary<string, object> { ["state"] = audioState, ["sampleRate"] = sampleRate,
+                    ["chunksSent"] = current == null ? 0 : current.AudioSent, ["chunksDropped"] = current == null ? 0 : current.AudioDropped },
                 ["semantics"] = "end_of_frame_viewport_rgba_over_loopback" };
         }
 
@@ -102,6 +112,7 @@ namespace UnityMicroEditor
             for (int handled = 0; handled < 256 && current.Lines.TryDequeue(out string line); handled++) Apply(current, line);
             if (pendingRelease) { pendingRelease = false; Release(); }
             if (!current.Connected) return;
+            Listen(current);
             string state = "{\"cursorLocked\":" + (Cursor.lockState == CursorLockMode.Locked ? "true" : "false")
                 + ",\"width\":" + Screen.width.ToString(CultureInfo.InvariantCulture) + ",\"height\":" + Screen.height.ToString(CultureInfo.InvariantCulture) + "}";
             if (state != sentState) { sentState = state; current.SendState(state); }
@@ -149,6 +160,35 @@ namespace UnityMicroEditor
 
         private static Dictionary<string, object> Point(double x, double y)
         { return new Dictionary<string, object> { ["x"] = Math.Max(-1000000, Math.Min(1000000, x)), ["y"] = Math.Max(-1000000, Math.Min(1000000, y)) }; }
+
+        // Keeps the tap on the active listener: scenes load, cameras change, listeners come and go.
+        private void Listen(Link current)
+        {
+            double now = Time.realtimeSinceStartupAsDouble;
+            if (now < nextListenerCheck) return;
+            nextListenerCheck = now + .5;
+            Type listenerType = Type.GetType("UnityEngine.AudioListener, UnityEngine.AudioModule", false);
+            Type settings = Type.GetType("UnityEngine.AudioSettings, UnityEngine.AudioModule", false);
+            if (listenerType == null || settings == null) { audioState = "this host has no audio module"; RemoveTap(); return; }
+            object rate = settings.GetProperty("outputSampleRate", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+            sampleRate = rate is int value ? value : 0;
+            var listener = UnityEngine.Object.FindAnyObjectByType(listenerType) as Behaviour;
+            if (listener == null || !listener.isActiveAndEnabled) { audioState = "no AudioListener"; RemoveTap(); return; }
+            audioState = sampleRate > 0 ? "streaming" : "audio output is disabled";
+            if (audioTap != null && audioTap.gameObject == listener.gameObject) return;
+            RemoveTap();
+            audioTap = listener.gameObject.AddComponent<AgentAudioTap>();
+            audioTap.hideFlags = HideFlags.DontSave;
+            audioTap.Sink = (data, channels) => current.SendAudio(data, channels, sampleRate);
+        }
+
+        private void RemoveTap()
+        {
+            if (audioTap == null) { audioTap = null; return; }
+            audioTap.Sink = null;
+            UnityEngine.Object.Destroy(audioTap);
+            audioTap = null;
+        }
 
         private void Release()
         {
@@ -244,7 +284,8 @@ namespace UnityMicroEditor
             if (loop != null && loopOwner != null) loopOwner.StopCoroutine(loop);
             loop = null; loopOwner = null;
             if (link != null) { link.Dispose(); link = null; Release(); }
-            readbacks = 0; pendingRelease = false;
+            RemoveTap();
+            readbacks = 0; pendingRelease = false; nextListenerCheck = 0;
         }
 
         public void Dispose()
@@ -268,7 +309,8 @@ namespace UnityMicroEditor
 
         /// <summary>
         /// One connection to the server. The Player writes typed, length-prefixed messages
-        /// ('F' frame: viewport and picture size, then R,G,B,A rows; 'S' state) and reads
+        /// ('F' frame: viewport and picture size, then R,G,B,A rows; 'A' audio: output rate,
+        /// channel count, then interleaved float samples; 'S' state) and reads
         /// newline-delimited JSON.
         /// </summary>
         private sealed class Link : IDisposable
@@ -280,11 +322,12 @@ namespace UnityMicroEditor
             private TcpClient client;
             private NetworkStream stream;
             private readonly Queue<Frame> frames = new Queue<Frame>();
+            private readonly Queue<Sound> sounds = new Queue<Sound>();
             private readonly Stack<byte[]> spare = new Stack<byte[]>();
             private string state;
             private volatile bool closed, connected;
             private volatile int queued;
-            private long framesSent, bytesSent;
+            private long framesSent, bytesSent, audioSent, audioDropped;
             private volatile string error;
             internal volatile int Viewers;
             internal bool Closed => closed;
@@ -293,6 +336,8 @@ namespace UnityMicroEditor
             internal string Error => error;
             internal long FramesSent => Interlocked.Read(ref framesSent);
             internal long BytesSent => Interlocked.Read(ref bytesSent);
+            internal long AudioSent => Interlocked.Read(ref audioSent);
+            internal long AudioDropped => Interlocked.Read(ref audioDropped);
 
             internal Link(int port, string token, int pid)
             {
@@ -318,6 +363,22 @@ namespace UnityMicroEditor
                 }
             }
 
+            // Called on the audio thread with the mix of one audio buffer.
+            internal void SendAudio(float[] data, int channels, int rate)
+            {
+                if (closed || !connected || Viewers < 1 || rate <= 0 || channels < 1 || channels > 8 || data.Length == 0) return;
+                var bytes = new byte[data.Length * 4];
+                Buffer.BlockCopy(data, 0, bytes, 0, bytes.Length);
+                lock (gate)
+                {
+                    if (closed) return;
+                    // A writer that cannot keep up loses the oldest sound, not the newest.
+                    if (sounds.Count >= MaximumQueuedAudio) { sounds.Dequeue(); Interlocked.Increment(ref audioDropped); }
+                    sounds.Enqueue(new Sound { Samples = bytes, Channels = channels, Rate = rate });
+                    Monitor.PulseAll(gate);
+                }
+            }
+
             internal void SendState(string value) { lock (gate) { if (closed) return; state = value; Monitor.PulseAll(gate); } }
 
             private void Write()
@@ -334,17 +395,28 @@ namespace UnityMicroEditor
                     new Thread(() => Read(output)) { IsBackground = true, Name = "UnityMicroEditor.Stream.Read" }.Start();
                     connected = true;
                     var header = new byte[13];
+                    var soundHeader = new byte[11];
                     while (true)
                     {
-                        Frame frame = null; string text;
+                        Frame frame = null; string text; Sound[] pending = null;
                         lock (gate)
                         {
-                            while (!closed && frames.Count == 0 && state == null) Monitor.Wait(gate);
+                            while (!closed && frames.Count == 0 && state == null && sounds.Count == 0) Monitor.Wait(gate);
                             if (closed) return;
                             // The frame stays counted until it is written.
                             if (frames.Count > 0) frame = frames.Peek();
                             text = state; state = null;
+                            if (sounds.Count > 0) { pending = sounds.ToArray(); sounds.Clear(); }
                         }
+                        // Sound goes first: a late frame is a stutter, late sound a gap.
+                        if (pending != null)
+                            foreach (Sound sound in pending)
+                            {
+                                soundHeader[0] = (byte)'A'; Length(soundHeader, sound.Samples.Length + 6);
+                                Integer32(soundHeader, 5, sound.Rate); Short(soundHeader, 9, sound.Channels);
+                                output.Write(soundHeader, 0, soundHeader.Length); output.Write(sound.Samples, 0, sound.Samples.Length);
+                                Interlocked.Increment(ref audioSent);
+                            }
                         if (text != null)
                         {
                             byte[] payload = Encoding.UTF8.GetBytes(text);
@@ -391,6 +463,8 @@ namespace UnityMicroEditor
 
             private static void Length(byte[] header, int value)
             { header[1] = (byte)value; header[2] = (byte)(value >> 8); header[3] = (byte)(value >> 16); header[4] = (byte)(value >> 24); }
+            private static void Integer32(byte[] header, int offset, int value)
+            { header[offset] = (byte)value; header[offset + 1] = (byte)(value >> 8); header[offset + 2] = (byte)(value >> 16); header[offset + 3] = (byte)(value >> 24); }
             private static void Short(byte[] header, int offset, int value)
             { header[offset] = (byte)value; header[offset + 1] = (byte)(value >> 8); }
 
@@ -404,6 +478,7 @@ namespace UnityMicroEditor
             public void Dispose() { Close(); }
 
             private sealed class Frame { internal byte[] Pixels; internal int Width, Height, ScreenWidth, ScreenHeight; }
+            private sealed class Sound { internal byte[] Samples; internal int Channels, Rate; }
         }
     }
 }

@@ -63,6 +63,8 @@ namespace UnityMicroEditor
             foreach (Component component in value.GetComponents<Component>())
             {
                 if (component == null) { components.Add(new Dictionary<string, object> { ["type"] = "missing_script" }); continue; }
+                // The remote session's audio tap is the bridge's, not the game's.
+                if (component is AgentAudioTap) continue;
                 var entry = new Dictionary<string, object> { ["type"] = component.GetType().FullName, ["fields"] = Fields(component) };
                 components.Add(entry);
             }

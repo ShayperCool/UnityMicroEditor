@@ -1,5 +1,6 @@
 //! The WebRTC transport: every viewer is a peer connection that receives the
-//! session's H.264 stream as an RTP video track, decoded by the browser's own
+//! session's H.264 stream as an RTP video track and its Opus sound as an audio
+//! track, decoded by the browser's own
 //! media pipeline. Unlike WebCodecs this works on a plain-HTTP page. All peers
 //! share one UDP socket; offers and answers travel over the viewer's WebSocket.
 use super::Shared;
@@ -35,6 +36,7 @@ struct Peer {
     viewer: u64,
     rtc: Rtc,
     track: Option<(Mid, Pt)>,
+    sound: Option<(Mid, Pt)>,
     // A peer starts, and restarts after a loss it reports, at a keyframe.
     waiting: bool,
 }
@@ -46,6 +48,7 @@ fn accept(viewer: u64, offer: Value, address: SocketAddr) -> Result<(Peer, Value
         .set_ice_lite(true)
         .clear_codecs()
         .enable_h264(true)
+        .enable_opus(true, false)
         .build(Instant::now());
     let candidate = Candidate::host(address, "udp").map_err(|error| error.to_string())?;
     rtc.add_local_candidate(candidate);
@@ -58,6 +61,7 @@ fn accept(viewer: u64, offer: Value, address: SocketAddr) -> Result<(Peer, Value
         viewer,
         rtc,
         track: None,
+        sound: None,
         waiting: true,
     };
     Ok((peer, answer))
@@ -96,6 +100,14 @@ fn drive(shared: &Shared, peer: &mut Peer, socket: &UdpSocket) -> Option<Instant
                 Event::MediaAdded(media) if media.kind == MediaKind::Video => {
                     peer.track = payload(&mut peer.rtc, media.mid).map(|pt| (media.mid, pt));
                 }
+                Event::MediaAdded(media) if media.kind == MediaKind::Audio => {
+                    peer.sound = peer.rtc.writer(media.mid).and_then(|writer| {
+                        writer
+                            .payload_params()
+                            .find(|params| params.spec().codec == Codec::Opus)
+                            .map(|params| (media.mid, params.pt()))
+                    });
+                }
                 Event::IceConnectionStateChange(IceConnectionState::Disconnected) => {
                     peer.rtc.disconnect()
                 }
@@ -120,6 +132,7 @@ pub(crate) async fn run(
     mut commands: mpsc::UnboundedReceiver<Command>,
 ) {
     let mut video = shared.video.subscribe();
+    let mut audio = shared.audio.subscribe();
     let mut peers: Vec<Peer> = Vec::new();
     let mut buffer = vec![0u8; 2000];
     loop {
@@ -162,6 +175,25 @@ pub(crate) async fn run(
                     peers.iter_mut().for_each(|peer| peer.waiting = true);
                     shared.request_keyframe();
                 }
+                Err(RecvError::Closed) => return,
+            },
+            packet = audio.recv() => match packet {
+                Ok(packet) => {
+                    let now = Instant::now();
+                    for peer in &mut peers {
+                        let Some((mid, pt)) = peer.sound else { continue };
+                        if !peer.rtc.is_connected() {
+                            continue;
+                        }
+                        let Some(writer) = peer.rtc.writer(mid) else { continue };
+                        let time = MediaTime::from_micros(packet.timestamp);
+                        if writer.write(pt, now, time, packet.data().to_vec()).is_err() {
+                            peer.rtc.disconnect();
+                        }
+                    }
+                }
+                // Missed sound is skipped.
+                Err(RecvError::Lagged(_)) => {}
                 Err(RecvError::Closed) => return,
             },
             received = socket.recv_from(&mut buffer) => {

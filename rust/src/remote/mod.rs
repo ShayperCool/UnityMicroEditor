@@ -1,12 +1,15 @@
-//! Remote session: the Player's picture as hardware-encoded H.264 in a browser,
-//! and the browser's keyboard and mouse back in the Player.
+//! Remote session: the Player's picture as hardware-encoded H.264 and its
+//! sound as Opus in a browser, and the browser's keyboard and mouse back in
+//! the Player.
 //!
 //! A session owns two listeners. The Player connects to the loopback one and
-//! sends raw frames it read back from its viewport; they are encoded here and
-//! fanned out over WebSockets to the viewers of the HTTP listener, whose input
+//! sends raw frames it read back from its viewport and the samples of its
+//! audio mix; they are encoded here and fanned out to the viewers of the HTTP
+//! listener, whose input
 //! travels the other way. Each session binds its own ports, so several
 //! editors serve their Players side by side. Making the HTTP address reachable
 //! from elsewhere is left to whoever starts the session.
+mod audio;
 mod encoder;
 mod http;
 mod input;
@@ -15,6 +18,7 @@ mod publish;
 mod tests;
 mod webrtc;
 
+pub use audio::{AudioEncoder, AudioFactory, Mixdown, Opus, opus};
 pub use encoder::{Encoded, Encoder, Factory, Parameters, codec_string, hardware};
 pub use input::{key_name, translate};
 pub use publish::{Publisher, expand, find_url, split_words};
@@ -40,6 +44,27 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 const MAXIMUM_SIDE: usize = 4096;
 /// Viewers may fall this many frames behind before they resume at a keyframe.
 const VIEWER_BACKLOG: usize = 120;
+/// Audio packets of 20 ms a viewer may fall behind before it skips them.
+const AUDIO_BACKLOG: usize = 50;
+/// The most samples one audio message of the Player holds: a second of 7.1.
+const MAXIMUM_AUDIO_SAMPLES: usize = 8 * 192_000;
+
+/// The encoders a session opens: one for video at each picture size and one
+/// for audio per Player connection.
+#[derive(Clone)]
+pub struct Encoders {
+    pub video: Arc<Factory>,
+    pub audio: Arc<AudioFactory>,
+}
+impl Encoders {
+    /// NVENC for the picture, libopus for the sound.
+    pub fn hardware() -> Encoders {
+        Encoders {
+            video: Arc::new(hardware),
+            audio: Arc::new(opus),
+        }
+    }
+}
 
 /// The Player a session shows, as far as the session needs it.
 pub trait Player: Send + Sync {
@@ -146,6 +171,31 @@ impl Packet {
         &self.wire[self.offset..]
     }
 }
+
+/// One Opus packet of 20 ms in the form viewers receive it: the flags byte
+/// with [`AUDIO_FLAG`], microseconds since the session started, the packet.
+pub(crate) struct AudioPacket {
+    pub timestamp: u64,
+    pub wire: Bytes,
+}
+/// Marks an audio message among the binary messages of a viewer's socket.
+const AUDIO_FLAG: u8 = 2;
+impl AudioPacket {
+    fn new(timestamp: u64, data: &[u8]) -> AudioPacket {
+        let mut wire = Vec::with_capacity(9 + data.len());
+        wire.push(AUDIO_FLAG);
+        wire.extend_from_slice(&timestamp.to_le_bytes());
+        wire.extend_from_slice(data);
+        AudioPacket {
+            timestamp,
+            wire: wire.into(),
+        }
+    }
+    /// The Opus packet.
+    pub(crate) fn data(&self) -> &[u8] {
+        &self.wire[9..]
+    }
+}
 // flags, encoder epoch, microseconds since the session started, picture size
 // and the codec string a decoder is configured with, then the access unit.
 fn packet(
@@ -188,6 +238,18 @@ struct Status {
     bytes: u64,
     error: String,
     attach_error: String,
+    audio: AudioStatus,
+}
+
+#[derive(Default)]
+struct AudioStatus {
+    encoder: &'static str,
+    // The Player's output rate and speaker channels.
+    rate: u32,
+    channels: usize,
+    packets: u64,
+    bytes: u64,
+    error: String,
 }
 
 pub(crate) struct Shared {
@@ -197,8 +259,9 @@ pub(crate) struct Shared {
     address: SocketAddr,
     link_port: u16,
     started: Instant,
-    encoders: Arc<Factory>,
+    encoders: Encoders,
     pub(crate) video: broadcast::Sender<Arc<Packet>>,
+    pub(crate) audio: broadcast::Sender<Arc<AudioPacket>>,
     pub(crate) changed: watch::Sender<u64>,
     status: Mutex<Status>,
     // The current Player connection and its generation.
@@ -340,6 +403,14 @@ impl Shared {
                 "frames": status.frames,
                 "bytes": status.bytes,
             },
+            "audio": {
+                "encoder": status.audio.encoder,
+                "sampleRate": status.audio.rate,
+                "channels": status.audio.channels,
+                "packets": status.audio.packets,
+                "bytes": status.audio.bytes,
+                "lastError": status.audio.error,
+            },
             "viewport": {"width": status.viewport.0, "height": status.viewport.1},
             "fps": self.options.fps,
             "maxWidth": self.options.max_width,
@@ -369,7 +440,7 @@ impl Session {
     pub fn start(
         player: Arc<dyn Player>,
         options: Options,
-        encoders: Arc<Factory>,
+        encoders: Encoders,
     ) -> Result<Session, String> {
         let options = options.normalized()?;
         let address: SocketAddr = options.listen.parse().map_err(|_| {
@@ -424,6 +495,7 @@ impl Session {
             started: Instant::now(),
             encoders,
             video: broadcast::channel(VIEWER_BACKLOG).0,
+            audio: broadcast::channel(AUDIO_BACKLOG).0,
             changed: watch::channel(0).0,
             status: Mutex::default(),
             link: Mutex::default(),
@@ -645,15 +717,97 @@ struct Active {
     encoder: Box<dyn Encoder>,
 }
 
+// The sound of one Player connection on its way to the encoder.
+#[derive(Default)]
+struct Sound {
+    mixdown: Mixdown,
+    encoder: Option<Box<dyn AudioEncoder>>,
+    retry: Option<Instant>,
+    // When the first packet of the current run was due, in microseconds
+    // since the session started, and the stereo samples encoded since.
+    clock: Option<(u64, u64)>,
+}
+
+impl Sound {
+    // Encodes what a chunk of the Player's samples completes and hands it to
+    // the viewers. Packets are timed by their samples; a run that drifts from
+    // the session's clock (the Player paused its output, or sent nothing
+    // while nobody watched) starts again from it.
+    fn take(&mut self, shared: &Shared, rate: u32, channels: usize, samples: &[f32]) {
+        let packets = self.mixdown.push(rate, channels, samples);
+        {
+            let mut status = shared.status.lock().unwrap();
+            status.audio.rate = rate;
+            status.audio.channels = channels;
+        }
+        for pcm in packets {
+            if self.encoder.is_none() {
+                if self.retry.is_some_and(|retry| Instant::now() < retry) {
+                    return;
+                }
+                match (shared.encoders.audio)() {
+                    Ok(encoder) => {
+                        let mut status = shared.status.lock().unwrap();
+                        status.audio.encoder = encoder.name();
+                        status.audio.error.clear();
+                        self.encoder = Some(encoder);
+                    }
+                    Err(error) => {
+                        self.retry = Some(Instant::now() + Duration::from_secs(5));
+                        shared.status.lock().unwrap().audio.error =
+                            format!("audio encoder unavailable: {error}");
+                        return;
+                    }
+                }
+            }
+            let now = shared.started.elapsed().as_micros() as u64;
+            let (start, encoded) = *self.clock.get_or_insert((now, 0));
+            let due = start + encoded * 1_000_000 / audio::SAMPLE_RATE as u64;
+            let timestamp = match due.abs_diff(now) > 500_000 {
+                true => {
+                    self.clock = Some((now, 0));
+                    now
+                }
+                false => due,
+            };
+            if let Some((_, encoded)) = &mut self.clock {
+                *encoded += audio::FRAME as u64;
+            }
+            let encoder = self.encoder.as_mut().expect("encoder was just ensured");
+            match encoder.encode(&pcm) {
+                Ok(data) => {
+                    let mut status = shared.status.lock().unwrap();
+                    status.audio.packets += 1;
+                    status.audio.bytes += data.len() as u64;
+                    drop(status);
+                    let _ = shared
+                        .audio
+                        .send(Arc::new(AudioPacket::new(timestamp, &data)));
+                }
+                Err(error) => {
+                    self.encoder = None;
+                    self.retry = Some(Instant::now() + Duration::from_secs(2));
+                    shared.status.lock().unwrap().audio.error =
+                        format!("audio encoding failed: {error}");
+                    return;
+                }
+            }
+        }
+    }
+}
+
 // Reads the Player's messages until the connection ends: 'S' is its state as
-// JSON, 'F' a frame (viewport and picture size as four u16, then RGBA rows).
-// A Player that goes away ends the stream without an error; a message that
-// breaks the protocol is one.
+// JSON, 'F' a frame (viewport and picture size as four u16, then RGBA rows),
+// 'A' samples of its audio mix (output rate as u32, channel count as u16,
+// then interleaved f32). A Player that goes away ends the stream without an
+// error; a message that breaks the protocol is one.
 fn pump(shared: &Shared, stream: &mut TcpStream) -> Result<(), String> {
     let mut header = [0u8; 5];
     let mut frame = Vec::new();
     let mut active: Option<Active> = None;
     let mut retry = Instant::now();
+    let mut sound = Sound::default();
+    let mut samples: Vec<f32> = Vec::new();
     loop {
         if stream.read_exact(&mut header).is_err() {
             return Ok(());
@@ -714,7 +868,7 @@ fn pump(shared: &Shared, stream: &mut TcpStream) -> Result<(), String> {
                         fps: shared.options.fps,
                         bitrate: shared.options.bitrate_kbps * 1000,
                     };
-                    match (shared.encoders)(&parameters) {
+                    match (shared.encoders.video)(&parameters) {
                         Ok(encoder) => {
                             let mut status = shared.status.lock().unwrap();
                             status.encoder = encoder.name();
@@ -779,6 +933,42 @@ fn pump(shared: &Shared, stream: &mut TcpStream) -> Result<(), String> {
                         shared.notify();
                     }
                 }
+            }
+            b'A' if (6..=6 + MAXIMUM_AUDIO_SAMPLES * 4).contains(&length)
+                && (length - 6).is_multiple_of(4) =>
+            {
+                let mut format = [0u8; 6];
+                if stream.read_exact(&mut format).is_err() {
+                    return Ok(());
+                }
+                let rate = u32::from_le_bytes([format[0], format[1], format[2], format[3]]);
+                let channels = u16::from_le_bytes([format[4], format[5]]) as usize;
+                let mut bytes = vec![0u8; length - 6];
+                if stream.read_exact(&mut bytes).is_err() {
+                    return Ok(());
+                }
+                if !(8_000..=192_000).contains(&rate)
+                    || !(1..=8).contains(&channels)
+                    || !(bytes.len() / 4).is_multiple_of(channels)
+                {
+                    return Err("the Player sent malformed audio".into());
+                }
+                if shared.viewers.load(Ordering::Relaxed) == 0 {
+                    continue;
+                }
+                samples.clear();
+                samples.extend(
+                    bytes
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|sample| f32::from_le_bytes(*sample))
+                        .map(|sample| match sample.is_finite() {
+                            true => sample.clamp(-1.0, 1.0),
+                            false => 0.0,
+                        }),
+                );
+                sound.take(shared, rate, channels, &samples);
             }
             _ => return Err("the Player sent an unknown stream message".into()),
         }

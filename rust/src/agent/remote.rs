@@ -69,7 +69,7 @@ impl Service {
                         let session = remote::Session::start(
                             Arc::new(controller),
                             options,
-                            Arc::new(remote::hardware),
+                            remote::Encoders::hardware(),
                         )
                         .map_err(|error| fail("remote_session_failed", error))?;
                         let status = session.status();

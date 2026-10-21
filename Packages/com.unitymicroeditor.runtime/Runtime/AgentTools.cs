@@ -233,7 +233,7 @@ namespace UnityMicroEditor
             var values = new List<MonoBehaviour>();
             foreach (GameObject root in AgentRuntimeSnapshot.LiveRoots())
                 foreach (MonoBehaviour component in root.GetComponentsInChildren<MonoBehaviour>(true))
-                    if (component != null && component.GetComponent<RawSceneResources>() == null && !(component is AgentCaptureRunner) && type.IsInstanceOfType(component))
+                    if (component != null && component.GetComponent<RawSceneResources>() == null && !(component is AgentCaptureRunner) && !(component is AgentAudioTap) && type.IsInstanceOfType(component))
                         values.Add(component);
             return values;
         }

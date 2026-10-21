@@ -1155,7 +1155,7 @@ fn runtime_tools() -> Vec<StaticTool> {
         static_tool(
             write_tool(
                 "remote_session",
-                "Serve the Player's picture and input to a browser: start, stop, status. start binds an HTTP listener of its own (default 127.0.0.1 and a free port, so every editor gets a distinct address) and returns url, which carries the session's secret; open it in a browser to watch the game as hardware-encoded H.264 and play it with keyboard and mouse. It can be started before the Player: the page waits and follows Player restarts. Encoding needs an NVIDIA GPU. transport websocket (default) uses one HTTP port and needs a WebCodecs browser on localhost or HTTPS; transport webrtc also works on a plain-HTTP page but sends the video over a UDP port. publish runs a command for the session's lifetime (a tunnel client, for example) and the reply's publicUrl is the address it announced.",
+                "Serve the Player's picture, sound and input to a browser: start, stop, status. start binds an HTTP listener of its own (default 127.0.0.1 and a free port, so every editor gets a distinct address) and returns url, which carries the session's secret; open it in a browser to watch the game as hardware-encoded H.264 with Opus sound (the mix of the scene's active AudioListener) and play it with keyboard and mouse. It can be started before the Player: the page waits and follows Player restarts. Encoding needs an NVIDIA GPU; sound needs libopus. transport websocket (default) uses one HTTP port and needs a WebCodecs browser on localhost or HTTPS; transport webrtc also works on a plain-HTTP page but sends the media over a UDP port. publish runs a command for the session's lifetime (a tunnel client, for example) and the reply's publicUrl is the address it announced.",
                 false,
                 object(&[
                     ("action", string("start,stop,status"), true),
@@ -1211,7 +1211,9 @@ fn runtime_tools() -> Vec<StaticTool> {
                     ),
                     (
                         "bitrateKbps",
-                        integer("start: video bitrate, 250-100000, default 12000"),
+                        integer(
+                            "start: ceiling of the video bitrate in kbit/s (a simpler picture takes less), 250-100000, default 12000",
+                        ),
                         false,
                     ),
                 ]),

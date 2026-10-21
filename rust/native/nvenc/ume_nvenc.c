@@ -2,8 +2,9 @@
 // encoder (libnvidia-encode) on a CUDA context. Both libraries are opened at
 // run time, so the tool starts on machines without an NVIDIA driver.
 //
-// Tuned for interactive streaming: no B-frames, no lookahead, constant
-// bitrate, an infinite GOP and IDR frames only when the caller asks. Every
+// Tuned for interactive streaming: no B-frames, no lookahead, a bitrate
+// ceiling with a quality floor, an infinite GOP and IDR frames only when the
+// caller asks. Every
 // call returns the complete access unit of the frame it was given.
 #include <dlfcn.h>
 #include <stdarg.h>
@@ -13,6 +14,10 @@
 #include <string.h>
 
 #include "nvEncodeAPI.h"
+
+// The finest quantizer the rate control may choose: about what the eye no
+// longer tells from the source in a game picture.
+#define UME_NVENC_MINIMUM_QP 23
 
 typedef int (*cu_init)(unsigned int);
 typedef int (*cu_device_get)(int *, int);
@@ -143,10 +148,19 @@ int ume_nvenc_open(uint32_t width, uint32_t height, uint32_t fps, uint32_t bitra
     config.profileGUID = NV_ENC_H264_PROFILE_HIGH_GUID;
     config.gopLength = NVENC_INFINITE_GOPLENGTH;
     config.frameIntervalP = 1;
-    config.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
-    config.rcParams.averageBitRate = bitrate;
+    // The bitrate is a ceiling and QP 23 a floor: under ultra-low-latency
+    // tuning the rate control spends the whole budget by lowering QP (it
+    // ignores a target quality), so a simple or slowly moving picture took
+    // the full bitrate. With the floor it takes what QP 23 needs.
+    config.rcParams.rateControlMode = NV_ENC_PARAMS_RC_VBR;
+    config.rcParams.averageBitRate = 0;
     config.rcParams.maxBitRate = bitrate;
-    // Two frames of buffer: an IDR frame keeps its quality without adding delay.
+    config.rcParams.enableMinQP = 1;
+    config.rcParams.minQP.qpInterP = UME_NVENC_MINIMUM_QP;
+    config.rcParams.minQP.qpInterB = UME_NVENC_MINIMUM_QP;
+    config.rcParams.minQP.qpIntra = UME_NVENC_MINIMUM_QP;
+    // Two frames of buffer at the ceiling: an IDR frame keeps its quality
+    // without adding delay.
     config.rcParams.vbvBufferSize = (uint32_t)((uint64_t)bitrate * 2 / fps);
     config.rcParams.vbvInitialDelay = config.rcParams.vbvBufferSize;
     config.rcParams.zeroReorderDelay = 1;

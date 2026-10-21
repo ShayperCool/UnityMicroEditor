@@ -104,9 +104,11 @@ impl Drop for Viewing {
 
 async fn viewer(shared: Arc<Shared>, mut socket: WebSocket) {
     let mut video = shared.video.subscribe();
+    let mut audio = shared.audio.subscribe();
     let mut changed = shared.changed.subscribe();
     let viewing = Viewing(shared.clone(), shared.viewer_joined());
-    // With WebRTC the video is a media track; this socket carries state, signalling and input.
+    // With WebRTC the video and the sound are media tracks; this socket
+    // carries state, signalling and input.
     let frames = !shared.uses_webrtc();
     // A viewer starts, and restarts after falling behind, at a keyframe.
     let mut waiting = true;
@@ -124,6 +126,12 @@ async fn viewer(shared: Arc<Shared>, mut socket: WebSocket) {
                     shared.request_keyframe();
                     continue;
                 }
+                Err(RecvError::Closed) => break,
+            },
+            // A viewer that fell behind skips the sound it missed.
+            packet = audio.recv(), if frames => match packet {
+                Ok(packet) => Message::Binary(packet.wire.clone()),
+                Err(RecvError::Lagged(_)) => continue,
                 Err(RecvError::Closed) => break,
             },
             update = changed.changed() => match update {

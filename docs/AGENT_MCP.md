@@ -190,7 +190,7 @@ An attached interactive Editor is not owned or terminated by the tool.
 | `runtime_query` | Public status, hierarchy, inspection, logs, raycast and tool catalog. |
 | `runtime_command` | Simulation, input, screenshots and public project tool calls. |
 | `project_tools` | Refresh the live catalog and register `project.<name>` MCP tools. |
-| `remote_session` | Start/stop/status of a browser page that shows the Player as H.264 video and plays it with keyboard and mouse. |
+| `remote_session` | Start/stop/status of a browser page that shows the Player as H.264 video with Opus sound and plays it with keyboard and mouse. |
 
 Resources `unitymicroeditor://project` and `unitymicroeditor://capabilities` expose
 project context and supported behavior. These are our tool names, not an assertion
@@ -931,9 +931,9 @@ Verified on 2026-10-20 on the sample in a scene the worker wrote: a door renamed
 ```
 
 The reply's `url` (`http://127.0.0.1:<port>/<secret>/`) opens a page that shows
-the Player's viewport and sends keyboard, mouse, wheel and touch input back.
-`status` reports the same object with `playerConnected`, `viewers` and the
-`video` counters; `stop` closes the listener and every viewer. Stopping the MCP
+the Player's viewport, plays its sound and sends keyboard, mouse, wheel and
+touch input back. `status` reports the same object with `playerConnected`,
+`viewers` and the `video` and `audio` counters; `stop` closes the listener and every viewer. Stopping the MCP
 server stops the session too.
 
 Every session binds its own listener, by default `127.0.0.1` and a free port, so
@@ -951,7 +951,7 @@ ready, and follows resets and Player replacements by itself.
 | `publishPattern` | none | Regular expression whose first group is the public address in the command's output. |
 | `fps` | `60` | Capture rate, 1-60. The Player's own frame cap (`mcp --fps`, default 30) bounds it. |
 | `maxWidth` | `1920` | Widest encoded picture; a wider viewport is scaled down. |
-| `bitrateKbps` | `12000` | Constant video bitrate. |
+| `bitrateKbps` | `12000` | Ceiling of the video bitrate. Below it the encoder spends what the picture needs at its quality floor, so a still or simple picture takes far less. |
 
 A repeated `start` with the same or no settings returns the running session;
 other settings need a `stop` first.
@@ -961,20 +961,31 @@ the public `ScreenCapture` API, reads it back asynchronously and sends the raw
 frame over a loopback connection that only it can open (the port and a secret
 travel through the control directory). The server encodes H.264 on the GPU
 through the NVIDIA driver's encoder (NVENC: ultra-low-latency tuning, no
-B-frames, keyframes only on request) and hands each frame to the viewers as
-soon as it is encoded. Nothing is captured or encoded while nobody watches.
+B-frames, keyframes only on request, the `bitrateKbps` ceiling with a
+quantizer floor of QP 23) and hands each frame to the viewers as soon as it is
+encoded. Nothing is captured or encoded while nobody watches.
+
+The sound is the Player's final mix: the bridge puts a component on the
+object of the scene's active `AudioListener` (and moves it when the listener
+changes), which receives the mix in `OnAudioFilterRead` and passes it on
+unchanged, so the Player still plays it locally. The samples travel over the
+same connection; the server folds them to stereo, brings them to 48 kHz and
+encodes Opus (libopus, 96 kbit/s, 20 ms packets). `status.audio` gives the
+Player's output rate and channels, the packets and bytes sent and
+`lastError`. The component is the bridge's own and does not appear in
+`runtime_query` snapshots.
 
 The two transports carry the same stream and the same input:
 
-- `websocket` sends the frames over the page's WebSocket and the page decodes
-  them with WebCodecs. Everything is one HTTP port, which any reverse proxy or
+- `websocket` sends the frames and the sound over the page's WebSocket and the
+  page decodes them with WebCodecs. Everything is one HTTP port, which any reverse proxy or
   tunnel forwards. Browsers offer WebCodecs only in a secure context, so the
   page must be opened on `localhost`/`127.0.0.1` or through HTTPS.
-- `webrtc` sends the video as an RTP track that the browser's own media
-  pipeline plays, so the page also works on plain `http://<lan-ip>`. The video
-  travels over UDP to `webrtcAddress`, reported by `status`, which the viewer
-  must reach directly: an HTTP proxy or tunnel carries the page and the input
-  but not the video. Signalling and input stay on the WebSocket. The server
+- `webrtc` sends the video and the sound as RTP tracks (H.264 and Opus) that
+  the browser's own media pipeline plays, so the page also works on plain
+  `http://<lan-ip>`. Both travel over UDP to `webrtcAddress`, reported by
+  `status`, which the viewer must reach directly: an HTTP proxy or tunnel
+  carries the page and the input but not the media. Signalling and input stay on the WebSocket. The server
   announces that single local address and uses no STUN or TURN server, so it
   cannot sit behind address translation.
 
@@ -1034,7 +1045,21 @@ Limits:
   relative motion (pointer lock).
 - The picture is the Player window's viewport as rendered; frames arrive a few
   frames after they were drawn (asynchronous GPU readback). Row order is
-  verified on OpenGL Core, the verified graphics path. Audio is not streamed.
+  verified on OpenGL Core, the verified graphics path.
+- A picture that changes all over every frame (camera motion over detailed
+  surfaces, noise) needs more than the ceiling at the quality
+  floor and takes all of `bitrateKbps`; lower it for a narrow link. The
+  ceiling is per frame at the session's `fps`, so a Player that renders fewer
+  frames (`mcp --fps`, default 30) uses that share of it.
+- Sound needs `libopus.so.0` on the server's machine (opened at run time;
+  without it `status.audio.lastError` says so and the video goes on), an
+  active `AudioListener` in the scene and a host Player with the audio module.
+  A Player whose audio output is disabled sends nothing. Browsers start sound
+  only after the viewer clicks or presses a key on the page; the page's Sound
+  button turns it off and on. Sound is played as it arrives, a few tens of
+  milliseconds ahead, and is not synchronized with the picture beyond that;
+  sound that falls a quarter second behind is dropped. With `websocket` it
+  needs WebCodecs `AudioDecoder` (verified in Chrome, as the picture).
 
 ## Limits of a session
 
