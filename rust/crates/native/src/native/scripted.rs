@@ -47,6 +47,12 @@ pub struct ScriptEnvironment {
     pub assembly_roots: BTreeMap<String, String>,
     /// Identifies the assemblies' contents.
     pub sha256: String,
+    /// The hash of each assembly's contents, by assembly name, and of each
+    /// precompiled one, by its place: what an import that needs one of
+    /// their classes was made with.
+    pub assembly_sha256: BTreeMap<String, String>,
+    /// The assembly each script is compiled into, by logical path.
+    pub script_assemblies: BTreeMap<String, String>,
 }
 
 impl ScriptEnvironment {
@@ -802,6 +808,11 @@ fn read_environment(
             };
             plugins.insert(place);
         }
+        for source in &assembly.source_files {
+            environment
+                .script_assemblies
+                .insert(source.clone(), assembly.name.clone());
+        }
         for source in assembly
             .source_files
             .iter()
@@ -853,8 +864,12 @@ fn read_environment(
                 .or_insert_with(|| root.to_string());
             scripts.insert(source.clone());
         }
-        identity.push_str(&format!("{}\0{}\0", assembly.name, sha256(&data)));
+        let hash = sha256(&data);
+        identity.push_str(&format!("{}\0{hash}\0", assembly.name));
         environment.assemblies.push(assembly.name.clone());
+        environment
+            .assembly_sha256
+            .insert(assembly.name.clone(), hash);
     }
     if scripts.len() > SCRIPT_LIMIT {
         bail!("importer assemblies are compiled from more scripts than one import context holds");
@@ -877,7 +892,9 @@ fn read_environment(
     for plugin in &environment.plugins {
         let data = read_file(&sysutil::join(&[&library, plugin]))
             .map_err(|error| wrap(&format!("precompiled assembly {plugin}"), error))?;
-        identity.push_str(&format!("plugin\0{plugin}\0{}\0", sha256(&data)));
+        let hash = sha256(&data);
+        identity.push_str(&format!("plugin\0{plugin}\0{hash}\0"));
+        environment.assembly_sha256.insert(plugin.clone(), hash);
     }
     environment.sha256 = sha256(identity.as_bytes());
     Ok(environment)

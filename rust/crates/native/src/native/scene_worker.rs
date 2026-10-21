@@ -45,6 +45,7 @@ struct Warm {
     sources: BTreeMap<String, (String, String)>,
     environment: String,
     assemblies: String,
+    code: Code,
     request: String,
     request_guid: String,
     revision: u64,
@@ -60,6 +61,7 @@ impl Drop for Warm {
             &library,
             &self.environment,
             &self.assemblies,
+            &self.code,
             &self.sources,
         ) {
             Event::new("scene-library-not-kept")
@@ -99,16 +101,104 @@ struct LibraryState {
     #[serde(default)]
     assemblies: String,
     sources: BTreeMap<String, (String, String)>,
+    /// The code the imports were made with. A library kept before it was
+    /// recorded takes an import that needs a script's class only with the
+    /// same scripts and assemblies.
+    #[serde(default)]
+    code: Code,
+}
+
+/// The code an import that needs a script's class depends on: the hash of
+/// each loaded assembly (by name, a precompiled one by its place) and the
+/// assembly each script is compiled into.
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Code {
+    assembly_sha256: BTreeMap<String, String>,
+    script_assemblies: BTreeMap<String, String>,
+}
+
+impl Code {
+    fn of(environment: &super::scripted::ScriptEnvironment) -> Self {
+        Self {
+            assembly_sha256: environment.assembly_sha256.clone(),
+            script_assemblies: environment.script_assemblies.clone(),
+        }
+    }
+
+    /// Whether a class the dependency names comes from other code than in
+    /// `before`: its script is compiled into another assembly, or that
+    /// assembly changed.
+    fn differs(&self, before: &Code, dependency: &Dependency) -> bool {
+        let assembly = |code: &Code| -> Option<(String, Option<String>)> {
+            let name = match dependency {
+                Dependency::Script(path) => code.script_assemblies.get(path)?.clone(),
+                Dependency::Assembly(name) => name.clone(),
+            };
+            let hash = code.assembly_sha256.get(&name).cloned();
+            Some((name, hash))
+        };
+        assembly(self) != assembly(before)
+    }
+}
+
+/// Where the class of an object of an asset is looked up.
+#[derive(Debug, PartialEq, Eq)]
+enum Dependency {
+    /// A script or a precompiled assembly, by logical path.
+    Script(String),
+    /// An assembly a serialized reference names.
+    Assembly(String),
+}
+
+/// The scripts and assemblies whose classes the import of an asset needs:
+/// those its objects and serialized references name, and its scripted
+/// importer.
+fn code_dependencies(
+    sources: &super::build_settings::Sources,
+    data: &[u8],
+    meta: &[u8],
+) -> Vec<Dependency> {
+    static GUID: std::sync::LazyLock<regex::bytes::Regex> =
+        std::sync::LazyLock::new(|| regex::bytes::Regex::new(r"guid: ([0-9a-fA-F]{32})").unwrap());
+    static ASSEMBLY: std::sync::LazyLock<regex::bytes::Regex> = std::sync::LazyLock::new(|| {
+        regex::bytes::Regex::new(r"\basm: ([A-Za-z0-9_.\-]+)").unwrap()
+    });
+    let script = |guid: &str| {
+        sources
+            .path_of(guid)
+            .filter(|path| matches!(super::support::lower_ext(path).as_str(), ".cs" | ".dll"))
+            .map(|path| Dependency::Script(path.to_string()))
+    };
+    let mut found = Vec::new();
+    if data.starts_with(b"%YAML") {
+        for capture in GUID.captures_iter(data) {
+            found.extend(script(
+                &String::from_utf8_lossy(&capture[1]).to_ascii_lowercase(),
+            ));
+        }
+        for capture in ASSEMBLY.captures_iter(data) {
+            found.push(Dependency::Assembly(
+                String::from_utf8_lossy(&capture[1]).into_owned(),
+            ));
+        }
+    }
+    if let Some(importer) = super::scripted::scripted_importer(meta) {
+        found.extend(script(&importer));
+    }
+    found
 }
 
 /// The assets of a batch whose import is out of date: those whose source or
-/// `.meta` differs from what the library holds, and every text asset that
-/// refers to one of them by GUID, transitively.
+/// `.meta` differs from what the library holds, those `stale` names for
+/// what else they depend on, and every text asset that refers to one of
+/// them by GUID, transitively.
 fn changed_assets(
     sources: &super::build_settings::Sources,
     batch: &[String],
     hashes: &BTreeMap<String, (String, String)>,
     kept: &BTreeMap<String, (String, String)>,
+    stale: impl Fn(&str, &[u8], &[u8]) -> bool,
 ) -> std::collections::BTreeSet<String> {
     static GUID: std::sync::LazyLock<regex::bytes::Regex> =
         std::sync::LazyLock::new(|| regex::bytes::Regex::new(r"guid: ([0-9a-fA-F]{32})").unwrap());
@@ -125,6 +215,10 @@ fn changed_assets(
         let Ok(data) = read_file(&physical) else {
             continue;
         };
+        let meta = read_file(&format!("{physical}.meta")).unwrap_or_default();
+        if !changed.contains(path) && stale(path, &data, &meta) {
+            changed.insert(path.clone());
+        }
         if !data.starts_with(b"%YAML") {
             continue;
         }
@@ -191,6 +285,7 @@ fn keep_library(
     context_library: &str,
     environment: &str,
     assemblies: &str,
+    code: &Code,
     sources: &BTreeMap<String, (String, String)>,
 ) -> Result<()> {
     let directory = library_directory(project);
@@ -213,6 +308,7 @@ fn keep_library(
             environment: environment.to_string(),
             assemblies: assemblies.to_string(),
             sources: sources.clone(),
+            code: code.clone(),
         },
     )
 }
@@ -220,8 +316,9 @@ fn keep_library(
 /// Whether a source's import depends on nothing a script or another asset
 /// changes, so that an import of the same source and `.meta` is taken as
 /// it is while the same assemblies are loaded: models, images, sounds,
-/// videos and fonts. Any other import is taken when the scripts are those
-/// it was made with and nothing it refers to changed.
+/// videos and fonts. Any other import is taken when the classes it needs
+/// come from the same code (`Code::differs`) and nothing it refers to
+/// changed.
 fn kept_as_imported(path: &str) -> bool {
     kept_kind(path)
 }
@@ -536,7 +633,20 @@ impl SceneWorker {
         let kept = take_library(&build.project, &library);
         let environment_key = environment_key(environment);
         let assemblies = assemblies_key(environment);
-        let changed = changed_assets(sources, batch, hashes, &kept.sources);
+        let code = Code::of(environment);
+        // With the code of its imports recorded, an import is out of date
+        // when a class it needs comes from changed code; without, any import
+        // but a model's, image's or sound's is when any script changed.
+        let recorded = !kept.code.assembly_sha256.is_empty();
+        let changed = changed_assets(sources, batch, hashes, &kept.sources, |path, data, meta| {
+            if recorded {
+                code_dependencies(sources, data, meta)
+                    .iter()
+                    .any(|dependency| code.differs(&kept.code, dependency))
+            } else {
+                !kept_as_imported(path) && kept.environment != environment_key
+            }
+        });
         let paths: BTreeMap<&str, &str> = opts
             .project_context
             .iter()
@@ -560,9 +670,8 @@ impl SceneWorker {
                     .and_then(|physical| read_file(&format!("{physical}.meta")).ok())
                     .unwrap_or_default();
                 imported_each_time(path, &meta)
-                    || !(!changed.contains(*path)
-                        && ((kept_as_imported(path) && kept.assemblies == assemblies)
-                            || kept.environment == environment_key))
+                    || changed.contains(*path)
+                    || kept.assemblies != assemblies
             })
             .cloned()
             .collect();
@@ -580,6 +689,7 @@ impl SceneWorker {
                     &library,
                     &kept.environment,
                     &kept.assemblies,
+                    &kept.code,
                     &sources,
                 );
                 return Err(error);
@@ -593,6 +703,7 @@ impl SceneWorker {
                 &library,
                 &kept.environment,
                 &kept.assemblies,
+                &kept.code,
                 &sources,
             );
             return Err(error);
@@ -609,6 +720,7 @@ impl SceneWorker {
             sources,
             environment: environment_key,
             assemblies,
+            code,
             request: request.to_string(),
             request_guid: request_guid.to_string(),
             revision: 0,
@@ -716,7 +828,100 @@ fn replace(path: &str, data: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::imported_each_time;
+    use super::*;
+
+    const SCRIPT: &str = "0123456789abcdef0123456789abcdef";
+    const PLUGIN: &str = "fedcba9876543210fedcba9876543210";
+    const IMPORTER: &str = "00112233445566778899aabbccddeeff";
+
+    fn project() -> (tempfile::TempDir, super::super::build_settings::Sources) {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path().to_str().unwrap().to_string();
+        for (path, guid) in [
+            ("Assets/Game/Enemy.cs", SCRIPT),
+            ("Assets/Plugins/Tool.dll", PLUGIN),
+            ("Assets/Editor/Import.cs", IMPORTER),
+        ] {
+            let file = sysutil::join(&[&root, path]);
+            std::fs::create_dir_all(sysutil::dir(&file)).unwrap();
+            std::fs::write(&file, "").unwrap();
+            std::fs::write(
+                format!("{file}.meta"),
+                format!("fileFormatVersion: 2\nguid: {guid}\n"),
+            )
+            .unwrap();
+        }
+        let sources =
+            super::super::build_settings::Sources::open(&root, &root, &BTreeMap::new()).unwrap();
+        (directory, sources)
+    }
+
+    fn code(game: &str, scripts: &[(&str, &str)]) -> Code {
+        Code {
+            assembly_sha256: BTreeMap::from([
+                ("Game".to_string(), game.to_string()),
+                ("Tools".to_string(), "t".to_string()),
+                ("Assets/Plugins/Tool.dll".to_string(), "p".to_string()),
+            ]),
+            script_assemblies: scripts
+                .iter()
+                .map(|(path, assembly)| (path.to_string(), assembly.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn an_import_needs_the_classes_its_objects_references_and_importer_name() {
+        let (_directory, sources) = project();
+        let prefab = format!(
+            "%YAML 1.1\n--- !u!114 &1\nMonoBehaviour:\n  m_Script: {{fileID: 11500000, guid: {SCRIPT}, type: 3}}\n  m_Tool: {{fileID: 7, guid: {PLUGIN}, type: 3}}\n  references:\n    - type: {{class: Loot, ns: Game, asm: Game.Data}}\n"
+        );
+        let meta = format!(
+            "fileFormatVersion: 2\nScriptedImporter:\n  script: {{fileID: 11500000, guid: {IMPORTER}, type: 3}}\n"
+        );
+        assert_eq!(
+            code_dependencies(&sources, prefab.as_bytes(), meta.as_bytes()),
+            [
+                Dependency::Script("Assets/Game/Enemy.cs".into()),
+                Dependency::Script("Assets/Plugins/Tool.dll".into()),
+                Dependency::Assembly("Game.Data".into()),
+                Dependency::Script("Assets/Editor/Import.cs".into()),
+            ]
+        );
+        // A material names a shader, no class.
+        let material = "%YAML 1.1\n--- !u!21 &2100000\nMaterial:\n  m_Shader: {fileID: 4800000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 3}\n";
+        assert!(code_dependencies(&sources, material.as_bytes(), b"").is_empty());
+    }
+
+    #[test]
+    fn an_import_is_out_of_date_only_when_code_it_needs_changed() {
+        let scripts = [
+            ("Assets/Game/Enemy.cs", "Game"),
+            ("Assets/Editor/Import.cs", "Tools"),
+        ];
+        let before = code("g1", &scripts);
+        let enemy = Dependency::Script("Assets/Game/Enemy.cs".into());
+        let importer = Dependency::Script("Assets/Editor/Import.cs".into());
+        let plugin = Dependency::Script("Assets/Plugins/Tool.dll".into());
+        // Same code.
+        assert!(!code("g1", &scripts).differs(&before, &enemy));
+        // Game changed: its scripts' imports are out of date, the others not.
+        let after = code("g2", &scripts);
+        assert!(after.differs(&before, &enemy));
+        assert!(after.differs(&before, &Dependency::Assembly("Game".into())));
+        assert!(!after.differs(&before, &importer));
+        assert!(!after.differs(&before, &plugin));
+        // A script that moved to another assembly, or one that was not
+        // compiled before, is out of date as well.
+        let moved = code("g1", &[("Assets/Game/Enemy.cs", "Tools"), scripts[1]]);
+        assert!(moved.differs(&before, &enemy));
+        let new = Dependency::Script("Assets/Game/Boss.cs".into());
+        let added = code(
+            "g1",
+            &[scripts[0], scripts[1], ("Assets/Game/Boss.cs", "Game")],
+        );
+        assert!(added.differs(&before, &new));
+    }
 
     #[test]
     fn a_texture_with_sprites_is_imported_by_every_worker() {
