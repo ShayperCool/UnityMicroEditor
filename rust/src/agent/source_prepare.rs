@@ -360,7 +360,7 @@ impl Service {
                 ctx,
                 project,
                 editor,
-                packages::Options::default().with_runtime_package()?,
+                packages::Options::default().with_runtime_package(project)?,
             )
         };
         let mut resolved = resolve()?;

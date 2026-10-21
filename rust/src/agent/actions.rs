@@ -204,28 +204,39 @@ pub fn install_agent_package(project: &str) -> Result<()> {
         return Err(anyhow!("package manifest dependencies must be an object"));
     };
     let expected = format!("file:{package_root}");
+    let mut changed = false;
     if let Some(installed) = dependencies.get(NAME) {
-        if *installed == Any::String(expected.clone()) {
-            return Ok(());
+        let same = *installed == Any::String(expected.clone())
+            || matches!(installed, Any::String(location)
+                if location.strip_prefix("file:").is_some_and(|physical| {
+                    let physical = if sysutil::is_abs(physical) {
+                        physical.to_string()
+                    } else {
+                        join(&[project, "Packages", physical])
+                    };
+                    lexpath::eval_symlinks(&physical).is_ok_and(|canonical| canonical == package_root)
+                }));
+        if !same {
+            return Err(fail(
+                "package_conflict",
+                "the target already requests another UnityMicroEditor package; resolve it explicitly before preparation",
+            ));
         }
-        if let Any::String(location) = installed
-            && let Some(physical) = location.strip_prefix("file:")
-        {
-            let physical = if sysutil::is_abs(physical) {
-                physical.to_string()
-            } else {
-                join(&[project, "Packages", physical])
-            };
-            if lexpath::eval_symlinks(&physical).is_ok_and(|canonical| canonical == package_root) {
-                return Ok(());
-            }
-        }
-        return Err(fail(
-            "package_conflict",
-            "the target already requests another UnityMicroEditor package; resolve it explicitly before preparation",
-        ));
+    } else {
+        dependencies.insert(NAME.into(), expected.into());
+        changed = true;
     }
-    dependencies.insert(NAME.into(), expected.into());
+    // The packages the runtime package needs from the project's release line,
+    // unless the project declares them itself.
+    for (name, version) in crate::engine::of_project(project)?.runtime_dependencies {
+        if !dependencies.contains_key(*name) {
+            dependencies.insert((*name).into(), (*version).into());
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
     let mut after = jsondoc::marshal_indent(&Any::Object(manifest)).map_err(|e| anyhow!(e))?;
     after.push(b'\n');
     let backup = join(&[

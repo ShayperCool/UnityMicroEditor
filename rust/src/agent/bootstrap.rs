@@ -80,7 +80,7 @@ impl Service {
                 ctx,
                 project,
                 &self.0.editor,
-                packages::Options::default().with_runtime_package()?,
+                packages::Options::default().with_runtime_package(project)?,
             )?;
             let graph = if supplied {
                 super::host::proof_graph(project, &self.0.editor, &host, &resolved)?

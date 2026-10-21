@@ -156,6 +156,17 @@ pub fn resolve(ctx: &Context, project: &str, editor: &str, options: Options) -> 
             r.direct.insert(name, request);
         }
     }
+    for (name, version) in r.options.provided_versions.clone() {
+        if !valid_package_name(&name) || version.is_empty() || version.contains(':') {
+            bail!("invalid provided dependency {name:?}");
+        }
+        if !r.direct.contains_key(&name) && !r.embedded.contains_key(&name) {
+            r.diagnostics.push(format!(
+                "{name}: provided by the tool for its runtime package, not declared in the manifest"
+            ));
+            r.direct.insert(name, version);
+        }
+    }
     for name in r.embedded.keys() {
         r.direct.insert(name.clone(), "embedded".into());
     }
@@ -537,7 +548,15 @@ impl Resolver<'_> {
                     }
                 }
                 if !result.path.is_empty() && result.content_hash != p.content_hash {
-                    bail!("conflicting cached contents for {name}@{selected}");
+                    // UPM rewrites the `package.json` of its PackageCache copy, so a
+                    // copy the tool downloaded and verified by its receipt is taken
+                    // over it. Two copies without a receipt still conflict.
+                    let owned = |path: &str| inside(&join(&[&self.cache, "content"]), path);
+                    match (owned(&result.path), owned(&p.path)) {
+                        (true, false) => continue,
+                        (false, true) => {}
+                        _ => bail!("conflicting cached contents for {name}@{selected}"),
+                    }
                 }
                 result = p;
             }

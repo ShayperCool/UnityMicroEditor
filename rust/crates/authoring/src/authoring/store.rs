@@ -56,6 +56,13 @@ pub(crate) fn guid_pattern() -> &'static Regex {
     static GUID: OnceLock<Regex> = OnceLock::new();
     GUID.get_or_init(|| Regex::new(r"(?m)^guid:[ \t\r\n\x0c]*([0-9a-fA-F]{32})[ \t]*\r?$").unwrap())
 }
+/// The GUID the Editor reads from a `.meta`: its first `guid:` line. A
+/// committed merge conflict can leave two; the Editor keeps the first.
+pub(crate) fn meta_guid_of(text: &str) -> Option<String> {
+    guid_pattern()
+        .captures(text)
+        .map(|capture| capture[1].to_lowercase())
+}
 pub(crate) fn revision(data: &[u8], meta: &[u8]) -> String {
     let mut hash = Sha256::new();
     hash.update(b"unitymicroeditor-authored-v1\0");
@@ -345,19 +352,16 @@ impl Store {
                 Some(json!({"path": relative, "cause": error.to_string()})),
             )
         })?;
-        let matches: Vec<_> = guid_pattern()
-            .captures_iter(std::str::from_utf8(&meta).unwrap())
-            .collect();
-        if matches.len() != 1 {
+        let Some(guid) = meta_guid_of(std::str::from_utf8(&meta).unwrap()) else {
             return Err(failure(
                 "invalid_identity",
-                "asset metadata requires exactly one GUID",
+                "asset metadata requires a GUID",
                 Some(json!({"path": relative})),
             ));
-        }
+        };
         Ok(Source {
             path: relative.into(),
-            guid: matches[0][1].to_lowercase(),
+            guid,
             revision: revision(&data, &meta),
             content: String::from_utf8(data).unwrap(),
             metadata: String::from_utf8(meta).unwrap(),
@@ -645,14 +649,12 @@ impl Store {
                     ".asmdef" => result.assembly_definitions.push(relative),
                     ".meta" => {
                         let text = String::from_utf8(read_limited(&path)?).unwrap();
-                        let matches: Vec<_> = guid_pattern().captures_iter(&text).collect();
-                        if matches.len() != 1 {
+                        let Some(guid) = meta_guid_of(&text) else {
                             result
                                 .identity_issues
-                                .push(format!("{relative}: metadata requires exactly one GUID"));
+                                .push(format!("{relative}: metadata requires a GUID"));
                             continue;
-                        }
-                        let guid = matches[0][1].to_lowercase();
+                        };
                         if let Some(previous) = guids.insert(guid.clone(), relative.clone()) {
                             result
                                 .identity_issues

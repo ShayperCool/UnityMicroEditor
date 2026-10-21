@@ -41,16 +41,25 @@ pub struct Options {
     /// authored manifest does not declare. They resolve as if declared, so the
     /// tool's runtime package never has to be written into the target manifest.
     pub provided: BTreeMap<String, String>,
+    /// Registry or built-in packages the tool's runtime package needs from
+    /// the selected engine's release line (`name` to a version), resolved as
+    /// direct dependencies unless the project declares them itself.
+    pub provided_versions: BTreeMap<String, String>,
 }
 
 /// The tool's runtime bridge package.
 pub const RUNTIME_PACKAGE: &str = "com.unitymicroeditor.runtime";
 
 impl Options {
-    /// Provides the tool's runtime package from the installation directory.
+    /// Provides the tool's runtime package from the installation directory,
+    /// with the packages it needs in the release `project` selects.
     /// The Player host is always built with it, while the target manifest
     /// stays as authored.
-    pub fn with_runtime_package(mut self) -> anyhow::Result<Self> {
+    pub fn with_runtime_package(mut self, project: &str) -> anyhow::Result<Self> {
+        for (name, version) in crate::engine::of_project(project)?.runtime_dependencies {
+            self.provided_versions
+                .insert(name.to_string(), version.to_string());
+        }
         let tool = crate::util::micro_editor_root()?;
         let root = crate::project::lexpath::eval_symlinks(&crate::sysutil::join(&[
             &tool,

@@ -552,7 +552,7 @@ impl Service {
                                 ctx,
                                 project,
                                 &self.0.editor,
-                                packages::Options::default().with_runtime_package()?,
+                                packages::Options::default().with_runtime_package(project)?,
                             )?);
                         }
                         if let Some(package) = resolved

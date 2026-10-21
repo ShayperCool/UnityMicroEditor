@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "displayName": "Unity Micro Editor runtime",
   "description": "Raw scene loading, lifecycle barriers, native asset delivery and iteration for a reusable Unity Mono host.",
-  "unity": "6000.6",
+  "unity": "6000.0",
   "dependencies": {
     "com.unity.modules.animation": "1.0.0",
     "com.unity.modules.assetbundle": "1.0.0",
@@ -15,8 +15,6 @@
     "com.unity.modules.physics2d": "1.0.0",
     "com.unity.modules.screencapture": "1.0.0",
     "com.unity.modules.ui": "1.0.0",
-    "com.unity.modules.uielements": "1.0.0",
-    "com.unity.render-pipelines.core": "17.6.0",
-    "com.unity.collections": "6.6.0"
+    "com.unity.modules.uielements": "1.0.0"
   }
 }

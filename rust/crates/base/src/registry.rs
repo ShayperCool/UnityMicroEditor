@@ -197,11 +197,11 @@ fn trim_space(bytes: &[u8]) -> &[u8] {
 pub fn meta_guid(data: &[u8]) -> Result<String> {
     let mut guid: &[u8] = b"";
     for line in data.split(|&b| b == b'\n') {
-        if let Some(value) = line.strip_prefix(b"guid:") {
-            ensure!(
-                guid.is_empty(),
-                "source .meta has duplicate top-level GUID fields"
-            );
+        // The Editor keeps the first of the GUIDs a committed merge
+        // conflict leaves.
+        if let Some(value) = line.strip_prefix(b"guid:")
+            && guid.is_empty()
+        {
             guid = trim_space(value);
         }
     }

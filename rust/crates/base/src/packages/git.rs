@@ -204,7 +204,7 @@ impl Resolver<'_> {
         } else {
             "HEAD"
         };
-        self.git_command(
+        if let Err(error) = self.git_command(
             &repo,
             &[
                 "-c",
@@ -217,7 +217,12 @@ impl Resolver<'_> {
                 "origin",
                 revision,
             ],
-        )?;
+        ) {
+            return match self.git_fingerprinted_copy(name, request, &commit, &reference.subdir)? {
+                Some(package) => Ok(package),
+                None => Err(error),
+            };
+        }
         let resolved =
             self.git_command(&repo, &["rev-parse", "--verify", "FETCH_HEAD^{commit}"])?;
         let resolved = resolved.trim().to_string();
@@ -300,6 +305,55 @@ impl Resolver<'_> {
         };
         atomic_json(&receipt_path, &receipt)?;
         self.git_materialized_copy(p)
+    }
+    /// A project PackageCache copy of a locked commit, for a remote the tool
+    /// cannot read (a private repository the Editor fetched with its own
+    /// credentials). UPM writes the commit it materialized as `_fingerprint`
+    /// into the copy's `package.json`; only a copy whose fingerprint is the
+    /// commit the lock names is taken, and the snapshot records that this is
+    /// UPM's word, not a verified archive.
+    fn git_fingerprinted_copy(
+        &mut self,
+        name: &str,
+        request: &str,
+        commit: &str,
+        subdirectory: &str,
+    ) -> Result<Option<Package>> {
+        if commit.is_empty() {
+            return Ok(None);
+        }
+        let project_cache = join(&[&self.project, "Library", "PackageCache"]);
+        let paths: Vec<String> = self
+            .caches
+            .get(name)
+            .into_iter()
+            .flat_map(|versions| versions.values().flatten())
+            .filter(|path| inside(&project_cache, path))
+            .cloned()
+            .collect();
+        let mut result: Option<Package> = None;
+        for path in paths {
+            let mut text = Vec::new();
+            open(&join(&[&path, "package.json"]))?
+                .take(1 << 20)
+                .read_to_end(&mut text)?;
+            let manifest: serde_json::Value = serde_json::from_slice(&text)?;
+            if manifest["_fingerprint"].as_str() != Some(commit) {
+                continue;
+            }
+            let mut package =
+                self.package_at(name, &path, "git", request, "upm_fingerprinted_cache_copy")?;
+            if result
+                .as_ref()
+                .is_some_and(|other| other.content_hash != package.content_hash)
+            {
+                bail!("ambiguous materialized Git package contents");
+            }
+            package.revision = commit.to_string();
+            package.subdirectory = subdirectory.to_string();
+            result = Some(package);
+        }
+        Ok(result)
     }
     /// A project PackageCache copy is reusable only after comparison with a freshly
     /// verified exact-commit archive or its unchanged receipt. Its folder suffix is

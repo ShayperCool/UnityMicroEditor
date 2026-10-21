@@ -37,6 +37,10 @@ pub struct Engine {
     /// Names what the worker's import environment is made of; part of every
     /// cached import's key.
     pub environment_revision: &'static str,
+    /// The packages of this release line the runtime package is built with:
+    /// its asmdef references their assemblies, and a host carries them for
+    /// projects that use them.
+    pub runtime_dependencies: &'static [(&'static str, &'static str)],
     pub worker: &'static dyn WorkerProtocol,
     pub data_store: &'static dyn DataStoreProtocol,
     pub asset_database: &'static dyn AssetDatabase,

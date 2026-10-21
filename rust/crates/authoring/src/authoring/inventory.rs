@@ -118,11 +118,12 @@ impl Store {
                         Ok(meta) => {
                             item.metadata_revision = sha256(&meta);
                             let text = std::str::from_utf8(&meta).unwrap();
-                            let matches: Vec<_> = guid_pattern().captures_iter(text).collect();
-                            if matches.len() != 1 { item.identity_issue = "metadata requires exactly one GUID".into(); }
-                            else {
-                                item.guid = matches[0][1].to_lowercase();
+                            match meta_guid_of(text) {
+                            None => item.identity_issue = "metadata requires a GUID".into(),
+                            Some(guid) => {
+                                item.guid = guid;
                                 guids.entry(item.guid.clone()).or_default().push(entries.len());
+                            }
                             }
                         }
                     },
