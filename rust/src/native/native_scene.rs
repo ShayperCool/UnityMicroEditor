@@ -145,7 +145,10 @@ impl NativeProjectImporter {
             ..Default::default()
         };
         // The Player reads back the objects the manifest names by their
-        // sources (the included assets); the scene finds the others itself.
+        // sources: the root of an included prefab, every object of the other
+        // included assets. The scene finds the others itself; an object of a
+        // prefab may be a component whose script the build left missing,
+        // which a built Player only warns about.
         let included: Vec<String> = {
             let mut session = self.session.lock();
             session.index_guids()?;
@@ -156,8 +159,12 @@ impl NativeProjectImporter {
         };
         for ((file_id, type_name), source) in dependencies.objects.iter().zip(&dependencies.sources)
         {
-            let guid = source.split('/').next().unwrap_or_default();
-            if included.iter().any(|known| known == guid) {
+            let (guid, source_id) = source.split_once('/').unwrap_or((source, ""));
+            let named = dependencies
+                .roots
+                .get(guid)
+                .is_none_or(|root| root == source_id);
+            if named && included.iter().any(|known| known == guid) {
                 content.objects.push(NativeContentObject {
                     file_id: file_id.clone(),
                     type_name: type_name.clone(),

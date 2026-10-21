@@ -288,7 +288,10 @@ pub(crate) fn source_engine_profile_cache_path(project: &str, host: &str) -> Res
     let proof_data = read_agent_file(&proof_path, 32 << 20).map_err(|error| {
         join_errors("host lacks its compiled-source profile proof", Some(&error))
     })?;
+    // The format of the profile is part of its identity: a profile an
+    // older tool wrote is captured again rather than read.
     let identity = super::marshal(&BTreeMap::from([
+        ("format", "2".to_string()),
         ("host", host.to_string()),
         ("executableSHA256", sha256(&host_data)),
         ("sourceProofSHA256", sha256(&proof_data)),
