@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # check-compile.sh <prepared host>/<Name>_Data/Managed [output directory]
 # Compiles the bridge the two ways it is compiled, and the applier as a session compiles it:
-#   1. the session command of rust/src/compiler/host.rs (stage_host);
+#   1. the session command of rust/crates/compiler/src/compiler/host.rs (stage_host);
 #   2. the same without -unsafe+, which is what the asmdef (allowUnsafeCode: false) allows in the host build;
 #   3. tools/HotReloadRuntime with the session flags against the same references plus the bridge of step 1.
 # Nothing is started; the Managed directory is only read.

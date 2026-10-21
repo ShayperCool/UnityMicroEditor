@@ -2559,6 +2559,179 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
+name = "ume-agentcontrol"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "libc",
+ "png",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ume-authoring",
+ "ume-base",
+ "ume-compiler",
+ "ume-playerbake",
+ "ume-runner",
+ "url",
+]
+
+[[package]]
+name = "ume-authoring"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "png",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "ume-base",
+ "yaml-rust2",
+]
+
+[[package]]
+name = "ume-base"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "flate2",
+ "libc",
+ "png",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "tar",
+ "tempfile",
+ "tokio",
+ "ureq",
+ "url",
+ "xxhash-rust",
+ "yaml-rust2",
+]
+
+[[package]]
+name = "ume-compiler"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "png",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "ume-authoring",
+ "ume-base",
+ "ume-playerbake",
+]
+
+[[package]]
+name = "ume-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "libc",
+ "regex",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "subtle",
+ "tempfile",
+ "tokio",
+ "ume-agentcontrol",
+ "ume-authoring",
+ "ume-base",
+ "ume-compiler",
+ "ume-playerbake",
+ "url",
+]
+
+[[package]]
+name = "ume-native"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "libc",
+ "png",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "ume-authoring",
+ "ume-base",
+ "ume-compiler",
+ "ume-playerbake",
+ "url",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "ume-playerbake"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lz4-sys",
+ "regex",
+ "serde",
+ "serde_json",
+ "ume-base",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "ume-remote"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "cc",
+ "libc",
+ "regex",
+ "serde_json",
+ "str0m",
+ "subtle",
+ "tempfile",
+ "tokio",
+ "ume-agentcontrol",
+ "ume-authoring",
+ "ume-base",
+ "ume-compiler",
+ "ume-playerbake",
+ "url",
+]
+
+[[package]]
+name = "ume-runner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "png",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ume-authoring",
+ "ume-base",
+ "ume-compiler",
+ "ume-native",
+ "ume-playerbake",
+ "yaml-rust2",
+]
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2569,29 +2742,23 @@ name = "unity-micro-editor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum",
  "base64 0.22.1",
- "cc",
- "chrono",
- "flate2",
  "libc",
- "lz4-sys",
  "png",
- "regex",
- "rmcp",
  "serde",
  "serde_json",
- "sha1",
  "sha2",
- "str0m",
- "subtle",
- "tar",
  "tempfile",
- "tokio",
- "ureq",
+ "ume-agentcontrol",
+ "ume-authoring",
+ "ume-base",
+ "ume-compiler",
+ "ume-mcp",
+ "ume-native",
+ "ume-playerbake",
+ "ume-remote",
+ "ume-runner",
  "url",
- "xxhash-rust",
- "yaml-rust2",
 ]
 
 [[package]]

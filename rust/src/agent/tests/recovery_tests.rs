@@ -2,9 +2,10 @@
 //!
 //! Every test drives `Service::runtime`, the entry point of the server, with
 //! a real `Controller` and a runner process that speaks the runner's
-//! protocol (`agentcontrol::tests::controller_helper_process`, the helper of
-//! the controller's own tests). Only the Unity part of a preparation is
-//! replaced, by `preparation_of`: a preparation with a compiler plan that
+//! protocol (`agentcontrol::testing::helper_process`, the helper of the
+//! controller's own tests, run here as `controller_helper_process`). Only the
+//! Unity part of a preparation is replaced, by `preparation_of`: a
+//! preparation with a compiler plan that
 //! names the managed inputs it was made with, which is what the recovery
 //! reads to tell what a preparation was made from.
 use super::jobs_tests::{preparation_fixture, preparation_of, run, wait_job};
@@ -19,9 +20,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-const HELPER: &str = "agentcontrol::tests::controller_helper_process";
+const HELPER: &str = "agent::tests::recovery_tests::controller_helper_process";
 const SCENE: &str = "Assets/Main.unity";
 const ASMDEF: &str = "Assets/Lib/Lib.asmdef";
+
+// The runner the rigs start is this test of the same binary.
+#[test]
+fn controller_helper_process() {
+    agentcontrol::testing::helper_process()
+}
 
 struct Rig {
     _guard: TempDir,

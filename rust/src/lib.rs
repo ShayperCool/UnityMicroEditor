@@ -1,50 +1,20 @@
 //! Independent Rust implementations of Unity Micro Editor's source formats.
+//!
+//! The layers live in the crates of `rust/crates`, each rebuilt only when it or
+//! a layer below it changes; their modules are re-exported here under the
+//! paths they always had.
+pub use ume_agentcontrol::agentcontrol;
+pub use ume_authoring::authoring;
+pub use ume_base::{
+    ENGINE_PROFILE, ENGINE_VERSION, cache, cancel, editorbridge, flags, graph, hashstore, hex,
+    jsondoc, lmdb, packages, parity, paths, project, protocol, registry, runtimeartifact, sha256,
+    sysutil, util, yaml,
+};
+pub use ume_compiler::{compiler, hotreload, sourcegraph};
+pub use ume_mcp::mcp;
+pub use ume_native::{engine, native};
+pub use ume_playerbake::playerbake;
+pub use ume_remote::remote;
+pub use ume_runner::runner;
+
 pub mod agent;
-pub mod agentcontrol;
-pub mod authoring;
-pub mod cache;
-pub mod cancel;
-pub mod compiler;
-pub mod editorbridge;
-pub mod engine;
-pub mod flags;
-pub mod graph;
-pub mod hashstore;
-pub mod hotreload;
-pub mod jsondoc;
-pub mod lmdb;
-pub mod mcp;
-pub mod native;
-pub mod packages;
-pub mod parity;
-pub mod paths;
-pub mod playerbake;
-pub mod project;
-pub mod protocol;
-pub mod registry;
-pub mod remote;
-pub mod runner;
-pub mod runtimeartifact;
-pub mod sourcegraph;
-pub mod sysutil;
-pub mod util;
-pub mod yaml;
-
-/// The verified release, which the formats outside `engine` serve.
-pub const ENGINE_VERSION: &str = engine::unity6000_6::VERSION;
-pub const ENGINE_PROFILE: &str = include_str!("../../engine-profile.json");
-
-pub fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut text = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        text.push(DIGITS[(byte >> 4) as usize] as char);
-        text.push(DIGITS[(byte & 15) as usize] as char);
-    }
-    text
-}
-
-pub fn sha256(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    hex(&Sha256::digest(bytes))
-}

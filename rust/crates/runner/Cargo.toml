@@ -1,0 +1,27 @@
+[package]
+name = "ume-runner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+ume-base.workspace = true
+ume-authoring.workspace = true
+ume-playerbake.workspace = true
+ume-compiler.workspace = true
+ume-native.workspace = true
+anyhow.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+yaml-rust2.workspace = true
+tempfile.workspace = true
+png.workspace = true
+
+[features]
+testing = ["ume-base/testing"]
+
+[dev-dependencies]
+ume-base = { workspace = true, features = ["testing"] }

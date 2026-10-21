@@ -54,7 +54,7 @@ it holds the following parts:
 `ProjectSettings/*.asset`:
 
 - **Layouts.** The Player type trees of the 13 classes are embedded under
-  `rust/src/playerbake/engine/type-<class>.bin`. They were taken from a file the
+  `rust/crates/playerbake/src/playerbake/engine/type-<class>.bin`. They were taken from a file the
   Editor wrote with the public `ContentBuildInterface.WriteSerializedFile` over
   the objects that `GetPlayerObjectIdentifiersInSerializedFile` returns for
   each `ProjectSettings` file, with target `StandaloneLinux64`.

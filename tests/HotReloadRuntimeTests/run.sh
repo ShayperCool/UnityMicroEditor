@@ -17,7 +17,7 @@ out="${HOTRELOAD_TEST_OUT:-$here/bin}"
 editor="${UNITY_EDITOR_DIR:-$HOME/Unity/Hub/Editor/6000.6.3f1/Editor}"
 data="$editor/Data"
 mbe="$data/MonoBleedingEdge"
-aot="$mbe/lib/mono/unityaot-linux"      # what sessions compile against (rust/src/compiler/host.rs)
+aot="$mbe/lib/mono/unityaot-linux"      # what sessions compile against (rust/crates/compiler/src/compiler/host.rs)
 jit="$mbe/lib/mono/unityjit-linux"      # what a Mono Player runs on
 player="$data/PlaybackEngines/LinuxStandaloneSupport/Variations/linux64_player_development_mono"
 mono="$mbe/bin-linux64/mono"
@@ -37,7 +37,7 @@ done
 
 csc() { "$dotnet" "$compiler" -nologo -nostdlib+ -langversion:9 "-reference:$aot/mscorlib.dll" "-reference:$aot/System.dll" "-reference:$aot/System.Core.dll" "$@"; }
 session=(-target:library -warnaserror+ -nowarn:0649,0618 -unsafe+)     # the bridge's session flags
-game=(-target:library -deterministic+ -debug:portable -optimize-)      # the flags of game assemblies (rust/src/compiler/compile.rs)
+game=(-target:library -deterministic+ -debug:portable -optimize-)      # the flags of game assemblies (rust/crates/compiler/src/compiler/compile.rs)
 
 rm -rf "$out/applier" "$out/faulty" "$out/patches" "$out/probe" "$out/ref" "$out/gen" "$out"/run-*
 mkdir -p "$out/applier" "$out/faulty" "$out/patches" "$out/probe" "$out/ref" "$out/gen"

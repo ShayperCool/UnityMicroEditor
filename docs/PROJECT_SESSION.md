@@ -1,11 +1,11 @@
 # Scene preparation
 
-The `authoring` module (`rust/src/authoring/`) also performs revision-checked component and prefab source
+The `authoring` module (`rust/crates/authoring/src/authoring/`) also performs revision-checked component and prefab source
 edits, including nested/variant create, overrides, apply/revert and unpack. Native
 default templates are supplied by a version-bound cache; these transactions do
 not run Editor. See [AGENT_MCP.md](AGENT_MCP.md).
 
-The `packages` module (`rust/src/packages/`) resolves manifest and lock dependencies, embedded/file
+The `packages` module (`rust/crates/base/src/packages/`) resolves manifest and lock dependencies, embedded/file
 packages, scoped registries, exact Git commits/subdirectories and built-in SDK
 packages. Registry download and safe archive extraction run in-process. Existing
 PackageCache directories are accepted only with source provenance checks; the
@@ -15,7 +15,7 @@ preserving the authored manifest and lock. Offline mode requires verified local
 sources. Use `unity-micro-editor resolve-packages --project /absolute/project`
 (also `--editor`, `--offline`, `--current` and `--refresh-git`).
 
-Player assembly graph derivation lives in `rust/src/sourcegraph/`. It uses these resolved
+Player assembly graph derivation lives in `rust/crates/compiler/src/sourcegraph/`. It uses these resolved
 roots and authored `.asmdef`/`.asmref` files, with a separately captured pinned
 engine/native-host profile. Rider/Visual Studio packages use Unity's public
 CompilationPipeline for their assembly inventories; our implementation derives
@@ -23,7 +23,7 @@ target ownership and references directly from source.
 
 ## The session
 
-The `project` module (`rust/src/project/`) publishes immutable revisions of a
+The `project` module (`rust/crates/base/src/project/`) publishes immutable revisions of a
 scene manifest (`scene.json`) without running the Unity Editor or a Player. It
 does not build the scene itself: the scene is written in the Player format by
 Unity's import worker ([NATIVE_IMPORT.md](NATIVE_IMPORT.md#scenes-in-the-player-format)),
@@ -56,13 +56,13 @@ are written beside the scene.
 
 ## What `prepare` does
 
-`Session::prepare` (`rust/src/project/session.rs`):
+`Session::prepare` (`rust/crates/base/src/project/session.rs`):
 
 1. Checks the retained built-in shaders the baseline names, indexes the GUIDs of
    the project's `.meta` files and hashes every source the baseline lists in
    `sourceDependencies`. A source the catalog recorded with another hash is a
    `NeedsImportError`.
-2. Calls `native_scene_over` (`rust/src/project/native_scene.rs`). It follows the
+2. Calls `native_scene_over` (`rust/crates/base/src/project/native_scene.rs`). It follows the
    GUIDs of the scene, the render pipeline asset, the preloaded assets, the
    addressed prefabs and every text asset they reach, and makes each file and its
    `.meta` a dependency of the revision. The hash of all of them is the scene's
@@ -87,7 +87,7 @@ are written beside the scene.
    writes `revisions/<random id>/scene.json` as a new file.
 
 The caller resolves the two errors and prepares again. The runner's
-`NativeProjectImporter::prepare` (`rust/src/native/importer.rs`) has the scene
+`NativeProjectImporter::prepare` (`rust/crates/native/src/native/importer.rs`) has the scene
 worker write the scene for `NeedsNativeScene` and hands it over with
 `Session::set_native_scene`; for `NeedsImportError` it builds the shader and
 hands it over with `Session::replace_native_content`, which checks the source
@@ -118,7 +118,7 @@ not change takes the revision without preparing ([RUNNER.md](RUNNER.md#a-start-w
 ## Authored YAML
 
 The source tools read authored scenes and prefabs through the same module:
-`rust/src/project/expand.rs` expands nested prefabs and model hierarchies for
+`rust/crates/base/src/project/expand.rs` expands nested prefabs and model hierarchies for
 `scene_hierarchy` and the `authored-graph` command. This expansion is not used
 to load a scene in the Player.
 

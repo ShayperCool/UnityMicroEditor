@@ -18,7 +18,7 @@ coordinator makes, for the scene worker and for `project-import` alike.
 A scene names its documents, panel settings and themes by GUID, but they name
 their own sources by path as often: a UXML `<Style src>` or `<Template src>`,
 a USS or TSS `@import` and `url()` (fonts, images). The scene's closure
-(`ui_references` in `rust/src/native/player_objects.rs`) follows these too, so
+(`ui_references` in `rust/crates/native/src/native/player_objects.rs`) follows these too, so
 the style sheets, templates, fonts and images go into the worker's context
 and are imported before what names them. A path is taken relative to the
 file, from the project root when it starts with `/`, or from a
@@ -41,7 +41,7 @@ script-backed object is refused with "Failed to add object of type
 the engine's own classes included.
 
 The coordinator therefore writes the register into every source database it
-makes (`rust/src/native/scripted.rs`, `script_register`). It lists the
+makes (`rust/crates/native/src/native/scripted.rs`, `script_register`). It lists the
 `MonoScript` objects of the installed Editor's
 `Data/Resources/unity default resources` (30 in 6000.6.3f1, for example
 `VisualTreeAsset` 11995 and `StyleSheet` 11998) as references into
@@ -71,7 +71,7 @@ class it logs "missing a UxmlElementAttribute", and the Player creates nothing
 there. `project-import` therefore loads, from the Editor compilation, each
 assembly whose metadata holds the name and the namespace of such an element,
 and what that assembly refers to (`uxml_elements` in
-`rust/src/native/scripted.rs`). The scene worker loads the assemblies of the
+`rust/crates/native/src/native/scripted.rs`). The scene worker loads the assemblies of the
 Editor compilation it selects for the scene ([NATIVE_IMPORT.md](NATIVE_IMPORT.md#scenes-in-the-player-format)).
 
 ## Limits
