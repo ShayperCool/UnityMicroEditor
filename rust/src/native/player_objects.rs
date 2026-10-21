@@ -1253,6 +1253,24 @@ pub(super) fn scene_closure(
                 }
             }
             let data = read_file(&physical)?;
+            // A document names its style sheets and templates, and a style
+            // sheet the sheets it imports and its fonts and images, by path
+            // as often as by GUID. The importer resolves them among the
+            // imports made before, so they go first.
+            if matches!(lower_ext(path).as_str(), ".uxml" | ".uss" | ".tss") {
+                for reference in ui_references(path, &data) {
+                    let target = match reference {
+                        UiReference::Guid(guid) => self.sources.path_of(&guid),
+                        UiReference::Path(path) => self
+                            .sources
+                            .guid_of(&path)
+                            .and_then(|guid| self.sources.path_of(guid)),
+                    };
+                    if let Some(target) = target.map(str::to_string) {
+                        self.visit(&target)?;
+                    }
+                }
+            }
             if data.starts_with(b"%YAML") {
                 for capture in GUID.captures_iter(&data) {
                     let guid = String::from_utf8_lossy(&capture[1]).to_ascii_lowercase();
@@ -1320,6 +1338,73 @@ pub(super) fn scene_closure(
         scripts: walk.scripts,
         importers: walk.importers,
     })
+}
+
+/// A source a UI document or style sheet names.
+#[derive(Debug, PartialEq, Eq)]
+enum UiReference {
+    Guid(String),
+    /// A project path.
+    Path(String),
+}
+
+/// What a UXML document (`<Style src>`, `<Template src>`) or a USS or TSS
+/// style sheet (`@import`, `url()`) at `path` refers to. A reference is a
+/// path relative to the file, a project path (`/Assets/...`) or a
+/// `project://database/` URL, which carries the GUID. The engine's own
+/// themes (`unity-theme://`) and `resource()` lookups name no source.
+fn ui_references(path: &str, data: &[u8]) -> Vec<UiReference> {
+    static DOCUMENT: std::sync::LazyLock<regex::bytes::Regex> = std::sync::LazyLock::new(|| {
+        regex::bytes::Regex::new(
+            r#"<(?:[\w.]+:)?(?:Style|Template)\b[^>]*?\s(?:src|path)\s*=\s*"([^"]*)""#,
+        )
+        .unwrap()
+    });
+    static SHEET: std::sync::LazyLock<regex::bytes::Regex> = std::sync::LazyLock::new(|| {
+        regex::bytes::Regex::new(
+            r#"(?:\burl\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\))|(?:@import\s+(?:"([^"]*)"|'([^']*)'))"#,
+        )
+        .unwrap()
+    });
+    static GUID: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"[?&;]guid=([0-9a-fA-F]{32})").unwrap());
+    let pattern = if lower_ext(path) == ".uxml" {
+        &*DOCUMENT
+    } else {
+        &*SHEET
+    };
+    let mut found = Vec::new();
+    for capture in pattern.captures_iter(data) {
+        let Some(value) = capture.iter().skip(1).flatten().next() else {
+            continue;
+        };
+        let value = String::from_utf8_lossy(value.as_bytes()).trim().to_string();
+        let reference = if let Some(guid) = GUID.captures(&value) {
+            UiReference::Guid(guid[1].to_ascii_lowercase())
+        } else {
+            let value = value.split(['?', '#']).next().unwrap_or_default();
+            let value = match value.strip_prefix("project://database/") {
+                Some(rest) => rest.replace("%20", " "),
+                None if value.contains("://") || value.is_empty() => continue,
+                None => value.to_string(),
+            };
+            let logical = match value.strip_prefix('/') {
+                Some(rooted) => sysutil::clean(rooted),
+                None if value.starts_with("Assets/") || value.starts_with("Packages/") => {
+                    sysutil::clean(&value)
+                }
+                None => sysutil::clean(&format!("{}/{value}", sysutil::dir(path))),
+            };
+            if !(logical.starts_with("Assets/") || logical.starts_with("Packages/")) {
+                continue;
+            }
+            UiReference::Path(logical)
+        };
+        if !found.contains(&reference) {
+            found.push(reference);
+        }
+    }
+    found
 }
 
 /// What a scene is made of.
@@ -1690,6 +1775,86 @@ mod tests {
             format!("fileFormatVersion: 2\nguid: {guid}\n"),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn ui_documents_and_style_sheets_name_their_sources_by_path() {
+        let document = br#"<ui:UXML xmlns:ui="UnityEngine.UIElements">
+    <Style src="Terminal.uss" />
+    <Style src="../../UI/Shared.uss" />
+    <ui:Template src="/Assets/UI/Row.uxml" name="row" />
+    <Style src="project://database/Assets/UI/Theme%20A.uss?fileID=7433441132597879392&amp;guid=ABCDEFABCDEFABCDEFABCDEFABCDEFAB&amp;type=3#Theme" />
+    <ui:Label text="src=&quot;No.uss&quot;" />
+</ui:UXML>"#;
+        assert_eq!(
+            ui_references("Assets/Game/Net/Hud.uxml", document),
+            vec![
+                UiReference::Path("Assets/Game/Net/Terminal.uss".into()),
+                UiReference::Path("Assets/UI/Shared.uss".into()),
+                UiReference::Path("Assets/UI/Row.uxml".into()),
+                UiReference::Guid("abcdefabcdefabcdefabcdefabcdefab".into()),
+            ]
+        );
+        let sheet = br#"@import url("unity-theme://default");
+@import "Base.uss";
+.a { -unity-font-definition: url("Fonts/VT323.ttf"); background-image: url('/Assets/Art/Icon.png'); }
+.b { background-image: resource("Icons/Gear"); -unity-font: url(Fonts/VT323.ttf); }
+"#;
+        assert_eq!(
+            ui_references("Assets/UI/Terminal.uss", sheet),
+            vec![
+                UiReference::Path("Assets/UI/Base.uss".into()),
+                UiReference::Path("Assets/UI/Fonts/VT323.ttf".into()),
+                UiReference::Path("Assets/Art/Icon.png".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_scene_takes_the_style_sheets_its_documents_name_before_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let guid = |index: u8| format!("{index:02x}").repeat(16);
+        source(root, "Assets/UI/Fonts/Mono.ttf", "", &guid(1));
+        source(
+            root,
+            "Assets/UI/Terminal.uss",
+            ".t { -unity-font-definition: url(\"Fonts/Mono.ttf\"); }\n",
+            &guid(2),
+        );
+        source(
+            root,
+            "Assets/UI/Hud.uxml",
+            "<ui:UXML xmlns:ui=\"UnityEngine.UIElements\">\n  <Style src=\"Terminal.uss\" />\n</ui:UXML>\n",
+            &guid(3),
+        );
+        source(
+            root,
+            "Assets/UI/Theme.tss",
+            "@import url(\"unity-theme://default\");\n",
+            &guid(4),
+        );
+        let scene = format!(
+            "%YAML 1.1\n--- !u!114 &1\nMonoBehaviour:\n  sourceAsset: {{fileID: 9197481963319205126, guid: {}, type: 3}}\n  themeUss: {{fileID: -4733365628477956816, guid: {}, type: 3}}\n",
+            guid(3),
+            guid(4)
+        );
+        source(root, "Assets/Scenes/Boot.unity", &scene, &guid(5));
+        std::fs::create_dir_all(root.join("Packages")).unwrap();
+        std::fs::write(root.join("Packages/manifest.json"), "{}").unwrap();
+        let project = root.to_str().unwrap();
+        let sources = Sources::open(project, project, &BTreeMap::new()).unwrap();
+        let closure = scene_closure(&sources, "Assets/Scenes/Boot.unity", &[]).unwrap();
+        assert_eq!(
+            closure.assets,
+            [
+                "Assets/UI/Fonts/Mono.ttf",
+                "Assets/UI/Terminal.uss",
+                "Assets/UI/Hud.uxml",
+                "Assets/UI/Theme.tss",
+                "Assets/Scenes/Boot.unity",
+            ]
+        );
     }
 
     #[test]

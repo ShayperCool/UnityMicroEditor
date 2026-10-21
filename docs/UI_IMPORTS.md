@@ -13,6 +13,22 @@ were parts of the former scene loader and are gone with it.
 What the worker needs for these importers is given to every import context the
 coordinator makes, for the scene worker and for `project-import` alike.
 
+## What a document and a style sheet name
+
+A scene names its documents, panel settings and themes by GUID, but they name
+their own sources by path as often: a UXML `<Style src>` or `<Template src>`,
+a USS or TSS `@import` and `url()` (fonts, images). The scene's closure
+(`ui_references` in `rust/src/native/player_objects.rs`) follows these too, so
+the style sheets, templates, fonts and images go into the worker's context
+and are imported before what names them. A path is taken relative to the
+file, from the project root when it starts with `/`, or from a
+`project://database/` URL, whose GUID wins. The engine's own themes
+(`unity-theme://default`) name no source. A `resource()` lookup by name in a
+`Resources` folder is not followed: such an asset reaches the Player only when
+something else in the scene names it. Without this, a document's `<Style src="Terminal.uss" />` was
+imported with "The specified URI does not exist in the current project" and
+the Player drew the document without its styles.
+
 ## The register of the engine's scripts
 
 These importers add objects of the engine's script classes (`VisualTreeAsset`,
