@@ -44,7 +44,7 @@ Source tools are `project_inspect`, `project_capabilities`, `project_inventory`,
 `script_create`, `script_edit` and `source_undo`. Resources
 `unitymicroeditor://project` and `unitymicroeditor://capabilities` describe the
 project, native source component types and configured backends. The source operations and
-transaction limits are implemented in `rust/src/authoring/`.
+transaction limits are implemented in `rust/crates/authoring/src/authoring/`.
 
 Read a source revision before editing. Submit a unique `operationId` and the same
 `expectedRevision`; stale source or metadata gives `revision_conflict`. Retry the
@@ -198,4 +198,4 @@ rejection, paging and source conflicts, runtime routing, project action schemas,
 exact DTO validation, signed 64-bit argument forwarding, catalog generation
 changes, component target selection, and the `hot_reload` tool with its typed
 errors. The controller's hot reload events and the `recompile` command are
-tested with a simulated runner in `rust/src/agentcontrol/tests.rs`.
+tested with a simulated runner in `rust/crates/agentcontrol/src/agentcontrol/tests.rs`.

@@ -162,7 +162,7 @@ internal static class Program
 
     static readonly string[] Switches = { "-nologo", "-nostdlib+", "-langversion:9.0", "-deterministic+", "-debug:portable", "-optimize-", "-unsafe-", "-nowarn:0169,0414,0649,0067,1998,0612,0618" };
 
-    /// Compiles a game assembly with the switches of rust/src/compiler/compile.rs against Unity's
+    /// Compiles a game assembly with the switches of rust/crates/compiler/src/compiler/compile.rs against Unity's
     /// reference class library.
     static string Compile(string output, IEnumerable<string> sources, IEnumerable<string>? references = null, string? define = null, string target = "library", string? library = null, bool unsafeCode = false)
     {

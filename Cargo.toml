@@ -1,25 +1,24 @@
-[package]
-name = "unity-micro-editor"
+[workspace]
+members = ["rust/crates/*"]
+# Commands at the root build, check and test every crate, as with one crate.
+default-members = [".", "rust/crates/*"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
-publish = false
 
-[lib]
-name = "unity_micro_editor"
-path = "rust/src/lib.rs"
-
-[[bin]]
-name = "unity-micro-editor"
-path = "rust/src/main.rs"
-
-# One binary for every integration test: each binary of its own loads and
-# links the library again, which a build after an edit of it paid eight times.
-[[test]]
-name = "integration"
-path = "rust/tests/integration.rs"
-
-[dependencies]
+[workspace.dependencies]
+ume-base = { path = "rust/crates/base" }
+ume-authoring = { path = "rust/crates/authoring" }
+ume-playerbake = { path = "rust/crates/playerbake" }
+ume-compiler = { path = "rust/crates/compiler" }
+ume-native = { path = "rust/crates/native" }
+ume-runner = { path = "rust/crates/runner" }
+ume-agentcontrol = { path = "rust/crates/agentcontrol" }
+ume-remote = { path = "rust/crates/remote" }
+ume-mcp = { path = "rust/crates/mcp" }
 anyhow = "1"
 base64 = "0.22"
 regex = "1"
@@ -43,9 +42,51 @@ url = "2"
 sha1 = "0.10"
 lz4-sys = "1.11.1"
 str0m = { version = "0.24.1", default-features = false, features = ["rust-crypto"] }
-
-[build-dependencies]
 cc = "1"
+
+[package]
+name = "unity-micro-editor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "unity_micro_editor"
+path = "rust/src/lib.rs"
+
+[[bin]]
+name = "unity-micro-editor"
+path = "rust/src/main.rs"
+
+# One binary for every integration test: each binary of its own loads and
+# links the library again, which a build after an edit of it paid eight times.
+[[test]]
+name = "integration"
+path = "rust/tests/integration.rs"
+
+[dependencies]
+ume-base.workspace = true
+ume-authoring.workspace = true
+ume-playerbake.workspace = true
+ume-compiler.workspace = true
+ume-native.workspace = true
+ume-runner.workspace = true
+ume-agentcontrol.workspace = true
+ume-remote.workspace = true
+ume-mcp.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+png.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+ume-agentcontrol = { workspace = true, features = ["testing"] }
 
 # Line tables keep file and line in backtraces and test failures; full debug
 # info made the library's metadata 400 MB, which every test binary loads.

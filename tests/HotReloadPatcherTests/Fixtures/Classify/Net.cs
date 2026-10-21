@@ -1,6 +1,6 @@
 // An assembly as the Netcode post-processor leaves it, written by hand: the fixtures are sources,
 // and the package's own post-processor needs a prepared Netcode project (the test
-// `hot_reload_netcode_sdk` of rust/src/hotreload/tests.rs runs it on real sources). Every class
+// `hot_reload_netcode_sdk` of rust/crates/compiler/src/hotreload/tests.rs runs it on real sources). Every class
 // below NetworkBehaviour carries what the post-processor adds: `__initializeRpcs`,
 // `__initializeVariables`, `__getTypeName`, one `__rpc_handler_<id>` per RPC, and in front of
 // every RPC body the code that sends it, which ends with the store into `__rpc_exec_stage`.

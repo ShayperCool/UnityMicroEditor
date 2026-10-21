@@ -1,0 +1,18 @@
+[package]
+name = "ume-playerbake"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+ume-base.workspace = true
+anyhow.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+xxhash-rust.workspace = true
+lz4-sys.workspace = true
+
+[dev-dependencies]
+ume-base = { workspace = true, features = ["testing"] }

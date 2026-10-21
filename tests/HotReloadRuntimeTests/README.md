@@ -50,8 +50,8 @@ gcc -O1 -g -o out/host host/host.c -include unistd.h -L"$P" -l:libmonobdwgc-2.0.
 ```bash
 csc() { "$D/DotNetSdk/dotnet" "$D"/DotNetSdk/sdk/8.0.318/Roslyn/bincore/csc.dll -nologo -nostdlib+ -langversion:9 \
     -reference:$B/mscorlib.dll -reference:$B/System.dll -reference:$B/System.Core.dll "$@"; }
-SESSION="-target:library -warnaserror+ -nowarn:0649,0618 -unsafe+"        # rust/src/compiler/host.rs
-GAME="-target:library -deterministic+ -debug:portable -optimize-"         # rust/src/compiler/compile.rs
+SESSION="-target:library -warnaserror+ -nowarn:0649,0618 -unsafe+"        # rust/crates/compiler/src/compiler/host.rs
+GAME="-target:library -deterministic+ -debug:portable -optimize-"         # rust/crates/compiler/src/compiler/compile.rs
 ENGINE="-reference:$O/UnityEngine.CoreModule.dll -reference:$O/UnityMicroEditor.dll"
 R=Packages/com.unitymicroeditor.runtime/Runtime
 ```

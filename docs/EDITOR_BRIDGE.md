@@ -1,6 +1,6 @@
 # Public Unity Editor bridge
 
-The `editorbridge` client (`rust/src/editorbridge/`) attaches to an idle Editor for an explicit project or starts and owns a batch Editor. The runtime package supplies the mailbox through public Unity APIs, independently of Coplay. Unity `6000.6.3f1` and Linux Mono are the verified profile.
+The `editorbridge` client (`rust/crates/base/src/editorbridge/`) attaches to an idle Editor for an explicit project or starts and owns a batch Editor. The runtime package supplies the mailbox through public Unity APIs, independently of Coplay. Unity `6000.6.3f1` and Linux Mono are the verified profile.
 
 ```rust
 use unity_micro_editor::{

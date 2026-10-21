@@ -112,10 +112,10 @@ Preparation and sessions do not need the package in the game project. To use the
 
 - `unity-micro-editor`: launcher. `build-host.sh`: host Player build.
 - `Cargo.toml`, `rust/`: the CLI crate; [rust/README.md](rust/README.md) describes its modules.
-- `rust/src/runner/`, `native/`, `compiler/`, `sourcegraph/`, `agent/`: runner, import coordinator, compiler driver and agent commands.
-- `rust/src/engine/`: the supported Unity releases and each one's worker, DataStore and asset database protocols.
-- `rust/src/project/`: source graph and scene revision preparation. `authoring/` holds revision-checked source edits and `packages/` package resolution.
-- `rust/src/mcp/`, `agentcontrol/`, `editorbridge/`, `runtimeartifact/`: MCP server, Player control, Editor bridge client and the reader of built-in lighting data.
+- `rust/crates/runner/src/runner/`, `native/`, `compiler/`, `sourcegraph/`, `agent/`: runner, import coordinator, compiler driver and agent commands.
+- `rust/crates/native/src/engine/`: the supported Unity releases and each one's worker, DataStore and asset database protocols.
+- `rust/crates/base/src/project/`: source graph and scene revision preparation. `authoring/` holds revision-checked source edits and `packages/` package resolution.
+- `rust/crates/mcp/src/mcp/`, `agentcontrol/`, `editorbridge/`, `runtimeartifact/`: MCP server, Player control, Editor bridge client and the reader of built-in lighting data.
 - `engine-profile.json`: the pinned engine profile embedded in the executable.
 - `Packages/com.unitymicroeditor.runtime/`: the Unity package with the runtime bridge that loads the worker-written scene, the agent controls and Editor utilities.
 - `HostProject/`: the minimal host project.
@@ -130,7 +130,7 @@ Add a separately named engine profile and keep the current one as a reference. U
 
 The worker protocol, `SourceAssetDB` tables, DataStore layout, serialized file layouts, content delivery and Mono assembly registration are private formats tied to the pinned version. Each needs to be checked again; changing a version string does not establish compatibility.
 
-The worker side is already split by release: `rust/src/engine/` holds one implementation of the worker messages, the DataStore and the asset databases per supported release, a project's `ProjectVersion.txt` selects it, and the installation has to report the same version ([docs/NATIVE_IMPORT.md](docs/NATIVE_IMPORT.md#unity-releases)). A new release gets a module of its own there. The other formats still have explicit `6000.6.3f1` guards that must be ported with it.
+The worker side is already split by release: `rust/crates/native/src/engine/` holds one implementation of the worker messages, the DataStore and the asset databases per supported release, a project's `ProjectVersion.txt` selects it, and the installation has to report the same version ([docs/NATIVE_IMPORT.md](docs/NATIVE_IMPORT.md#unity-releases)). A new release gets a module of its own there. The other formats still have explicit `6000.6.3f1` guards that must be ported with it.
 
 ## Development
 

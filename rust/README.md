@@ -1,13 +1,34 @@
-# The CLI crate
+# The CLI crates
 
-`unity-micro-editor` is one Rust crate: the manifest is the repository's root
-`Cargo.toml`, the library and executable are under `rust/src/`, integration
-tests under `rust/tests/`. The executable never invokes Python and has no
+`unity-micro-editor` is a Cargo workspace: the root `Cargo.toml` holds the
+executable, the `agent` module and the integration tests (`rust/src/`,
+`rust/tests/`); the layers below it are the crates of `rust/crates/`, each
+rebuilt only when it or a layer under it changes:
+
+| Crate | Modules | Uses |
+|---|---|---|
+| `ume-base` | `yaml`, `cache`, `graph`, `project/`, `packages/`, `editorbridge/`, `parity/`, `lmdb`, `protocol`, `registry`, `runtimeartifact/` and the small helpers | |
+| `ume-authoring` | `authoring/` | base |
+| `ume-playerbake` | `playerbake/` | base |
+| `ume-compiler` | `compiler/`, `hotreload/`, `sourcegraph/` | base, authoring, playerbake |
+| `ume-native` | `native/`, `engine/` | compiler |
+| `ume-runner` | `runner/` | native |
+| `ume-agentcontrol` | `agentcontrol/` | compiler |
+| `ume-remote`, `ume-mcp` | `remote/`, `mcp/` | agentcontrol |
+
+Each crate re-exports the modules of the crates below it, so a module reaches
+another as `crate::project` wherever it lives, and the root library re-exports
+every module under the path it had as one crate (`unity_micro_editor::native`).
+Test helpers that tests of other crates share (`sysutil::testing`,
+`runner::testing`, `agentcontrol::testing`) are behind each crate's `testing`
+feature, which only dev-dependencies turn on.
+
+The executable never invokes Python and has no
 fallback: a path that is not supported fails explicitly. The C# runtime package
 and SDK helpers remain necessary inside Unity.
 
 `../unity-micro-editor` builds a stripped release binary into the user cache,
-sets `UNITY_MICRO_EDITOR_ROOT` to the installation and runs it. The crate
+sets `UNITY_MICRO_EDITOR_ROOT` to the installation and runs it. `ume-base`
 embeds `../engine-profile.json`.
 
 ## Layout
@@ -20,7 +41,7 @@ embeds `../engine-profile.json`.
 | `runtimeartifact/` | Readers of the built-in lighting data of native artifacts |
 | `editorbridge/`, `agentcontrol/` | Client of the Editor mailbox; Player control, journal and routing |
 | `mcp/` | The MCP server over stdio and Streamable HTTP, on the `rmcp` crate |
-| `remote/` | `remote_session`: Player link, H.264 encoding, the viewer page, its WebSocket and WebRTC (`str0m`) transports, the publish command. `native/nvenc` holds the C source that drives the NVIDIA encoder, built by `build.rs` |
+| `remote/` | `remote_session`: Player link, H.264 encoding, the viewer page, its WebSocket and WebRTC (`str0m`) transports, the publish command. `native/nvenc` holds the C source that drives the NVIDIA encoder, built by `rust/crates/remote/build.rs` |
 | `engine/` | The supported Unity releases: a project's `ProjectVersion.txt` selects one, the installation must report the same version, and each release implements its own worker messages, DataStore service and asset database writes (`unity6000_6.rs`) |
 | `lmdb`, `protocol`, `registry` | The stopped-LMDB reader, the import worker transport (frames, blobs, decoded results), the owned `SourceAssetDB` |
 | `native/` | Native import coordinator: the import worker, the warm scene worker and its project library, DataStore, and the content the Player loads |
