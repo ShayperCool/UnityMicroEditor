@@ -7,7 +7,7 @@ rebuilt only when it or a layer under it changes:
 
 | Crate | Modules | Uses |
 |---|---|---|
-| `ume-base` | `yaml`, `cache`, `graph`, `project/`, `packages/`, `editorbridge/`, `parity/`, `lmdb`, `protocol`, `registry`, `runtimeartifact/` and the small helpers | |
+| `ume-base` | `yaml`, `cache`, `graph`, `project/`, `packages/`, `editorbridge/`, `parity/`, `lmdb`, `protocol`, `registry`, `spooky`, `runtimeartifact/` and the small helpers | |
 | `ume-authoring` | `authoring/` | base |
 | `ume-playerbake` | `playerbake/` | base |
 | `ume-compiler` | `compiler/`, `hotreload/`, `sourcegraph/` | base, authoring, playerbake |
@@ -42,8 +42,8 @@ embeds `../engine-profile.json`.
 | `editorbridge/`, `agentcontrol/` | Client of the Editor mailbox; Player control, journal and routing |
 | `mcp/` | The MCP server over stdio and Streamable HTTP, on the `rmcp` crate |
 | `remote/` | `remote_session`: Player link, H.264 encoding, the viewer page, its WebSocket and WebRTC (`str0m`) transports, the publish command. `native/nvenc` holds the C source that drives the NVIDIA encoder, built by `rust/crates/remote/build.rs` |
-| `engine/` | The supported Unity releases: a project's `ProjectVersion.txt` selects one, the installation must report the same version, and each release implements its own worker messages, DataStore service and asset database writes (`unity6000_6.rs`) |
-| `lmdb`, `protocol`, `registry` | The stopped-LMDB reader, the import worker transport (frames, blobs, decoded results), the owned `SourceAssetDB` |
+| `engine/` | The supported Unity releases: a project's `ProjectVersion.txt` selects one, the installation must report the same version, and each release implements its own worker messages, artifact storage (the DataStore service of 6000.6, `Library/Artifacts` of 6000.0) and asset database writes (`unity6000_6.rs`, `unity6000_0.rs`) |
+| `lmdb`, `protocol`, `registry`, `spooky` | The stopped-LMDB reader, the import worker transport (frames, blobs, decoded results), the owned `SourceAssetDB` of each release, SpookyHash V2 (the content hash of 6000.0) |
 | `native/` | Native import coordinator: the import worker, the warm scene worker and its project library, DataStore, and the content the Player loads |
 | `compiler/` | Roslyn driver, script type inventory, Netcode post-processing, host staging |
 | `sourcegraph/` | The Player assembly graph derived from `.asmdef`/`.asmref` and the engine profile |
