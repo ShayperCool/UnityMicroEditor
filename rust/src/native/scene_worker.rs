@@ -223,6 +223,46 @@ fn keep_library(
 /// videos and fonts. Any other import is taken when the scripts are those
 /// it was made with and nothing it refers to changed.
 fn kept_as_imported(path: &str) -> bool {
+    kept_kind(path)
+}
+
+/// Whether a kept import of the source is never taken by another worker: an
+/// image imported with sprites. Its import depends on the sprite
+/// postprocessors (`postprocessor/textureSprite`), and a later worker takes
+/// it as out of date without saying so, even with the same scripts and
+/// assemblies; the image is then missing from what that worker writes.
+fn imported_each_time(path: &str, meta: &[u8]) -> bool {
+    image(path) && sprite_texture(meta)
+}
+
+fn image(path: &str) -> bool {
+    matches!(
+        super::support::lower_ext(path).as_str(),
+        ".png"
+            | ".jpg"
+            | ".jpeg"
+            | ".tga"
+            | ".psd"
+            | ".tif"
+            | ".tiff"
+            | ".exr"
+            | ".hdr"
+            | ".bmp"
+            | ".gif"
+    )
+}
+
+/// Whether a texture's `.meta` imports it as a sprite or a set of sprites.
+fn sprite_texture(meta: &[u8]) -> bool {
+    String::from_utf8_lossy(meta).lines().any(|line| {
+        matches!(
+            line.trim_end(),
+            "  textureType: 8" | "  spriteMode: 1" | "  spriteMode: 2"
+        )
+    })
+}
+
+fn kept_kind(path: &str) -> bool {
     matches!(
         super::support::lower_ext(path).as_str(),
         ".fbx"
@@ -515,9 +555,14 @@ impl SceneWorker {
                 else {
                     return true;
                 };
-                !(!changed.contains(*path)
-                    && ((kept_as_imported(path) && kept.assemblies == assemblies)
-                        || kept.environment == environment_key))
+                let meta = sources
+                    .physical(path)
+                    .and_then(|physical| read_file(&format!("{physical}.meta")).ok())
+                    .unwrap_or_default();
+                imported_each_time(path, &meta)
+                    || !(!changed.contains(*path)
+                        && ((kept_as_imported(path) && kept.assemblies == assemblies)
+                            || kept.environment == environment_key))
             })
             .cloned()
             .collect();
@@ -667,4 +712,21 @@ fn replace(path: &str, data: &[u8]) -> Result<()> {
         let _ = std::fs::remove_file(&partial);
         anyhow!("rename {partial}: {error}")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::imported_each_time;
+
+    #[test]
+    fn a_texture_with_sprites_is_imported_by_every_worker() {
+        let texture = b"TextureImporter:\n  textureType: 0\n  spriteMode: 0\n";
+        let sprite = b"TextureImporter:\n  textureType: 8\n  spriteMode: 1\n";
+        let sheet = b"TextureImporter:\n  textureType: 0\n  spriteMode: 2\n";
+        assert!(!imported_each_time("Assets/Art/Wall.png", texture));
+        assert!(imported_each_time("Assets/Art/Icon.png", sprite));
+        assert!(imported_each_time("Assets/Art/Sheet.PNG", sheet));
+        // Only images are told apart by their sprites.
+        assert!(!imported_each_time("Assets/Audio/Hit.wav", sprite));
+    }
 }
