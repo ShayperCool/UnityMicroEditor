@@ -32,8 +32,8 @@ use crate::{
     cancel::Context,
     compiler::{
         AssemblyConfig, CompileScript, CompilerGraphAssembly, CompilerGraphExport,
-        CompilerHostAssembly, CompilerSourceRoot, MetadataGuidIndex, NilMap, NilVec, UNITY_VERSION,
-        Walk, editor_source, equal_strings, is_not_exist, managed_plugin, walk_dir,
+        CompilerHostAssembly, CompilerSourceRoot, MetadataGuidIndex, NilMap, NilVec, Walk,
+        editor_source, equal_strings, is_not_exist, managed_plugin, unity_version, walk_dir,
     },
     jsondoc::{self, Json, Target},
     packages::Package,
@@ -384,8 +384,8 @@ pub fn build_source_graph(
     if !profile_hash(profile).is_ok_and(|hash| hash == profile.profile_sha256)
         || profile.editor != options.editor
         || profile.player != options.player
-        || profile.unity_version != UNITY_VERSION
-        || profile.unity_revision != profile::UNITY_REVISION
+        || profile.unity_version != unity_version(&project)?
+        || profile.unity_revision != crate::release::of_project(&project)?.revision
         || profile.target != "LinuxStandalone64"
         || profile.scripting_backend != "Mono"
     {
@@ -456,7 +456,8 @@ pub fn build_source_graph(
         sysutil::join(&[&project, "Assets"]),
         String::new(),
     )];
-    let mut versions = BTreeMap::from([("Unity".to_string(), UNITY_VERSION.to_string())]);
+    let mut versions =
+        BTreeMap::from([("Unity".to_string(), unity_version(&project)?.to_string())]);
     let mut package_map: BTreeMap<&str, &Package> = BTreeMap::new();
     for package in packages.packages.iter() {
         versions.insert(package.name.clone(), package.version.clone());

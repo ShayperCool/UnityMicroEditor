@@ -85,14 +85,10 @@ impl Sdk {
     /// (the `Unity` executable) belongs to.
     pub fn locate(editor: &str) -> Result<Self> {
         let data = join(&[&sysutil::dir(editor), "Data"]);
-        let mut compilers = glob_lossy(&join(&[&data, "DotNetSdk/sdk/*/Roslyn/bincore/csc.dll"]));
-        compilers.sort();
-        let Some(csc) = compilers.pop() else {
-            bail!("installed Unity Roslyn SDK is missing");
-        };
+        let sdk = crate::compiler::unity_sdk(&data)?;
         Ok(Self {
-            dotnet: join(&[&data, "DotNetSdk/dotnet"]),
-            csc,
+            dotnet: sdk.dotnet,
+            csc: sdk.csc,
         })
     }
 }

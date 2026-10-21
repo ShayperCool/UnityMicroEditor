@@ -46,13 +46,21 @@ pub use service::{Reply as ServiceReply, Service, ServiceError};
 pub use source_graph::{managed_plugin, remove_source_native_initializers};
 pub use stamp::{HashCache, PlayerMap, Stamp};
 pub use sys::{BUILD_WITHOUT_SERVERS, CommandError, compiler_command, glob, path_match};
+pub use sys::{UnitySdk, unity_sdk};
 pub use sys::{Walk, WalkEntry, glob_lossy, is_not_exist, walk_dir};
 
 use nilable::{is_empty, is_false, nz};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
+/// The verified release, which the fixtures of the tests use.
+#[cfg(test)]
 pub const UNITY_VERSION: &str = crate::ENGINE_VERSION;
+
+/// The Unity release `project` selects, which every record of it carries.
+pub fn unity_version(project: &str) -> anyhow::Result<&'static str> {
+    crate::release::project_release(project)
+}
 
 /// The store the compilers of a project share. It is not copied between
 /// checkouts: an assembly holds the paths of the sources it was compiled

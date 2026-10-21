@@ -1,9 +1,9 @@
 //! The version-bound native component defaults cache behind `component_schema`,
 //! `component_add` and prefab `add_component`.
 use super::{
-    Any, AnyMap, Service, UNITY_VERSION, actions::request, error_text, fail, fail_with, join,
-    join_errors, map_reply, marshal, not_exist, nz, obj, read_json, store_error, text, to_serde,
-    typed,
+    Any, AnyMap, Service, actions::request, error_text, fail, fail_with, join, join_errors,
+    map_reply, marshal, not_exist, nz, obj, read_json, store_error, text, to_serde, typed,
+    unity_version,
 };
 use crate::{
     ENGINE_PROFILE,
@@ -93,7 +93,7 @@ pub fn component_defaults_profile(
 ) -> Result<(DefaultsProfile, String)> {
     let mut profile = DefaultsProfile {
         schema_version: 1,
-        unity_version: UNITY_VERSION.into(),
+        unity_version: unity_version(project)?.into(),
         unity_revision: String::new(),
         engine_inputs: NilMap::make(),
         context_inputs: NilMap::make(),
@@ -103,7 +103,11 @@ pub fn component_defaults_profile(
         #[serde(default, rename = "unityRevision")]
         unity_revision: String,
     }
-    profile.unity_revision = serde_json::from_str::<Embedded>(ENGINE_PROFILE)?.unity_revision;
+    let release = crate::release::of_project(project).ok();
+    profile.unity_revision = match release {
+        Some(release) if release != crate::release::verified() => release.revision.to_string(),
+        _ => serde_json::from_str::<Embedded>(ENGINE_PROFILE)?.unity_revision,
+    };
     let version = read_agent_file(
         &join(&[project, "ProjectSettings/ProjectVersion.txt"]),
         64 << 10,
@@ -112,8 +116,7 @@ pub fn component_defaults_profile(
         .as_deref()
         .map(|data| String::from_utf8_lossy(data).into_owned())
         .unwrap_or_default();
-    let expected = format!("m_EditorVersion: {UNITY_VERSION}");
-    let valid_version = version_text.split('\n').any(|line| line.trim() == expected);
+    let valid_version = release.is_some();
     if version.is_err() || !valid_version {
         return Err(fail(
             "unsupported_unity_version",

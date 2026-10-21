@@ -1,9 +1,9 @@
 //! The reusable Mono host built by the Editor in the
 //! owned staging copy of the target project.
 use super::{
-    Any, AnyMap, Service, UNITY_VERSION, actions::request, error_text, fail, join, not_exist, nz,
-    obj, operation_id, read_json, regular, staging::SourceSnapshot, staging::phase_id, text,
-    unmarshal_any, unmarshal_map,
+    Any, AnyMap, Service, actions::request, error_text, fail, join, not_exist, nz, obj,
+    operation_id, read_json, regular, staging::SourceSnapshot, staging::phase_id, text,
+    unity_version, unmarshal_any, unmarshal_map,
 };
 use crate::{
     cancel::Context,
@@ -79,7 +79,7 @@ pub(crate) fn prepare_agent_host(
             ("requestId", id.into()),
             ("stageProject", stage.clone().into()),
             ("action", "build_host".into()),
-            ("unityVersion", UNITY_VERSION.into()),
+            ("unityVersion", unity_version(project)?.into()),
             ("development", true.into()),
         ])),
     )?;
@@ -185,7 +185,7 @@ fn build_host(
         Err(_) => {}
     }
 
-    let (synced, stage_snapshot) = super::sync_staging(ctx, project)?;
+    let (synced, stage_snapshot) = super::sync_staging(ctx, project, editor)?;
     if synced != stage || snapshot.files != stage_snapshot.files {
         return Err(anyhow!(
             "host stage no longer matches its immutable authored source snapshot"
@@ -212,7 +212,7 @@ fn build_host(
     let data = data?;
     if response.project != stage
         || response.backend != "unity_editor"
-        || response.unity_version != UNITY_VERSION
+        || response.unity_version != unity_version(project)?
         || response.editor != editor
     {
         return Err(anyhow!(
@@ -383,7 +383,7 @@ pub(crate) fn stage_graph(
         };
         return Ok((stage, path));
     }
-    let (stage, _) = super::sync_staging(ctx, &service.0.project)?;
+    let (stage, _) = super::sync_staging(ctx, &service.0.project, &service.0.editor)?;
     super::native::seed_stage_library(ctx, service, &stage)?;
     let client = stage_editor(ctx, service, &stage)?;
     let _close = Close(client.clone());
@@ -629,13 +629,14 @@ pub(crate) fn proof_graph(
     )?;
     for (field, expected) in [
         ("backend", "unity_editor_build_sources"),
-        ("unityVersion", UNITY_VERSION),
+        ("unityVersion", unity_version(project)?),
         ("target", "StandaloneLinux64"),
         ("scriptingBackend", "Mono2x"),
     ] {
         if proof.get(field).and_then(|value| value.as_str()) != Some(expected) {
             return Err(anyhow!(
-                "host build proof is not a Linux Mono build of {UNITY_VERSION}: {field}"
+                "host build proof is not a Linux Mono build of {}: {field}",
+                unity_version(project)?
             ));
         }
     }
@@ -717,7 +718,7 @@ pub(crate) fn proof_graph(
         "schemaVersion": 1,
         "backend": "unity_editor",
         "development": true,
-        "unityVersion": UNITY_VERSION,
+        "unityVersion": unity_version(project)?,
         "target": "StandaloneLinux64",
         "scriptingBackend": "Mono2x",
         "project": project,

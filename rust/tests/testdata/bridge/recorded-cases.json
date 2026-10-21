@@ -485,7 +485,7 @@
    "data": "bV9FZGl0b3JWZXJzaW9uOiA2MDAwLjYuNGYxCg=="
   },
   "output": "",
-  "error": "project requires the verified Unity 6000.6.3f1 version line"
+  "error": "project requires a supported Unity version line (6000.6.3f1, 6000.0.71f1)"
  },
  {
   "kind": "validateProjectVersion",
@@ -493,7 +493,7 @@
    "data": "bV9FZGl0b3JWZXJzaW9uOiA2MDAwLjYuM2YxLWV4dHJhCg=="
   },
   "output": "",
-  "error": "project requires the verified Unity 6000.6.3f1 version line"
+  "error": "project requires a supported Unity version line (6000.6.3f1, 6000.0.71f1)"
  },
  {
   "kind": "validateProjectVersion",
@@ -509,7 +509,7 @@
    "data": "bV9FZGl0b3JWZXJzaW9uOiA2MDAwLjYuM2YxCm1fRWRpdG9yVmVyc2lvbjogNjAwMC42LjRmMQo="
   },
   "output": "",
-  "error": "project requires the verified Unity 6000.6.3f1 version line"
+  "error": "project requires a supported Unity version line (6000.6.3f1, 6000.0.71f1)"
  },
  {
   "kind": "validateProjectVersion",
@@ -541,7 +541,7 @@
    "data": "bV9FZGl0b3JWZXJzaW9uOjYwMDAuNi4zZjEK"
   },
   "output": "",
-  "error": "project requires the verified Unity 6000.6.3f1 version line"
+  "error": "project requires a supported Unity version line (6000.6.3f1, 6000.0.71f1)"
  },
  {
   "kind": "validateProjectVersion",
@@ -549,7 +549,7 @@
    "data": "bV9FZGl0b3JWZXJzaW9uOiA2MDAwLjYuM2Yx/wo="
   },
   "output": "",
-  "error": "project requires the verified Unity 6000.6.3f1 version line"
+  "error": "project requires a supported Unity version line (6000.6.3f1, 6000.0.71f1)"
  },
  {
   "kind": "validateProjectVersion",
@@ -557,7 +557,7 @@
    "data": "bV9FZGl0b3JWZXJzaW9uOiA2MDAwLjYuM2YxDW1fRWRpdG9yVmVyc2lvbjogNjAwMC42LjNmMQo="
   },
   "output": "",
-  "error": "project requires the verified Unity 6000.6.3f1 version line"
+  "error": "project requires a supported Unity version line (6000.6.3f1, 6000.0.71f1)"
  },
  {
   "kind": "validateProjectVersion",

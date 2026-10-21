@@ -1,9 +1,9 @@
 //! The service entry points, the project action lock, the Editor client, package
 //! installation and the historical Editor-backed preparation.
 use super::{
-    Any, AnyMap, Preparation, Service, UNITY_VERSION, authored_scene, fail, fail_with, join,
-    join_errors, json_reply, map_reply, marshal, not_exist, nz, obj, operation_id, read_json, stat,
-    text, unmarshal_any, unmarshal_map,
+    Any, AnyMap, Preparation, Service, authored_scene, fail, fail_with, join, join_errors,
+    json_reply, map_reply, marshal, not_exist, nz, obj, operation_id, read_json, stat, text,
+    unity_version, unmarshal_any, unmarshal_map,
 };
 use crate::{
     agentcontrol::{self, Reply},
@@ -111,7 +111,7 @@ pub fn validate_cached_preparation(
         || !manifest.supported
         || manifest.project_root != project
         || manifest.scene_path != scene
-        || manifest.unity_version != UNITY_VERSION
+        || manifest.unity_version != unity_version(project)?
     {
         return Err(fail(
             CODE,

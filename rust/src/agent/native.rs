@@ -1,8 +1,8 @@
 //! Project settings references, the native import catalog produced by an owned
 //! staging Editor, and the catalog seed of a source preparation.
 use super::{
-    Any, AnyMap, Service, UNITY_VERSION, actions::request, fail, join, lstat, marshal, not_exist,
-    obj, read_json, read_map, staging::phase_id, text, text_of, unmarshal_map,
+    Any, AnyMap, Service, actions::request, fail, join, lstat, marshal, not_exist, obj, read_json,
+    read_map, staging::phase_id, text, text_of, unity_version, unmarshal_map,
 };
 use crate::{
     cancel::Context,
@@ -421,7 +421,7 @@ pub(crate) fn identity_catalog(project: &str, graph_path: &str, directory: &str)
     let catalog = obj([
         ("schemaVersion", 1.into()),
         ("project", project.into()),
-        ("engineVersion", UNITY_VERSION.into()),
+        ("engineVersion", unity_version(project)?.into()),
         ("backend", "unity_editor_public_identity".into()),
         ("sourceRoots", value::raw(&graph.source_roots)?),
         ("sourceDependencies", empty()),
@@ -452,7 +452,7 @@ impl Service {
         directory: &str,
     ) -> Result<String> {
         let project = self.0.project.as_str();
-        let (stage, snapshot) = super::sync_staging(ctx, project)?;
+        let (stage, snapshot) = super::sync_staging(ctx, project, &self.0.editor)?;
         seed_stage_library(ctx, self, &stage)?;
         let (_, _, _, settings) = project_references(project)?;
         let client = Client::new(
@@ -520,7 +520,7 @@ impl Service {
         let is = |key: &str, expected: Any| catalog.get(key) == Some(&expected);
         if !is("schemaVersion", Any::Float(1.0))
             || !is("success", true.into())
-            || !is("engineVersion", UNITY_VERSION.into())
+            || !is("engineVersion", unity_version(project)?.into())
             || !is("containsScenes", false.into())
             || !is("sceneLoader", "raw".into())
             || !is("cookedRegistryVerified", true.into())

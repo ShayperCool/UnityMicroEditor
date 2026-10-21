@@ -22,7 +22,9 @@ namespace UnityMicroEditor.Editor
     [InitializeOnLoad]
     public static class AgentEditorBridge
     {
-        private const string Profile = "6000.6.3f1";
+        // The releases the tool supports; the bridge serves the one it runs in.
+        private static readonly string[] Releases = { "6000.6.3f1", "6000.0.71f1" };
+        private static readonly string Profile = Array.IndexOf(Releases, Application.unityVersion) >= 0 ? Application.unityVersion : Releases[0];
         private const int RequestLimit = 256 * 1024;
         private const int ResponseLimit = 32 * 1024 * 1024;
         private static readonly string Project = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
@@ -37,7 +39,7 @@ namespace UnityMicroEditor.Editor
         public static void RunBatch()
         {
             if (!Application.isBatchMode || Application.unityVersion != Profile)
-                throw new InvalidOperationException("Editor bridge batch mode requires Unity " + Profile + ".");
+                throw new InvalidOperationException("Editor bridge batch mode requires Unity " + string.Join(" or ", Releases) + ".");
             // A fresh headless Editor can start with no loaded scene. Its
             // public RestoreSceneManagerSetup API requires one active scene.
             if (!SceneManager.GetActiveScene().IsValid() || !SceneManager.GetActiveScene().isLoaded)

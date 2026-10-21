@@ -1451,3 +1451,120 @@ fn provided_dependency_resolves_without_a_manifest_declaration() {
     };
     assert!(resolve(&background(), &root, "", invalid).is_err());
 }
+
+#[test]
+fn downloaded_copy_wins_over_the_rewritten_package_cache_copy() {
+    let f = Registry::new();
+    f.add("com.example.a", "1.0.0", json!({"com.example.b": "1.0.0"}));
+    f.add("com.example.b", "1.0.0", Value::Null);
+    let temp = Temp::new();
+    let root = registry_project(&temp, &f, Value::Null);
+    let downloaded = resolve(&background(), &root, "", Options::default()).unwrap();
+    // UPM's own copy of the same version, its package.json rewritten.
+    let cache = format!("{root}/Library/PackageCache/com.example.a@0123456789ab");
+    let mut manifest =
+        package_manifest("com.example.a", "1.0.0", json!({"com.example.b": "1.0.0"}));
+    manifest["_upm"] = json!({"changelog": ""});
+    json_file(format!("{cache}/package.json"), &manifest);
+    write(
+        format!("{cache}/Runtime/Source.cs"),
+        b"public class PackageProbe {}",
+    );
+    let s = resolve(&background(), &root, "", offline()).unwrap();
+    assert_eq!(
+        package_by_name(&s, "com.example.a").path,
+        package_by_name(&downloaded, "com.example.a").path
+    );
+    // Without a downloaded copy, two differing UPM copies still conflict.
+    let other = format!("{root}/Library/PackageCache/com.example.b@0123456789ab");
+    package_fixture(&other, "com.example.b", "1.0.0", Value::Null);
+    let second = format!("{root}/Library/PackageCache/com.example.b@ba9876543210");
+    package_fixture(
+        &second,
+        "com.example.b",
+        "1.0.0",
+        json!({"com.example.a": "1.0.0"}),
+    );
+    fs::remove_dir_all(package_by_name(&downloaded, "com.example.b").path.clone()).unwrap();
+    let error = format!(
+        "{:#}",
+        resolve(&background(), &root, "", offline()).unwrap_err()
+    );
+    assert!(
+        error.contains("conflicting cached contents for com.example.b@1.0.0"),
+        "{error}"
+    );
+}
+
+#[test]
+fn unreachable_git_package_takes_the_cache_copy_upm_fingerprinted() {
+    let temp = Temp::new();
+    let head = "0123456789abcdef0123456789abcdef01234567";
+    let request = format!("git+file://{}#main", temp.path("missing-repository"));
+    let root = project_fixture(&temp, json!({"com.example.git": request}));
+    json_file(
+        lock_path(&root),
+        &json!({"dependencies": {"com.example.git": {"version": request, "depth": 0, "source": "git", "dependencies": {}, "hash": head}}}),
+    );
+    // A copy whose fingerprint names another commit is not taken.
+    let stale = format!("{root}/Library/PackageCache/com.example.git@aaaaaaaaaaaa");
+    let mut manifest = package_manifest("com.example.git", "1.0.0", Value::Null);
+    manifest["_fingerprint"] = json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    json_file(format!("{stale}/package.json"), &manifest);
+    assert!(resolve(&background(), &root, "", Options::default()).is_err());
+    let cache = format!("{root}/Library/PackageCache/com.example.git@012345678901");
+    manifest["_fingerprint"] = json!(head);
+    json_file(format!("{cache}/package.json"), &manifest);
+    write(
+        format!("{cache}/Runtime/Probe.cs"),
+        b"public class Probe {}\n",
+    );
+    let s = resolve(&background(), &root, "", Options::default()).unwrap();
+    let p = package_by_name(&s, "com.example.git");
+    assert!(
+        p.path == cache && p.revision == head && p.proof == "upm_fingerprinted_cache_copy",
+        "{p:?}"
+    );
+    load_current(&background(), &root, "", Options::default()).unwrap();
+    // Offline resolution still requires a verified commit.
+    assert!(resolve(&background(), &root, "", offline()).is_err());
+}
+
+#[test]
+fn runtime_package_dependencies_follow_the_release_line() {
+    let temp = Temp::new();
+    let root = project_fixture(&temp, json!({}));
+    let version = |text: &str| {
+        write(
+            format!("{root}/ProjectSettings/ProjectVersion.txt"),
+            text.as_bytes(),
+        );
+        runtime_dependencies(&root).map(|list| list.to_vec())
+    };
+    assert_eq!(
+        version("m_EditorVersion: 6000.6.3f1\n").unwrap(),
+        [
+            ("com.unity.render-pipelines.core", "17.6.0"),
+            ("com.unity.collections", "6.6.0")
+        ]
+    );
+    assert_eq!(version("m_EditorVersion: 6000.0.71f1\n").unwrap(), []);
+    assert!(version("m_EditorVersion: 2022.3.1f1\n").is_err());
+    // A provided version yields to the project's own declaration.
+    json_file(
+        manifest_path(&root),
+        &json!({"dependencies": {"com.example.local": format!("file:{}", temp.path("local"))}}),
+    );
+    package_fixture(
+        &temp.path("local"),
+        "com.example.local",
+        "2.0.0",
+        Value::Null,
+    );
+    let options = Options {
+        provided_versions: BTreeMap::from([("com.example.local".to_string(), "1.0.0".to_string())]),
+        ..offline()
+    };
+    let s = resolve(&background(), &root, "", options).unwrap();
+    assert_eq!(package_by_name(&s, "com.example.local").version, "2.0.0");
+}

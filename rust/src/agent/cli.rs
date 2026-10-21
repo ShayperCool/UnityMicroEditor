@@ -2,8 +2,8 @@
 //! `prepare-project` and `cache-component-defaults`. Each returns the error
 //! the caller prints before exiting with status 1.
 use super::{
-    Any, Options, Service, UNITY_VERSION, authored_scene, defaults::defaults_directory,
-    handler_error, join, marshal, native::attach_native_seed, obj, reply_bytes,
+    Any, Options, Service, authored_scene, defaults::defaults_directory, handler_error, join,
+    marshal, native::attach_native_seed, obj, reply_bytes, unity_version,
 };
 use crate::{
     agentcontrol::{self, Controller},
@@ -95,7 +95,11 @@ pub fn run_mcp_cli(arguments: Vec<String>) -> Result<()> {
         project: project.clone(),
         baseline: flags.get_string("baseline"),
         output: flags.get_string("output"),
-        editor: flags.get_string("editor"),
+        editor: crate::util::project_unity_editor(
+            &flags.get_string("editor"),
+            flags.is_set("editor"),
+            &project,
+        ),
         runner,
         scene: flags.get_string("scene"),
         fps: flags.get_int("fps"),
@@ -192,7 +196,11 @@ pub fn run_auto_prepare_cli(arguments: Vec<String>) -> Result<()> {
         bail!("auto-prepare requires --project and --scene");
     }
     let project = eval_symlinks(&lexpath::abs(&project)?)?;
-    let editor = eval_symlinks(&flags.get_string("editor"))?;
+    let editor = eval_symlinks(&crate::util::project_unity_editor(
+        &flags.get_string("editor"),
+        flags.is_set("editor"),
+        &project,
+    ))?;
     let ctx = mcp::signal_context()?;
     let service = Service::new(Options {
         project,
@@ -236,7 +244,11 @@ pub fn run_build_project_cli(arguments: Vec<String>) -> Result<()> {
         bail!("build-project requires --project and --scenes");
     }
     let project = eval_symlinks(&lexpath::abs(&project)?)?;
-    let editor = eval_symlinks(&flags.get_string("editor"))?;
+    let editor = eval_symlinks(&crate::util::project_unity_editor(
+        &flags.get_string("editor"),
+        flags.is_set("editor"),
+        &project,
+    ))?;
     let ctx = mcp::signal_context()?;
     let service = Service::new(Options {
         project,
@@ -283,7 +295,11 @@ pub fn run_component_defaults_cli(arguments: Vec<String>) -> Result<()> {
         bail!("cache-component-defaults requires an explicit --project");
     }
     let project = lexpath::abs(&eval_symlinks(&project)?)?;
-    let editor = eval_symlinks(&flags.get_string("editor"))?;
+    let editor = eval_symlinks(&crate::util::project_unity_editor(
+        &flags.get_string("editor"),
+        flags.is_set("editor"),
+        &project,
+    ))?;
     let ctx = mcp::signal_context()?;
     let service = Service::new(Options {
         project: project.clone(),
@@ -472,7 +488,7 @@ pub fn prepare_agent_project_with_native(
     let mut seed = obj([
         ("schemaVersion", 1.into()),
         ("supported", true.into()),
-        ("unityVersion", UNITY_VERSION.into()),
+        ("unityVersion", unity_version(&project)?.into()),
         ("projectRoot", project.clone().into()),
         ("scenePath", scene.into()),
         (

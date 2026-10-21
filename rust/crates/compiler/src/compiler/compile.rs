@@ -802,21 +802,9 @@ impl Compiler {
     /// Unity's source generators inside the installation.
     pub fn initialize_sdk(&mut self) -> Result<()> {
         let data = join(&[&sysutil::dir(&self.editor), "Data"]);
-        self.dotnet = join(&[&data, "DotNetSdk", "dotnet"]);
-        let mut compilers = sys::glob_lossy(&join(&[
-            &data,
-            "DotNetSdk",
-            "sdk",
-            "*",
-            "Roslyn",
-            "bincore",
-            "csc.dll",
-        ]));
-        if compilers.is_empty() {
-            bail!("installed Unity Roslyn SDK is missing");
-        }
-        compilers.sort();
-        self.csc = compilers.pop().unwrap_or_default();
+        let sdk = sys::unity_sdk(&data)?;
+        self.dotnet = sdk.dotnet;
+        self.csc = sdk.csc;
         let bcl = join(&[&data, "MonoBleedingEdge", "lib", "mono", "unityaot-linux"]);
         let mut base = sys::glob_lossy(&join(&[&bcl, "*.dll"]));
         base.extend(sys::glob_lossy(&join(&[&bcl, "Facades", "*.dll"])));

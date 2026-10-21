@@ -1,5 +1,5 @@
 //! Lighting validation of an authored scene and the baseline publication.
-use super::{UNITY_VERSION, nz};
+use super::{nz, unity_version};
 use crate::{
     project::{BUILTIN_RESOURCE_GUID, Document, parse_unity_yaml, value},
     sha256,
@@ -104,7 +104,7 @@ pub fn validate_scene_lighting(
     let proof: Proof = read_json_file::<Option<Proof>>(proof_path)?.unwrap_or_default();
     if proof.schema_version != 1
         || proof.project_root != project
-        || proof.unity_version != UNITY_VERSION
+        || proof.unity_version != unity_version(project)?
         || proof.scene_path != scene
         || proof.scene_sha256 != sha256(contents)
         || proof.lightmap_count != Some(0)

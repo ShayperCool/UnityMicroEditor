@@ -9,7 +9,6 @@ use super::{
     text_error, wrap,
 };
 use crate::{
-    ENGINE_VERSION,
     jsondoc::{self, Json, Member, Target},
     native::{resolve_project_import_source, stage_native_resources},
     project::{
@@ -460,7 +459,9 @@ pub fn validate_prepared_scene(
     if scene.schema_version != 1
         || !scene.supported
         || scene.project != launch.project
-        || scene.unity_version != ENGINE_VERSION
+        || crate::release::project_release(&launch.project)
+            .is_ok_and(|release| scene.unity_version != release)
+        || !crate::release::is_supported(&scene.unity_version)
     {
         bail!("prepared manifest does not match the supported source project/engine");
     }

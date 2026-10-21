@@ -14,6 +14,7 @@ pub mod paths;
 pub mod project;
 pub mod protocol;
 pub mod registry;
+pub mod release;
 pub mod runtimeartifact;
 pub mod sysutil;
 pub mod util;

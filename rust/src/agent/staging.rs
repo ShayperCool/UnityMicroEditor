@@ -200,7 +200,7 @@ const STAGE_MARKER: &str = "ProjectSettings/UnityMicroEditorStaging.json";
 /// match keep their timestamps, so Unity reimports only what changed; whatever
 /// an earlier stage Editor authored in those roots is removed. An interrupted
 /// run is repaired by the next one.
-pub fn sync_staging(ctx: &Context, source: &str) -> Result<(String, SourceSnapshot)> {
+pub fn sync_staging(ctx: &Context, source: &str, editor: &str) -> Result<(String, SourceSnapshot)> {
     let stage = shared_stage(source);
     if !is_owned_cache_path(source, &stage) {
         return Err(anyhow!("shared stage is outside owned project caches"));
@@ -268,6 +268,7 @@ pub fn sync_staging(ctx: &Context, source: &str) -> Result<(String, SourceSnapsh
     }
     normalize_staged_package_paths(source, &stage)?;
     super::install_agent_package(&stage)?;
+    pin_staged_packages(ctx, source, editor, &stage)?;
     let staging_marker = join(&[&stage, STAGE_MARKER]);
     if snapshot.files.contains_key(STAGE_MARKER) {
         fs::remove_file(&staging_marker)
@@ -282,6 +283,54 @@ pub fn sync_staging(ctx: &Context, source: &str) -> Result<(String, SourceSnapsh
     )?;
     verify_snapshot(ctx, &snapshot)?;
     Ok((stage, snapshot))
+}
+
+/// The registry whose packages any Editor can fetch.
+const UNITY_REGISTRY: &str = "https://packages.unity.com";
+
+/// Pins the stage's third-party packages to the copies the resolver verified.
+///
+/// A scoped registry or a Git repository may need credentials that only the
+/// target's own Editor has; the resolver then takes the copy that Editor's
+/// Package Manager left in the project. The stage's Editor gets the same
+/// packages as `file:` dependencies, so it resolves nothing over the network
+/// and builds with exactly what the tool compiles. Packages of the Unity
+/// registry, built-in, embedded and local packages stay as authored.
+fn pin_staged_packages(ctx: &Context, source: &str, editor: &str, stage: &str) -> Result<()> {
+    let options = || crate::packages::Options::default().with_runtime_package(source);
+    let resolved = match crate::packages::load_current(ctx, source, editor, options()?) {
+        Ok(snapshot) => snapshot,
+        Err(_) => crate::packages::resolve(ctx, source, editor, options()?)?,
+    };
+    let path = join(&[stage, "Packages/manifest.json"]);
+    let data = read_agent_file(&path, 1 << 20)?;
+    let mut manifest = unmarshal_map(&data)?.unwrap_or_default();
+    let Some(Any::Object(dependencies)) = manifest.get_mut("dependencies") else {
+        return Err(anyhow!("staged package manifest lacks dependencies"));
+    };
+    let mut changed = false;
+    for package in &resolved.packages {
+        let third_party = match package.source.as_str() {
+            "git" => true,
+            "registry" => package.registry.trim_end_matches('/') != UNITY_REGISTRY,
+            _ => false,
+        };
+        if !third_party {
+            continue;
+        }
+        let pinned = Any::String(format!("file:{}", package.path));
+        if dependencies.get(&package.name) != Some(&pinned) {
+            dependencies.insert(package.name.clone(), pinned);
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    let mut encoded = jsondoc::marshal_indent(&Any::Object(manifest)).map_err(|e| anyhow!(e))?;
+    encoded.push(b'\n');
+    fs::write(&path, encoded).map_err(|error| sysutil::Error::os("open", &path, &error))?;
+    Ok(())
 }
 
 /// Removes what the staged `relative` directory holds beyond the snapshot.

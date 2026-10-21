@@ -2098,3 +2098,15 @@ fn source_prefab_publication_reattaches_current_guard_to_persisted_plan() {
         .unwrap();
     assert!(replay.publication.replayed);
 }
+
+#[test]
+fn meta_with_a_committed_merge_conflict_keeps_its_first_guid() {
+    // The Editor's SourceAssetDB keeps the GUID of the first `guid:` line
+    // (seen on 6000.0.71f1 with a .meta committed with conflict markers).
+    let text = "fileFormatVersion: 2\n<<<<<<<< HEAD:Assets/A.meta\nguid: ce51c8e33b734b4db6086586558c53a3\n========\nguid: 64318ba402f4c4c4b8281f4e5a8a1ae8\n>>>>>>>> feature:Assets/B.meta\nfolderAsset: yes\n";
+    assert_eq!(
+        super::store::meta_guid_of(text).as_deref(),
+        Some("ce51c8e33b734b4db6086586558c53a3")
+    );
+    assert_eq!(super::store::meta_guid_of("fileFormatVersion: 2\n"), None);
+}

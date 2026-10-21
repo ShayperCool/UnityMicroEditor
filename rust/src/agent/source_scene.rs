@@ -1,7 +1,7 @@
 //! The source/native-resource scene proof. It never
 //! claims an Editor opened the target scene, nor fabricates public Editor
 //! observations.
-use super::{UNITY_VERSION, join, join_errors, nz, read_json, scene::builtin_lighting};
+use super::{join, join_errors, nz, read_json, scene::builtin_lighting, unity_version};
 use crate::{
     cancel::Context,
     jsondoc::{self, Json},
@@ -118,7 +118,7 @@ pub fn build_source_scene_proof(
         schema_version: 2,
         backend: "source_native_resource".into(),
         project_root: project.into(),
-        unity_version: UNITY_VERSION.into(),
+        unity_version: unity_version(project)?.into(),
         scene_path: scene.into(),
         ..Default::default()
     };
@@ -167,7 +167,7 @@ pub(crate) fn validate_source_scene_proof(
     if proof.schema_version != 2
         || proof.backend != "source_native_resource"
         || proof.project_root != project
-        || proof.unity_version != UNITY_VERSION
+        || proof.unity_version != unity_version(project)?
         || proof.scene_path != scene
         || proof.scene_sha256 != sha256(contents)
     {

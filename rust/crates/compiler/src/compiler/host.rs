@@ -155,13 +155,8 @@ pub fn compile_bridge(
             sys::write(&destination, contents)?;
             stable_sources.push(destination);
         }
-        let mut compilers =
-            match sys::glob(&join(&[&data, "DotNetSdk/sdk/*/Roslyn/bincore/csc.dll"])) {
-                Ok(compilers) if !compilers.is_empty() => compilers,
-                Ok(_) => bail!("Unity SDK compiler is missing: <nil>"),
-                Err(error) => bail!("Unity SDK compiler is missing: {error}"),
-            };
-        compilers.sort();
+        let sdk = sys::unity_sdk(&data)
+            .map_err(|error| anyhow!("Unity SDK compiler is missing: {error}"))?;
         let mut arguments: Vec<String> = [
             "-nologo",
             "-target:library",
@@ -203,11 +198,7 @@ pub fn compile_bridge(
             text.push_str("\"\n");
         }
         sys::write(&response, text.as_bytes())?;
-        let (listing, error) = plain(
-            ctx,
-            &join(&[&data, "DotNetSdk/dotnet"]),
-            &[&compilers[compilers.len() - 1], &format!("@{response}")],
-        );
+        let (listing, error) = plain(ctx, &sdk.dotnet, &[&sdk.csc, &format!("@{response}")]);
         if let Some(error) = error {
             let _ = std::fs::remove_file(&dll);
             bail!(

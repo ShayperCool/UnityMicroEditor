@@ -60,7 +60,10 @@ use std::{
     sync::{Arc, Condvar, Mutex, RwLock},
 };
 
-pub(crate) const UNITY_VERSION: &str = crate::ENGINE_VERSION;
+/// The Unity release `project` selects, which every record of it carries.
+pub(crate) fn unity_version(project: &str) -> Result<&'static str> {
+    crate::release::project_release(project)
+}
 
 /// JSON `null` decodes to the default value.
 pub(crate) fn nz<'de, D: Deserializer<'de>, T: Default + Deserialize<'de>>(

@@ -326,14 +326,7 @@ pub fn stage_importer(ctx: &Context, editor: &str, project: &str) -> Result<()> 
         _ => sysutil::dir(editor),
     };
     let data = sysutil::join(&[&installation, "Data"]);
-    let mut compilers = glob_lossy(&sysutil::join(&[
-        &data,
-        "DotNetSdk/sdk/*/Roslyn/bincore/csc.dll",
-    ]));
-    compilers.sort();
-    let Some(csc) = compilers.pop() else {
-        bail!("installed Unity Roslyn SDK is missing");
-    };
+    let crate::compiler::UnitySdk { dotnet, csc } = crate::compiler::unity_sdk(&data)?;
     let generator = sysutil::join(&[
         &data,
         "Tools/BuildPipeline/Unity.SourceGenerators/Unity.SourceGenerators.dll",
@@ -385,7 +378,6 @@ pub fn stage_importer(ctx: &Context, editor: &str, project: &str) -> Result<()> 
         text.push_str("\"\n");
     }
     write_file(&response, text.as_bytes(), 0o600)?;
-    let dotnet = sysutil::join(&[&data, "DotNetSdk", "dotnet"]);
     let listing = match compiler_command(ctx, project, &dotnet, &[&csc, &format!("@{response}")]) {
         Ok(output) => output,
         Err(error) => bail!("compile the worker's build importer: {}", error.message),

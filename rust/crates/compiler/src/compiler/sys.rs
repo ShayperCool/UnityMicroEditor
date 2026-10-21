@@ -384,6 +384,56 @@ pub fn glob_lossy(pattern: &str) -> Vec<String> {
     glob(pattern).unwrap_or_default()
 }
 
+/// The C# compiler of a Unity installation and the .NET host that runs it
+/// and the tool's own SDK helpers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnitySdk {
+    pub dotnet: String,
+    pub csc: String,
+}
+
+/// Locates Roslyn in the installation whose `Data` directory is `data`.
+///
+/// 6000.6 ships a whole .NET SDK (`DotNetSdk`) with Roslyn inside it. 6000.0
+/// ships only Roslyn (`DotNetSdkRoslyn`) and a .NET 6 runtime; its compiler
+/// runs on a newer host too (it rolls forward), but the tool's helpers are
+/// built and run by a .NET 8 SDK, which then comes from `UME_DOTNET` or
+/// from another Unity installation beside this one that has one.
+pub fn unity_sdk(data: &str) -> Result<UnitySdk> {
+    let mut compilers = glob_lossy(&sysutil::join(&[
+        data,
+        "DotNetSdk/sdk/*/Roslyn/bincore/csc.dll",
+    ]));
+    compilers.sort();
+    if let Some(csc) = compilers.pop() {
+        return Ok(UnitySdk {
+            dotnet: sysutil::join(&[data, "DotNetSdk/dotnet"]),
+            csc,
+        });
+    }
+    let csc = sysutil::join(&[data, "DotNetSdkRoslyn/csc.dll"]);
+    if fs::metadata(&csc).is_err() {
+        return Err(anyhow!("installed Unity Roslyn SDK is missing"));
+    }
+    if let Some(dotnet) = std::env::var("UME_DOTNET")
+        .ok()
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(UnitySdk { dotnet, csc });
+    }
+    // <Hub>/Editor/<version>/Editor/Data: the installations beside this one.
+    let editor = sysutil::dir(data);
+    let hub = sysutil::dir(&sysutil::dir(&editor));
+    let mut hosts = glob_lossy(&sysutil::join(&[&hub, "*/Editor/Data/DotNetSdk/dotnet"]));
+    hosts.sort();
+    match hosts.pop() {
+        Some(dotnet) => Ok(UnitySdk { dotnet, csc }),
+        None => Err(anyhow!(
+            "this Unity installation has no .NET SDK; set UME_DOTNET to a .NET 8 SDK's dotnet or install a Unity release that ships one (6000.6) beside it"
+        )),
+    }
+}
+
 /// A failed external command: the combined output comes next to the error.
 #[derive(Debug)]
 pub struct CommandError {

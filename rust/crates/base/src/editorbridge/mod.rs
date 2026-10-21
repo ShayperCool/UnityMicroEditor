@@ -22,9 +22,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::release;
 pub use crate::sysutil::{Error, ErrorKind, Result};
 
-pub const PROFILE: &str = crate::ENGINE_VERSION;
 const REQUEST_LIMIT: usize = 256 * 1024;
 const RESPONSE_LIMIT: usize = 32 * 1024 * 1024;
 
@@ -342,6 +342,8 @@ struct State {
 }
 struct Inner {
     options: Options,
+    /// The release the project selects, which its Editor has to run.
+    release: &'static str,
     mailbox: String,
     lifetime: Context,
     start: Mutex<()>,
@@ -359,12 +361,14 @@ impl Drop for StartupLock {
     }
 }
 
-/// Accepts one exact pinned version line with LF, CRLF, or no final newline.
-/// Conflicting, suffixed and duplicate declarations fail.
-pub fn validate_project_version(data: &[u8]) -> Result<()> {
+/// Accepts one exact supported version line with LF, CRLF, or no final
+/// newline, and returns that release. Conflicting, suffixed and duplicate
+/// declarations fail.
+pub fn validate_project_version(data: &[u8]) -> Result<&'static str> {
     if data.len() > 65536 {
         return Err(Error::new("project version file exceeds its byte bound"));
     }
+    let mut found = None;
     let mut count = 0;
     for line in String::from_utf8_lossy(data).split('\n') {
         let line = line.trim();
@@ -372,18 +376,23 @@ pub fn validate_project_version(data: &[u8]) -> Result<()> {
             continue;
         }
         count += 1;
-        if line != format!("m_EditorVersion: {PROFILE}") {
+        let release = release::RELEASES
+            .iter()
+            .find(|release| line == format!("m_EditorVersion: {}", release.version));
+        let Some(release) = release else {
             return Err(Error::new(format!(
-                "project requires the verified Unity {PROFILE} version line"
+                "project requires a supported Unity version line ({})",
+                release::supported_versions()
             )));
-        }
+        };
+        found = Some(release.version);
     }
-    if count != 1 {
-        return Err(Error::new(
+    match found {
+        Some(version) if count == 1 => Ok(version),
+        _ => Err(Error::new(
             "project version file requires one unambiguous Editor version declaration",
-        ));
+        )),
     }
-    Ok(())
 }
 
 impl Client {
@@ -407,11 +416,15 @@ impl Client {
             &sysutil::join(&[&options.project, "ProjectSettings/ProjectVersion.txt"]),
             65536,
         );
-        if !version.is_ok_and(|version| validate_project_version(&version).is_ok()) {
+        let Some(release) = version
+            .ok()
+            .and_then(|version| validate_project_version(&version).ok())
+        else {
             return Err(Error::new(format!(
-                "Editor bridge requires project profile Unity {PROFILE}"
+                "Editor bridge requires a project of a supported Unity release ({})",
+                release::supported_versions()
             )));
-        }
+        };
         if options.startup_timeout.is_zero() {
             options.startup_timeout = Duration::from_secs(180);
         }
@@ -430,13 +443,14 @@ impl Client {
                 "Editor poll interval must be between 1 ms and 1 second",
             ));
         }
-        validate_editor_executable(ctx, &options.editor)?;
+        validate_editor_executable(ctx, &options.editor, release)?;
         let mailbox = sysutil::join(&[&options.project, "Library/UnityMicroEditor/editor-bridge"]);
         canonical(&mailbox)?;
         sysutil::mkdir_all(&mailbox)?;
         let lifetime = ctx.with_cancel();
         let client = Client(Arc::new(Inner {
             options,
+            release,
             mailbox,
             lifetime: lifetime.clone(),
             start: Mutex::new(()),
@@ -545,7 +559,7 @@ impl Client {
                 && h.backend == "unity_editor"
                 && h.project == options.project
                 && h.editor == options.editor
-                && h.unity_version == PROFILE
+                && h.unity_version == self.0.release
                 && h.pid >= 1
         });
         let Some(h) = heartbeat else {
@@ -580,7 +594,7 @@ impl Client {
         if let Some(error) = inner.lifetime.error() {
             return Err(error.into());
         }
-        validate_editor_executable(&inner.lifetime, &inner.options.editor)?;
+        validate_editor_executable(&inner.lifetime, &inner.options.editor, inner.release)?;
         let log = sysutil::join(&[&inner.mailbox, "editor.log"]);
         canonical(&log)?;
         let owner = sysutil::new_id();
@@ -692,7 +706,7 @@ impl Client {
                     schema_version: 1,
                     id: request.id.clone(),
                     project: options.project.clone(),
-                    unity_version: PROFILE.into(),
+                    unity_version: self.0.release.into(),
                     editor: options.editor.clone(),
                     expected_pid: pid,
                     action: request.action.clone(),
@@ -788,7 +802,7 @@ impl Client {
             || response.request_sha256 != hash
             || response.project != options.project
             || response.editor != options.editor
-            || response.unity_version != PROFILE
+            || response.unity_version != self.0.release
             || response.status != "completed"
             || response.pid < 1
             || success != b"true" && success != b"false"
@@ -810,7 +824,7 @@ impl Client {
             || original.id != request.id
             || original.project != options.project
             || original.editor != options.editor
-            || original.unity_version != PROFILE
+            || original.unity_version != self.0.release
             || original.action != request.action
             || original.expected_pid < 1
             || request.expected_pid != 0 && request.expected_pid != original.expected_pid
@@ -836,7 +850,7 @@ impl Client {
             request_id: request.id.clone(),
             request_sha256: hash.into(),
             project: self.0.options.project.clone(),
-            unity_version: PROFILE.into(),
+            unity_version: self.0.release.into(),
             editor: self.0.options.editor.clone(),
             pid: request.expected_pid,
             status: status.into(),
@@ -1110,16 +1124,16 @@ pub fn project_is_open(project: &str) -> Result<bool> {
     Ok(false)
 }
 
-fn validate_editor_executable(ctx: &Context, editor: &str) -> Result<()> {
+fn validate_editor_executable(ctx: &Context, editor: &str, release: &str) -> Result<()> {
     // A version-only invocation opens no project and acquires no project lock.
     // Validate before package installation can change authored inputs. Discard
     // excess output while retaining a strict bound even for a bad executable.
-    let mismatch = format!("Editor executable does not report pinned Unity {PROFILE}");
+    let mismatch = format!("Editor executable does not report the project's Unity {release}");
     let version = ctx.with_timeout(Duration::from_secs(15));
     let outcome = run_version(&version, editor);
     version.cancel();
     let (output, overflow) = outcome.map_err(|error| Error::wrap(&mismatch, &error))?;
-    if overflow || String::from_utf8_lossy(&output).trim() != PROFILE {
+    if overflow || String::from_utf8_lossy(&output).trim() != release {
         return Err(Error::new(mismatch));
     }
     Ok(())

@@ -5,8 +5,8 @@ use super::{SourceAsmdef, decode_asmdef, nz, read_metadata_guid, read_source_set
 use crate::{
     cancel::Context,
     compiler::{
-        AssemblyConfig, CompilerGraphExport, NilMap, NilVec, UNITY_VERSION, Walk,
-        canonical_configuration, glob_lossy, is_not_exist, walk_dir,
+        AssemblyConfig, CompilerGraphExport, NilMap, NilVec, Walk, canonical_configuration,
+        glob_lossy, is_not_exist, unity_version, walk_dir,
     },
     packages::Snapshot,
     project::lexpath::rune_lower,
@@ -19,8 +19,6 @@ use crate::{
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-
-pub(super) const UNITY_REVISION: &str = "45d8eee7de74";
 
 fn is_empty(value: &str) -> bool {
     value.is_empty()
@@ -165,7 +163,7 @@ pub fn capture_engine_profile(
     }
     if graph.backend != "unity_editor"
         || !graph.development
-        || graph.unity_version != UNITY_VERSION
+        || graph.unity_version != unity_version(project)?
         || graph.target != "StandaloneLinux64"
         || graph.scripting_backend != "Mono2x"
     {
@@ -179,8 +177,8 @@ pub fn capture_engine_profile(
     let mut profile = SourceEngineProfile {
         schema_version: 1,
         backend: "unity_public_engine_profile".into(),
-        unity_version: UNITY_VERSION.into(),
-        unity_revision: UNITY_REVISION.into(),
+        unity_version: unity_version(project)?.into(),
+        unity_revision: crate::release::of_project(project)?.revision.into(),
         editor: editor.into(),
         target: "LinuxStandalone64".into(),
         scripting_backend: "Mono".into(),
@@ -481,7 +479,7 @@ pub fn read_build_proof(path: &str) -> Result<SourceBuildProof> {
         .unwrap_or_default();
     if proof.schema_version != 1
         || proof.backend != "unity_editor_build_sources"
-        || proof.unity_version != UNITY_VERSION
+        || !crate::release::is_supported(&proof.unity_version)
         || proof.target != "StandaloneLinux64"
         || proof.scripting_backend != "Mono2x"
         || !proof.development
@@ -633,8 +631,8 @@ pub fn load_engine_profile(
         agent_read_json::<Option<_>>(filename, 16 << 20)?.unwrap_or_default();
     if profile.schema_version != 1
         || profile.backend != "unity_public_engine_profile"
-        || profile.unity_version != UNITY_VERSION
-        || profile.unity_revision != UNITY_REVISION
+        || !crate::release::supported(&profile.unity_version)
+            .is_ok_and(|release| profile.unity_revision == release.revision)
         || profile.editor != editor
         || profile.player != player
         || profile.target != "LinuxStandalone64"

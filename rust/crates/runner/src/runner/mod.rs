@@ -498,7 +498,11 @@ pub(crate) fn launch_options(args: &[String]) -> Result<LaunchOptions> {
         project: flags.get_string("project"),
         baseline: flags.get_string("baseline"),
         output: flags.get_string("output"),
-        editor: flags.get_string("editor"),
+        editor: crate::util::project_unity_editor(
+            &flags.get_string("editor"),
+            flags.is_set("editor"),
+            &flags.get_string("project"),
+        ),
         scene: flags.get_string("scene"),
         raw_routes: String::new(),
         prepared: flags.get_string("prepared"),

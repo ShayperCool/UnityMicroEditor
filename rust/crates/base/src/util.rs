@@ -104,6 +104,22 @@ pub fn default_unity_editor() -> String {
     sysutil::join(&[&home, "Unity/Hub/Editor", ENGINE_VERSION, "Editor/Unity"])
 }
 
+/// The Unity Editor of `project`: `named` when it was given explicitly or
+/// `UNITY_EDITOR` names one, otherwise the Hub installation of the release
+/// the project selects.
+pub fn project_unity_editor(named: &str, explicit: bool, project: &str) -> String {
+    if explicit || env::var("UNITY_EDITOR").is_ok_and(|value| !value.is_empty()) {
+        return named.to_string();
+    }
+    match crate::release::project_version(project) {
+        Ok(version) => {
+            let home = env::var("HOME").unwrap_or_default();
+            sysutil::join(&[&home, "Unity/Hub/Editor", &version, "Editor/Unity"])
+        }
+        Err(_) => named.to_string(),
+    }
+}
+
 /// The OS releases this lock even after an unclean exit.
 pub fn lock_session(output: &str) -> Result<File> {
     let path = sysutil::join(&[output, ".session.lock"]);

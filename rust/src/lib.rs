@@ -7,8 +7,8 @@ pub use ume_agentcontrol::agentcontrol;
 pub use ume_authoring::authoring;
 pub use ume_base::{
     ENGINE_PROFILE, ENGINE_VERSION, cache, cancel, editorbridge, flags, graph, hashstore, hex,
-    jsondoc, lmdb, packages, parity, paths, project, protocol, registry, runtimeartifact, sha256,
-    sysutil, util, yaml,
+    jsondoc, lmdb, packages, parity, paths, project, protocol, registry, release, runtimeartifact,
+    sha256, sysutil, util, yaml,
 };
 pub use ume_compiler::{compiler, hotreload, sourcegraph};
 pub use ume_mcp::mcp;

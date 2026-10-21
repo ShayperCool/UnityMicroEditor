@@ -6,6 +6,8 @@ use serde_json::{Value, json};
 use std::{collections::HashMap, env, fs, path::Path, process};
 use tempfile::TempDir;
 
+const PROFILE: &str = crate::ENGINE_VERSION;
+
 const HELPER: &str = "editorbridge::tests::editor_bridge_helper";
 const BRIDGE: &str = "Library/UnityMicroEditor/editor-bridge";
 
@@ -358,7 +360,7 @@ fn rejects_executable_profile_before_cache_mutation() {
             Err(error) => assert!(
                 error
                     .message()
-                    .starts_with("Editor executable does not report pinned Unity"),
+                    .starts_with("Editor executable does not report the project's Unity"),
                 "{name}: {error}"
             ),
         }
@@ -988,7 +990,7 @@ fn recorded_cases_agree_on_documents_and_receipts() {
     });
     compare("validateProjectVersion", |case| {
         validate_project_version(&case.bytes("data"))
-            .map(|()| Vec::new())
+            .map(|_| Vec::new())
             .map_err(message)
     });
     compare("isOwnedCachePath", |case| {
@@ -1044,6 +1046,7 @@ fn recorded_cases_agree_on_documents_and_receipts() {
             editor: "/e".into(),
             ..Options::default()
         },
+        release: PROFILE,
         mailbox: "/mailbox".into(),
         lifetime: Context::background(),
         start: Mutex::new(()),

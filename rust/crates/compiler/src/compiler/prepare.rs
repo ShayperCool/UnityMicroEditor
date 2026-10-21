@@ -9,7 +9,7 @@ pub const HOST_LACKS_PACKAGE: &str = "the host does not provide package assembly
 
 use super::{
     AssemblyConfig, CompileAssembly, CompileManifest, CompileScript, Compiler, CompilerGraphExport,
-    CompilerHostAssembly, CompilerPreparationResult, NilMap, NilVec, UNITY_VERSION,
+    CompilerHostAssembly, CompilerPreparationResult, NilMap, NilVec,
     compile::{canonical_json, deduplicate_references, equal_strings},
     join,
     netcode::needs_netcode,
@@ -155,7 +155,10 @@ pub fn prepare_compiler_graph_with(
     if !fs::read(join(&[&project, "ProjectSettings/ProjectVersion.txt"]))
         .is_ok_and(|version| validate_project_version(&version).is_ok())
     {
-        bail!("compiler preparation requires the verified Unity {UNITY_VERSION} project profile");
+        bail!(
+            "compiler preparation requires a project of a supported Unity release ({})",
+            crate::release::supported_versions()
+        );
     }
     let mut graph: CompilerGraphExport =
         read_json_file::<Option<_>>(graph_file)?.unwrap_or_default();
