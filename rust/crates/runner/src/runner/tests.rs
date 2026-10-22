@@ -276,9 +276,39 @@ fn route_snapshot(root: &str, manifests: &[&str]) -> String {
             project: root.into(),
             scenes: Some(scenes),
             addressables: Vec::new(),
+            build_scenes: Vec::new(),
         },
     )
     .unwrap()
+}
+
+#[test]
+fn content_routes_carry_the_build_scenes_the_host_stands_in_for() {
+    let (_guard, root) = temp_dir();
+    let main = route_manifest(&root, "main", Json::Null);
+    let guid = "c".repeat(32);
+    let routes = RawContentRoutes {
+        schema_version: 1,
+        project: root.clone(),
+        scenes: Some(vec![RawSceneRoute {
+            guid: guid.clone(),
+            manifest: main.clone(),
+            sha256: file_hash(&main).unwrap(),
+        }]),
+        addressables: Vec::new(),
+        build_scenes: vec![super::addressables::BuildSceneRoute {
+            index: 1,
+            guid: guid.clone(),
+            path: String::new(),
+        }],
+    };
+    let path = publish_content_routes(&root, &routes).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains(&format!(r#""buildScenes":[{{"index":1,"guid":"{guid}"}}]"#)),
+        "{text}"
+    );
+    assert_eq!(RawContentRoutes::read(&path).unwrap(), routes);
 }
 
 #[test]

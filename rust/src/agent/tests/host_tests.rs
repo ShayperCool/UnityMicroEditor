@@ -250,7 +250,7 @@ fn shared_stage_follows_the_source_and_keeps_its_caches() {
         .unwrap()
         .set_modified(old)
         .unwrap();
-    let (stage, _) = sync_staging(&ctx(), &project).unwrap();
+    let (stage, _) = sync_staging(&ctx(), &project, "").unwrap();
     assert_eq!(stage, staging::shared_stage(&project));
     assert_eq!(modified(&join(&[&stage, "Assets/Kept.txt"])), old);
     // What a stage Editor leaves behind: caches, a build and authored files.
@@ -267,7 +267,7 @@ fn shared_stage_follows_the_source_and_keeps_its_caches() {
     fs::remove_file(join(&[&project, "Assets/Gone.txt"])).unwrap();
     write(&join(&[&project, "Assets/Edited.txt"]), "after");
     write(&join(&[&project, "Assets/New/Added.txt"]), "added");
-    let (again, snapshot) = sync_staging(&ctx(), &project).unwrap();
+    let (again, snapshot) = sync_staging(&ctx(), &project, "").unwrap();
     assert_eq!(again, stage);
     assert_eq!(
         snapshot.files,
@@ -310,7 +310,7 @@ fn shared_stage_follows_the_source_and_keeps_its_caches() {
         &marker,
         r#"{"schemaVersion":1,"sourceProject":"/another/project"}"#,
     );
-    sync_staging(&ctx(), &project).unwrap();
+    sync_staging(&ctx(), &project, "").unwrap();
     assert!(absent(&cache), "a foreign stage kept its Library");
     assert_eq!(staged("Assets/Edited.txt"), "after");
 }

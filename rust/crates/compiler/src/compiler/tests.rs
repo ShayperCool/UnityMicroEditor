@@ -926,7 +926,7 @@ fn compiler_preparation_project_version_uses_exact_lines() {
             if valid {
                 sys::is_not_exist(&error)
             } else {
-                error.to_string().contains("verified Unity")
+                error.to_string().contains("supported Unity release")
             },
             "project version preflight {name} validity={valid} err={error}"
         );

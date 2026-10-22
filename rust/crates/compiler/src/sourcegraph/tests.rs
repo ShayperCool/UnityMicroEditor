@@ -2,6 +2,7 @@
 //! compiler/tests.rs. SDK and real-project tests are gated on environment variables
 //! and return early without them.
 use super::*;
+use crate::compiler::UNITY_VERSION;
 use crate::{
     compiler::{
         Compiler, CompilerPreparationResult, compiler_command, deduplicate_references,
@@ -1072,5 +1073,83 @@ fn editor_test_runner_users_get_nunit_with_overridden_references() {
         editor_plugin_references(&config(&["UnityEngine.UI"]), &plugins, "/editor").to_vec(),
         vec!["/Newtonsoft.Json.dll".to_string()],
         "one that does not gets only what it names"
+    );
+}
+
+#[test]
+fn a_device_game_compiles_as_the_editor_compiles_it_for_its_group() {
+    let (_directory, project) = temp();
+    write_graph_file(&project, "Packages/manifest.json", r#"{"dependencies":{}}"#);
+    write_graph_file(
+        &project,
+        "ProjectSettings/ProjectSettings.asset",
+        "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!129 &1\nPlayerSettings:\n  scriptingDefineSymbols:\n    Android: GAME_DEFINE\n    Standalone: BROKEN\n",
+    );
+    write_graph_file(
+        &project,
+        COMPILE_FOR_FILE,
+        r#"{"schemaVersion":1,"group":"Android"}"#,
+    );
+    // Saved with a byte order mark, naming an assembly the project lacks and
+    // one the platform leaves out, with a padded version define.
+    write_graph_file(
+        &project,
+        "Assets/Game/Game.asmdef",
+        "\u{feff}{\"name\":\"Game\",\"includePlatforms\":[\"Android\",\"Editor\",\"iOS\"],\"references\":[\"Missing\",\"Stub\",\"GUID:dddddddddddddddddddddddddddddddd\"],\"versionDefines\":[{\"name\":\"Unity\",\"expression\":\"6000.0\",\"define\":\"PADDED \"}]}",
+    );
+    write_graph_file(
+        &project,
+        "Assets/Game/Game.asmdef.meta",
+        "guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+    );
+    write_graph_file(
+        &project,
+        "Assets/Stub/Stub.asmdef",
+        r#"{"name":"Stub","includePlatforms":["LinuxStandalone64","Editor"]}"#,
+    );
+    write_graph_file(
+        &project,
+        "Assets/Stub/Stub.asmdef.meta",
+        "guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+    );
+    for (path, guid) in [("Assets/Game/Game.cs", "1"), ("Assets/Stub/Stub.cs", "2")] {
+        write_graph_file(&project, path, "public class Probe {}");
+        write_graph_file(
+            &project,
+            &format!("{path}.meta"),
+            &format!("guid: {}\n", guid.repeat(32)),
+        );
+    }
+    let options = SourceGraphOptions {
+        project: project.clone(),
+        profile: Some(signed(fixture_profile(&["ENABLE_MONO"]))),
+        packages: Some(resolve(&project, "")),
+        ..Default::default()
+    };
+    let graph = build_source_graph(&background(), &options).unwrap();
+    let names: Vec<&str> = graph
+        .assemblies
+        .iter()
+        .map(|assembly| assembly.config.name.as_str())
+        .collect();
+    assert_eq!(names, ["Game"], "{names:?}");
+    let game = &graph.assemblies[0].config;
+    for define in ["GAME_DEFINE", "UNITY_ANDROID", "PLATFORM_ANDROID", "PADDED"] {
+        assert!(
+            game.defines.iter().any(|d| d == define),
+            "{define}: {:?}",
+            game.defines
+        );
+    }
+    assert!(!game.defines.iter().any(|d| d == "BROKEN"));
+    assert!(game.dependencies.is_empty(), "{:?}", game.dependencies);
+    // Without the selection the device assembly is not a Linux one.
+    fs::remove_file(sysutil::join(&[&project, COMPILE_FOR_FILE])).unwrap();
+    let linux = build_source_graph(&background(), &options).unwrap();
+    assert!(
+        linux
+            .assemblies
+            .iter()
+            .all(|assembly| assembly.config.name != "Game")
     );
 }

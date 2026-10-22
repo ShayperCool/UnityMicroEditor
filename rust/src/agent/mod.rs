@@ -60,6 +60,10 @@ use std::{
     sync::{Arc, Condvar, Mutex, RwLock},
 };
 
+/// The verified release, which the fixtures of the tests use.
+#[cfg(test)]
+pub(crate) const UNITY_VERSION: &str = crate::ENGINE_VERSION;
+
 /// The Unity release `project` selects, which every record of it carries.
 pub(crate) fn unity_version(project: &str) -> Result<&'static str> {
     crate::release::project_release(project)

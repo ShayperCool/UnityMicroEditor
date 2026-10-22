@@ -299,10 +299,24 @@ const UNITY_REGISTRY: &str = "https://packages.unity.com";
 /// and builds with exactly what the tool compiles. Packages of the Unity
 /// registry, built-in, embedded and local packages stay as authored.
 fn pin_staged_packages(ctx: &Context, source: &str, editor: &str, stage: &str) -> Result<()> {
+    // Only a scoped registry or a Git dependency brings a third-party package.
+    let authored = read_agent_file(&join(&[source, "Packages/manifest.json"]), 1 << 20)?;
+    let authored = unmarshal_map(&authored)?.unwrap_or_default();
+    let scoped = matches!(authored.get("scopedRegistries"), Some(Any::Array(registries)) if !registries.is_empty());
+    let git = matches!(authored.get("dependencies"), Some(Any::Object(dependencies))
+        if dependencies.values().any(|request| matches!(request, Any::String(text) if crate::packages::is_git_request(text))));
+    if !scoped && !git {
+        return Ok(());
+    }
     let options = || crate::packages::Options::default().with_runtime_package(source);
+    // Without a resolution the stage's Editor resolves the packages itself,
+    // with whatever credentials it has.
     let resolved = match crate::packages::load_current(ctx, source, editor, options()?) {
         Ok(snapshot) => snapshot,
-        Err(_) => crate::packages::resolve(ctx, source, editor, options()?)?,
+        Err(_) => match crate::packages::resolve(ctx, source, editor, options()?) {
+            Ok(snapshot) => snapshot,
+            Err(_) => return Ok(()),
+        },
     };
     let path = join(&[stage, "Packages/manifest.json"]);
     let data = read_agent_file(&path, 1 << 20)?;

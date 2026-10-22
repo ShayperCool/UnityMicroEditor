@@ -84,8 +84,16 @@ pub fn project_version(project: &str) -> Result<String> {
     project_version_of(&text)
 }
 
-/// The supported release a project selects.
+/// The supported release a project selects. A project without a
+/// `ProjectVersion.txt` (one no Editor has opened yet) is the verified
+/// release's, as an Editor takes such a project for its own.
 pub fn of_project(project: &str) -> Result<&'static Release> {
+    let path = crate::sysutil::join(&[project, "ProjectSettings/ProjectVersion.txt"]);
+    if std::fs::symlink_metadata(&path)
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Ok(verified());
+    }
     supported(&project_version(project)?)
 }
 
@@ -215,6 +223,8 @@ mod tests {
         );
         assert!(version("m_EditorVersionWithRevision: 6000.6.3f1 (45d8eee7de74)\n").is_err());
         assert_eq!(verified().version, crate::ENGINE_VERSION);
+        std::fs::remove_file(directory.path().join("ProjectSettings/ProjectVersion.txt")).unwrap();
+        assert_eq!(of_project(project).unwrap(), verified());
     }
 
     #[test]

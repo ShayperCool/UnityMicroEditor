@@ -18,6 +18,11 @@ pub use cli::signal_context;
 pub use current::load_current;
 pub use resolve::resolve;
 
+/// Whether a manifest request names a Git repository.
+pub fn is_git_request(request: &str) -> bool {
+    git::is_git(request)
+}
+
 use anyhow::Result;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
@@ -93,19 +98,14 @@ const RUNTIME_DEPENDENCIES: &[(&str, &[(&str, &str)])] = &[
 pub fn runtime_dependencies(
     project: &str,
 ) -> anyhow::Result<&'static [(&'static str, &'static str)]> {
-    use anyhow::Context as _;
-    let path = crate::sysutil::join(&[project, "ProjectSettings/ProjectVersion.txt"]);
-    let text = std::fs::read(&path).with_context(|| format!("read {path}"))?;
-    let version = String::from_utf8_lossy(&text)
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("m_EditorVersion:"))
-        .map(|version| version.trim().to_string())
-        .with_context(|| format!("{path} names no m_EditorVersion"))?;
+    let version = crate::release::of_project(project)?.version;
     RUNTIME_DEPENDENCIES
         .iter()
         .find(|(line, _)| version.starts_with(line))
         .map(|(_, dependencies)| *dependencies)
-        .with_context(|| format!("the runtime package has no dependencies for Unity {version}"))
+        .ok_or_else(|| {
+            anyhow::anyhow!("the runtime package has no dependencies for Unity {version}")
+        })
 }
 
 /// Authored manifests, locks and registry documents may spell an unset field as `null`.
