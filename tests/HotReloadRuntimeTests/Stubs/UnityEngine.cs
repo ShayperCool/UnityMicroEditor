@@ -7,6 +7,7 @@ using System.Collections.Generic;
 namespace UnityEngine
 {
     public enum FindObjectsInactive { Exclude, Include }
+    public enum FindObjectsSortMode { None, InstanceID }
 
     public class Object
     {
@@ -35,7 +36,7 @@ namespace UnityEngine
             foreach (Object value in due) DestroyImmediate(value);
         }
 
-        public static Object[] FindObjectsByType(Type type, FindObjectsInactive findObjectsInactive)
+        public static Object[] FindObjectsByType(Type type, FindObjectsInactive findObjectsInactive, FindObjectsSortMode sortMode)
         {
             var found = new List<Object>();
             lock (live) foreach (Object value in live) if (type.IsInstanceOfType(value)) found.Add(value);

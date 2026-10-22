@@ -62,9 +62,10 @@ namespace UnityMicroEditor.HotReload
 
         internal override object[] Instances(Type type)
         {
-            // Inactive objects are live too; a destroyed one compares equal to null.
+            // Inactive objects are live too; a destroyed one compares equal to null. The
+            // overload with a sort mode is the one every supported release has.
             var live = new List<object>();
-            foreach (UnityEngine.Object value in UnityEngine.Object.FindObjectsByType(type, UnityEngine.FindObjectsInactive.Include))
+            foreach (UnityEngine.Object value in UnityEngine.Object.FindObjectsByType(type, UnityEngine.FindObjectsInactive.Include, UnityEngine.FindObjectsSortMode.None))
                 if (value != null) live.Add(value);
             return live.ToArray();
         }
