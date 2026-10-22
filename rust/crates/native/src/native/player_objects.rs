@@ -357,6 +357,14 @@ pub fn stage_importer(ctx: &Context, editor: &str, project: &str) -> Result<()> 
     ]
     .map(String::from)
     .to_vec();
+    // The version symbols the Editor compiles with, which the importer
+    // selects the release's API by.
+    let versions =
+        crate::release::version_defines(&crate::release::installed_version(&sysutil::join(&[
+            &installation,
+            "Unity",
+        ]))?)?;
+    arguments.extend(versions.iter().map(|define| format!("-define:{define}")));
     arguments.push(format!("-out:{output}"));
     for pattern in [
         "Managed/UnityEngine/*.dll",

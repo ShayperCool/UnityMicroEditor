@@ -79,6 +79,17 @@ namespace UnityMicroEditor.Worker
             ctx.SetMainObject(text);
         }
 
+        // A file of the import's artifact, by its name. 6000.0 has the
+        // artifact's own path to write it to; 6000.6 takes a written file.
+        static void OutputFile(AssetImportContext ctx, string name, string path)
+        {
+#if UNITY_6000_6_OR_NEWER
+            ctx.SetOutputArtifactFile(name, path);
+#else
+            File.Copy(path, ctx.GetOutputArtifactFilePath(name), true);
+#endif
+        }
+
         static string OneLine(string text)
         {
             return text.Replace('\r', ' ').Replace('\n', ' ');
@@ -513,8 +524,8 @@ namespace UnityMicroEditor.Worker
             string output = Path.Combine(directory, command.fileName);
             if (!File.Exists(output))
                 throw new InvalidOperationException("the Editor wrote no scene file");
-            ctx.SetOutputArtifactFile("player", output);
-            if (withDependencies) ctx.SetOutputArtifactFile("deps", Path.Combine(directory, "deps"));
+            OutputFile(ctx, "player", output);
+            if (withDependencies) OutputFile(ctx, "deps", Path.Combine(directory, "deps"));
             report.Append("done\n");
             // A worker that lives on is read beside its artifacts.
             File.WriteAllText(Path.Combine(directory, "report.txt"), report.ToString());
@@ -677,7 +688,7 @@ namespace UnityMicroEditor.Worker
             if (result.resourceFiles.Count(f => !f.serializedFile) != 0)
                 throw new InvalidOperationException("the written objects keep data outside their file");
             Messages(writtenPaths, report);
-            ctx.SetOutputArtifactFile("player", output);
+            OutputFile(ctx, "player", output);
             report.Append("done\n");
         }
     }
