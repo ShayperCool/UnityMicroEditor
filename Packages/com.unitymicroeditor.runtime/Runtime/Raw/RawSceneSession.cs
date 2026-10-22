@@ -13,11 +13,15 @@ namespace UnityMicroEditor.Raw
     {
         public static string CurrentRevision { get; private set; } = string.Empty;
 
+        /// <summary>The session the Player's scene was loaded by, while it lasts.</summary>
+        internal static LiveSession Current { get; private set; }
+
         public static LiveSession OpenSession(string manifestPath, string contentRoutesPath = null)
         {
             var manifest = ReadManifest(manifestPath);
             var session = new LiveSession(manifest, manifestPath);
             if (!string.IsNullOrEmpty(contentRoutesPath)) RawProjectContent.Initialize(contentRoutesPath, session, manifest.projectRoot);
+            Current = session;
             try { session.LoadInitial(manifest); return session; }
             catch { session.Dispose(); throw; }
         }
@@ -60,6 +64,17 @@ namespace UnityMicroEditor.Raw
                 if (disposed) throw new ObjectDisposedException(nameof(LiveSession));
                 asset = null;
                 return current != null && current.TryGetAsset(guid, type, out asset);
+            }
+
+            /// <summary>
+            /// Loads assets the session wrote while the Player runs (<c>nativeContentFiles</c> and
+            /// <c>aliases</c> of a written-assets descriptor), which <see cref="TryGetAsset"/> then finds.
+            /// </summary>
+            internal void LoadSourceAssets(NativeContentFileDescriptor[] files, NativeSceneAliasDescriptor[] aliases)
+            {
+                if (disposed) throw new ObjectDisposedException(nameof(LiveSession));
+                if (current == null) throw new InvalidOperationException("The session has no scene yet.");
+                current.AddSourceAssets(files, aliases);
             }
 
             public Scene LoadAdditive(string manifestPath, string expectedManifestSha256, Scene target = default)
@@ -161,6 +176,7 @@ namespace UnityMicroEditor.Raw
             {
                 if (disposed) return;
                 disposed = true;
+                if (Current == this) Current = null;
                 Exception failure = null;
                 RawCleanup.Run(RetireAdditiveScenes, ref failure);
                 if (current != null)

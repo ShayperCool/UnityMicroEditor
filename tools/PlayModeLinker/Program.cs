@@ -115,7 +115,7 @@ static class Names
         return ns + string.Join("_", parts.Select(part => part[(part.LastIndexOf('.') + 1)..]));
     }
 
-    public static string Holder(string fullName) => fullName.Replace('.', '_').Replace('/', '_');
+    public static string Holder(string fullName) => fullName.Replace('.', '_').Replace('/', '_').Replace('`', '_');
 
     public static DefaultAssemblyResolver Resolver(params string[] directories)
     {
@@ -514,6 +514,7 @@ sealed class StandIns
         if (request.Support.Length > 0 && File.Exists(supportPath))
             support = ModuleDefinition.ReadModule(supportPath, new ReaderParameters { AssemblyResolver = player });
         foreach (var module in code) Collect(module);
+        AddAnswered();
         ImplementInterfaces();
         Write();
         Verify();
@@ -738,17 +739,60 @@ sealed class StandIns
         foreach (var implementation in definition.Interfaces)
         {
             var interfaceType = implementation.InterfaceType;
-            if (interfaceType is GenericInstanceType || !IsStandIn(Names.ScopeName(interfaceType))) continue;
+            if (interfaceType is GenericInstanceType generic)
+            {
+                // One of the class library's over types the Player has (IEnumerable<PackageInfo>):
+                // code may call it, and a type that names it implements all of it.
+                if (!LibraryInterface(generic.ElementType) || !generic.GenericArguments.All(Available)) continue;
+            }
+            else if (!IsStandIn(Names.ScopeName(interfaceType)) && !LibraryInterface(interfaceType)) continue;
             type.Interfaces.Add(new InterfaceImplementation(Map(interfaceType, module, type, null)));
         }
     }
 
-    /// <summary>Gives every stand-in class the members of the stand-in interfaces it implements that it lacks.</summary>
+    /// <summary>An interface of the Player's class library whose members a stand-in can implement (none generic).</summary>
+    bool LibraryInterface(TypeReference type)
+    {
+        var scope = Names.ScopeName(type);
+        // The Editor names them through netstandard or mscorlib; the Player has them in mscorlib.
+        return !IsStandIn(scope)
+            && Names.Lookup(player, "mscorlib", type.FullName, out _) is { IsInterface: true } contract
+            && !contract.Methods.Any(method => method.HasGenericParameters);
+    }
+
+    /// <summary>A type of an interface's member as the instance <paramref name="context"/> of it has it.</summary>
+    static TypeReference Substitute(TypeReference type, GenericInstanceType? context)
+    {
+        if (context == null) return type;
+        switch (type)
+        {
+            case GenericParameter { Type: GenericParameterType.Type } parameter when parameter.Position < context.GenericArguments.Count:
+                return context.GenericArguments[parameter.Position];
+            case GenericInstanceType instance:
+                var copy = new GenericInstanceType(instance.ElementType);
+                foreach (var argument in instance.GenericArguments) copy.GenericArguments.Add(Substitute(argument, context));
+                return copy;
+            case ArrayType array:
+                return new ArrayType(Substitute(array.ElementType, context), array.Rank);
+            case ByReferenceType reference:
+                return new ByReferenceType(Substitute(reference.ElementType, context));
+            default:
+                return type;
+        }
+    }
+
+    /// <summary>
+    /// Gives every stand-in class the members of the interfaces it implements that it lacks: of a
+    /// stand-in interface, and of one of the class library's with the interfaces it extends, each
+    /// answered by the runtime bridge where it has a method of the member's name (a collection's
+    /// GetEnumerator), else with its type's default.
+    /// </summary>
     void ImplementInterfaces()
     {
         foreach (var type in generated.Values.Distinct().ToList())
         {
             if (type.IsInterface) continue;
+            ImplementLibraryInterfaces(type);
             foreach (var implementation in type.Interfaces.ToList())
             {
                 var reference = implementation.InterfaceType;
@@ -772,8 +816,61 @@ sealed class StandIns
         }
     }
 
-    static TypeReference Import(TypeReference type, ModuleDefinition module) =>
-        type.Module == module || type is GenericParameter ? type : module.ImportReference(type);
+    void ImplementLibraryInterfaces(TypeDefinition type)
+    {
+        var module = type.Module;
+        var pending = new Queue<TypeReference>(type.Interfaces.Select(implementation => implementation.InterfaceType)
+            .Where(reference => LibraryInterface(reference.GetElementType())));
+        var done = new HashSet<string>(StringComparer.Ordinal);
+        while (pending.Count != 0)
+        {
+            var reference = pending.Dequeue();
+            if (!done.Add(reference.FullName)) continue;
+            var contract = Names.Lookup(player, "mscorlib", reference.GetElementType().FullName, out _);
+            if (contract == null) continue;
+            var context = reference as GenericInstanceType;
+            if (!type.Interfaces.Any(implementation => implementation.InterfaceType.FullName == reference.FullName))
+                type.Interfaces.Add(new InterfaceImplementation(Import(reference, module)));
+            foreach (var inherited in contract.Interfaces)
+                pending.Enqueue(Substitute(inherited.InterfaceType, context));
+            foreach (var required in contract.Methods.Where(method => method.IsAbstract && !method.IsStatic))
+            {
+                var name = reference.FullName + "." + required.Name;
+                if (type.Methods.Any(method => method.Name == name)) continue;
+                var implementationMethod = new MethodDefinition(name,
+                    MethodAttributes.Private | MethodAttributes.Virtual | MethodAttributes.Final | MethodAttributes.NewSlot | MethodAttributes.HideBySig,
+                    Import(Substitute(required.ReturnType, context), module));
+                foreach (var parameter in required.Parameters)
+                    implementationMethod.Parameters.Add(new ParameterDefinition(parameter.Name, parameter.Attributes, Import(Substitute(parameter.ParameterType, context), module)));
+                var overridden = module.ImportReference(required);
+                if (context != null) overridden.DeclaringType = Import(reference, module);
+                implementationMethod.Overrides.Add(overridden);
+                type.Methods.Add(implementationMethod);
+                EmitBody(implementationMethod, type, required.Name);
+                report.EditorMembers++;
+            }
+        }
+    }
+
+    /// <summary>A type for a member of <paramref name="module"/>; its parts are imported one by one, since a generic parameter of the module's own needs none.</summary>
+    static TypeReference Import(TypeReference type, ModuleDefinition module)
+    {
+        switch (type)
+        {
+            case GenericParameter:
+                return type;
+            case GenericInstanceType instance:
+                var copy = new GenericInstanceType(Import(instance.ElementType, module));
+                foreach (var argument in instance.GenericArguments) copy.GenericArguments.Add(Import(argument, module));
+                return copy;
+            case ArrayType array:
+                return new ArrayType(Import(array.ElementType, module), array.Rank);
+            case ByReferenceType reference:
+                return new ByReferenceType(Import(reference.ElementType, module));
+            default:
+                return type.Module == module ? type : module.ImportReference(type);
+        }
+    }
 
     /// <summary>A type as a stand-in names it: types of stand-in assemblies are stand-ins, any other is the Player's.</summary>
     TypeReference Map(TypeReference type, ModuleDefinition module, TypeDefinition? owner, MethodDefinition? method)
@@ -848,6 +945,41 @@ sealed class StandIns
         }
     }
 
+    /// <summary>
+    /// The methods of the stand-in types that the runtime bridge answers and the code does not
+    /// name, with the Editor's visibility: code may reach a member of the Editor by reflection
+    /// (Hive takes the Player settings' serialized object from the internal
+    /// <c>PlayerSettings.GetSerializedObject</c>).
+    /// </summary>
+    void AddAnswered()
+    {
+        if (support == null) return;
+        for (var count = -1; count != definitions.Count;)
+        {
+            count = definitions.Count;
+            foreach (var (type, definition) in definitions.ToList())
+            {
+                if (definition == null || type.Namespace == Names.EngineNamespace) continue;
+                var holder = support.Types.FirstOrDefault(candidate => candidate.Namespace == Names.SupportNamespace && candidate.Name == Names.Holder(type.FullName));
+                if (holder == null) continue;
+                foreach (var answer in holder.Methods.Where(method => method.IsPublic && method.IsStatic))
+                {
+                    foreach (var method in definition.Methods.Where(method => method.Name == answer.Name
+                        && method.GenericParameters.Count == answer.GenericParameters.Count
+                        && method.Parameters.Count + (method.HasThis ? 1 : 0) == answer.Parameters.Count).ToList())
+                    {
+                        if (type.Methods.Any(known => known.Name == method.Name && known.Parameters.Count == method.Parameters.Count)) continue;
+                        var before = type.Methods.Count;
+                        AddMethod(type, method);
+                        if (type.Methods.Count == before) continue;
+                        var added = type.Methods[^1];
+                        added.Attributes = (added.Attributes & ~MethodAttributes.MemberAccessMask) | (method.Attributes & MethodAttributes.MemberAccessMask);
+                    }
+                }
+            }
+        }
+    }
+
     static HashSet<string> StaticFieldUse(ModuleDefinition module)
     {
         var used = new HashSet<string>(StringComparer.Ordinal);
@@ -900,6 +1032,8 @@ sealed class StandIns
             method.IsSpecialName = method.IsRuntimeSpecialName = true;
             method.IsVirtual = false;
         }
+        // A body names `this` through the type that declares the method.
+        type.Methods.Add(method);
         if (type.IsInterface)
         {
             method.IsVirtual = method.IsAbstract = method.IsNewSlot = true;
@@ -912,7 +1046,6 @@ sealed class StandIns
         {
             EmitBody(method, type);
         }
-        type.Methods.Add(method);
         report.EditorMembers++;
     }
 
@@ -981,16 +1114,17 @@ sealed class StandIns
         return reference;
     }
 
-    MethodDefinition? FindSupport(TypeDefinition type, MethodDefinition method)
+    MethodDefinition? FindSupport(TypeDefinition type, MethodDefinition method, string? name = null)
     {
         if (support == null) return null;
+        name ??= method.Name;
         // An engine member's stand-in is answered by the class named after the engine's type.
-        var name = type.Namespace == Names.EngineNamespace ? type.Name : Names.Holder(type.FullName);
-        var holder = support.Types.FirstOrDefault(candidate => candidate.Namespace == Names.SupportNamespace && candidate.Name == name);
+        var holderName = type.Namespace == Names.EngineNamespace ? type.Name : Names.Holder(type.FullName);
+        var holder = support.Types.FirstOrDefault(candidate => candidate.Namespace == Names.SupportNamespace && candidate.Name == holderName);
         if (holder == null) return null;
         foreach (var candidate in holder.Methods)
         {
-            if (!candidate.IsStatic || !candidate.IsPublic || candidate.Name != method.Name
+            if (!candidate.IsStatic || !candidate.IsPublic || candidate.Name != name
                 || candidate.GenericParameters.Count != method.GenericParameters.Count) continue;
             var expected = new List<TypeReference>();
             if (method.HasThis) expected.Add(type);
@@ -1017,6 +1151,8 @@ sealed class StandIns
         if (given.FullName == "System.Int32" && wanted is TypeDefinition { IsEnum: true }) return true;
         if (wanted.FullName == "System.Object") return !given.IsValueType && givenDefinition?.IsEnum != true && given is not GenericParameter;
         if (wanted.FullName == "System.Delegate") return Definition(given)?.BaseType?.FullName == "System.MulticastDelegate";
+        // An answer of a generic type's member gives its type argument as an object.
+        if (given.FullName == "System.Object" && wanted is GenericParameter) return true;
         if (given.FullName == "System.Object") return !wanted.IsValueType && wanted is not GenericParameter && wanted is not TypeDefinition { IsEnum: true };
         return false;
     }
@@ -1028,12 +1164,12 @@ sealed class StandIns
         catch (AssemblyResolutionException) { return null; }
     }
 
-    void EmitBody(MethodDefinition method, TypeDefinition type)
+    void EmitBody(MethodDefinition method, TypeDefinition type, string? name = null)
     {
         var module = type.Module;
         var il = method.Body.GetILProcessor();
         if (type.Namespace == Names.EngineNamespace && EngineFact(type, method, il)) return;
-        var answer = FindSupport(type, method);
+        var answer = FindSupport(type, method, name);
         if (answer != null)
         {
             var count = method.Parameters.Count + (method.HasThis ? 1 : 0);
@@ -1047,7 +1183,7 @@ sealed class StandIns
             }
             il.Emit(OpCodes.Call, target);
             if (method.ReturnType.FullName != "System.Void" && answer.ReturnType.FullName == "System.Object" && method.ReturnType.FullName != "System.Object")
-                il.Emit(OpCodes.Castclass, method.ReturnType);
+                il.Emit(method.ReturnType is GenericParameter ? OpCodes.Unbox_Any : OpCodes.Castclass, method.ReturnType);
             il.Emit(OpCodes.Ret);
             report.SupportedMembers++;
             return;

@@ -1271,6 +1271,13 @@ pub fn write_player_objects(ctx: &Context, build: &Build) -> Result<PlayerObject
     bail!("the build of {} did not settle", build.target)
 }
 
+/// The GUID of the UnityEngine.UI.dll that held uGUI's scripts before uGUI was
+/// a package (Unity 2019.2), which prefabs made then still name.
+const LEGACY_UI_ASSEMBLY: &str = "f70555f144d8491a825f0804e09c671c";
+/// The GUID of `Text.cs` of the `com.unity.ugui` package, one script of
+/// the assembly those scripts are compiled into now.
+const UI_TEXT_SCRIPT: &str = "5f7201a12d95ffc409449d95f23cf332";
+
 /// The assets a scene refers to, each after what it refers to in turn, the
 /// scene last, and the scripts whose classes they need: those of their
 /// objects and the importers of those a script imports. Scripts are not
@@ -1335,6 +1342,14 @@ pub(super) fn scene_closure(
             if data.starts_with(b"%YAML") {
                 for capture in GUID.captures_iter(&data) {
                     let guid = String::from_utf8_lossy(&capture[1]).to_ascii_lowercase();
+                    // A script of uGUI named as the Editor named it before uGUI was
+                    // a package: by the GUID of its UnityEngine.UI.dll and the hash
+                    // of its class. The Editor ties it to the package's script, for
+                    // which the worker needs the package's assembly with its scripts.
+                    if guid == LEGACY_UI_ASSEMBLY {
+                        self.scripts.insert(UI_TEXT_SCRIPT.to_string());
+                        continue;
+                    }
                     let Some(target) = self.sources.path_of(&guid) else {
                         continue;
                     };
@@ -1362,7 +1377,10 @@ pub(super) fn scene_closure(
         walk.visit(include)?;
     }
     let order = std::mem::take(&mut walk.order);
-    walk.visit(scene)?;
+    // Assets may be written without a scene (`SceneWorker::write`).
+    if !scene.is_empty() {
+        walk.visit(scene)?;
+    }
     let mut order_all = order;
     order_all.append(&mut walk.order);
     walk.order = order_all;

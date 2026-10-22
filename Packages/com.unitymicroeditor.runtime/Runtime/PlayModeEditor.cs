@@ -45,27 +45,86 @@ namespace UnityMicroEditor.PlayModeEditor
     }
 
     /// <summary>
-    /// What the asset database knows of the project's own files. A Player of Play mode code runs in
-    /// the project's directory, as the Editor does, so the paths the code names (<c>Assets/...</c>)
-    /// are the files themselves; the identity of each is its <c>.meta</c> file's. Packages, the
-    /// assets' types and their loading are the Editor's alone.
+    /// What the asset database knows of the project's files. A Player of Play mode code runs in the
+    /// project's directory, as the Editor does, so a path below <c>Assets</c> is the file itself; a
+    /// package's (<c>Packages/&lt;name&gt;/...</c>) lies where the session found the package, which the
+    /// runner names in <c>UME_PLAY_MODE_PACKAGES</c>. The identity and labels of each are its
+    /// <c>.meta</c> file's. An asset is loaded as the session holds it: from a <c>Resources</c>
+    /// folder, among the assets the session wrote, or written from its source on the first request
+    /// (<c>UME_PLAY_MODE_ASSETS</c>), which blocks the frame as the Editor's import would.
     /// </summary>
     public static class UnityEditor_AssetDatabase
     {
-        static Dictionary<string, string> paths;
+        sealed class Entry
+        {
+            internal string guid;
+            internal string path;
+            internal string[] labels;
+        }
 
-        public static bool IsValidFolder(string path) =>
-            !string.IsNullOrEmpty(path) && (path == "Assets" || path.StartsWith("Assets/", StringComparison.Ordinal)) && Directory.Exists(path);
+        static List<KeyValuePair<string, string>> roots;
+        static Dictionary<string, Entry> entries;
+        static readonly HashSet<string> refused = new HashSet<string>(StringComparer.Ordinal);
 
-        public static string AssetPathToGUID(string path) => string.IsNullOrEmpty(path) ? string.Empty : GuidOf(path + ".meta");
+        public static bool IsValidFolder(string path)
+        {
+            string physical = Physical(path);
+            return physical != null && Directory.Exists(physical);
+        }
+
+        public static string AssetPathToGUID(string path)
+        {
+            string physical = Physical(path);
+            return physical == null ? string.Empty : Meta(physical + ".meta").guid;
+        }
 
         public static string GUIDToAssetPath(string guid) =>
-            guid != null && Paths().TryGetValue(guid, out string path) ? path : string.Empty;
+            guid != null && Entries().TryGetValue(guid, out Entry entry) ? entry.path : string.Empty;
+
+        public static string[] GetAllAssetPaths()
+        {
+            var all = new List<string>();
+            foreach (Entry entry in Entries().Values) all.Add(entry.path);
+            all.Sort(StringComparer.Ordinal);
+            return all.ToArray();
+        }
+
+        public static string[] FindAssets(string filter) => FindAssets(filter, null);
 
         /// <summary>
-        /// An asset of a <c>Resources</c> folder, as the Player holds it; the Player has no other
-        /// asset by its path.
+        /// The GUIDs of the assets a search finds: every term holds, <c>l:</c> a label of the asset's
+        /// <c>.meta</c>, <c>t:</c> its main type (by its kind of file, or for an asset of a script by
+        /// the script's name), any other a part of its name.
         /// </summary>
+        public static string[] FindAssets(string filter, string[] searchInFolders)
+        {
+            var labels = new List<string>();
+            var types = new List<string>();
+            var names = new List<string>();
+            foreach (string term in (filter ?? string.Empty).Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (term.StartsWith("l:", StringComparison.Ordinal)) labels.Add(term.Substring(2));
+                else if (term.StartsWith("t:", StringComparison.Ordinal)) types.Add(term.Substring(2));
+                else names.Add(term);
+            }
+            var found = new List<KeyValuePair<string, string>>();
+            foreach (var item in Entries())
+            {
+                Entry entry = item.Value;
+                string physical = Physical(entry.path);
+                if (physical == null || Directory.Exists(physical)) continue;
+                if (searchInFolders != null && searchInFolders.Length != 0 && !Array.Exists(searchInFolders,
+                    folder => entry.path.StartsWith(folder.TrimEnd('/') + "/", StringComparison.Ordinal))) continue;
+                if (labels.Count != 0 && !labels.Exists(label => Array.IndexOf(entry.labels, label) >= 0)) continue;
+                string name = Path.GetFileNameWithoutExtension(entry.path);
+                if (!names.TrueForAll(part => name.IndexOf(part, StringComparison.OrdinalIgnoreCase) >= 0)) continue;
+                if (types.Count != 0 && !types.Exists(type => OfType(entry.path, physical, type))) continue;
+                found.Add(new KeyValuePair<string, string>(entry.path, item.Key));
+            }
+            found.Sort((a, b) => string.CompareOrdinal(a.Key, b.Key));
+            return found.ConvertAll(pair => pair.Value).ToArray();
+        }
+
         public static UnityEngine.Object LoadAssetAtPath(string path, Type type) => Load(path, type ?? typeof(UnityEngine.Object));
 
         public static T LoadAssetAtPath<T>(string path) where T : UnityEngine.Object => Load(path, typeof(T)) as T;
@@ -75,17 +134,88 @@ namespace UnityMicroEditor.PlayModeEditor
         static UnityEngine.Object Load(string path, Type type)
         {
             if (string.IsNullOrEmpty(path)) return null;
+            string extension = Path.GetExtension(path);
+            // The file's own main asset is the one of the type its kind of file has.
+            Type main = type == typeof(UnityEngine.Object) ? MainType(extension) ?? type : type;
             const string folder = "/Resources/";
             int at = path.LastIndexOf(folder, StringComparison.Ordinal);
-            if (at < 0) return null;
-            string inside = path.Substring(at + folder.Length);
-            string extension = Path.GetExtension(inside);
-            if (extension.Length > 0) inside = inside.Substring(0, inside.Length - extension.Length);
-            // Resources names an asset without its extension; the file's own main asset is the
-            // one of the type its kind of file has.
-            Type main = type == typeof(UnityEngine.Object) ? MainType(extension) ?? type : type;
-            UnityEngine.Object asset = Resources.Load(inside, main);
-            return asset != null && type.IsInstanceOfType(asset) ? asset : null;
+            if (at >= 0)
+            {
+                // Resources names an asset without its extension.
+                string inside = path.Substring(at + folder.Length);
+                if (extension.Length > 0) inside = inside.Substring(0, inside.Length - extension.Length);
+                UnityEngine.Object held = Resources.Load(inside, main);
+                if (held != null && type.IsInstanceOfType(held)) return held;
+            }
+            string guid = AssetPathToGUID(path);
+            var session = UnityMicroEditor.Raw.RawSceneLoader.Current;
+            if (guid.Length == 0 || session == null) return null;
+            if (session.TryGetAsset(guid, main, out UnityEngine.Object asset)) return asset;
+            if (!Written(session, path, guid)) return null;
+            return session.TryGetAsset(guid, main, out asset) ? asset : null;
+        }
+
+        [Serializable]
+        sealed class WrittenAssets
+        {
+            public string error;
+            public UnityMicroEditor.Raw.NativeContentFileDescriptor[] nativeContentFiles;
+            public UnityMicroEditor.Raw.NativeSceneAliasDescriptor[] aliases;
+        }
+
+        /// <summary>Has the session write an asset from its source and loads it, once per asset.</summary>
+        static bool Written(UnityMicroEditor.Raw.RawSceneLoader.LiveSession session, string path, string guid)
+        {
+            string directory = Environment.GetEnvironmentVariable("UME_PLAY_MODE_ASSETS");
+            if (string.IsNullOrEmpty(directory) || !refused.Add(guid)) return false;
+            Debug.Log("[unity-micro-editor] the game's Editor code loads " + path + ", which the session writes from its source now and holds from the start of its next Player.");
+            string request = Path.Combine(directory, guid + ".request.json");
+            string response = Path.Combine(directory, guid + ".response.json");
+            try
+            {
+                Directory.CreateDirectory(directory);
+                File.Delete(response);
+                File.WriteAllText(request + ".tmp", "{\"schemaVersion\":1,\"path\":\"" + path.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"}");
+                File.Move(request + ".tmp", request);
+                var waited = System.Diagnostics.Stopwatch.StartNew();
+                while (!File.Exists(response))
+                {
+                    if (waited.Elapsed.TotalSeconds > 900) throw new TimeoutException("the session wrote nothing in 900 s");
+                    System.Threading.Thread.Sleep(20);
+                }
+                var written = JsonUtility.FromJson<WrittenAssets>(File.ReadAllText(response));
+                if (written == null || !string.IsNullOrEmpty(written.error))
+                    throw new InvalidDataException(written == null ? "an empty answer" : written.error);
+                session.LoadSourceAssets(written.nativeContentFiles, written.aliases);
+                refused.Remove(guid);
+                return true;
+            }
+            catch (Exception error)
+            {
+                Debug.LogWarning("[unity-micro-editor] " + path + " cannot be loaded from its source: " + error.Message);
+                return false;
+            }
+        }
+
+        static bool OfType(string path, string physical, string type)
+        {
+            Type main = MainType(Path.GetExtension(path));
+            if (main != null) return main.Name == type || main.FullName == type;
+            if (!path.EndsWith(".asset", StringComparison.OrdinalIgnoreCase)) return false;
+            // An asset of a script names it; its class is named as its file.
+            try
+            {
+                foreach (string line in File.ReadLines(physical))
+                {
+                    int at = line.IndexOf("m_Script: {fileID: 11500000, guid: ", StringComparison.Ordinal);
+                    if (at < 0) continue;
+                    string script = line.Substring(at + 36, 32);
+                    return Path.GetFileNameWithoutExtension(GUIDToAssetPath(script)) == type;
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            return false;
         }
 
         static Type MainType(string extension)
@@ -105,37 +235,67 @@ namespace UnityMicroEditor.PlayModeEditor
             }
         }
 
-        public static string[] GetAllAssetPaths()
+        /// <summary>The file a logical path names, or none.</summary>
+        internal static string Physical(string path)
         {
-            var all = new List<string>(Paths().Values);
-            all.Sort(StringComparer.Ordinal);
-            return all.ToArray();
+            if (string.IsNullOrEmpty(path)) return null;
+            path = path.Replace('\\', '/').TrimEnd('/');
+            foreach (var root in Roots())
+                if (path == root.Key || path.StartsWith(root.Key + "/", StringComparison.Ordinal))
+                    return root.Value + path.Substring(root.Key.Length);
+            return null;
         }
 
-        static Dictionary<string, string> Paths()
+        /// <summary>Where <c>Assets</c> and each package (<c>Packages/&lt;name&gt;</c>) lie.</summary>
+        internal static List<KeyValuePair<string, string>> Roots()
         {
-            if (paths != null) return paths;
-            paths = new Dictionary<string, string>(StringComparer.Ordinal);
-            if (!Directory.Exists("Assets")) return paths;
-            foreach (string meta in Directory.EnumerateFiles("Assets", "*.meta", SearchOption.AllDirectories))
+            if (roots != null) return roots;
+            roots = new List<KeyValuePair<string, string>> { new KeyValuePair<string, string>("Assets", Path.GetFullPath("Assets")) };
+            string list = Environment.GetEnvironmentVariable("UME_PLAY_MODE_PACKAGES");
+            if (!string.IsNullOrEmpty(list) && File.Exists(list))
+                foreach (string line in File.ReadAllLines(list))
+                {
+                    int tab = line.IndexOf('\t');
+                    if (tab > 0) roots.Add(new KeyValuePair<string, string>(line.Substring(0, tab), line.Substring(tab + 1)));
+                }
+            return roots;
+        }
+
+        static Dictionary<string, Entry> Entries()
+        {
+            if (entries != null) return entries;
+            entries = new Dictionary<string, Entry>(StringComparer.Ordinal);
+            foreach (var root in Roots())
             {
-                string guid = GuidOf(meta);
-                if (guid.Length > 0 && !paths.ContainsKey(guid))
-                    paths.Add(guid, meta.Substring(0, meta.Length - ".meta".Length).Replace('\\', '/'));
+                if (!Directory.Exists(root.Value)) continue;
+                foreach (string meta in Directory.EnumerateFiles(root.Value, "*.meta", SearchOption.AllDirectories))
+                {
+                    Entry entry = Meta(meta);
+                    entry.path = root.Key + meta.Substring(root.Value.Length, meta.Length - root.Value.Length - ".meta".Length).Replace('\\', '/');
+                    if (entry.guid.Length > 0 && !entries.ContainsKey(entry.guid)) entries.Add(entry.guid, entry);
+                }
             }
-            return paths;
+            return entries;
         }
 
-        static string GuidOf(string meta)
+        static Entry Meta(string meta)
         {
+            string guid = string.Empty;
+            var labels = new List<string>();
             try
             {
+                bool inLabels = false;
                 foreach (string line in File.ReadLines(meta))
-                    if (line.StartsWith("guid:", StringComparison.Ordinal)) return line.Substring(5).Trim();
+                {
+                    if (line.StartsWith("guid:", StringComparison.Ordinal)) guid = line.Substring(5).Trim();
+                    else if (line.StartsWith("labels:", StringComparison.Ordinal)) inLabels = true;
+                    else if (inLabels && line.StartsWith("- ", StringComparison.Ordinal)) labels.Add(line.Substring(2).Trim());
+                    else inLabels = false;
+                }
             }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
-            return string.Empty;
+            return new Entry { guid = guid, labels = labels.ToArray() };
         }
     }
 
@@ -188,6 +348,243 @@ namespace UnityMicroEditor.PlayModeEditor
         public static string get_productName() => Application.productName;
         public static string get_companyName() => Application.companyName;
         public static string get_bundleVersion() => Application.version;
+
+        /// <summary>
+        /// The Editor's serialized object of the Player settings, which tools reach by reflection
+        /// (Hive's splash of the active platform): the settings of
+        /// <c>ProjectSettings/ProjectSettings.asset</c> as they are saved.
+        /// </summary>
+        public static object GetSerializedObject() => Serialized.Settings("ProjectSettings/ProjectSettings.asset");
+    }
+
+    /// <summary>
+    /// A <c>SerializedObject</c> of an asset saved as text: the properties of its first object's top
+    /// level, as the file holds them. A reference is loaded as the asset database loads it; what
+    /// is changed is not written back.
+    /// </summary>
+    public static class UnityEditor_SerializedObject
+    {
+        public static void Update(object self) { }
+        public static bool UpdateIfRequiredOrScript(object self) => false;
+        public static bool ApplyModifiedProperties(object self) => false;
+        public static bool ApplyModifiedPropertiesWithoutUndo(object self) => false;
+        public static object FindProperty(object self, string propertyPath) => Serialized.Find(self, propertyPath);
+    }
+
+    public static class UnityEditor_SerializedProperty
+    {
+        // UnityEditor.SerializedPropertyType
+        const int Generic = -1, Integer = 0, Float = 2, Text = 3, Color = 4, ObjectReference = 5;
+
+        public static string get_name(object self) => Serialized.Of(self).Key;
+        public static string get_propertyPath(object self) => Serialized.Of(self).Key;
+
+        /// <summary>What the saved text says: a reference, a whole number, a number, a colour, a text, or something else.</summary>
+        public static int get_propertyType(object self)
+        {
+            string value = Serialized.Of(self).Value;
+            if (value.StartsWith("{fileID:", StringComparison.Ordinal)) return ObjectReference;
+            if (value.StartsWith("{r:", StringComparison.Ordinal)) return Color;
+            if (value.Length == 0 || value.StartsWith("{", StringComparison.Ordinal) || value.StartsWith("[", StringComparison.Ordinal)) return Generic;
+            if (long.TryParse(value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out _)) return Integer;
+            if (double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out _)) return Float;
+            return Text;
+        }
+
+        public static bool get_boolValue(object self) => Serialized.Of(self).Value == "1";
+        public static int get_intValue(object self) =>
+            int.TryParse(Serialized.Of(self).Value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out int value) ? value : 0;
+        public static long get_longValue(object self) =>
+            long.TryParse(Serialized.Of(self).Value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out long value) ? value : 0;
+        public static float get_floatValue(object self) =>
+            float.TryParse(Serialized.Of(self).Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float value) ? value : 0;
+        public static string get_stringValue(object self) => Serialized.Of(self).Value;
+
+        /// <summary>The asset a reference names by its GUID, loaded as the asset database loads it.</summary>
+        public static UnityEngine.Object get_objectReferenceValue(object self)
+        {
+            string value = Serialized.Of(self).Value;
+            int at = value.IndexOf("guid: ", StringComparison.Ordinal);
+            if (at < 0) return null;
+            string guid = value.Substring(at + 6, Math.Min(32, value.Length - at - 6));
+            string path = UnityEditor_AssetDatabase.GUIDToAssetPath(guid);
+            return path.Length == 0 ? null : UnityEditor_AssetDatabase.LoadMainAssetAtPath(path);
+        }
+    }
+
+    /// <summary>The state of the stand-ins of the Editor's serialized objects and properties.</summary>
+    internal static class Serialized
+    {
+        static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, Dictionary<string, string>> objects =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<object, Dictionary<string, string>>();
+        static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, Holder> properties =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<object, Holder>();
+
+        sealed class Holder { internal KeyValuePair<string, string> Property; }
+
+        internal static object Settings(string path)
+        {
+            object made = New("UnityEditor.SerializedObject");
+            if (made == null || !File.Exists(path)) return null;
+            objects.Add(made, TopLevel(path));
+            return made;
+        }
+
+        internal static object Find(object serializedObject, string name)
+        {
+            if (serializedObject == null || name == null || !objects.TryGetValue(serializedObject, out var values)
+                || !values.TryGetValue(name, out string value)) return null;
+            object made = New("UnityEditor.SerializedProperty");
+            if (made != null) properties.Add(made, new Holder { Property = new KeyValuePair<string, string>(name, value) });
+            return made;
+        }
+
+        internal static KeyValuePair<string, string> Of(object property) =>
+            property != null && properties.TryGetValue(property, out Holder holder) ? holder.Property : new KeyValuePair<string, string>(string.Empty, string.Empty);
+
+        /// <summary>An instance of a stand-in type of the Editor, made without its constructor.</summary>
+        internal static object New(string fullName)
+        {
+            Type type = Type.GetType(fullName + ", UnityEditor.CoreModule", false);
+            return type == null ? null : System.Runtime.Serialization.FormatterServices.GetUninitializedObject(type);
+        }
+
+        /// <summary>The keys of the first object of a text asset, each with its value; a flow mapping over several lines is joined.</summary>
+        static Dictionary<string, string> TopLevel(string path)
+        {
+            var values = new Dictionary<string, string>(StringComparer.Ordinal);
+            string key = null, value = null;
+            foreach (string line in File.ReadLines(path))
+            {
+                if (line.StartsWith("--- ", StringComparison.Ordinal) && values.Count != 0) break;
+                if (key != null && value.StartsWith("{", StringComparison.Ordinal) && !value.EndsWith("}", StringComparison.Ordinal))
+                {
+                    value += " " + line.Trim();
+                    values[key] = value;
+                    continue;
+                }
+                if (line.Length < 3 || line[0] != ' ' || line[1] != ' ' || line[2] == ' ' || line[2] == '-') continue;
+                int colon = line.IndexOf(':');
+                if (colon < 0) continue;
+                key = line.Substring(2, colon - 2);
+                value = line.Substring(colon + 1).Trim();
+                values[key] = value;
+            }
+            return values;
+        }
+    }
+
+    /// <summary>
+    /// The Package Manager's list of the project's packages, which the Editor answers from what it
+    /// resolved: the packages of <c>Packages/packages-lock.json</c> (those the manifest names, or all
+    /// of them with the indirect ones), each with its <c>package.json</c>. The request is complete at
+    /// once. No other request of the Package Manager is answered.
+    /// </summary>
+    public static class UnityEditor_PackageManager_Client
+    {
+        public static object List() => Packages.List(false);
+        public static object List(bool offlineMode) => Packages.List(false);
+        public static object List(bool offlineMode, bool includeIndirectDependencies) => Packages.List(includeIndirectDependencies);
+    }
+
+    public static class UnityEditor_PackageManager_Requests_Request
+    {
+        public static bool get_IsCompleted(object self) => Packages.Answered(self);
+        // UnityEditor.PackageManager.StatusCode: InProgress, Success, Failure
+        public static int get_Status(object self) => Packages.Answered(self) ? 1 : 0;
+    }
+
+    public static class UnityEditor_PackageManager_Requests_Request_1
+    {
+        public static object get_Result(object self) => Packages.Result(self);
+    }
+
+    public static class UnityEditor_PackageManager_PackageCollection
+    {
+        public static object GetEnumerator(object self) => Packages.Enumerator(self);
+    }
+
+    public static class UnityEditor_PackageManager_PackageInfo
+    {
+        public static string get_name(object self) => Packages.Info(self, "name");
+        public static string get_version(object self) => Packages.Info(self, "version");
+        public static string get_displayName(object self) => Packages.Info(self, "displayName");
+        public static string get_description(object self) => Packages.Info(self, "description");
+        public static string get_packageId(object self) => Packages.Info(self, "name") + "@" + Packages.Info(self, "version");
+        public static string get_assetPath(object self) => "Packages/" + Packages.Info(self, "name");
+        public static string get_resolvedPath(object self) => Packages.Info(self, "resolvedPath");
+    }
+
+    internal static class Packages
+    {
+        static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, object> results =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<object, object>();
+        static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, List<object>> collections =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<object, List<object>>();
+        static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, Dictionary<string, string>> infos =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<object, Dictionary<string, string>>();
+
+        internal static object List(bool indirect)
+        {
+            object request = Serialized.New("UnityEditor.PackageManager.Requests.ListRequest");
+            object collection = Serialized.New("UnityEditor.PackageManager.PackageCollection");
+            if (request == null || collection == null) return request;
+            var packages = new List<object>();
+            var directories = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var root in UnityEditor_AssetDatabase.Roots()) directories[root.Key] = root.Value;
+            try
+            {
+                var lockFile = UnityMicroEditor.Raw.RawJson.Parse(File.ReadAllText("Packages/packages-lock.json")) as Dictionary<string, object>;
+                if (lockFile != null && lockFile.TryGetValue("dependencies", out object listed) && listed is Dictionary<string, object> dependencies)
+                {
+                    var names = new List<string>(dependencies.Keys);
+                    names.Sort(StringComparer.Ordinal);
+                    foreach (string name in names)
+                    {
+                        var entry = dependencies[name] as Dictionary<string, object>;
+                        if (!indirect && entry != null && entry.TryGetValue("depth", out object depth) && Convert.ToInt64(depth) != 0) continue;
+                        var info = new Dictionary<string, string>(StringComparer.Ordinal) { ["name"] = name };
+                        if (entry != null && entry.TryGetValue("version", out object version)) info["version"] = version as string ?? string.Empty;
+                        if (directories.TryGetValue("Packages/" + name, out string directory))
+                        {
+                            info["resolvedPath"] = directory;
+                            string manifest = Path.Combine(directory, "package.json");
+                            if (File.Exists(manifest) && UnityMicroEditor.Raw.RawJson.Parse(File.ReadAllText(manifest)) is Dictionary<string, object> package)
+                                foreach (string field in new[] { "version", "displayName", "description" })
+                                    if (package.TryGetValue(field, out object text) && text is string known) info[field] = known;
+                        }
+                        object made = Serialized.New("UnityEditor.PackageManager.PackageInfo");
+                        if (made == null) continue;
+                        infos.Add(made, info);
+                        packages.Add(made);
+                    }
+                }
+            }
+            catch (Exception error)
+            {
+                Debug.LogWarning("[unity-micro-editor] the project's packages cannot be listed: " + error.Message);
+            }
+            collections.Add(collection, packages);
+            results.Add(request, collection);
+            return request;
+        }
+
+        internal static bool Answered(object request) => request != null && results.TryGetValue(request, out _);
+
+        internal static object Result(object request) => request != null && results.TryGetValue(request, out object result) ? result : null;
+
+        internal static object Enumerator(object collection)
+        {
+            Type element = Type.GetType("UnityEditor.PackageManager.PackageInfo, UnityEditor.CoreModule", false);
+            if (element == null) return null;
+            var typed = (System.Collections.IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(element));
+            if (collection != null && collections.TryGetValue(collection, out List<object> packages))
+                foreach (object package in packages) typed.Add(package);
+            return typed.GetType().GetMethod("GetEnumerator").Invoke(typed, null);
+        }
+
+        internal static string Info(object package, string field) =>
+            package != null && infos.TryGetValue(package, out var info) && info.TryGetValue(field, out string value) ? value : string.Empty;
     }
 
     /// <summary>Preferences of this run only; the Editor's own are the user's, and the Player does not read them.</summary>

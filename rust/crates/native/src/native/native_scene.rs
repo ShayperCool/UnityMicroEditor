@@ -14,13 +14,13 @@ use crate::{
     playerbake,
     project::{
         BUILTIN_RESOURCE_GUID, NativeContentDependency, NativeContentFile, NativeContentObject,
-        NativeScene, NativeSceneFile, NeedsNativeScene,
+        NativeScene, NativeSceneAlias, NativeSceneFile, NeedsNativeScene,
     },
     sha256, sysutil,
     util::random_id,
 };
 use anyhow::{Result, bail};
-use std::time::Duration;
+use std::{collections::BTreeSet, time::Duration};
 
 /// The engine's resources a Player holds itself, by the name a written file
 /// gives them.
@@ -53,7 +53,149 @@ fn global(name: &str) -> Option<NativeContentDependency> {
     })
 }
 
+/// What a Player loads to hold assets written on their own
+/// (`NativeProjectImporter::write_native_assets`).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub struct NativeAssets {
+    /// The file of the assets' objects and of what they refer to, then the
+    /// published files it needs.
+    #[serde(rename = "nativeContentFiles")]
+    pub content: Vec<NativeContentFile>,
+    /// Where each object an asset is named by went: a prefab or model by its
+    /// root, any other asset by its objects, the main one first.
+    pub aliases: Vec<NativeSceneAlias>,
+}
+
 impl NativeProjectImporter {
+    /// Writes `assets` (logical paths) in the Player format with what they
+    /// refer to, as a scene's dependencies are written, and no scene: what a
+    /// Player of Play mode code asks for by path while it runs. A worker of
+    /// its own writes them; it starts without the project's library, so the
+    /// closure of the assets is imported for it.
+    pub fn write_native_assets(
+        &mut self,
+        ctx: &Context,
+        assets: &[String],
+    ) -> Result<NativeAssets> {
+        let output = sysutil::join(&[&self.opts.native_dir(), "imports", &random_id()]);
+        mkdir_all(&output, 0o700)?;
+        let build = Build {
+            project: self.opts.project.clone(),
+            editor: self.opts.editor.clone(),
+            output,
+            target: String::new(),
+            users: assets.to_vec(),
+            timeout: Duration::from_secs(3600),
+            reload_list: String::new(),
+            shader_cache: sysutil::join(&[
+                &self.opts.project,
+                "Library/UnityMicroEditor/shader-cache",
+            ]),
+        };
+        let written = self
+            .asset_worker
+            .get_or_init(super::scene_worker::SceneWorker::default)
+            .write(ctx, &build)?;
+        let Some(file) = written.dependencies else {
+            bail!("the worker wrote nothing of {}", assets.join(", "));
+        };
+        let file_sha = sha256(&file);
+        let guid = sha256(format!("ume-native-assets\0{file_sha}").as_bytes())[..32].to_string();
+        let directory = sysutil::join(&[
+            &self.opts.native_dir(),
+            "baked",
+            &format!("{guid}-{file_sha}"),
+        ]);
+        mkdir_all(&directory, 0o700)?;
+        for (name, data) in &written.resources {
+            let path = sysutil::join(&[&directory, name]);
+            if std::fs::metadata(&path).is_err() {
+                super::support::write_immutable_file(&path, data)?;
+            }
+        }
+        let path = sysutil::join(&[&directory, "dependencies"]);
+        if std::fs::metadata(&path).is_err() {
+            super::support::write_immutable_file(&path, &file)?;
+        }
+        let mut content = NativeContentFile {
+            guid: guid.clone(),
+            path,
+            sha256: file_sha,
+            ..Default::default()
+        };
+        let report = &written.report;
+        let wanted: BTreeSet<(String, String)> = report
+            .include_roots
+            .iter()
+            .chain(&report.include_objects)
+            .map(|(guid, id)| (guid.clone(), id.to_string()))
+            .collect();
+        let mut aliases = Vec::new();
+        for object in &report.dependencies {
+            let source = (object.guid.clone(), object.local_id.to_string());
+            if object.class_name == "UnityEditor.MonoScript" || !wanted.contains(&source) {
+                continue;
+            }
+            content.objects.push(NativeContentObject {
+                file_id: object.index.to_string(),
+                type_name: object.class_name.clone(),
+            });
+            aliases.push(NativeSceneAlias {
+                guid: source.0,
+                file_id: source.1,
+                file: guid.clone(),
+                local_id: object.index.to_string(),
+            });
+        }
+        if aliases.is_empty() {
+            bail!("the worker wrote no object of {}", assets.join(", "));
+        }
+        let mut published = Vec::new();
+        for name in playerbake::external_paths(&file)? {
+            if let Some(dependency) = global(&name) {
+                content.dependencies.push(dependency);
+                continue;
+            }
+            let Some(shader) = name.strip_prefix(PUBLISHED_PREFIX) else {
+                bail!("the assets refer to {name}, which no published file stands for");
+            };
+            published.push(shader.to_string());
+            content.dependencies.push(NativeContentDependency {
+                guid: shader.to_string(),
+                global: false,
+            });
+        }
+        // A shader the session has not published yet is built now.
+        let mut attempted = BTreeSet::new();
+        let shaders = loop {
+            let error = match self.session.published_native_content(&published) {
+                Ok(files) => break files,
+                Err(error) => error,
+            };
+            let Some(needed) = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<crate::project::NeedsImportError>())
+            else {
+                return Err(error);
+            };
+            let source = needed
+                .path
+                .strip_suffix(".meta")
+                .unwrap_or(&needed.path)
+                .to_string();
+            if !attempted.insert(source.clone()) {
+                return Err(error);
+            }
+            self.import_baked(ctx, &source)?;
+        };
+        let mut files = vec![content];
+        files.extend(shaders);
+        Ok(NativeAssets {
+            content: files,
+            aliases,
+        })
+    }
+
     /// Writes the scene `needed` asks for, or takes it from the store, and
     /// gives it to the session.
     pub(crate) fn build_native_scene(

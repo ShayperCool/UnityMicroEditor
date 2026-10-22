@@ -298,6 +298,32 @@ impl Inner {
 }
 
 impl super::Session {
+    /// The published files (shaders) with GUIDs `guids` and every published
+    /// file they need in turn. Fails with `NeedsImportError` for one that is
+    /// not published or out of date.
+    pub fn published_native_content(&self, guids: &[String]) -> Result<Vec<NativeContentFile>> {
+        let mut s = self.lock();
+        s.index_guids()?;
+        let mut pending = guids.to_vec();
+        let mut included = BTreeSet::new();
+        let mut content = Vec::new();
+        while let Some(guid) = pending.pop() {
+            if !included.insert(guid.clone()) {
+                continue;
+            }
+            let file = s.published_content(&guid)?;
+            pending.extend(
+                file.dependencies
+                    .iter()
+                    .filter(|dependency| !dependency.global)
+                    .map(|dependency| dependency.guid.clone()),
+            );
+            s.verify_native_artifacts(&file)?;
+            content.push(file);
+        }
+        Ok(content)
+    }
+
     /// The assets a build holds beside the scene, which the project's
     /// settings name: the render pipeline asset and the preloaded assets, by
     /// path.

@@ -22,7 +22,9 @@
 //   include <asset path> with a scene: an asset whose objects go into the file beside it though the scene does not
 //                        refer to it (the render pipeline asset, the preloaded assets a build holds, what the
 //                        game asks for by address), reported as "include-root" for a prefab or model and
-//                        "include-object" for each object of any other asset, the main one first
+//                        "include-object" for each object of any other asset, the main one first. Without a
+//                        scene, the file holds only these and what they refer to (an asset the game's Editor
+//                        code loads by path in a Player of Play mode code).
 //   revision <n>         ignored: a request kept by a worker that lives on is changed so that it is imported again
 //   scene <asset path>   a scene, written as a build writes it: prefab instances unpacked, EditorOnly objects
 //                        left out, with the scene's settings managers. A request that writes a scene writes
@@ -387,6 +389,125 @@ namespace UnityMicroEditor.Worker
                 || name.EndsWith(".Editor", StringComparison.Ordinal) || name.Contains(".Editor.");
         }
 
+        static void WriteDependencies(string directory, BuildSettings settings, List<RenderPipelineAsset> pipelines, BuildReferenceMap map,
+            BuildUsageTagGlobal projectGlobal, IEnumerable<ObjectIdentifier> refers, List<string> includes, StringBuilder report)
+        {
+            // What the scene refers to (`refers`) and the assets
+            // `includes` names with what they refer to, but the engine's
+            // own resources and the shaders of the project and its
+            // packages, written into one file beside it, scripts first. A shader is built
+            // on its own, with every material of the project that uses
+            // it, as the coordinator publishes it: each object of one is
+            // named by the file `ume-asset/<GUID>`, in which it keeps its
+            // local ID.
+            const string Builtin = "0000000000000000e000000000000000";
+            const string BuiltinExtra = "0000000000000000f000000000000000";
+            Func<ObjectIdentifier, bool> published = id =>
+            {
+                string guid = id.guid.ToString();
+                var type = ContentBuildInterface.GetTypeForObject(id);
+                return guid != Builtin && guid != BuiltinExtra && (type == typeof(Shader) || type == typeof(ComputeShader));
+            };
+            var referenced = new List<ObjectIdentifier>(refers);
+            var seen = new HashSet<ObjectIdentifier>(referenced);
+            foreach (string path in includes)
+            {
+                var ids = ContentBuildInterface.GetPlayerObjectIdentifiersInAsset(new GUID(AssetDatabase.AssetPathToGUID(path)), Target);
+                report.Append("project-asset ").Append(ids.Length).Append(' ').Append(path).Append('\n');
+                // A prefab or model is named by its root, as a reference to
+                // it holds it. Any other asset by its objects, the main
+                // one first: a texture before its sprites.
+                var main = AssetDatabase.LoadMainAssetAtPath(path);
+                if (main is GameObject root
+                    && AssetDatabase.TryGetGUIDAndLocalFileIdentifier(root, out string rootGuid, out long rootId))
+                    report.Append("include-root ").Append(rootGuid).Append(' ').Append(rootId).Append('\n');
+                else if (main != null && !EditorOnly(main.GetType())
+                    && AssetDatabase.TryGetGUIDAndLocalFileIdentifier(main, out string mainGuid, out long mainId))
+                {
+                    report.Append("include-object ").Append(mainGuid).Append(' ').Append(mainId).Append('\n');
+                    foreach (var id in ids)
+                        if (id.localIdentifierInFile != mainId && !EditorOnly(ContentBuildInterface.GetTypeForObject(id)))
+                            report.Append("include-object ").Append(id.guid).Append(' ').Append(id.localIdentifierInFile).Append('\n');
+                }
+                foreach (var id in ids.Concat(ContentBuildInterface.GetPlayerDependenciesForObjects(ids, Target, null)))
+                    if (seen.Add(id)) referenced.Add(id);
+                // The scripts of its behaviours and scriptable objects, which a build writes with
+                // them: a scene's dependencies hold those of its own objects, the dependencies of
+                // other objects do not.
+                foreach (string dependency in AssetDatabase.GetDependencies(path, true))
+                {
+                    if (!dependency.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)) continue;
+                    var script = AssetDatabase.LoadAssetAtPath<MonoScript>(dependency);
+                    if (script != null && ObjectIdentifier.TryGetObjectIdentifier(script, out var scriptId) && seen.Add(scriptId))
+                        referenced.Add(scriptId);
+                }
+            }
+            foreach (var id in referenced.Where(published))
+            {
+                string file = "ume-asset/" + id.guid;
+                map.AddMapping(file, id.localIdentifierInFile, id);
+                report.Append("published ").Append(id.guid).Append(' ').Append(id.localIdentifierInFile).Append(' ')
+                    .Append(ContentBuildInterface.GetTypeForObject(id).FullName).Append(' ').Append(OneLine(AssetDatabase.GUIDToAssetPath(id.guid))).Append('\n');
+            }
+            var dependencies = referenced.Where(id => id.guid.ToString() != Builtin && !published(id))
+                .OrderBy(id => ContentBuildInterface.GetTypeForObject(id) == typeof(MonoScript) ? 0 : 1).ToList();
+            // What the objects use (a material's keywords, a mesh's
+            // channels), as a build tags the objects of each file it
+            // writes; the scene's own objects tag only what they use
+            // directly, and a shader without usage is written with every
+            // variant it declares.
+            var dependencyIds = dependencies.ToArray();
+            var dependencyUsage = new BuildUsageTagSet();
+            ContentBuildInterface.CalculateBuildUsageTags(dependencyIds, dependencyIds, projectGlobal, dependencyUsage);
+            var depsCommand = new WriteCommand { fileName = "deps", internalName = "ume-deps", serializeObjects = new List<SerializationInfo>() };
+            for (int index = 0; index < dependencies.Count; index++)
+            {
+                var id = dependencies[index];
+                depsCommand.serializeObjects.Add(new SerializationInfo { serializationObject = id, serializationIndex = index + 1 });
+                map.AddMapping("ume-deps", index + 1, id);
+                var type = ContentBuildInterface.GetTypeForObject(id);
+                report.Append("dependency ").Append(index + 1).Append(' ').Append(type == null ? "?" : type.FullName).Append(' ').Append(id.guid).Append(' ').Append(id.localIdentifierInFile).Append('\n');
+            }
+            Debug.Log("[ume-scene] writing " + dependencies.Count + " dependencies");
+            var depsResult = WithBuildCallbacks(pipelines, report, () => ContentBuildInterface.WriteSerializedFile(directory, new WriteParameters
+            {
+                writeCommand = depsCommand,
+                settings = settings,
+                globalUsage = projectGlobal,
+                usageSet = dependencyUsage,
+                referenceMap = map,
+            }));
+            foreach (var file in depsResult.resourceFiles)
+                report.Append("deps-file ").Append(file.fileAlias).Append(' ').Append(file.serializedFile ? 1 : 0).Append(' ').Append(Path.GetFileName(file.fileName)).Append('\n');
+            foreach (var name in depsResult.externalFileReferences)
+                report.Append("deps-external ").Append(name.filePath).Append('\n');
+        }
+
+        // Assets written as a scene's dependencies are, with what they refer to and without a
+        // scene: what a Player of Play mode code asks the asset database for while it runs.
+        static void WriteAssets(AssetImportContext ctx, List<string> includes, StringBuilder report)
+        {
+            var settings = new BuildSettings { target = Target, group = BuildTargetGroup.Standalone, buildFlags = ContentBuildFlags.None };
+            string directory = Path.Combine("Temp", "ume-player-" + AssetDatabase.AssetPathToGUID(ctx.assetPath));
+            Directory.CreateDirectory(directory);
+            try
+            {
+                foreach (string path in includes)
+                    if (ContentBuildInterface.GetPlayerObjectIdentifiersInAsset(new GUID(AssetDatabase.AssetPathToGUID(path)), Target).Length == 0)
+                        throw new InvalidOperationException(path + " holds no object a Player loads (a build leaves out an object of an Editor class)");
+                WriteDependencies(directory, settings, BuildPipelines(), new BuildReferenceMap(), ContentBuildInterface.GetGlobalUsageFromGraphicsSettings(),
+                    new ObjectIdentifier[0], includes, report);
+                OutputFile(ctx, "deps", Path.Combine(directory, "deps"));
+                report.Append("done\n");
+            }
+            catch (Exception error)
+            {
+                report.Append("error ").Append(OneLine(error.GetType().Name + ": " + error.Message)).Append('\n');
+            }
+            // A worker that lives on is read beside its artifacts; it says why it wrote nothing.
+            File.WriteAllText(Path.Combine(directory, "report.txt"), report.ToString());
+        }
+
         // A scene as a build writes it. The Editor opens the scene from its
         // source for the build, unpacks its prefab instances and leaves out
         // its EditorOnly objects; every object of another file it refers to
@@ -410,86 +531,7 @@ namespace UnityMicroEditor.Worker
             string directory = Path.Combine("Temp", "ume-player-" + AssetDatabase.AssetPathToGUID(ctx.assetPath));
             Directory.CreateDirectory(directory);
             if (withDependencies)
-            {
-                // What the scene refers to, but the engine's own resources
-                // and the shaders of the project and its packages, written
-                // into one file beside it, scripts first. A shader is built
-                // on its own, with every material of the project that uses
-                // it, as the coordinator publishes it: each object of one is
-                // named by the file `ume-asset/<GUID>`, in which it keeps its
-                // local ID.
-                const string Builtin = "0000000000000000e000000000000000";
-                const string BuiltinExtra = "0000000000000000f000000000000000";
-                Func<ObjectIdentifier, bool> published = id =>
-                {
-                    string guid = id.guid.ToString();
-                    var type = ContentBuildInterface.GetTypeForObject(id);
-                    return guid != Builtin && guid != BuiltinExtra && (type == typeof(Shader) || type == typeof(ComputeShader));
-                };
-                var referenced = new List<ObjectIdentifier>(info.referencedObjects);
-                var seen = new HashSet<ObjectIdentifier>(referenced);
-                foreach (string path in includes)
-                {
-                    var ids = ContentBuildInterface.GetPlayerObjectIdentifiersInAsset(new GUID(AssetDatabase.AssetPathToGUID(path)), Target);
-                    report.Append("project-asset ").Append(ids.Length).Append(' ').Append(path).Append('\n');
-                    // A prefab or model is named by its root, as a reference to
-                    // it holds it. Any other asset by its objects, the main
-                    // one first: a texture before its sprites.
-                    var main = AssetDatabase.LoadMainAssetAtPath(path);
-                    if (main is GameObject root
-                        && AssetDatabase.TryGetGUIDAndLocalFileIdentifier(root, out string rootGuid, out long rootId))
-                        report.Append("include-root ").Append(rootGuid).Append(' ').Append(rootId).Append('\n');
-                    else if (main != null && !EditorOnly(main.GetType())
-                        && AssetDatabase.TryGetGUIDAndLocalFileIdentifier(main, out string mainGuid, out long mainId))
-                    {
-                        report.Append("include-object ").Append(mainGuid).Append(' ').Append(mainId).Append('\n');
-                        foreach (var id in ids)
-                            if (id.localIdentifierInFile != mainId && !EditorOnly(ContentBuildInterface.GetTypeForObject(id)))
-                                report.Append("include-object ").Append(id.guid).Append(' ').Append(id.localIdentifierInFile).Append('\n');
-                    }
-                    foreach (var id in ids.Concat(ContentBuildInterface.GetPlayerDependenciesForObjects(ids, Target, null)))
-                        if (seen.Add(id)) referenced.Add(id);
-                }
-                foreach (var id in referenced.Where(published))
-                {
-                    string file = "ume-asset/" + id.guid;
-                    map.AddMapping(file, id.localIdentifierInFile, id);
-                    report.Append("published ").Append(id.guid).Append(' ').Append(id.localIdentifierInFile).Append(' ')
-                        .Append(ContentBuildInterface.GetTypeForObject(id).FullName).Append(' ').Append(OneLine(AssetDatabase.GUIDToAssetPath(id.guid))).Append('\n');
-                }
-                var dependencies = referenced.Where(id => id.guid.ToString() != Builtin && !published(id))
-                    .OrderBy(id => ContentBuildInterface.GetTypeForObject(id) == typeof(MonoScript) ? 0 : 1).ToList();
-                // What the objects use (a material's keywords, a mesh's
-                // channels), as a build tags the objects of each file it
-                // writes; the scene's own objects tag only what they use
-                // directly, and a shader without usage is written with every
-                // variant it declares.
-                var dependencyIds = dependencies.ToArray();
-                var dependencyUsage = new BuildUsageTagSet();
-                ContentBuildInterface.CalculateBuildUsageTags(dependencyIds, dependencyIds, projectGlobal, dependencyUsage);
-                var depsCommand = new WriteCommand { fileName = "deps", internalName = "ume-deps", serializeObjects = new List<SerializationInfo>() };
-                for (int index = 0; index < dependencies.Count; index++)
-                {
-                    var id = dependencies[index];
-                    depsCommand.serializeObjects.Add(new SerializationInfo { serializationObject = id, serializationIndex = index + 1 });
-                    map.AddMapping("ume-deps", index + 1, id);
-                    var type = ContentBuildInterface.GetTypeForObject(id);
-                    report.Append("dependency ").Append(index + 1).Append(' ').Append(type == null ? "?" : type.FullName).Append(' ').Append(id.guid).Append(' ').Append(id.localIdentifierInFile).Append('\n');
-                }
-                Debug.Log("[ume-scene] writing " + dependencies.Count + " dependencies");
-                var depsResult = WithBuildCallbacks(pipelines, report, () => ContentBuildInterface.WriteSerializedFile(directory, new WriteParameters
-                {
-                    writeCommand = depsCommand,
-                    settings = settings,
-                    globalUsage = projectGlobal,
-                    usageSet = dependencyUsage,
-                    referenceMap = map,
-                }));
-                foreach (var file in depsResult.resourceFiles)
-                    report.Append("deps-file ").Append(file.fileAlias).Append(' ').Append(file.serializedFile ? 1 : 0).Append(' ').Append(Path.GetFileName(file.fileName)).Append('\n');
-                foreach (var name in depsResult.externalFileReferences)
-                    report.Append("deps-external ").Append(name.filePath).Append('\n');
-            }
+                WriteDependencies(directory, settings, pipelines, map, projectGlobal, info.referencedObjects, includes, report);
             foreach (var id in withDependencies ? new List<ObjectIdentifier>() : info.referencedObjects.ToList())
             {
                 var type = ContentBuildInterface.GetTypeForObject(id);
@@ -583,6 +625,13 @@ namespace UnityMicroEditor.Worker
                         break;
                     default: throw new InvalidOperationException("unknown request statement " + verb);
                 }
+            }
+            if (scenes.Count == 0 && includes.Count != 0)
+            {
+                if (written.Count != 0 || embedded.Count != 0 || saved.Count != 0 || settings.Count != 0)
+                    throw new InvalidOperationException("a request that writes assets with what they refer to writes nothing else");
+                WriteAssets(ctx, includes, report);
+                return;
             }
             if (scenes.Count != 0)
             {

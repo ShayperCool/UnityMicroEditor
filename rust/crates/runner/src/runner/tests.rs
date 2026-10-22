@@ -1189,3 +1189,33 @@ fn unique_symbols_of_a_plugin_become_weak() {
         0
     );
 }
+
+#[test]
+fn assets_play_mode_code_asked_for_are_remembered_while_their_sources_exist() {
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().to_str().unwrap();
+    fs::create_dir_all(root.path().join("Assets/Stub")).unwrap();
+    fs::create_dir_all(root.path().join("Library/UnityMicroEditor")).unwrap();
+    fs::write(root.path().join("Assets/Stub/Banner.prefab"), "").unwrap();
+    fs::write(root.path().join("Assets/Stub/Gone.prefab"), "").unwrap();
+    for path in [
+        "Assets/Stub/Gone.prefab",
+        "Assets/Stub/Banner.prefab",
+        "Assets/Stub/Banner.prefab",
+    ] {
+        assets::remember(project, path).unwrap();
+    }
+    assert_eq!(
+        assets::remembered(project),
+        ["Assets/Stub/Banner.prefab", "Assets/Stub/Gone.prefab"]
+    );
+    // A source that is gone is not written with the next scene; a package
+    // the project has no compilation record of is not found.
+    fs::remove_file(root.path().join("Assets/Stub/Gone.prefab")).unwrap();
+    assets::remember(
+        project,
+        "Packages/com.applovin.mediation.ads/Prefabs/BannerTop.prefab",
+    )
+    .unwrap();
+    assert_eq!(assets::remembered(project), ["Assets/Stub/Banner.prefab"]);
+}

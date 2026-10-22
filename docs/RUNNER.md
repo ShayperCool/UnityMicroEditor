@@ -272,7 +272,7 @@ A line that is no command is reported as `command-rejected` with `error` and the
 
 ## Events and reports
 
-The runner prints one JSON event per line: `prepared`, `ready`, `updated`, `code-patched`, `code-updated`, `content-updated`, `unchanged`, `synced`, `native-revision-unchanged`, `native-scene-written`, `native-scene-reused`, `scene-worker-wrote`, `scene-worker-restarted`, `scene-worker-stopped`, `scene-library`, `native-cache-rejected`, `native-cache-seeded`, `native-prebuild`, `native-prebuilt`, `native-built`, `native-build-reused`, `native-baked`, `native-import-repeated`, `addressables`, `addressables-skipped`, `addressables-changed`, `hot-reload-unavailable`, `command-rejected` and `update-rejected`.
+The runner prints one JSON event per line: `prepared`, `ready`, `updated`, `code-patched`, `code-updated`, `content-updated`, `unchanged`, `synced`, `native-revision-unchanged`, `native-scene-written`, `native-scene-reused`, `scene-worker-wrote`, `scene-worker-restarted`, `scene-worker-stopped`, `scene-library`, `native-cache-rejected`, `native-cache-seeded`, `native-prebuild`, `native-prebuilt`, `native-built`, `native-build-reused`, `native-baked`, `native-import-repeated`, `addressables`, `addressables-skipped`, `addressables-changed`, `hot-reload-unavailable`, `play-mode-asset`, `play-mode-asset-refused`, `command-rejected` and `update-rejected`.
 
 What hot reload adds to them, in a watched session:
 

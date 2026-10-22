@@ -2,6 +2,7 @@
 //! scripts, prepares the scene, owns one Player process and, with `--watch`,
 //! turns source changes into live patches, reloads or Player restarts.
 mod addressables;
+mod assets;
 mod commands;
 mod json;
 mod noop;
@@ -89,6 +90,9 @@ pub struct LaunchOptions {
     /// declarations that exist only because of them.
     pub addressables: Vec<AddressableRoute>,
     pub addressable_content: Vec<String>,
+    /// The assets earlier Players of Play mode code asked for, which the
+    /// session writes with its scene (`assets::remembered`).
+    pub play_mode_assets: Vec<String>,
     /// The Build Settings scenes the game may load through `SceneManager`,
     /// each also a content scene.
     pub build_scenes: Vec<addressables::BuildSceneRoute>,
@@ -524,6 +528,7 @@ pub(crate) fn launch_options(args: &[String]) -> Result<LaunchOptions> {
         content_prefabs: flags.get_list("content-prefab"),
         addressables: Vec::new(),
         addressable_content: Vec::new(),
+        play_mode_assets: Vec::new(),
         build_scenes: Vec::new(),
         no_addressables: flags.get_bool("no-addressables"),
         no_build_scenes: flags.get_bool("no-build-scenes"),
@@ -763,6 +768,27 @@ fn drop_addressable_prefabs(
         return true;
     }
     give_up_prefabs(opts, session, &prefabs, &err_text(error));
+    true
+}
+
+/// Gives up the assets remembered for Play mode code after the session
+/// failed to prepare with them; the Player asks for each again. False when
+/// there is none, so the error is the next one's.
+fn drop_play_mode_assets(
+    opts: &mut LaunchOptions,
+    session: &Session,
+    error: &anyhow::Error,
+) -> bool {
+    if opts.play_mode_assets.is_empty() {
+        return false;
+    }
+    let dropped = std::mem::take(&mut opts.play_mode_assets);
+    opts.content_prefabs.retain(|path| !dropped.contains(path));
+    session.remove_extra_assets(&dropped);
+    Event::new("play-mode-asset-refused")
+        .with("paths", &dropped)
+        .with("error", &err_text(error))
+        .emit();
     true
 }
 
@@ -1301,6 +1327,9 @@ fn run_session(
     opts.play_mode = play_mode;
     if play_mode {
         player::adopt_addressables_target(&staged_player, &opts.project)?;
+        if let Err(error) = assets::write_packages(&opts.project, &output) {
+            eprintln!("[unity-micro-editor] the Player finds no package by its path: {error:#}");
+        }
         let isolated = player::isolate_plugin_symbols(&staged_player)?;
         if isolated > 0 {
             eprintln!(
@@ -1345,6 +1374,16 @@ fn run_session(
     let script_types = compiler.script_type_names(ctx)?;
     let addressable_sources = adopt_addressables(opts);
     adopt_build_scenes(opts, &json::scene_path_of(&baseline.manifest)?);
+    // What the game's Editor code asked earlier Players for by path is
+    // written with the scene; when that fails, the Player asks again.
+    if play_mode {
+        for path in assets::remembered(&project) {
+            if !opts.content_prefabs.contains(&path) {
+                opts.content_prefabs.push(path.clone());
+                opts.play_mode_assets.push(path);
+            }
+        }
+    }
     let assemblies = compiler::player_assembly_paths(&baseline.player, &baseline.manifest)?;
     let initializers = json::read_runtime_initializers(&baseline.manifest)?;
     let session = Arc::new(Session::new(project::Options {
@@ -1369,10 +1408,23 @@ fn run_session(
     // one of the session's start: the staged host stays (caches6-1).
     let mut native_options = opts.native(&staged_player);
     native_options.seed = baseline.native_import.index.clone();
+    // What the Player of Play mode code asks the asset database for is
+    // written while it runs, by an importer of its own.
+    let _assets = match play_mode {
+        true => Some(assets::serve(
+            ctx.clone(),
+            &output,
+            &project,
+            NativeProjectImporter::new(native_options.clone(), session.clone())?,
+        )),
+        false => None,
+    };
     let mut native_importer = NativeProjectImporter::new(native_options, session.clone())?;
     let prepared = loop {
         match native_importer.prepare(ctx) {
             Ok(prepared) => break prepared,
+            Err(error)
+                if ctx.error().is_none() && drop_play_mode_assets(opts, &session, &error) => {}
             Err(error)
                 if ctx.error().is_none() && drop_addressable_prefabs(opts, &session, &error) => {}
             Err(error) => return Err(error),

@@ -482,6 +482,8 @@ impl Inner {
                 for permitted in [
                     lexpath::join(&[&library, "PackageCache"]),
                     lexpath::join(&[&library, "UnityMicroEditor/package-sources"]),
+                    // The packages the tool fetched itself (`packages::resolve`).
+                    lexpath::join(&[&library, "UnityMicroEditor/packages/content"]),
                 ] {
                     if lexpath::rel(&permitted, &base)
                         .is_ok_and(|r| r != "." && lexpath::inside(&r))
@@ -818,7 +820,11 @@ impl Session {
             if matches!(extension, "" | ".unity" | ".meta") {
                 bail!("a runtime asset must be an authored asset other than a scene: {path}");
             }
-            validate_authored_path(path, extension)?;
+            // Also a package's: what the Editor code of Play mode code loads by path.
+            match path.strip_prefix("Packages/") {
+                Some(rest) if lexpath::clean(path) == *path && rest.contains('/') => {}
+                _ => validate_authored_path(path, extension)?,
+            }
             s.extra_assets.push(path.clone());
         }
         if !options.native_catalog.is_empty() {

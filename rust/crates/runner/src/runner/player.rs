@@ -139,6 +139,15 @@ pub fn start_player(
         // The build target the Editor would have active (`UnityEditor.BuildTarget`).
         let (target, _) = active_build_target(&opts.project);
         command.env("UME_PLAY_MODE_BUILD_TARGET", target.to_string());
+        // Where the asset database finds packages and asks for assets.
+        command.env(
+            "UME_PLAY_MODE_PACKAGES",
+            super::assets::packages_file(&opts.output),
+        );
+        command.env(
+            "UME_PLAY_MODE_ASSETS",
+            super::assets::requests_directory(&opts.output),
+        );
         // The game's native plugins bind to their own symbols, as zavod's
         // Editor images open them: Firebase's desktop library and another
         // gRPC of the game otherwise share one gRPC and crash.

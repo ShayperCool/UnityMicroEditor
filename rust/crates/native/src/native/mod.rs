@@ -47,6 +47,7 @@ pub use importer::{
     NativeOptions, NativeProjectImporter, native_index, project_native_store,
     stage_native_resources, valid_native_guid,
 };
+pub use native_scene::NativeAssets;
 pub use player_objects::{
     Build as PlayerBuild, ExternalObject as PlayerExternalObject, Plan as PlayerBuildPlan,
     PlayerObjects, Report as PlayerObjectReport, Request as PlayerObjectRequest, WrittenScene,
@@ -57,6 +58,7 @@ pub use probe::{
     FrameEvidence, ImportEvidence, NativeImportJob, ProbeOptions, ProbeReport, capture_frame,
     receive_message, rss_kib, run_probe, validate_worker_version,
 };
+pub use scripted::package_directories;
 pub use shader_compiler::ShaderCompiler;
 pub use support::{JsonF64, is_canceled, is_not_exist};
 

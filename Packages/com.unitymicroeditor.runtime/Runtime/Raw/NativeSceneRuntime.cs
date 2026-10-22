@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using Unity.Collections;
 using Unity.Content;
@@ -117,7 +118,27 @@ namespace UnityMicroEditor.Raw
                     if (alias != null && alias.guid == guid && assets.TryGetValue(AssetKey(alias.guid, alias.fileId), out Object value)
                         && value != null && (type == null || type.IsInstanceOfType(value)))
                     { asset = value; return true; }
+                foreach (NativeSceneAliasDescriptor alias in sourceAliases)
+                    if (alias.guid == guid && assets.TryGetValue(AssetKey(alias.guid, alias.fileId), out Object value)
+                        && value != null && (type == null || type.IsInstanceOfType(value)))
+                    { asset = value; return true; }
                 return false;
+            }
+
+            // Assets the session wrote while the Player ran, which the game's Editor code asked
+            // the asset database for (Play mode code), named by their sources.
+            private readonly List<NativeSceneAliasDescriptor> sourceAliases = new List<NativeSceneAliasDescriptor>();
+
+            internal void AddSourceAssets(NativeContentFileDescriptor[] files, NativeSceneAliasDescriptor[] aliases)
+            {
+                LoadNativeContentFiles(files);
+                foreach (NativeSceneAliasDescriptor alias in aliases ?? Array.Empty<NativeSceneAliasDescriptor>())
+                {
+                    if (alias == null || !assets.TryGetValue(AssetKey(alias.file, alias.localId), out Object held))
+                        throw new InvalidDataException("Written assets name no published object: " + (alias == null ? "" : alias.guid + "/" + alias.fileId));
+                    assets[AssetKey(alias.guid, alias.fileId)] = held;
+                    sourceAliases.Add(alias);
+                }
             }
 
             private void UnloadNativeScene()

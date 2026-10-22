@@ -88,12 +88,14 @@ namespace UnityMicroEditor.Raw
 
         private sealed partial class ImportContext
         {
-            private void LoadNativeContentFiles()
+            private void LoadNativeContentFiles() { LoadNativeContentFiles(manifest.nativeContentFiles); }
+
+            private void LoadNativeContentFiles(NativeContentFileDescriptor[] files)
             {
-                if (manifest.nativeContentFiles == null || manifest.nativeContentFiles.Length == 0) return;
+                if (files == null || files.Length == 0) return;
                 if (nativeCache == null) throw new InvalidDataException("Direct native ContentFiles require a retained raw scene session.");
                 var descriptors = new Dictionary<string, NativeContentFileDescriptor>(StringComparer.Ordinal);
-                foreach (NativeContentFileDescriptor descriptor in manifest.nativeContentFiles)
+                foreach (NativeContentFileDescriptor descriptor in files)
                 {
                     ValidateNativeContentDescriptor(descriptor);
                     if (descriptors.ContainsKey(descriptor.guid)) throw new InvalidDataException("Duplicate native ContentFile GUID: " + descriptor.guid);
@@ -102,13 +104,13 @@ namespace UnityMicroEditor.Raw
                 var loaded = new Dictionary<string, NativeContentHandle>(StringComparer.Ordinal);
                 var visiting = new HashSet<string>(StringComparer.Ordinal);
                 var created = new List<NativeContentHandle>();
-                VerifyNativeContentHashes(manifest.nativeContentFiles);
+                VerifyNativeContentHashes(files);
                 try
                 {
                     // Every file is started first, a dependency before what needs
                     // it, so that the loading thread takes them one after the
                     // other; each is then waited for and read back in that order.
-                    foreach (NativeContentFileDescriptor descriptor in manifest.nativeContentFiles)
+                    foreach (NativeContentFileDescriptor descriptor in files)
                         LoadNativeContentDescriptor(descriptor, descriptors, loaded, visiting, created);
                     CompleteNativeContentFiles(created, loaded);
                     // All native parsing and exact-ID readback succeeds before

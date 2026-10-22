@@ -83,6 +83,9 @@ pub struct NativeProjectImporter {
     /// The worker that writes scenes in the Player format, started when
     /// one is first written.
     pub(crate) scene_worker: std::sync::OnceLock<Arc<super::scene_worker::SceneWorker>>,
+    /// The worker that writes assets on their own
+    /// (`write_native_assets`), so that the scene worker keeps its scenes.
+    pub(crate) asset_worker: std::sync::OnceLock<super::scene_worker::SceneWorker>,
 }
 
 /// What a published revision was made of; see `unchanged_revision`.
@@ -127,6 +130,7 @@ impl NativeProjectImporter {
             sources: Default::default(),
             prepared_once: false,
             scene_worker: std::sync::OnceLock::new(),
+            asset_worker: std::sync::OnceLock::new(),
         };
         let read_index = |index: &str| -> Result<Option<Option<Vec<NativeReplacement>>>> {
             match read_json_verbatim(index) {

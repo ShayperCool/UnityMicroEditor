@@ -479,7 +479,8 @@ impl Drop for SceneWorker {
 
 impl SceneWorker {
     /// Writes `build.target` as a build writes it, with what it refers to
-    /// in a file beside it.
+    /// in a file beside it. Without a target, the file holds `build.users`
+    /// and what they refer to, and no scene is written.
     pub(crate) fn write(&self, ctx: &Context, build: &Build) -> Result<WrittenScene> {
         let started = Instant::now();
         let sources = open_sources(&build.project)?;
@@ -506,7 +507,10 @@ impl SceneWorker {
         }
         let environment = closure.environment(&build.project)?;
         let request = Request {
-            scenes_with_dependencies: vec![build.target.clone()],
+            scenes_with_dependencies: match build.target.is_empty() {
+                true => Vec::new(),
+                false => vec![build.target.clone()],
+            },
             includes: build.users.clone(),
             ..Default::default()
         }
@@ -806,8 +810,12 @@ impl SceneWorker {
                 resources.push((format!("ume-deps.{extension}"), read_file(&path)?));
             }
         }
+        let scene = match warm.request.contains("scene-with-dependencies ") {
+            true => file("scene")?,
+            false => Vec::new(),
+        };
         Ok(WrittenScene {
-            scene: file("scene")?,
+            scene,
             dependencies: Some(file("deps")?),
             resources,
             report,
