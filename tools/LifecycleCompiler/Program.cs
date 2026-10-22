@@ -542,6 +542,49 @@ internal static class Program
             }
         }
 
+        /// What the Editor runs as it enters Play mode with a domain reload, before any runtime
+        /// initializer: the static constructor of every class marked <c>[InitializeOnLoad]</c>, then
+        /// every static method marked <c>[InitializeOnLoadMethod]</c>, then every
+        /// <c>[InitializeOnEnterPlayMode]</c> one. Only Play mode code has them; each gets a bridge
+        /// that the Player calls in the phase after the runtime ones (5, 6 and 7). What the Editor
+        /// itself would not run (an instance method, a generic one) gets none.
+        private void AddEditorInitializers(ClassDeclarationSyntax node, INamedTypeSymbol type, List<MemberDeclarationSyntax> members)
+        {
+            for (var containing = type; containing is not null; containing = containing.ContainingType)
+                if (containing.TypeParameters.Length != 0) return;
+            // A partial class carries its attribute once; its first declaration takes the bridge.
+            var first = type.DeclaringSyntaxReferences[0];
+            if (first.SyntaxTree == node.SyntaxTree && first.Span == node.Span
+                && type.GetAttributes().Any(a => a.AttributeClass?.ToDisplayString() == "UnityEditor.InitializeOnLoadAttribute"))
+                AddEditorBridge(type, members, "global::System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof("
+                    + type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) + ").TypeHandle);", 5);
+            foreach (var method in node.Members.OfType<MethodDeclarationSyntax>())
+            {
+                var symbol = model.GetDeclaredSymbol(method)!;
+                if (!symbol.IsStatic || symbol.TypeParameters.Length != 0 || method.Body is null && method.ExpressionBody is null) continue;
+                foreach (var attribute in symbol.GetAttributes())
+                {
+                    var name = attribute.AttributeClass?.ToDisplayString();
+                    if (name == "UnityEditor.InitializeOnLoadMethodAttribute" && symbol.Parameters.Length == 0)
+                        AddEditorBridge(type, members, method.Identifier.Text + "();", 6);
+                    else if (name == "UnityEditor.InitializeOnEnterPlayModeAttribute" && symbol.Parameters.Length == 0)
+                        AddEditorBridge(type, members, method.Identifier.Text + "();", 7);
+                    // Entered with a domain reload, as the Player starts: no option is set.
+                    else if (name == "UnityEditor.InitializeOnEnterPlayModeAttribute" && symbol.Parameters.Length == 1
+                        && symbol.Parameters[0].Type.ToDisplayString() == "UnityEditor.EnterPlayModeOptions")
+                        AddEditorBridge(type, members, method.Identifier.Text + "(default);", 7);
+                }
+            }
+        }
+
+        private void AddEditorBridge(INamedTypeSymbol type, List<MemberDeclarationSyntax> members, string call, int phase)
+        {
+            var bridge = "__UnityPlay_EditorInitialize_" + runtimeInitializers.Count;
+            while (type.GetMembers(bridge).Length != 0) bridge += "_";
+            members.Add(SyntaxFactory.ParseMemberDeclaration($"public static void {bridge}() {{ {call} }}")!);
+            runtimeInitializers.Add(new RuntimeInitializerInfo(request.AssemblyName, MetadataTypeName(type), bridge, phase));
+        }
+
         public override SyntaxNode? VisitStructDeclaration(StructDeclarationSyntax node)
         {
             foreach (var method in node.Members.OfType<MethodDeclarationSyntax>())
@@ -557,6 +600,7 @@ internal static class Program
             var visited = (ClassDeclarationSyntax)base.VisitClassDeclaration(node)!;
             var members = visited.Members.ToList();
             AddRuntimeInitializers(node, type, members);
+            AddEditorInitializers(node, type, members);
             return Appended(visited, members, visited.Members.Count);
         }
 

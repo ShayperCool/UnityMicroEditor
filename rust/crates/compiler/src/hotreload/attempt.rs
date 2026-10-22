@@ -33,6 +33,9 @@ pub const ACK_TIMEOUT: Duration = Duration::from_secs(20);
 pub const CODE_BUILDER_FAILED: &str = "patch_builder_failed";
 /// The reason code of a patch the Player refused before writing anything.
 pub const CODE_APPLY_FAILED: &str = "apply_failed";
+/// The reason code of an edit of Play mode code that names types or members
+/// of the Editor the running Player's stand-ins lack (`compiler::playmode`).
+pub const CODE_STAND_INS_CHANGED: &str = "editor_stand_ins_changed";
 /// The note code of game callbacks that threw or could not be called.
 pub const CODE_CALLBACK_FAILED: &str = "callback_failed";
 /// The builder's note code of an added field that Unity would serialize:

@@ -427,4 +427,20 @@ impl Compiler {
         }
         Ok(report)
     }
+
+    /// The stand-ins of the newest compile that the Player at `player` does
+    /// not hold as they are: the code of that compile names types or members
+    /// of the Editor the running Player's stand-ins lack, so no patch of it
+    /// can be applied there.
+    pub fn changed_play_mode_stand_ins(&self, player: &str) -> Vec<String> {
+        let managed = super::player_managed(player);
+        self.play_mode_stand_ins
+            .iter()
+            .filter(|(name, hash)| {
+                let path = sysutil::join(&[&managed, &format!("{name}.dll")]);
+                file_hash(&path).map_or(true, |loaded| loaded != **hash)
+            })
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
 }

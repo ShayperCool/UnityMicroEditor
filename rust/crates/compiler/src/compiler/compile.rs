@@ -271,7 +271,7 @@ pub fn valid_lifecycle_proof(proof: &LifecycleProof, name: &str) -> bool {
         initializer.assembly != name
             || initializer.type_name.is_empty()
             || initializer.method_name.is_empty()
-            || !(0..=4).contains(&initializer.phase)
+            || !(0..=super::LAST_INITIALIZER_PHASE).contains(&initializer.phase)
     }) {
         return false;
     }
@@ -1390,9 +1390,12 @@ impl Compiler {
         if self.play_mode {
             // The stand-ins hold what the code of the revision names.
             let report = self.write_play_mode_stand_ins(ctx, &staging, &managed)?;
+            self.play_mode_stand_ins.clear();
             for name in &report.shims {
                 let path = join(&[&managed, &format!("{name}.dll")]);
-                map.wrote(&path, file_hash(&path)?)?;
+                let hash = file_hash(&path)?;
+                map.wrote(&path, hash.clone())?;
+                self.play_mode_stand_ins.insert(name.clone(), hash);
             }
         }
         update.elapsed_seconds = float_layout(started.elapsed().as_secs_f64());

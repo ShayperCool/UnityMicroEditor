@@ -931,6 +931,29 @@ impl Steps for Live<'_> {
     }
 
     fn patch_code(&mut self, ctx: &Context, window: &Window) -> Result<Outcome> {
+        // The patch of Play mode code is the linked code; what it names of
+        // the Editor has to be in the stand-ins the Player loaded.
+        if self.opts.play_mode {
+            let running = self.player().path.clone();
+            let changed = self.compiler.changed_play_mode_stand_ins(&running);
+            if !changed.is_empty() {
+                return Ok(Outcome::Unsupported(hotreload::Refusal {
+                    reasons: changed
+                        .iter()
+                        .map(|name| {
+                            hotreload::Reason::new(
+                                hotreload::CODE_STAND_INS_CHANGED,
+                                name,
+                                &format!(
+                                    "the code names types or members of the Editor that the Player's stand-in {name} lacks"
+                                ),
+                            )
+                        })
+                        .collect(),
+                    report: String::new(),
+                }));
+            }
+        }
         let Some(Hot { tools, code }) = &mut self.hot else {
             bail!("hot reload is not set up for this session");
         };
@@ -1272,8 +1295,8 @@ fn run_session(
     let prepared_player = baseline.player.clone();
     let staged_player = compiler::stage_host(ctx, &opts.output, &opts.editor, &baseline.player)?;
     baseline.player = staged_player.clone();
-    // Play mode code is linked into the Player as each compile builds it;
-    // a patch of a method is not (`compiler::playmode`).
+    // Play mode code is linked into the Player as each compile builds it
+    // (`compiler::playmode`).
     let play_mode = compiler::compiler_manifest(&opts.baseline)?.0.play_mode;
     opts.play_mode = play_mode;
     if play_mode {
@@ -1284,15 +1307,6 @@ fn run_session(
                 "[unity-micro-editor] {isolated} unique symbols of the Player's native plugins are each plugin's own"
             );
         }
-    }
-    if play_mode && opts.hot_reload {
-        opts.hot_reload = false;
-        Event::new("hot-reload-unavailable")
-            .with(
-                "message",
-                "C# changes restart the Player of Play mode code in this session",
-            )
-            .emit();
     }
     // The patch builder and the applier are built beside the startup compile
     // and the Player start, which take longer than both.

@@ -1016,9 +1016,16 @@ sealed class StandIns
         if (wanted.FullName == "System.Int32" && givenDefinition?.IsEnum == true) return true;
         if (given.FullName == "System.Int32" && wanted is TypeDefinition { IsEnum: true }) return true;
         if (wanted.FullName == "System.Object") return !given.IsValueType && givenDefinition?.IsEnum != true && given is not GenericParameter;
-        if (wanted.FullName == "System.Delegate") return givenDefinition?.BaseType?.FullName == "System.MulticastDelegate";
+        if (wanted.FullName == "System.Delegate") return Definition(given)?.BaseType?.FullName == "System.MulticastDelegate";
         if (given.FullName == "System.Object") return !wanted.IsValueType && wanted is not GenericParameter && wanted is not TypeDefinition { IsEnum: true };
         return false;
+    }
+
+    /// <summary>The definition of a type, also of a generic instance (<c>Action&lt;T&gt;</c>), or none.</summary>
+    static TypeDefinition? Definition(TypeReference type)
+    {
+        try { return type.Resolve(); }
+        catch (AssemblyResolutionException) { return null; }
     }
 
     void EmitBody(MethodDefinition method, TypeDefinition type)
@@ -1128,7 +1135,10 @@ sealed class StandIns
         foreach (var (name, shim) in shims)
         {
             if (playerNames.Contains(name)) throw new InvalidOperationException($"{name} is the Player's own; no stand-in replaces it");
-            shim.Write(System.IO.Path.Combine(request.Managed, name + ".dll"));
+            // The same stand-ins make the same bytes: a running Player's are compared with
+            // those of a later compile (hot reload of Play mode code).
+            shim.Write(System.IO.Path.Combine(request.Managed, name + ".dll"),
+                new WriterParameters { DeterministicMvid = true, Timestamp = 0 });
         }
     }
 

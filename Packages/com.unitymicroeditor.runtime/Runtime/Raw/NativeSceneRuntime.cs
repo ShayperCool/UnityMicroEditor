@@ -96,7 +96,11 @@ namespace UnityMicroEditor.Raw
                     if (target.IsValid())
                         foreach (GameObject root in loadedScene.GetRootGameObjects()) SceneManager.MoveGameObjectToScene(root, target);
                     if (main) SceneManager.SetActiveScene(loadedScene);
-                    if (initializers) InvokeRuntimeInitializers(manifest, 0);
+                    if (initializers)
+                    {
+                        InvokeRuntimeInitializers(manifest, 0);
+                        UnityMicroEditor.PlayModeEditor.EditorLoop.EnteredPlayMode();
+                    }
                 };
                 SceneManager.sceneLoaded += integrated;
                 nativeScene.IntegrateAtEndOfFrame();

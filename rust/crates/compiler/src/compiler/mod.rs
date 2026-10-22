@@ -54,6 +54,7 @@ pub use sys::{Walk, WalkEntry, glob_lossy, is_not_exist, walk_dir};
 
 use nilable::{is_empty, is_false, nz};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 /// The verified release, which the fixtures of the tests use.
@@ -103,6 +104,13 @@ fn float<'de, D: serde::Deserializer<'de>>(
         Option::<f64>::deserialize(deserializer)?.unwrap_or(0.0),
     ))
 }
+
+/// The last phase a runtime initializer may have. 0 to 4 are the load types
+/// of `[RuntimeInitializeOnLoadMethod]`; Play mode code adds three that the
+/// Player runs before all of them, as the Editor does on entering Play mode:
+/// 5, the static constructor of an `[InitializeOnLoad]` class; 6, an
+/// `[InitializeOnLoadMethod]`; 7, an `[InitializeOnEnterPlayMode]` method.
+pub const LAST_INITIALIZER_PHASE: i64 = 7;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -642,6 +650,9 @@ pub struct Compiler {
     pub play_mode: bool,
     /// The Play mode linker, once built, kept by every clone.
     pub play_mode_linker: Arc<Mutex<Option<String>>>,
+    /// The stand-ins the newest compile wrote into its Player, by assembly
+    /// name, with the hash of each.
+    pub play_mode_stand_ins: BTreeMap<String, String>,
 }
 
 /// `UME_COMPILER_COLD=1`: a session starts no process that outlives one

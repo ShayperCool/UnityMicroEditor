@@ -46,6 +46,7 @@ namespace UnityMicroEditor.Raw
             internal void LoadInitial(RawSceneManifest manifest)
             {
                 LoadScriptAssemblies(manifest);
+                for (int phase = LastRuntimePhase + 1; phase <= LastEditorPhase; phase++) InvokeRuntimeInitializers(manifest, phase);
                 InvokeRuntimeInitializers(manifest, 4);
                 InvokeRuntimeInitializers(manifest, 2);
                 InvokeRuntimeInitializers(manifest, 3);

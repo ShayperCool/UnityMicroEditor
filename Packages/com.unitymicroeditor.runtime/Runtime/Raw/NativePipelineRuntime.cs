@@ -9,6 +9,12 @@ namespace UnityMicroEditor.Raw
 {
     public static partial class RawSceneLoader
     {
+        // The phases after the RuntimeInitializeLoadType ones belong to Play mode
+        // code: [InitializeOnLoad] classes (5), [InitializeOnLoadMethod] (6) and
+        // [InitializeOnEnterPlayMode] (7) methods, which the Editor runs as it
+        // enters Play mode, before any runtime initializer.
+        private const int LastRuntimePhase = 4, LastEditorPhase = 7;
+
         // The game's [RuntimeInitializeOnLoadMethod] methods, which the
         // lifecycle compiler exposes as public bridges, run at the points a
         // built Player runs them.
@@ -17,9 +23,10 @@ namespace UnityMicroEditor.Raw
             if (manifest.runtimeInitializers == null) return;
             foreach (RawRuntimeInitializer initializer in manifest.runtimeInitializers)
             {
-                if (initializer == null || initializer.phase < 0 || initializer.phase > 4
+                if (initializer == null || initializer.phase < 0 || initializer.phase > LastEditorPhase
                     || string.IsNullOrEmpty(initializer.assembly) || string.IsNullOrEmpty(initializer.typeName)
-                    || string.IsNullOrEmpty(initializer.methodName) || !initializer.methodName.StartsWith("__UnityPlay_RuntimeInitialize_", StringComparison.Ordinal))
+                    || string.IsNullOrEmpty(initializer.methodName)
+                    || !initializer.methodName.StartsWith(initializer.phase > LastRuntimePhase ? "__UnityPlay_EditorInitialize_" : "__UnityPlay_RuntimeInitialize_", StringComparison.Ordinal))
                     throw new InvalidDataException("Runtime initialization bridge descriptor is invalid.");
                 if (initializer.phase != phase) continue;
                 Assembly assembly = null;

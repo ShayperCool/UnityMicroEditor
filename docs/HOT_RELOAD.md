@@ -197,6 +197,7 @@ The runner adds three reasons of its own:
 | `patch_builder_failed` | The builder failed, did not finish within 60 s, or answered unusably. | Recompile; if it repeats, report it with the runner's log. |
 | `apply_failed` | The Player refused the patch and changed nothing. The message begins with the applier's stage: `resolve`, `inlining`, `compile` or `write` (or is the bridge's message). | Recompile. For `inlining`, remove a `MONO_ARGUMENTS` from the runner's environment that leaves inlining on. For `write`, see the [limits](#limits-and-known-problems). |
 | `assembly_not_loaded` | The compiler graph has an assembly the running Player did not load. | Recompile. |
+| `editor_stand_ins_changed` | Play mode code names a type or member of the Editor that the stand-in assembly in `member`, as the running Player loaded it, lacks. | Recompile: the new Player gets stand-ins with it. |
 
 When the Player says its code is in an unknown state (an exception while writing, a game static initializer that failed while the patch was compiled), exits during a patch or does not answer within 20 s, the runner restarts it on the newest code in either fallback mode: `code-updated` with `reason: "hot_reload_failed"`, and in MCP `hotReload.lastRestart` and an `attention` that says the game state was lost.
 
@@ -417,5 +418,5 @@ Each with what you see.
 - **Callbacks** run inside the 20 s the runner waits for the Player; one that blocks longer makes the runner restart the Player (`hot_reload_failed`).
 - **`[FormerlySerializedAs]`** is not applied by the session's loader: a renamed serialized field loses its scene value, also after a restart, until the data is saved under the new name.
 - **Only the verified profile.** The applier refuses other platforms and architectures, and the runner then takes its fallback for every C# change. When the patch builder or the applier cannot be built at the start, `ready` says `hotReload: false`, the runner prints `hot-reload-unavailable`, and every C# change restarts the Player.
-- **Not Play mode code.** A project prepared with `--play-mode` ([UNITY_RELEASES.md](UNITY_RELEASES.md#play-mode-code)) has its assemblies linked into the Player after each compile, which a patch is not: the runner prints `hot-reload-unavailable` at the start and every C# change restarts the Player.
+- **Play mode code** ([UNITY_RELEASES.md](UNITY_RELEASES.md#play-mode-code)) is patched as it is linked: the builder compares the linked assembly with the one the Player loaded. An edit that names a type or member of the Editor that the running Player's stand-ins lack is refused (`editor_stand_ins_changed`).
 - **Not verified:** hot reload with content routes and Addressables, a Player with the Mono debugger attached, another Netcode for GameObjects version, a dedicated server or distributed authority.

@@ -26,6 +26,13 @@ namespace UnityMicroEditor.PlayModeEditor
         public static bool get_isCompiling() => false;
         public static bool get_isUpdating() => false;
         public static double get_timeSinceStartup() => Time.realtimeSinceStartupAsDouble;
+
+        /// <summary>
+        /// What the code adds to <c>playModeStateChanged</c> hears that Play mode was entered once the
+        /// first scene woke (<c>EditorLoop.EnteredPlayMode</c>), and that it is left as the Player quits.
+        /// </summary>
+        public static void add_playModeStateChanged(Delegate value) => EditorLoop.PlayModeStateChanged = Delegate.Combine(EditorLoop.PlayModeStateChanged, value);
+        public static void remove_playModeStateChanged(Delegate value) => EditorLoop.PlayModeStateChanged = Delegate.Remove(EditorLoop.PlayModeStateChanged, value);
         public static void ExitPlaymode() => LeavePlayMode();
 
         /// <summary>
@@ -236,7 +243,32 @@ namespace UnityMicroEditor.PlayModeEditor
     /// </summary>
     internal static class EditorLoop
     {
+        internal static Delegate PlayModeStateChanged;
+        static bool entered;
         static bool searched;
+
+        // UnityEditor.PlayModeStateChange
+        const int EnteredPlayModeState = 2, ExitingPlayModeState = 3;
+
+        /// <summary>Tells <c>playModeStateChanged</c> that Play mode was entered, once.</summary>
+        internal static void EnteredPlayMode()
+        {
+            if (entered) return;
+            entered = true;
+            Application.quitting += () => ChangePlayModeState(ExitingPlayModeState);
+            ChangePlayModeState(EnteredPlayModeState);
+        }
+
+        static void ChangePlayModeState(int state)
+        {
+            if (PlayModeStateChanged == null) return;
+            foreach (Delegate callback in PlayModeStateChanged.GetInvocationList())
+            {
+                ParameterInfo[] parameters = callback.Method.GetParameters();
+                if (parameters.Length != 1 || !parameters[0].ParameterType.IsEnum) continue;
+                Invoke(callback, Enum.ToObject(parameters[0].ParameterType, state));
+            }
+        }
         static FieldInfo update;
         static FieldInfo delayCall;
 
@@ -254,23 +286,21 @@ namespace UnityMicroEditor.PlayModeEditor
             if (delayCall != null && delayCall.GetValue(null) is Delegate once)
             {
                 delayCall.SetValue(null, null);
-                Invoke(once);
+                foreach (Delegate callback in once.GetInvocationList()) Invoke(callback);
             }
-            if (update != null && update.GetValue(null) is Delegate each) Invoke(each);
+            if (update != null && update.GetValue(null) is Delegate each)
+                foreach (Delegate callback in each.GetInvocationList()) Invoke(callback);
         }
 
-        static void Invoke(Delegate callbacks)
+        static void Invoke(Delegate callback, params object[] arguments)
         {
-            foreach (Delegate callback in callbacks.GetInvocationList())
+            try
             {
-                try
-                {
-                    callback.DynamicInvoke();
-                }
-                catch (TargetInvocationException exception)
-                {
-                    Debug.LogException(exception.InnerException ?? exception);
-                }
+                callback.DynamicInvoke(arguments);
+            }
+            catch (TargetInvocationException exception)
+            {
+                Debug.LogException(exception.InnerException ?? exception);
             }
         }
     }
