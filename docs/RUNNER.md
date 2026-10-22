@@ -23,7 +23,7 @@ unity-micro-editor run \
 | `--project` | Unity project root. Default: current directory. |
 | `--baseline` | Validated preparation `current.json` for this project. Required unless `--prepared` is used. |
 | `--output` | Session cache. Must be under the project's `Library/UnityMicroEditor` or `Temp`. Default: `Library/UnityMicroEditor/Sessions/default`. |
-| `--editor` | Matching `Editor/Unity` executable, used for its SDK and import worker. Default: `UNITY_EDITOR`, then the pinned version under `$HOME/Unity/Hub/Editor`. |
+| `--editor` | Matching `Editor/Unity` executable, used for its SDK and import worker. Default: `UNITY_EDITOR`, then the project's release under `$HOME/Unity/Hub/Editor`. |
 | `--scene` | Authored `Assets/...unity` scene to run on the prepared host. |
 | `--watch` | Watch sources and update the running Player. Implies `--interactive`. |
 | `--no-hot-reload` | With `--watch`: restart the Player for every C# change instead of patching the running one. |
@@ -41,7 +41,7 @@ unity-micro-editor run \
 | `--no-addressables` | Do not serve the project's Addressables keys from sources; leave them to the host's built content. |
 | `--builtin-shader` | Verified snapshot of a retained built-in shader. Repeatable. |
 
-The addressable scenes and assets of the project's Addressables groups (everything but code and shaders) are registered automatically and resolved from sources in the Player; see [AGENT_MCP.md](AGENT_MCP.md#addressables-from-sources) for what that covers.
+The addressable scenes and assets of the project's Addressables groups (everything but code and shaders) are registered automatically and resolved from sources in the Player; see [AGENT_MCP.md](AGENT_MCP.md#addressables-from-sources) for what that covers. So are the enabled scenes of the Build Settings after the first, which the game loads through `SceneManager` by name or index: the host stands in for each with an empty scene that the Player fills from the authored one ([UNITY_RELEASES.md](UNITY_RELEASES.md#scenes-the-game-loads-by-name)).
 
 Arguments after `--` are passed to the game. Through MCP the same options are the `gameArguments`, `contentScenes`, `contentPrefabs` and `addressables` of `session_control(start)`; its `hotReload: false` is `--no-hot-reload` and its `onUnsupportedEdit` is `--hot-reload-fallback`, which the MCP server sets to `report` unless told otherwise. A rejected update whose error needs a new source graph carries `preparationRequired: true` in its `update-rejected` event: the Player keeps its old code until the project is prepared again.
 

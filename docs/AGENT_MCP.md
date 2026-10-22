@@ -101,9 +101,13 @@ used; when it no longer fits (changed packages), the
 preparation fails with `host_reuse_failed`, and `rebuildHost: true` with a new
 `requestId` builds a new one. Settings do not tie a project to its host: a
 preparation writes the Player's settings managers from the project's
-`ProjectSettings` over the host's own ([HOSTLESS_PLAYER.md](HOSTLESS_PLAYER.md)).
+`ProjectSettings` over the host's own ([HOSTLESS_PLAYER.md](HOSTLESS_PLAYER.md));
+a host of 6000.0 keeps its own ([UNITY_RELEASES.md](UNITY_RELEASES.md)).
 `--editor` selects the matching Unity installation;
-the default is `UNITY_EDITOR`, then the pinned installation under `$HOME/Unity`.
+the default is `UNITY_EDITOR`, then the installation of the project's release under `$HOME/Unity/Hub/Editor`.
+`--compile-for Android` (or another build target group) compiles the Player's
+code as for that device, for a game written for a phone; the choice is kept for
+the project ([UNITY_RELEASES.md](UNITY_RELEASES.md#a-game-written-for-a-device)).
 `--engine-profile` selects a captured engine/host profile. Add `--no-editor` to
 `mcp` or `auto-prepare` to forbid main Editor bootstrap and build calls; missing
 native facts fail explicitly instead of launching it. Prepared native import
