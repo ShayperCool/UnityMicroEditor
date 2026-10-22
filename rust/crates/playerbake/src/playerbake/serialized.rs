@@ -244,99 +244,39 @@ pub fn read_of_class(file: &[u8], class_id: i32) -> Result<Vec<Read>> {
 }
 
 /// The local IDs of the objects of one native class, in the order of the
-/// file's object table, out of a file of format 23 (6000.6) or 22 (6000.0,
-/// whose type trees are skipped by their sizes rather than read).
+/// file's object table.
 pub fn local_ids_of_class(file: &[u8], class_id: i32) -> Result<Vec<i64>> {
-    let version = file
-        .get(8..12)
-        .map(|b| u32::from_be_bytes(b.try_into().unwrap()));
-    if version != Some(22) {
-        return Ok(read_of_class(file, class_id)?
-            .iter()
-            .map(|object| object.local_id)
-            .collect());
-    }
-    let be32 = |at: usize| {
-        file.get(at..at + 4)
-            .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
-    };
-    let be64 = |at: usize| {
-        file.get(at..at + 8)
-            .map(|b| u64::from_be_bytes(b.try_into().unwrap()))
-    };
-    let (Some(0), Some(meta_size), Some(size), Some(data_offset)) =
-        (file.get(16).copied(), be32(20), be64(24), be64(32))
-    else {
-        bail!("not a little-endian SerializedFile v22");
-    };
-    let meta_end = 48 + meta_size as usize;
-    if size != file.len() as u64 || meta_end as u64 > data_offset || data_offset > size {
-        bail!("SerializedFile header bounds are invalid");
-    }
-    let mut at = 48;
-    let take = |at: &mut usize, count: usize| -> Result<&[u8]> {
-        let Some(bytes) = file
-            .get(*at..at.saturating_add(count))
-            .filter(|_| *at + count <= meta_end)
-        else {
-            bail!("SerializedFile metadata is truncated");
-        };
-        *at += count;
-        Ok(bytes)
-    };
-    let le32 = |at: &mut usize| -> Result<u32> {
-        Ok(u32::from_le_bytes(take(at, 4)?.try_into().unwrap()))
-    };
-    while take(&mut at, 1)?[0] != 0 {}
-    le32(&mut at)?; // Target platform.
-    if take(&mut at, 1)?[0] != 1 {
-        bail!("SerializedFile has no inline type trees");
-    }
-    let type_count = le32(&mut at)? as usize;
-    if type_count > 4096 {
-        bail!("SerializedFile type count is invalid");
-    }
-    let mut classes = Vec::with_capacity(type_count);
-    for _ in 0..type_count {
-        let header = take(&mut at, 7)?;
-        let class = i32::from_le_bytes(header[..4].try_into().unwrap());
-        let script = i16::from_le_bytes([header[5], header[6]]);
-        // A script's ID precedes the type hash of a behaviour.
-        take(&mut at, if class == SCRIPT_CLASS { 32 } else { 16 })?;
-        // The nodes of the tree, 32 bytes each, then its strings.
-        let nodes = le32(&mut at)? as usize;
-        let strings = le32(&mut at)? as usize;
-        if nodes > 1 << 20 {
-            bail!("SerializedFile type tree is invalid");
-        }
-        take(&mut at, nodes * 32 + strings)?;
-        let held = le32(&mut at)? as usize;
-        if held > 4096 {
-            bail!("SerializedFile type dependency count is invalid");
-        }
-        take(&mut at, 4 * held)?;
-        classes.push(class == class_id && script < 0);
-    }
-    let object_count = le32(&mut at)? as usize;
-    let mut ids = Vec::new();
-    for _ in 0..object_count {
-        at = (at + 3) & !3;
-        let row = take(&mut at, 24)?;
-        let local_id = i64::from_le_bytes(row[..8].try_into().unwrap());
-        let offset = u64::from_le_bytes(row[8..16].try_into().unwrap());
-        let length = u32::from_le_bytes(row[16..20].try_into().unwrap()) as u64;
-        let index = u32::from_le_bytes(row[20..24].try_into().unwrap()) as usize;
-        let inside = data_offset
-            .checked_add(offset)
-            .is_some_and(|start| start + length <= size);
-        let (true, Some(wanted)) = (inside, classes.get(index)) else {
-            bail!("SerializedFile object bounds are invalid");
-        };
-        if *wanted {
-            ids.push(local_id);
-        }
-    }
-    Ok(ids)
+    Ok(read_of_class(file, class_id)?
+        .iter()
+        .map(|object| object.local_id)
+        .collect())
+}
+
+/// A type table entry of format 22 (6000.0) in the shape of format 23, which
+/// `TypeTree` reads: the tree as a blob of its own, after a second type
+/// hash. Format 22 has the node count and the string size where 23 has the
+/// size of the blob, and the same 32-byte nodes.
+fn entry_of_format_22(
+    header: &[u8],
+    hashes: &[u8],
+    nodes: u32,
+    strings: &[u8],
+    tree: &[u8],
+    held: &[u8],
+) -> Vec<u8> {
+    let mut entry = header.to_vec();
+    entry.extend_from_slice(hashes);
+    entry.extend_from_slice(&[0; 16]);
+    let blob = 16 + tree.len() + strings.len();
+    entry.extend_from_slice(&(blob as u32).to_le_bytes());
+    entry.extend_from_slice(&0x7474_686d_u32.to_le_bytes());
+    entry.extend_from_slice(&23u32.to_le_bytes());
+    entry.extend_from_slice(&nodes.to_le_bytes());
+    entry.extend_from_slice(&(strings.len() as u32).to_le_bytes());
+    entry.extend_from_slice(tree);
+    entry.extend_from_slice(strings);
+    entry.extend_from_slice(held);
+    entry
 }
 
 /// The path names of the files a file refers to, in the order of its
@@ -355,7 +295,8 @@ fn read_objects(file: &[u8], only: Option<i32>) -> Result<(Vec<Read>, Vec<String
         file.get(at..at + 8)
             .map(|b| u64::from_be_bytes(b.try_into().unwrap()))
     };
-    let (Some(23), Some(0), Some(meta_size), Some(size), Some(data_offset)) =
+    // Format 23 (6000.6) and 22 (6000.0) differ in their type table alone.
+    let (Some(version @ (22 | 23)), Some(0), Some(meta_size), Some(size), Some(data_offset)) =
         (be32(8), file.get(16).copied(), be32(20), be64(24), be64(32))
     else {
         bail!("not a little-endian SerializedFile v23");
@@ -402,19 +343,49 @@ fn read_objects(file: &[u8], only: Option<i32>) -> Result<(Vec<Read>, Vec<String
         if header[4] != 0 || (only.is_none() && scripted != (script >= 0)) {
             bail!("SerializedFile holds stripped types or a script type without a class");
         }
-        take(&mut at, if scripted { 48 } else { 32 })?;
-        let blob = le32(&mut at)? as usize;
-        take(&mut at, blob)?;
-        // The types the objects of this type hold by managed reference.
-        let held = le32(&mut at)? as usize;
-        if held > 4096 {
-            bail!("SerializedFile type dependency count is invalid");
-        }
-        take(&mut at, 4 * held)?;
         let wanted = only.is_none_or(|only| only == class && !scripted);
+        let entry = if version == 23 {
+            take(&mut at, if scripted { 48 } else { 32 })?;
+            let blob = le32(&mut at)? as usize;
+            take(&mut at, blob)?;
+            // The types the objects of this type hold by managed reference.
+            let held = le32(&mut at)? as usize;
+            if held > 4096 {
+                bail!("SerializedFile type dependency count is invalid");
+            }
+            take(&mut at, 4 * held)?;
+            file[start..at].to_vec()
+        } else {
+            // A script's ID precedes the type hash of a behaviour alone.
+            let hashes = take(&mut at, if class == SCRIPT_CLASS { 32 } else { 16 })?;
+            let nodes = le32(&mut at)?;
+            let chars = le32(&mut at)? as usize;
+            if nodes > 1 << 20 {
+                bail!("SerializedFile type tree is invalid");
+            }
+            let tree = take(&mut at, nodes as usize * 32)?;
+            let strings = take(&mut at, chars)?;
+            let held_at = at;
+            let held = le32(&mut at)? as usize;
+            if held > 4096 {
+                bail!("SerializedFile type dependency count is invalid");
+            }
+            take(&mut at, 4 * held)?;
+            match wanted {
+                true => entry_of_format_22(
+                    &file[start..start + 7],
+                    hashes,
+                    nodes,
+                    strings,
+                    tree,
+                    &file[held_at..at],
+                ),
+                false => Vec::new(),
+            }
+        };
         trees.push((
             wanted
-                .then(|| TypeTree::parse(file[start..at].to_vec()).map(std::sync::Arc::new))
+                .then(|| TypeTree::parse(entry).map(std::sync::Arc::new))
                 .transpose()?,
             script,
         ));

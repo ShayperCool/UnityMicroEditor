@@ -41,6 +41,7 @@ pub static ENGINE: Engine = Engine {
     data_store: None,
     artifacts: &Unity6000_0,
     asset_database: &Unity6000_0,
+    assemblies_from_definitions: true,
 };
 
 /// The release's `SourceAssetDB`: the tables and layouts of 6000.6, another

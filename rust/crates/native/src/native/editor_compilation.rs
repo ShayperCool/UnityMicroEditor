@@ -97,10 +97,16 @@ fn references(editor: &str, engine: &[String]) -> References {
             runtime_modules.push(editor_module);
         }
     }
-    let mut extras = vec![
-        sysutil::join(&[&data, "Managed/Bootstrap/Unity.Scripting.dll"]),
-        sysutil::join(&[&data, "Managed/UnityEditor.Graphs.dll"]),
-    ];
+    // The scripting bootstrap is an assembly of its own from 6000.6 on;
+    // 6000.0 has none.
+    let mut extras: Vec<String> = [
+        "Managed/Bootstrap/Unity.Scripting.dll",
+        "Managed/UnityEditor.Graphs.dll",
+    ]
+    .iter()
+    .map(|name| sysutil::join(&[&data, name]))
+    .filter(|path| std::path::Path::new(path).is_file())
+    .collect();
     extras.extend(crate::compiler::sys_glob(&sysutil::join(&[
         &data,
         "PlaybackEngines/*/UnityEditor.*.Extensions.dll",

@@ -26,6 +26,7 @@ pub static ENGINE: Engine = Engine {
     data_store: Some(&Unity6000_6),
     artifacts: &Unity6000_6,
     asset_database: &Unity6000_6,
+    assemblies_from_definitions: false,
 };
 
 struct Unity6000_6;

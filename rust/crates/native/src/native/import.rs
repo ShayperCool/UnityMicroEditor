@@ -406,9 +406,10 @@ fn prepare_run(
     // A build of Player objects, as opposed to a run that only loads what
     // it imports.
     let player = build.is_some_and(|build| build.extras.is_none());
-    if player {
-        stage_importer(ctx, &opts.editor, &prepared.project)?;
-    }
+    let importer_sources = match player {
+        true => stage_importer(ctx, &opts.editor, &prepared.project)?,
+        false => Vec::new(),
+    };
     // UI Toolkit's importers load the style sheets a source imports, which
     // the worker finds only among the imports recorded before.
     if build.is_some()
@@ -501,7 +502,11 @@ fn prepare_run(
         });
     }
     // The importers' own sources are registered, not imported.
-    for script in scripts.iter().flat_map(|environment| &environment.scripts) {
+    for script in scripts
+        .iter()
+        .flat_map(|environment| &environment.scripts)
+        .chain(&importer_sources)
+    {
         input.assets.push(registry::Asset {
             path: script.clone(),
             source: String::new(),

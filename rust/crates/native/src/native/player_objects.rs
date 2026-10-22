@@ -36,6 +36,27 @@ pub const IMPORTER_SOURCE: &str =
 /// Where the context holds it while it is compiled.
 pub const IMPORTER_PATH: &str = "Assets/UnityMicroEditorWorker/PlayerObjectImporter.cs";
 pub const IMPORTER_ASSEMBLY: &str = "UnityMicroEditor.Worker";
+/// The assembly definition the importer is compiled from, for a worker that
+/// loads only the assemblies the project's definitions make
+/// (`Engine::assemblies_from_definitions`), and the GUIDs of both sources.
+pub const IMPORTER_DEFINITION_PATH: &str =
+    "Assets/UnityMicroEditorWorker/UnityMicroEditor.Worker.asmdef";
+const IMPORTER_GUID: &str = "d1f2a7c4e8b94f0a9c3e5b7d1a2f4c60";
+const IMPORTER_DEFINITION_GUID: &str = "d1f2a7c4e8b94f0a9c3e5b7d1a2f4c61";
+const IMPORTER_DEFINITION: &str = r#"{
+    "name": "UnityMicroEditor.Worker",
+    "references": [],
+    "includePlatforms": ["Editor"],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
+"#;
 /// The asset the importer imports: the request. The worker picks the
 /// importer by the extension.
 pub const REQUEST_PATH: &str = "Assets/UnityMicroEditorWorker/request.umeplayer";
@@ -318,9 +339,12 @@ pub fn read_report(primary: &[u8]) -> Result<Report> {
 
 /// Compiles the importer into the context's script assemblies, where the
 /// worker loads it. The worker picks it by the extension its attribute
-/// names; no script of it has to be registered. It is compiled like a
-/// script of the project, Unity's source generator included.
-pub fn stage_importer(ctx: &Context, editor: &str, project: &str) -> Result<()> {
+/// names. It is compiled like a script of the project, Unity's source
+/// generator included. Returns the sources the context's `SourceAssetDB`
+/// has to register as script compilation assets for the worker to load the
+/// assembly: the importer and its assembly definition where the release
+/// loads only the assemblies its definitions make, none otherwise.
+pub fn stage_importer(ctx: &Context, editor: &str, project: &str) -> Result<Vec<String>> {
     let installation = match stat(editor).map_err(|e| wrap("Unity installation", e))? {
         info if info.is_dir() => editor.to_string(),
         _ => sysutil::dir(editor),
@@ -334,6 +358,27 @@ pub fn stage_importer(ctx: &Context, editor: &str, project: &str) -> Result<()> 
     let source = sysutil::join(&[project, IMPORTER_PATH]);
     mkdir_all(&sysutil::dir(&source), 0o700)?;
     write_file(&source, IMPORTER_SOURCE.as_bytes(), 0o600)?;
+    let mut registered = Vec::new();
+    if crate::engine::of_project(project)?.assemblies_from_definitions {
+        let script_meta = format!(
+            "fileFormatVersion: 2\nguid: {IMPORTER_GUID}\nMonoImporter:\n  externalObjects: {{}}\n  serializedVersion: 2\n  defaultReferences: []\n  executionOrder: 0\n  icon: {{instanceID: 0}}\n  userData: \n  assetBundleName: \n  assetBundleVariant: \n"
+        );
+        write_file(&format!("{source}.meta"), script_meta.as_bytes(), 0o600)?;
+        let definition = sysutil::join(&[project, IMPORTER_DEFINITION_PATH]);
+        write_file(&definition, IMPORTER_DEFINITION.as_bytes(), 0o600)?;
+        let definition_meta = format!(
+            "fileFormatVersion: 2\nguid: {IMPORTER_DEFINITION_GUID}\nAssemblyDefinitionImporter:\n  externalObjects: {{}}\n  userData: \n  assetBundleName: \n  assetBundleVariant: \n"
+        );
+        write_file(
+            &format!("{definition}.meta"),
+            definition_meta.as_bytes(),
+            0o600,
+        )?;
+        registered = vec![
+            IMPORTER_PATH.to_string(),
+            IMPORTER_DEFINITION_PATH.to_string(),
+        ];
+    }
     let work = sysutil::join(&[project, "Temp", "UnityMicroEditorWorker"]);
     mkdir_all(&work, 0o700)?;
     let output = sysutil::join(&[
@@ -400,7 +445,7 @@ pub fn stage_importer(ctx: &Context, editor: &str, project: &str) -> Result<()> 
     {
         bail!("compile the worker's build importer: {listing}");
     }
-    Ok(())
+    Ok(registered)
 }
 
 /// What to write and where.
@@ -1560,6 +1605,26 @@ mod tests {
         assert!(broken.encode().is_err());
     }
 
+    /// The primary artifact of a scene request as a 6000.0.71f1 worker
+    /// imported it for `Samples/RawProject`: a SerializedFile of format 22
+    /// with the importer's object and the report as a TextAsset.
+    #[test]
+    fn reads_the_report_of_a_6000_0_worker() {
+        let artifact = include_bytes!("../../testdata/unity6000_0/scene-request-artifact.bin");
+        assert_eq!(artifact[8..12], 22u32.to_be_bytes());
+        let report = read_report(artifact).unwrap();
+        // The scene's objects and what it refers to: the material, the
+        // texture, the built-in shader and the ScriptableObject.
+        assert_eq!(report.objects.len(), 17);
+        let dependencies: Vec<_> = report
+            .dependencies
+            .iter()
+            .map(|object| (object.guid.as_str(), object.local_id))
+            .collect();
+        assert!(dependencies.contains(&("a01ac09a24c8493b862564ce94c80304", 2100000)));
+        assert!(dependencies.contains(&("a01ac09a24c8493b862564ce94c80303", 11400000)));
+    }
+
     #[test]
     fn compiles_the_importer_with_the_sdk() {
         let Some(editor) = std::env::var("UME_LIFECYCLE_SDK")
@@ -1571,6 +1636,14 @@ mod tests {
         };
         let directory = tempfile::tempdir().unwrap();
         let project = directory.path().to_str().unwrap();
+        // The context names the release the importer is compiled for.
+        let version = crate::release::installed_version(&editor).unwrap();
+        std::fs::create_dir(directory.path().join("ProjectSettings")).unwrap();
+        std::fs::write(
+            directory.path().join("ProjectSettings/ProjectVersion.txt"),
+            format!("m_EditorVersion: {version}\n"),
+        )
+        .unwrap();
         stage_importer(&Context::background(), &editor, project).unwrap();
         let assembly = std::fs::read(sysutil::join(&[
             project,
