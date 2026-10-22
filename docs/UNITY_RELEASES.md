@@ -69,6 +69,10 @@ A game that loads the scenes of its Build Settings through `SceneManager` (`Load
 - two copies of an Editor tool's assemblies (External Dependency Manager in `Assets` and as a package) in the Editor compilation: the project's copy is taken;
 - the host build packs no sprite atlases (the host carries no game content), and takes the precompiled references after the project's build callbacks ran; any other change of the host's assemblies during the build is named in the error.
 
+## Verified on 2026-10-22
+
+A copy of a large 6000.0.71f1 mobile game (Android/iOS, Addressables, Zenject, Odin Inspector, a private registry and private Git packages, 1,500 assets in its main scene) prepared with `--compile-for Android`: the host (a Linux build of the device's code, about 12 minutes with a warm stage), the source graph, the Player and Editor compilations, and the Loading scene written by the 6000.0 worker; `run` then wrote the Build Settings scene `Main` (1,546 imports) and started the Player. The game's own loading ran its Zenject `ProjectContext` and its loading steps until a consent SDK that answers only through Android JNI. With a scratch change to the game's copy that gives up a step after 10 s (not a tool change), the loading finished, `SceneManager.LoadSceneAsync("Main")` loaded the stand-in and the bridge built `Main` into it, and the game drew its first gameplay screen. The game's SDKs for the device (ads, store, social, consent) report exceptions in such a Player. A 6000.6.3f1 copy of `Samples/RawProject` prepared and ran unchanged.
+
 ## Limits
 
 - The verified release's checks against engine-built bytes (playerbake corpora, shader builds, hot reload's detours) were not repeated for 6000.0.
