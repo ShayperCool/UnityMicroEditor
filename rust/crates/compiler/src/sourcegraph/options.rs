@@ -74,7 +74,9 @@ pub fn read_source_plugin(
         result.enabled = linux_enabled;
     }
     let constraints = match_constraints(&result.constraints, defines)?;
-    result.enabled = result.enabled && constraints;
+    // A plugin below an `Editor` folder is the Editor's, whatever its
+    // platform settings say; a build leaves it out.
+    result.enabled = result.enabled && constraints && !editor_source(path);
     Ok(result)
 }
 
