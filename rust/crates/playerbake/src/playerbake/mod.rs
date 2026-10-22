@@ -14,9 +14,9 @@ pub use managers::{
     ManagerReport, PlainFile, compare_managers, manager_trees, write_project_managers,
 };
 pub use serialized::{
-    External, Object, Read, ReferenceType, external_paths, local_ids_of_class,
-    read as read_serialized, read_of_class as read_serialized_of_class,
-    read_with_externals as read_serialized_with_externals, write, write_with_references,
+    External, FileFormat, Object, Read, ReferenceType, VERIFIED_FORMAT, external_paths,
+    local_ids_of_class, read as read_serialized, read_of_class as read_serialized_of_class,
+    read_with_externals as read_serialized_with_externals, write, write_in, write_with_references,
 };
 pub use shader::{
     COMPUTE_SHADER_CLASS, COMPUTE_SHADER_LOCAL_ID, FogKeep, LightmapKeep, NoShaders,

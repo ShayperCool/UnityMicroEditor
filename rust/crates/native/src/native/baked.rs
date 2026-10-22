@@ -870,7 +870,9 @@ fn build_source(ctx: &Context, build: &Build, guid: &str) -> Result<built_store:
         }
     }
     objects.sort_by_key(|object| object.local_id);
-    let file = playerbake::write(&objects, &externals)?;
+    // In the release's format: the trees are those of the worker's build.
+    let format = crate::engine::of_project(&build.project)?.serialized_format;
+    let file = playerbake::write_in(format, &objects, &externals)?;
     Event::new("native-built")
         .with("path", logical)
         .with("imports", &built.imports)

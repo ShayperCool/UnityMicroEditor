@@ -36,12 +36,16 @@ pub const VERSION: &str = "6000.0.71f1";
 pub static ENGINE: Engine = Engine {
     version: VERSION,
     revision: "907bc2d768b5",
-    environment_revision: "6000.0.71f1-linux-native-environment-v1",
+    environment_revision: "6000.0.71f1-linux-native-environment-v2",
     worker: &Unity6000_0,
     data_store: None,
     artifacts: &Unity6000_0,
     asset_database: &Unity6000_0,
     assemblies_from_definitions: true,
+    serialized_format: crate::playerbake::FileFormat {
+        version: 22,
+        unity_version: VERSION,
+    },
 };
 
 /// The release's `SourceAssetDB`: the tables and layouts of 6000.6, another

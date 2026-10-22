@@ -1625,6 +1625,43 @@ mod tests {
         assert!(dependencies.contains(&("a01ac09a24c8493b862564ce94c80303", 11400000)));
     }
 
+    /// An object read from a file of format 22 is written back in that
+    /// format, as a 6000.0 Player reads it, and in format 23 as before.
+    #[test]
+    fn writes_an_object_of_a_6000_0_file_in_its_format() {
+        let artifact = include_bytes!("../../testdata/unity6000_0/scene-request-artifact.bin");
+        let read = playerbake::read_serialized_of_class(artifact, 49).unwrap();
+        let [report] = &read[..] else {
+            panic!("one TextAsset")
+        };
+        let objects = [playerbake::Object {
+            local_id: report.local_id,
+            tree: &report.tree,
+            data: report.data.clone(),
+            script: None,
+        }];
+        let format = crate::engine::supported("6000.0.71f1")
+            .unwrap()
+            .serialized_format;
+        let file = playerbake::write_in(format, &objects, &[]).unwrap();
+        assert_eq!(file[8..12], 22u32.to_be_bytes());
+        assert_eq!(&file[48..60], b"6000.0.71f1\0");
+        let again = playerbake::read_serialized_of_class(&file, 49).unwrap();
+        assert_eq!(again.len(), 1);
+        assert_eq!(
+            (again[0].local_id, &again[0].data),
+            (report.local_id, &report.data)
+        );
+        assert_eq!(again[0].tree.entry, report.tree.entry);
+        // The text the worker wrote reads the same out of the copy.
+        let text = |object: &playerbake::Read| object.tree.decode(&object.data).unwrap();
+        assert_eq!(text(&again[0]), text(report));
+        // The verified release's format is the writer's default.
+        let verified = playerbake::write_in(playerbake::VERIFIED_FORMAT, &objects, &[]).unwrap();
+        assert_eq!(verified, playerbake::write(&objects, &[]).unwrap());
+        assert_eq!(verified[8..12], 23u32.to_be_bytes());
+    }
+
     #[test]
     fn compiles_the_importer_with_the_sdk() {
         let Some(editor) = std::env::var("UME_LIFECYCLE_SDK")

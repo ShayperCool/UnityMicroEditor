@@ -27,6 +27,7 @@ pub static ENGINE: Engine = Engine {
     artifacts: &Unity6000_6,
     asset_database: &Unity6000_6,
     assemblies_from_definitions: false,
+    serialized_format: crate::playerbake::VERIFIED_FORMAT,
 };
 
 struct Unity6000_6;

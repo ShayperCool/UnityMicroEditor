@@ -1,7 +1,7 @@
 //! Writes a SerializedFile of the pinned engine with inline type trees, the
 //! form the Player loads as a ContentFile.
 use super::typetree::{SCRIPT_CLASS, TypeTree};
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 
 /// Linux standalone, the runtime target of adapted native content.
 const RUNTIME_TARGET: u32 = 24;
@@ -58,8 +58,32 @@ impl ReferenceType<'_> {
     }
 }
 
+/// The format of a written file and the engine version it names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileFormat {
+    /// 23 (6000.6) or 22 (6000.0).
+    pub version: u32,
+    pub unity_version: &'static str,
+}
+
+/// The format of the verified release.
+pub const VERIFIED_FORMAT: FileFormat = FileFormat {
+    version: 23,
+    unity_version: crate::ENGINE_VERSION,
+};
+
 pub fn write(objects: &[Object<'_>], externals: &[External]) -> Result<Vec<u8>> {
     write_with_references(objects, externals, &[])
+}
+
+/// The same in another release's format. A format-22 file takes its type
+/// trees from files of that format; it holds nothing by managed reference.
+pub fn write_in(
+    format: FileFormat,
+    objects: &[Object<'_>],
+    externals: &[External],
+) -> Result<Vec<u8>> {
+    write_file(format, objects, externals, &[])
 }
 
 /// Writes a file whose objects hold others by managed reference: `held`
@@ -69,6 +93,42 @@ pub fn write_with_references(
     externals: &[External],
     held: &[Vec<ReferenceType<'_>>],
 ) -> Result<Vec<u8>> {
+    write_file(VERIFIED_FORMAT, objects, externals, held)
+}
+
+/// A type table entry as format 22 has it, out of the shape of format 23
+/// that `TypeTree` keeps: without the second type hash, the tree's node
+/// count and string size in place of the size of its blob.
+fn entry_in_format_22(entry: &[u8]) -> Result<Vec<u8>> {
+    let class = i32::from_le_bytes(entry[..4].try_into()?);
+    let hashes = 7 + if class == SCRIPT_CLASS { 32 } else { 16 };
+    let at = hashes + 16;
+    let size = entry
+        .get(at..at + 4)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize)
+        .context("type table entry is truncated")?;
+    let Some(blob) = entry.get(at + 4..at + 4 + size).filter(|blob| {
+        blob.len() >= 16
+            && blob[..4] == 0x7474_686d_u32.to_le_bytes()
+            && blob[4..8] == 23u32.to_le_bytes()
+    }) else {
+        bail!("type table entry has no tree of format 23");
+    };
+    let mut out = entry[..hashes].to_vec();
+    out.extend_from_slice(&blob[8..]);
+    out.extend_from_slice(&entry[at + 4 + size..]);
+    Ok(out)
+}
+
+fn write_file(
+    format: FileFormat,
+    objects: &[Object<'_>],
+    externals: &[External],
+    held: &[Vec<ReferenceType<'_>>],
+) -> Result<Vec<u8>> {
+    if !matches!(format.version, 22 | 23) {
+        bail!("SerializedFile format {} is not written", format.version);
+    }
     if objects.is_empty() {
         bail!("a serialized file needs at least one object");
     }
@@ -124,8 +184,11 @@ pub fn write_with_references(
     if references.len() > i16::MAX as usize {
         bail!("a serialized file holds more managed types than its format indexes");
     }
+    if format.version == 22 && !references.is_empty() {
+        bail!("a file of format 22 that holds objects by managed reference is not written");
+    }
     let mut meta = Vec::new();
-    meta.extend_from_slice(crate::ENGINE_VERSION.as_bytes());
+    meta.extend_from_slice(format.unity_version.as_bytes());
     meta.push(0);
     meta.extend_from_slice(&RUNTIME_TARGET.to_le_bytes());
     meta.push(1); // Inline type trees.
@@ -134,7 +197,11 @@ pub fn write_with_references(
         let start = meta.len();
         // An entry ends in the count of the types its objects hold, zero as
         // the tree's own entry has it.
-        let Some((body, [0, 0, 0, 0])) = tree.entry.split_last_chunk::<4>() else {
+        let entry = match format.version {
+            22 => std::borrow::Cow::Owned(entry_in_format_22(&tree.entry)?),
+            _ => std::borrow::Cow::Borrowed(&tree.entry[..]),
+        };
+        let Some((body, [0, 0, 0, 0])) = entry.split_last_chunk::<4>() else {
             bail!("type table entry already names the types its objects hold");
         };
         meta.extend_from_slice(body);
@@ -203,7 +270,7 @@ pub fn write_with_references(
     }
     let size = data_offset + data.len();
     let mut out = vec![0u8; 48];
-    out[8..12].copy_from_slice(&23u32.to_be_bytes());
+    out[8..12].copy_from_slice(&format.version.to_be_bytes());
     out[20..24].copy_from_slice(&(meta.len() as u32).to_be_bytes());
     out[24..32].copy_from_slice(&(size as u64).to_be_bytes());
     out[32..40].copy_from_slice(&(data_offset as u64).to_be_bytes());

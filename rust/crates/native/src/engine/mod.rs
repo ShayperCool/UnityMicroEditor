@@ -54,6 +54,9 @@ pub struct Engine {
     /// compilation computes its target assemblies (6000.0). Otherwise the
     /// tool's own importer assembly is loaded without a definition (6000.6).
     pub assemblies_from_definitions: bool,
+    /// The format of the Player's serialized files, which the worker's
+    /// build writes and the tool writes a built object into.
+    pub serialized_format: crate::playerbake::FileFormat,
 }
 
 impl std::fmt::Debug for Engine {

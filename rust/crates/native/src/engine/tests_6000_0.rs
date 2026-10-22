@@ -195,6 +195,17 @@ fn the_worker_is_started_as_the_editor_starts_it() {
          -job-worker-count 2 -background-job-worker-count 2 -gc-helper-count 1"
     );
     assert!(engine().data_store.is_none());
+    // The worker loads the assemblies its definitions make, the tool's
+    // importer's among them, and its build writes files of format 22.
+    assert!(engine().assemblies_from_definitions && !verified().assemblies_from_definitions);
+    assert_eq!(
+        (
+            engine().serialized_format.version,
+            engine().serialized_format.unity_version
+        ),
+        (22, "6000.0.71f1")
+    );
+    assert_eq!(verified().serialized_format.version, 23);
     let log = b"Unity Editor version:    6000.0.71f1 (907bc2d768b5)\nBranch: x\n";
     assert_eq!(
         engine().worker.logged_version(log).as_deref(),
