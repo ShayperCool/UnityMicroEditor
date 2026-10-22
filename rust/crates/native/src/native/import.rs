@@ -383,7 +383,7 @@ fn prepare_run(
         Some(build) => Some(build.environment.clone()),
         None => importer_environment(&opts.project, assets, extras)?,
     };
-    let (prepared, created) = match build {
+    let (mut prepared, created) = match build {
         Some(build) => create_build_import_context(
             ctx,
             &opts.project,
@@ -482,6 +482,20 @@ fn prepare_run(
             }
         }
     }
+    // A worker that loads only what the registered scripts and assembly
+    // definitions make up (6000.0) also loads a precompiled assembly, and
+    // makes the scripts of its classes, only from its registration as a
+    // script compilation asset; it refuses to import one ("PluginImporter::
+    // GenerateAssetData should never be called"), and the objects of its
+    // classes are then left without their scripts.
+    let engine = crate::engine::supported(&prepared.unity_version)?;
+    let precompiled: BTreeSet<String> = prepared
+        .assets()
+        .iter()
+        .filter(|asset| engine.assemblies_from_definitions && lower_ext(&asset.path) == ".dll")
+        .map(|asset| asset.path.clone())
+        .collect();
+    prepared.registered.extend(precompiled.iter().cloned());
     opts.jobs.clear();
     for asset in prepared.assets() {
         input.assets.push(registry::Asset {
@@ -490,7 +504,7 @@ fn prepare_run(
             meta: String::new(),
             guid: asset.guid.clone(),
             directory: false,
-            script: false,
+            script: precompiled.contains(&asset.path),
         });
         if prepared.registered.contains(&asset.path) {
             continue;
@@ -516,9 +530,7 @@ fn prepare_run(
             script: true,
         });
     }
-    let registry = crate::engine::supported(&prepared.unity_version)?
-        .asset_database
-        .write_sources(input)?;
+    let registry = engine.asset_database.write_sources(input)?;
     opts.context = prepared.project.clone();
     opts.registry = Some(registry);
     opts.project_context = Some(prepared.clone());
