@@ -108,6 +108,9 @@ namespace UnityMicroEditor
                     if (!string.IsNullOrEmpty(options.CodeReloadRequestPath)) codeReload = new CodeReload(options.CodeReloadRequestPath);
                     if (options.TargetFrameRate.HasValue) Application.targetFrameRate = options.TargetFrameRate.Value;
                     if (options.NoVsync) QualitySettings.vSyncCount = 0;
+                    // A development Player opens a console over the game at the first logged
+                    // error; the Editor shows errors in its own window, so a session does not.
+                    if (!options.DeveloperConsole) { Debug.developerConsoleEnabled = false; Debug.developerConsoleVisible = false; }
                     if (string.IsNullOrEmpty(options.RawManifestPath) && !string.IsNullOrEmpty(options.Scene))
                         sceneIndex = ResolveScene(options.Scene);
                     PlayerLoopSystem loop = PlayerLoop.GetCurrentPlayerLoop();

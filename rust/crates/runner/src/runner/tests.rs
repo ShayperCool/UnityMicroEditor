@@ -1108,6 +1108,20 @@ fn player_launch_for_hot_reload() {
         args.windows(2)
             .any(|pair| pair[0] == "--unity-cli-screenshot" && pair[1] == "/tmp/last.png")
     );
+    // The development Player's console of errors stays closed unless asked for.
+    assert!(
+        !args
+            .iter()
+            .any(|argument| argument == "--unity-cli-developer-console")
+    );
+    let (args, _, _) = launch_recording(&LaunchOptions {
+        developer_console: true,
+        ..finite.clone()
+    });
+    assert!(
+        args.iter()
+            .any(|argument| argument == "--unity-cli-developer-console")
+    );
     let (args, _, _) = launch_recording(&LaunchOptions {
         screenshot: String::new(),
         ..finite

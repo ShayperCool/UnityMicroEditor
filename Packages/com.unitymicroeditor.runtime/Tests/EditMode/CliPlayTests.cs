@@ -44,9 +44,11 @@ namespace UnityMicroEditor.Tests
                 "--unity-cli-report", Path.Combine(root, "runtime.json"), "--unity-cli-frames", "10",
                 "--unity-cli-ready", Path.Combine(root, "ready.json"), "--unity-cli-screenshot", Path.Combine(root, "frame.png"),
                 "--unity-cli-content", Path.Combine(root, "current.json"), "--unity-cli-fps", frameRate, "--unity-cli-no-vsync",
+                "--unity-cli-developer-console",
             }, out var options), Is.True);
             Assert.That(options.TargetFrameRate, Is.EqualTo(expectedRate));
             Assert.That(options.NoVsync, Is.True);
+            Assert.That(options.DeveloperConsole, Is.True);
             Assert.That(options.ReadyPath, Is.EqualTo(Path.Combine(root, "ready.json")));
             Assert.That(options.ScreenshotPath, Is.EqualTo(Path.Combine(root, "frame.png")));
             Assert.That(options.ContentManifestPath, Is.EqualTo(Path.Combine(root, "current.json")));

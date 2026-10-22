@@ -21,9 +21,12 @@ namespace UnityMicroEditor
         public int? TargetFrameRate { get; }
         public bool NoVsync { get; }
         public bool Interactive { get; }
+        /// <summary>Whether the development Player opens its console of logged errors; it does not by default, as the Editor does not.</summary>
+        public bool DeveloperConsole { get; }
 
         private CliPlayArguments(string reportPath, string readyPath, string screenshotPath, string contentManifestPath, string rawManifestPath, string rawReloadRequestPath, string rawContentRoutesPath,
-            int frames, string scene, int? targetFrameRate, bool noVsync, bool interactive, string controlDirectory, string codeReloadRequestPath)
+            int frames, string scene, int? targetFrameRate, bool noVsync, bool interactive, string controlDirectory, string codeReloadRequestPath,
+            bool developerConsole)
         {
             ReportPath = reportPath;
             ReadyPath = readyPath;
@@ -39,6 +42,7 @@ namespace UnityMicroEditor
             TargetFrameRate = targetFrameRate;
             NoVsync = noVsync;
             Interactive = interactive;
+            DeveloperConsole = developerConsole;
         }
 
         public static bool TryParse(string[] arguments, out CliPlayArguments result)
@@ -66,6 +70,7 @@ namespace UnityMicroEditor
             int? targetFrameRate = null;
             bool noVsync = false;
             bool interactive = false;
+            bool developerConsole = false;
             int frames = 0;
             bool hasScene = false;
             bool hasFrames = false;
@@ -132,6 +137,11 @@ namespace UnityMicroEditor
                     if (noVsync) throw new FormatException("Duplicate --unity-cli-no-vsync.");
                     noVsync = true;
                 }
+                else if (argument == "--unity-cli-developer-console")
+                {
+                    if (developerConsole) throw new FormatException("Duplicate --unity-cli-developer-console.");
+                    developerConsole = true;
+                }
                 else if (argument == "--unity-cli-interactive")
                 {
                     if (interactive) throw new FormatException("Duplicate --unity-cli-interactive.");
@@ -189,7 +199,7 @@ namespace UnityMicroEditor
                     codeReloadRequestPath, codeReloadRequestPath == null ? null : codeReloadRequestPath + ".ack.json" })
                     if (file != null && file == controlDirectory)
                         throw new FormatException("Agent control directory and source/report destinations must use distinct paths.");
-            result = new CliPlayArguments(reportPath, readyPath, screenshotPath, contentManifestPath, rawManifestPath, rawReloadRequestPath, rawContentRoutesPath, frames, scene, targetFrameRate, noVsync, interactive, controlDirectory, codeReloadRequestPath);
+            result = new CliPlayArguments(reportPath, readyPath, screenshotPath, contentManifestPath, rawManifestPath, rawReloadRequestPath, rawContentRoutesPath, frames, scene, targetFrameRate, noVsync, interactive, controlDirectory, codeReloadRequestPath, developerConsole);
             return true;
         }
 

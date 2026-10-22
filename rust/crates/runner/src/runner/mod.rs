@@ -98,6 +98,9 @@ pub struct LaunchOptions {
     pub build_scenes: Vec<addressables::BuildSceneRoute>,
     pub no_addressables: bool,
     pub no_build_scenes: bool,
+    /// Whether a development Player opens its console of logged errors, as
+    /// the Editor's Play mode does not.
+    pub developer_console: bool,
     pub builtin_shaders: Vec<String>,
     pub game_arguments: Vec<String>,
     pub watch: bool,
@@ -455,6 +458,11 @@ pub(crate) fn run_flags() -> FlagSet {
         false,
         "leave the Build Settings scenes the game loads by name to the host's empty stand-ins",
     );
+    flags.bool(
+        "developer-console",
+        false,
+        "let the development Player open its console of logged errors over the game",
+    );
     flags.list(
         "builtin-shader",
         string_list,
@@ -532,6 +540,7 @@ pub(crate) fn launch_options(args: &[String]) -> Result<LaunchOptions> {
         build_scenes: Vec::new(),
         no_addressables: flags.get_bool("no-addressables"),
         no_build_scenes: flags.get_bool("no-build-scenes"),
+        developer_console: flags.get_bool("developer-console"),
         builtin_shaders: flags.get_list("builtin-shader"),
         game_arguments: game_args,
         watch: flags.get_bool("watch"),

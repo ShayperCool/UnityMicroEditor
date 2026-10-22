@@ -87,6 +87,9 @@ pub fn start_player(
     if !opts.raw_routes.is_empty() {
         args.extend(["--unity-cli-raw-routes".into(), opts.raw_routes.clone()]);
     }
+    if opts.developer_console {
+        args.push("--unity-cli-developer-console".into());
+    }
     if opts.interactive {
         args.push("--unity-cli-interactive".into());
         if opts.control {

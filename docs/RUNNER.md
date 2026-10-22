@@ -39,6 +39,7 @@ unity-micro-editor run \
 | `--content-scene GUID=Assets/...unity` | Register an additional scene the game loads at runtime. Repeatable. |
 | `--content-prefab Assets/...prefab` | Register a prefab the game addresses at runtime. Repeatable. |
 | `--no-addressables` | Do not serve the project's Addressables keys from sources; leave them to the host's built content. |
+| `--developer-console` | Let the development Player open its console of logged errors over the game, which it otherwise keeps closed, as the Editor's Play mode shows errors only in its Console window. The Player log has every error either way. |
 | `--builtin-shader` | Verified snapshot of a retained built-in shader. Repeatable. |
 
 The addressable scenes and assets of the project's Addressables groups (everything but code and shaders) are registered automatically and resolved from sources in the Player; see [AGENT_MCP.md](AGENT_MCP.md#addressables-from-sources) for what that covers. So are the enabled scenes of the Build Settings after the first, which the game loads through `SceneManager` by name or index: the host stands in for each with an empty scene that the Player fills from the authored one ([UNITY_RELEASES.md](UNITY_RELEASES.md#scenes-the-game-loads-by-name)).
