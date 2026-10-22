@@ -69,7 +69,7 @@ impl NativeProjectImporter {
         let mut ingredients = BTreeMap::new();
         // The shaders a shader falls back on or takes passes from are baked
         // first: its own bake reads them.
-        if lower_ext(logical) == ".shader" && !self.pipeline_project()? {
+        if lower_ext(logical) == ".shader" && !self.editor_builds_shaders()? {
             for (path, linked) in self.linked_shaders(&data)? {
                 if !self.shader_current(&path, &linked) {
                     self.publish_baked(ctx, &path, depth + 1)?;
@@ -80,7 +80,7 @@ impl NativeProjectImporter {
         // refers to, by GUID.
         let mut built_paths = BTreeMap::new();
         let baked = match lower_ext(logical).as_str() {
-            ".shader" if !self.pipeline_project()? => {
+            ".shader" if !self.editor_builds_shaders()? => {
                 self.bake_shader_source(ctx, logical, &guid, &mut ingredients)
             }
             ".shader" | ".shadergraph" | ".compute" => {
@@ -348,7 +348,7 @@ impl NativeProjectImporter {
         logical: &str,
         guid: &str,
     ) -> Result<ShaderIngredients> {
-        if lower_ext(logical) != ".shader" || self.pipeline_project()? {
+        if lower_ext(logical) != ".shader" || self.editor_builds_shaders()? {
             let plan = self.built_plan_in(shared, logical, guid)?.1;
             return Ok((plan.ingredients, Vec::new()));
         }
@@ -544,6 +544,19 @@ impl NativeProjectImporter {
         ))
     }
 
+    /// Whether the Editor's own build code in a worker builds the project's
+    /// shaders: in a pipeline project, and in a release other than the
+    /// verified one, whose shader programs and Player type trees the tool's
+    /// own baker (`playerbake::shader`) was not compared with.
+    fn editor_builds_shaders(&self) -> Result<bool> {
+        if crate::release::project_release(&self.opts.project)?
+            != crate::release::verified().version
+        {
+            return Ok(true);
+        }
+        self.pipeline_project()
+    }
+
     /// The assets the pipeline's objects were found to load by path, kept
     /// for the project from one build to the next.
     pub(super) fn reload_list(&self) -> String {
@@ -565,7 +578,7 @@ impl NativeProjectImporter {
         logical: &str,
         guid: &str,
     ) -> Result<(Vec<String>, Plan)> {
-        if !self.pipeline_project()? {
+        if !self.editor_builds_shaders()? {
             return Err(Unsupported(format!(
                 "a {} of a project without a scriptable render pipeline: the Editor's build code in a worker is verified for pipeline projects only",
                 match lower_ext(logical).as_str() {
