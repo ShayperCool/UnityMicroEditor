@@ -7,12 +7,8 @@
 //! importers, material inspectors), as it does from the compilation of a
 //! staging Editor.
 //!
-//! The references follow what the pinned Editor gives its own compilation:
-//! an assembly for the Editor platform alone compiles against the .NET
-//! Framework 4.8 API and every engine and Editor module; any other against
-//! the Player's API, the modules the project enables and every Editor
-//! module. All get the scripting bootstrap, the Graphs assembly and the
-//! extensions of the installed platforms.
+//! The references follow what the Editor gives its own compilation
+//! (`compiler::editor_references`).
 use crate::{
     cancel::Context,
     compiler::{
@@ -30,112 +26,6 @@ use std::collections::BTreeMap;
 /// Where the compilation is kept, relative to the project. It is the first
 /// place the importers look for one.
 pub const DIRECTORY: &str = "Library/UnityMicroEditor/editor-compilation";
-
-/// The .NET Framework assemblies the Editor references for its own
-/// assemblies, besides the facades.
-const FRAMEWORK: [&str; 17] = [
-    "mscorlib.dll",
-    "System.dll",
-    "System.Core.dll",
-    "System.Runtime.Serialization.dll",
-    "System.Xml.dll",
-    "System.Xml.Linq.dll",
-    "System.Numerics.dll",
-    "System.Numerics.Vectors.dll",
-    "System.Net.Http.dll",
-    "System.IO.Compression.dll",
-    "Microsoft.CSharp.dll",
-    "System.Data.dll",
-    "System.Data.DataSetExtensions.dll",
-    "System.Drawing.dll",
-    "System.IO.Compression.FileSystem.dll",
-    "System.ComponentModel.Composition.dll",
-    "System.Transactions.dll",
-];
-
-struct References {
-    framework: Vec<String>,
-    /// The BCL extensions' targeting pack, which Bee gives every assembly
-    /// (`System.Runtime.CompilerServices.Unsafe` among them).
-    extensions: Vec<String>,
-    editor_modules: Vec<String>,
-    runtime_modules: Vec<String>,
-    extras: Vec<String>,
-}
-
-fn references(editor: &str, engine: &[String]) -> References {
-    let data = sysutil::join(&[&sysutil::dir(editor), "Data"]);
-    let api = sysutil::join(&[&data, "UnityReferenceAssemblies/unity-4.8-api"]);
-    let mut framework: Vec<String> = FRAMEWORK
-        .iter()
-        .map(|name| sysutil::join(&[&api, name]))
-        .collect();
-    framework.extend(crate::compiler::sys_glob(&sysutil::join(&[
-        &api,
-        "Facades/*.dll",
-    ])));
-    // Bee adds the BCL extensions' targeting pack to every assembly.
-    let extensions = crate::compiler::sys_glob(&sysutil::join(&[
-        &data,
-        "BCLExtensions/TargetingPacks/netstandard2.1/ref/*.dll",
-    ]));
-    framework.extend(extensions.iter().cloned());
-    let modules = sysutil::join(&[&data, "Managed/UnityEngine"]);
-    let all: Vec<String> = crate::compiler::sys_glob(&sysutil::join(&[&modules, "UnityE*.dll"]))
-        .into_iter()
-        .filter(|path| sysutil::base(path) != "UnityEditor.MSBuild.dll")
-        .collect();
-    let mut runtime_modules: Vec<String> = all
-        .iter()
-        .filter(|path| sysutil::base(path).starts_with("UnityEditor"))
-        .cloned()
-        .collect();
-    for path in engine {
-        let name = sysutil::base(path);
-        let editor_module = sysutil::join(&[&modules, &name]);
-        if name.starts_with("UnityEngine") && std::path::Path::new(&editor_module).is_file() {
-            runtime_modules.push(editor_module);
-        }
-    }
-    // The scripting bootstrap is an assembly of its own from 6000.6 on;
-    // 6000.0 has none.
-    let mut extras: Vec<String> = [
-        "Managed/Bootstrap/Unity.Scripting.dll",
-        "Managed/UnityEditor.Graphs.dll",
-    ]
-    .iter()
-    .map(|name| sysutil::join(&[&data, name]))
-    .filter(|path| std::path::Path::new(path).is_file())
-    .collect();
-    extras.extend(crate::compiler::sys_glob(&sysutil::join(&[
-        &data,
-        "PlaybackEngines/*/UnityEditor.*.Extensions.dll",
-    ])));
-    // 6000.0's Editor also gives its assemblies the other extension
-    // assemblies of the installed platform modules (the iOS `Xcode` and
-    // `Common` ones, Android's Gradle types), as its Bee input lists them.
-    if !std::path::Path::new(&sysutil::join(&[
-        &data,
-        "Managed/Bootstrap/Unity.Scripting.dll",
-    ]))
-    .is_file()
-    {
-        for pattern in [
-            "PlaybackEngines/*/UnityEditor.*.Extensions.*.dll",
-            "PlaybackEngines/AndroidPlayer/Unity.Android.Gradle.dll",
-            "PlaybackEngines/AndroidPlayer/Unity.Android.Types.dll",
-        ] {
-            extras.extend(crate::compiler::sys_glob(&sysutil::join(&[&data, pattern])));
-        }
-    }
-    References {
-        framework,
-        extensions,
-        editor_modules: all,
-        runtime_modules,
-        extras,
-    }
-}
 
 /// Compiles the Editor's assemblies of `project` and replaces the kept
 /// compilation with them. Returns the directory that now stands for the
@@ -187,7 +77,7 @@ pub fn ensure(
     ]);
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging)?;
-    let known = references(editor, &graph.engine_references);
+    let known = crate::compiler::editor_references(editor, &graph.engine_references);
     // The compilation is laid out as the Editor's is, and compiled from
     // there: Unity's source generators record each script's path relative
     // to the project (`./Library/PackageCache/<name>@<hash>/...`), and the

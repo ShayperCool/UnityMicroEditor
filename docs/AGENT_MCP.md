@@ -108,6 +108,10 @@ the default is `UNITY_EDITOR`, then the installation of the project's release un
 `--compile-for Android` (or another build target group) compiles the Player's
 code as for that device, for a game written for a phone; the choice is kept for
 the project ([UNITY_RELEASES.md](UNITY_RELEASES.md#a-game-written-for-a-device)).
+`--play-mode` compiles it as the Editor's Play mode does, with `UNITY_EDITOR`,
+so that code the game keeps for the Editor (SDKs that answer at once there
+instead of calling a device's native library) runs in the Player as well; it is
+kept beside `--compile-for` ([UNITY_RELEASES.md](UNITY_RELEASES.md#play-mode-code)).
 `--engine-profile` selects a captured engine/host profile. Add `--no-editor` to
 `mcp` or `auto-prepare` to forbid main Editor bootstrap and build calls; missing
 native facts fail explicitly instead of launching it. Prepared native import

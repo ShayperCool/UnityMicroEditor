@@ -234,6 +234,26 @@ pub fn prepare_compiler_graph_with(
         compiler.manifest.compiler_inputs = NilMap::make();
     }
     compiler.initialize_sdk()?;
+    compiler.play_mode = own_graph && graph.play_mode;
+    compiler.manifest.play_mode = compiler.play_mode;
+    if compiler.play_mode {
+        // Play mode code replaces the host's builds of the game's and the
+        // packages' assemblies and plugins; the Player's data keeps their
+        // serialized layout.
+        let names: BTreeSet<String> = graph
+            .assemblies
+            .iter()
+            .map(|assembly| assembly.config.name.clone())
+            .chain(graph.assemblies.iter().flat_map(|assembly| {
+                assembly
+                    .compiled_references
+                    .iter()
+                    .map(|path| sysutil::base(path))
+                    .collect::<Vec<_>>()
+            }))
+            .collect();
+        super::playmode::keep_host_layouts(&staged_player, names.iter().map(String::as_str))?;
+    }
     if own_graph {
         if graph.base_references.is_empty() || graph.engine_references.is_empty() {
             bail!("Source compiler requires proven exact engine/BCL reference sets");
@@ -279,6 +299,52 @@ pub fn prepare_compiler_graph_with(
                     && existing != hash
                     && existing == facade
                 {
+                    continue;
+                }
+                if compiler.play_mode {
+                    // Play mode code takes the plugins the Editor takes,
+                    // linked as the game's assemblies are.
+                    // A precompiled library with a build of its own for the
+                    // Player (Odin Inspector's `NoEditor` assemblies), which
+                    // the host holds, keeps it: the Editor's build serves the
+                    // Editor's tools (Odin's serializer tracks prefab changes
+                    // through it).
+                    if let Ok(held) = file_hash(&destination)
+                        && held != hash
+                        && plugins.insert(name.clone(), hash.clone()).is_none()
+                    {
+                        compiler.manifest.compiler_inputs.insert(&destination, held);
+                        continue;
+                    }
+                    if plugins.insert(name.clone(), hash.clone()).is_none() {
+                        let _ = fs::remove_file(&destination);
+                        compiler.link_play_mode_assembly(
+                            ctx,
+                            &join(&[&staging_path, "PlayModePlugins", &name]),
+                            name.strip_suffix(".dll").unwrap_or(&name),
+                            path,
+                            &destination,
+                        )?;
+                        // The host's own build of it, where the graph
+                        // recorded one, is replaced.
+                        let replaced: Vec<String> = compiler
+                            .manifest
+                            .compiler_inputs
+                            .keys()
+                            .filter(|recorded| {
+                                sysutil::base(recorded) == name
+                                    && sysutil::base(&sysutil::dir(recorded)) == "Managed"
+                            })
+                            .cloned()
+                            .collect();
+                        for recorded in replaced {
+                            compiler.manifest.compiler_inputs.remove(&recorded);
+                        }
+                        compiler
+                            .manifest
+                            .compiler_inputs
+                            .insert(&destination, file_hash(&destination)?);
+                    }
                     continue;
                 }
                 plugins.insert(name.clone(), hash.clone());
@@ -357,7 +423,7 @@ pub fn prepare_compiler_graph_with(
         }
         if config.name.is_empty()
             || sysutil::base(&config.name) != config.name
-            || config.name.starts_with("UnityEditor")
+            || config.name.starts_with("UnityEditor") && !compiler.play_mode
             || !compiler.configs.value(&config.name).name.is_empty()
             || config.sources.is_empty()
             || config.defines.is_empty()
@@ -369,10 +435,11 @@ pub fn prepare_compiler_graph_with(
                 config.name
             );
         }
-        if config
-            .defines
-            .iter()
-            .any(|define| define == "UNITY_EDITOR" || define.starts_with("UNITY_EDITOR_"))
+        if !compiler.play_mode
+            && config
+                .defines
+                .iter()
+                .any(|define| define == "UNITY_EDITOR" || define.starts_with("UNITY_EDITOR_"))
         {
             bail!("compiler export uses Editor-only defines: {}", config.name);
         }
@@ -402,6 +469,7 @@ pub fn prepare_compiler_graph_with(
             name: config.name.clone(),
             sources: config.sources.clone(),
             references: config.dependencies.clone(),
+            editor_only: compiler.play_mode && exported.editor_only,
             ..Default::default()
         });
         compiler.configs.insert(config.name.clone(), config);
@@ -529,7 +597,14 @@ pub fn prepare_compiler_graph_with(
     };
     for index in 0..ordered.len() {
         let mut assembly = ordered[index].clone();
-        let mut refs: Vec<String> = compiler.base_references.to_vec();
+        let (base, engine) = match compiler.play_mode && assembly.editor_only {
+            true => compiler.editor_only_references(),
+            false => (
+                compiler.base_references.to_vec(),
+                compiler.engine_references.to_vec(),
+            ),
+        };
+        let mut refs: Vec<String> = base;
         if own_graph {
             refs.push(join(&[&managed, "UnityMicroEditor.dll"]));
         }
@@ -539,7 +614,7 @@ pub fn prepare_compiler_graph_with(
             .config
             .no_engine_references
         {
-            refs.extend(compiler.engine_references.iter().cloned());
+            refs.extend(engine);
         }
         if !own_graph {
             for reference in &host_references {
@@ -554,7 +629,7 @@ pub fn prepare_compiler_graph_with(
             }
             for reference in &exported.compiled_references {
                 let name = stem(reference);
-                if name.starts_with("UnityEditor") {
+                if name.starts_with("UnityEditor") && !compiler.play_mode {
                     bail!("Editor-only reference in runtime compiler export: {reference}");
                 }
                 if compiler.current_dlls.at(&name).is_empty() {
@@ -697,6 +772,9 @@ pub fn prepare_compiler_graph_with(
         )?;
     }
     register_compiler_assembly_slots(&slots_file, &ordered)?;
+    if compiler.play_mode {
+        compiler.write_play_mode_stand_ins(ctx, &staging_path, &managed)?;
+    }
     // The Player reads the project's settings, not those the host was built
     // with; what each manager kept of the host is recorded beside it.
     let managers = super::settings::prepare_managers(&project, &staged_player)?;
@@ -1134,7 +1212,7 @@ impl Compiler {
         for assembly in &graph.host_assemblies {
             if assembly.name.is_empty()
                 || sysutil::base(&assembly.name) != assembly.name
-                || assembly.name.starts_with("UnityEditor")
+                || assembly.name.starts_with("UnityEditor") && !self.play_mode
                 || exported.contains_key(assembly.name.as_str())
                 || !exported_host_path(self, graph, assembly)
             {
@@ -1365,12 +1443,19 @@ fn build_package_assemblies(
             .find(|exported| exported.config.name == assembly.name)
             .cloned()
             .unwrap_or_default();
-        let mut refs: Vec<String> = compiler.base_references.to_vec();
+        let (base, engine) = match compiler.play_mode && exported.editor_only {
+            true => compiler.editor_only_references(),
+            false => (
+                compiler.base_references.to_vec(),
+                compiler.engine_references.to_vec(),
+            ),
+        };
+        let mut refs: Vec<String> = base;
         if !config.config.no_engine_references {
-            refs.extend(compiler.engine_references.iter().cloned());
+            refs.extend(engine);
         }
         for reference in &exported.compiled_references {
-            if sysutil::base(reference).starts_with("UnityEditor") {
+            if sysutil::base(reference).starts_with("UnityEditor") && !compiler.play_mode {
                 bail!(
                     "Editor-only reference in package assembly {}: {reference}",
                     assembly.name
@@ -1522,15 +1607,31 @@ fn build_package_assemblies(
             .strip_suffix(".dll")
             .unwrap_or(&build.dll)
             .to_string();
-        for (from, to) in [
-            (build.dll.clone(), target.clone()),
-            (
-                format!("{stem}.pdb"),
+        if compiler.play_mode {
+            for to in [
+                target.clone(),
                 format!("{}.pdb", target.strip_suffix(".dll").unwrap_or(&target)),
-            ),
-        ] {
-            let _ = fs::remove_file(&to);
-            sys::write(&to, &sys::read(&from)?)?;
+            ] {
+                let _ = fs::remove_file(&to);
+            }
+            compiler.link_play_mode_assembly(
+                ctx,
+                &join(&[staging_path, "PlayModePackages", &assembly.name]),
+                &assembly.name,
+                &build.dll,
+                &target,
+            )?;
+        } else {
+            for (from, to) in [
+                (build.dll.clone(), target.clone()),
+                (
+                    format!("{stem}.pdb"),
+                    format!("{}.pdb", target.strip_suffix(".dll").unwrap_or(&target)),
+                ),
+            ] {
+                let _ = fs::remove_file(&to);
+                sys::write(&to, &sys::read(&from)?)?;
+            }
         }
         let ran: Vec<&str> = build
             .post_processors

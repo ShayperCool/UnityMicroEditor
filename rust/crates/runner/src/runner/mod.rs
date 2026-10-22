@@ -104,6 +104,9 @@ pub struct LaunchOptions {
     /// edit that cannot be patched, the Player restarts.
     pub hot_reload: bool,
     pub hot_reload_fallback: Fallback,
+    /// Whether the Player runs Play mode code (`compiler::playmode`), which
+    /// runs in the project's directory as the Editor's does.
+    pub play_mode: bool,
     /// Commands are read from standard input.
     pub commands_stdin: bool,
     pub frames: i64,
@@ -532,6 +535,7 @@ pub(crate) fn launch_options(args: &[String]) -> Result<LaunchOptions> {
         control: flags.get_bool("control"),
         hot_reload: false,
         hot_reload_fallback: fallback,
+        play_mode: false,
         commands_stdin: flags.get_bool("commands-stdin"),
         frames: flags.get_int("frames"),
         width: flags.get_int("width"),
@@ -1268,6 +1272,28 @@ fn run_session(
     let prepared_player = baseline.player.clone();
     let staged_player = compiler::stage_host(ctx, &opts.output, &opts.editor, &baseline.player)?;
     baseline.player = staged_player.clone();
+    // Play mode code is linked into the Player as each compile builds it;
+    // a patch of a method is not (`compiler::playmode`).
+    let play_mode = compiler::compiler_manifest(&opts.baseline)?.0.play_mode;
+    opts.play_mode = play_mode;
+    if play_mode {
+        player::adopt_addressables_target(&staged_player, &opts.project)?;
+        let isolated = player::isolate_plugin_symbols(&staged_player)?;
+        if isolated > 0 {
+            eprintln!(
+                "[unity-micro-editor] {isolated} unique symbols of the Player's native plugins are each plugin's own"
+            );
+        }
+    }
+    if play_mode && opts.hot_reload {
+        opts.hot_reload = false;
+        Event::new("hot-reload-unavailable")
+            .with(
+                "message",
+                "C# changes restart the Player of Play mode code in this session",
+            )
+            .emit();
+    }
     // The patch builder and the applier are built beside the startup compile
     // and the Player start, which take longer than both.
     let setup = opts.hot_reload.then(|| {
@@ -1289,6 +1315,14 @@ fn run_session(
     // processes and caches. Preparations and runs without --watch do not.
     if opts.watch {
         compiler.serve(&sysutil::join(&[&output, "compiler"]));
+    }
+    if play_mode {
+        // The stand-ins answer through the bridge the session staged.
+        compiler.write_play_mode_stand_ins(
+            ctx,
+            &sysutil::join(&[&output, "compiler"]),
+            &compiler::player_managed(&staged_player),
+        )?;
     }
     let initial_compile = compiler.compile(ctx, None)?;
     if let Some(compiled) = &initial_compile {

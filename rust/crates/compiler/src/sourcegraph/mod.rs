@@ -116,7 +116,7 @@ pub struct SourceAsmdef {
 
 const ASMDEF: &str = "sourceAsmdef";
 
-/// The defines the pinned Editor compiles its own assemblies with beyond
+/// The defines the Editor of 6000.6 compiles its own assemblies with beyond
 /// those of a development Player, which it leaves out (`DEVELOPMENT_BUILD`).
 pub const EDITOR_DEFINES: [&str; 9] = [
     "ENABLE_BURST_AOT",
@@ -129,6 +129,88 @@ pub const EDITOR_DEFINES: [&str; 9] = [
     "UNITY_INCLUDE_TESTS",
     "UNITY_TEAM_LICENSE",
 ];
+
+/// The defines the Editor of a release compiles its own assemblies with
+/// beyond those of a development Player (`EDITOR_DEFINES` for 6000.6; the
+/// Editor of 6000.0 has neither instrumentation nor its checks, as its
+/// `Library/Bee` record of a project shows).
+pub fn editor_defines(version: &str) -> &'static [&'static str] {
+    const EDITOR_6000_0: [&str; 7] = [
+        "ENABLE_BURST_AOT",
+        "ENABLE_UNITY_COLLECTIONS_CHECKS",
+        "UNITY_EDITOR",
+        "UNITY_EDITOR_64",
+        "UNITY_EDITOR_LINUX",
+        "UNITY_INCLUDE_TESTS",
+        "UNITY_TEAM_LICENSE",
+    ];
+    match version.starts_with("6000.0.") {
+        true => &EDITOR_6000_0,
+        false => &EDITOR_DEFINES,
+    }
+}
+
+/// What a Linux Player defines for its platform and the Editor does not
+/// while another platform is the active one (6000.0.71f1's `Library/Bee`
+/// record of a project with Android active, against the Linux Player built
+/// from it).
+const LINUX_PLATFORM_DEFINES: [&str; 14] = [
+    "ENABLE_CLUSTERINPUT",
+    "ENABLE_CLUSTER_SYNC",
+    "ENABLE_MODULAR_UNITYENGINE_ASSEMBLIES",
+    "ENABLE_MOVIES",
+    "ENABLE_VIRTUALTEXTURING",
+    "PLATFORM_ARCH_64",
+    "PLATFORM_STANDALONE",
+    "PLATFORM_STANDALONE_LINUX",
+    "PLATFORM_USES_EXPLICIT_MEMORY_MANAGER_INITIALIZER",
+    "RENDER_SOFTWARE_CURSOR",
+    "UNITY_64",
+    "UNITY_STANDALONE",
+    "UNITY_STANDALONE_LINUX",
+    "UNITY_STANDALONE_LINUX_API",
+];
+
+/// What the Editor defines for the active platform of a build target group
+/// (the same record for Android); for a group no record was taken of, the
+/// platform symbols a Player of it defines (`group_platform_defines`).
+pub fn editor_platform_defines(group: &str) -> &'static [&'static str] {
+    match group {
+        "Android" => &[
+            "ENABLE_ACCESSIBILITY",
+            "ENABLE_ANDROID_ADVERTISING_IDS",
+            "ENABLE_ANDROID_APP_SET_ID",
+            "ENABLE_AR",
+            "ENABLE_CLOUD_SERVICES_ENGINE_DIAGNOSTICS",
+            "ENABLE_CLOUD_SERVICES_NATIVE_CRASH_REPORTING",
+            "ENABLE_EGL",
+            "ENABLE_ENGINE_CODE_STRIPPING",
+            "ENABLE_ETC_COMPRESSION",
+            "ENABLE_EVENT_QUEUE",
+            "ENABLE_FIREBASE_IDENTIFIERS",
+            "ENABLE_INSIGHTS_PLATFORM_SPECIFIC_RESOURCES",
+            "ENABLE_ONSCREEN_KEYBOARD",
+            "ENABLE_UNITYADS_RUNTIME",
+            "PLATFORM_ANDROID",
+            "PLATFORM_EXTENDS_VULKAN_DEVICE",
+            "PLATFORM_EXTENDS_VULKAN_PIPELINE_CACHE",
+            "PLATFORM_HAS_ADDITIONAL_API_CHECKS",
+            "PLATFORM_HAS_BUGGY_MSAA_RESOLVE",
+            "PLATFORM_HAS_MULTIPLE_SWAPCHAINS",
+            "PLATFORM_IMPLEMENTS_INSIGHTS_ANR",
+            "PLATFORM_SUPPORTS_INSIGHTS_DEVICE_INFO",
+            "PLATFORM_UPDATES_TIME_OUTSIDE_OF_PLAYER_LOOP",
+            "UNITY_ANDROID",
+            "UNITY_ANDROID_API",
+            "UNITY_ANDROID_SUPPORTS_SHADOWFILES",
+            "UNITY_CAN_SHOW_SPLASH_SCREEN",
+            "UNITY_HAS_GOOGLEVR",
+            "UNITY_HAS_TANGO",
+            "UNITY_UNITYADS_API",
+        ],
+        other => group_platform_defines(other),
+    }
+}
 
 fn set_strings(target: &mut NilVec<String>, value: &Json, field: &str) -> Result<(), String> {
     let at = Target {
@@ -369,20 +451,26 @@ pub fn group_platform_defines(group: &str) -> &'static [&'static str] {
     }
 }
 
-/// The build target group (as `ProjectSettings.asset` names it, `Android`,
-/// `iPhone`, ...) whose scripting define symbols the project's Player is
-/// compiled with instead of the Standalone ones; `None` for Standalone.
-///
-/// A mobile game is often edited with its device as the active target, and
-/// its code compiles only with that group's symbols, its platform symbols
-/// (`group_platform_defines`) included, as in the Editor's Play mode. The
-/// Player stays a Linux one: code that calls the device's native plugins
-/// under those symbols fails at run time unless it also checks for the Editor.
-pub fn compile_for_group(project: &str) -> Result<Option<String>> {
+/// How a project's Player code is compiled, as `COMPILE_FOR_FILE` records it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodeSelection {
+    /// The build target group (as `ProjectSettings.asset` names it,
+    /// `Android`, `iPhone`, ...) whose scripting define symbols the Player is
+    /// compiled with instead of the Standalone ones; `None` for Standalone.
+    pub group: Option<String>,
+    /// Whether the Player's code is compiled as the Editor's Play mode
+    /// compiles it: with the Editor's symbols (`UNITY_EDITOR`) and against
+    /// the Editor's assemblies, which the Player gets stand-ins of.
+    pub play_mode: bool,
+}
+
+/// The project's record of how its Player code is compiled; the default
+/// (Standalone, as a Player build compiles it) without one.
+pub fn code_selection(project: &str) -> Result<CodeSelection> {
     let path = sysutil::join(&[project, COMPILE_FOR_FILE]);
     let content = match read_agent_file(&path, 64 << 10) {
         Ok(content) => content,
-        Err(error) if is_not_exist(&error) => return Ok(None),
+        Err(error) if is_not_exist(&error) => return Ok(CodeSelection::default()),
         Err(error) => return Err(error),
     };
     #[derive(Deserialize)]
@@ -390,13 +478,37 @@ pub fn compile_for_group(project: &str) -> Result<Option<String>> {
     struct Selection {
         schema_version: i64,
         group: String,
+        #[serde(default)]
+        play_mode: bool,
     }
     let selection: Selection =
         serde_json::from_slice(&content).map_err(|error| anyhow!("{path}: {error}"))?;
     if selection.schema_version != 1 || !symbol(&selection.group) {
         bail!("{path} names no valid build target group");
     }
-    Ok(Some(selection.group))
+    Ok(CodeSelection {
+        group: (selection.group != "Standalone").then_some(selection.group),
+        play_mode: selection.play_mode,
+    })
+}
+
+/// The build target group whose scripting define symbols the project's
+/// Player is compiled with (`CodeSelection::group`).
+///
+/// A mobile game is often edited with its device as the active target, and
+/// its code compiles only with that group's symbols, its platform symbols
+/// (`group_platform_defines`) included, as in the Editor's Play mode. The
+/// Player stays a Linux one: code that calls the device's native plugins
+/// under those symbols fails at run time unless it also checks for the
+/// Editor, which Play mode code (`CodeSelection::play_mode`) does.
+pub fn compile_for_group(project: &str) -> Result<Option<String>> {
+    Ok(code_selection(project)?.group)
+}
+
+/// Whether the project's Player code is compiled as the Editor's Play mode
+/// compiles it (`CodeSelection::play_mode`).
+pub fn play_mode_code(project: &str) -> Result<bool> {
+    Ok(code_selection(project)?.play_mode)
 }
 
 pub fn read_source_settings(project: &str) -> Result<SourceSettings> {
@@ -499,6 +611,11 @@ pub fn build_source_graph(
         project::lexpath::abs(&sysutil::eval_symlinks(&options.project)?)?
     };
     let platform = code_platform(&project)?;
+    let selection = code_selection(&project)?;
+    // Play mode code is the Editor's own compilation of the runtime
+    // assemblies, which the Player then runs (`compiler::playmode`).
+    let play_mode = !options.editor_domain && selection.play_mode;
+    let editor_rules = options.editor_domain || play_mode;
     let (Some(profile), Some(packages)) = (&options.profile, &options.packages) else {
         bail!(MISMATCH);
     };
@@ -534,11 +651,26 @@ pub fn build_source_graph(
     if settings.input_handler == 0 || settings.input_handler == 2 {
         base.push("ENABLE_LEGACY_INPUT_MANAGER".into());
     }
-    if options.editor_domain {
-        // What the Editor defines beyond a development Player of the pinned
-        // engine (compared with its own `Library/Bee` record of a project).
+    if editor_rules {
+        // What the Editor defines beyond a development Player (compared with
+        // its own `Library/Bee` record of a project), and for the platform
+        // that is active in it instead of the Linux Player's.
         base = retain(&base, |define| define != "DEVELOPMENT_BUILD");
-        base.append(EDITOR_DEFINES.iter().map(|define| define.to_string()));
+        base.append(
+            editor_defines(unity_version(&project)?)
+                .iter()
+                .map(|define| define.to_string()),
+        );
+        if let Some(group) = &selection.group {
+            base = retain(&base, |define| {
+                !LINUX_PLATFORM_DEFINES.contains(&define.as_str())
+            });
+            base.append(
+                editor_platform_defines(group)
+                    .iter()
+                    .map(|define| define.to_string()),
+            );
+        }
     }
     let base = sorted_strings(&base);
     let automatic_engine_assemblies = automatic_engine_assemblies(profile);
@@ -741,7 +873,7 @@ pub fn build_source_graph(
                             .entry(sysutil::base(path))
                             .or_insert_with(|| path.to_string());
                     }
-                    let mut plugin = match options.editor_domain {
+                    let mut plugin = match editor_rules {
                         true => read_editor_plugin(path, &base)?,
                         false => read_source_plugin(path, &base, platform)?,
                     };
@@ -749,7 +881,7 @@ pub fn build_source_graph(
                     // Player being built (Odin Inspector's NoEditor
                     // assemblies); the host is such a build, by the Editor,
                     // and holds the plugin it took.
-                    if !options.editor_domain
+                    if !editor_rules
                         && !plugin.enabled
                         && managed_plugin(path)
                         && host_holds(&options.player, path)
@@ -762,7 +894,7 @@ pub fn build_source_graph(
                         // Player's (Odin keeps one per kind of platform and
                         // its build callbacks pick it).
                         if let Some(previous) = plugins.get(&name)
-                            && !options.editor_domain
+                            && !editor_rules
                             && host_holds(&options.player, &previous.path)
                                 != host_holds(&options.player, path)
                         {
@@ -782,9 +914,7 @@ pub fn build_source_graph(
                                     &sysutil::join(&[&project, "Assets"]),
                                 )
                             };
-                            if !options.editor_domain
-                                || project_copy(&previous.path) == project_copy(path)
-                            {
+                            if !editor_rules || project_copy(&previous.path) == project_copy(path) {
                                 bail!("duplicate active managed plugin filename: {name}");
                             }
                             if project_copy(&previous.path) {
@@ -850,7 +980,7 @@ pub fn build_source_graph(
         let defines = sorted_strings(&defines);
         let constraints = match_constraints(&definition.define_constraints, &defines)
             .map_err(|error| anyhow!("{name} constraints: {error}"))?;
-        let included = match options.editor_domain {
+        let included = match editor_rules {
             true => {
                 (definition.include_platforms.is_empty()
                     || has(&definition.include_platforms, "Editor"))
@@ -873,7 +1003,7 @@ pub fn build_source_graph(
         // The Editor compiles the test framework and what refers to it, but
         // not the tests of packages, which only build with UNITY_INCLUDE_TESTS
         // when the project lists the package as testable.
-        let tests = match options.editor_domain {
+        let tests = match editor_rules {
             true => {
                 !definition.package.is_empty()
                     && has(&definition.define_constraints, "UNITY_INCLUDE_TESTS")
@@ -892,9 +1022,7 @@ pub fn build_source_graph(
         config.config.no_engine_references = definition.no_engine_references;
         config.config.override_references = definition.override_references;
         config.config.precompiled = definition.precompiled_references.clone();
-        for reference in
-            &expanded_references(&definition.references, &definitions, options.editor_domain)
-        {
+        for reference in &expanded_references(&definition.references, &definitions, editor_rules) {
             if !enabled {
                 break;
             }
@@ -960,7 +1088,7 @@ pub fn build_source_graph(
         configs.insert(name.clone(), config);
         owner_package.insert(name.clone(), definition.package.clone());
     }
-    if options.editor_domain {
+    if editor_rules {
         add_implicit_editor_references(&mut configs, &implicit_kinds);
     }
     for path in sources.keys() {
@@ -980,7 +1108,7 @@ pub fn build_source_graph(
         if name.is_empty() {
             let logical = logical_path(&project, packages, path);
             let editor = editor_source(path);
-            if editor && !options.editor_domain {
+            if editor && !editor_rules {
                 continue;
             }
             name = "Assembly-CSharp".into();
@@ -1133,7 +1261,7 @@ pub fn build_source_graph(
             &plugins,
             &mut graph.compiler_inputs,
         )?;
-        config.compiler_references = match options.editor_domain {
+        config.compiler_references = match editor_rules {
             true => editor_plugin_references(&config, &plugins, &options.editor),
             false => plugin_references(&config, &plugins)?,
         };
@@ -1161,7 +1289,7 @@ pub fn build_source_graph(
                 && fact.source_hashes.at(&format!("{logical}.meta"))
                     == graph.compiler_inputs.at(&format!("{source}.meta"))
         };
-        let mut native = !options.editor_domain
+        let mut native = !editor_rules
             && match (package, fact) {
                 (Some(package), Some(fact)) => {
                     !package.name.is_empty()
@@ -1227,7 +1355,7 @@ pub fn build_source_graph(
                     && package.is_some_and(|package| {
                         matches!(package.source.as_str(), "registry" | "builtin" | "git")
                     }),
-                editor_only: options.editor_domain
+                editor_only: editor_rules
                     && (editor_source(name)
                         || definitions.get(name).is_some_and(|definition| {
                             definition.include_platforms.len() == 1
@@ -1236,11 +1364,78 @@ pub fn build_source_graph(
             });
         }
     }
+    if play_mode {
+        build_packages_after_game_code(&mut graph);
+        play_mode_references(&mut graph, &options.editor)?;
+        graph.play_mode = true;
+    }
     if graph.assemblies.len() + graph.host_assemblies.len() > 256 && !options.editor_domain {
         bail!("Source graph exceeds256 runtime assemblies");
     }
     packages.validate(ctx)?;
     Ok(graph)
+}
+
+/// Play mode runs every assembly the Editor compiles, those for the Editor
+/// alone too (Unity Localization finds its Editor interface by name). A
+/// package assembly that refers to one of the game's is built after it, as
+/// game code: nothing of the host stands in for it.
+fn build_packages_after_game_code(graph: &mut CompilerGraphExport) {
+    loop {
+        let games: std::collections::BTreeSet<String> = graph
+            .assemblies
+            .iter()
+            .filter(|assembly| !assembly.package_build)
+            .map(|assembly| assembly.config.name.clone())
+            .collect();
+        let mut changed = false;
+        for assembly in graph.assemblies.iter_mut() {
+            if assembly.package_build
+                && assembly
+                    .references
+                    .iter()
+                    .any(|reference| games.contains(reference))
+            {
+                assembly.package_build = false;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+/// Play mode code compiles against the Editor's engine and Editor modules,
+/// as the Editor compiles its runtime assemblies (`editor_references`).
+fn play_mode_references(graph: &mut CompilerGraphExport, editor: &str) -> Result<()> {
+    let known = crate::compiler::editor_references(editor, &graph.engine_references);
+    let mut base = graph.base_references.to_vec();
+    base.extend(known.extensions.iter().cloned());
+    let mut engine = known.runtime_modules.clone();
+    engine.extend(known.extras.iter().cloned());
+    graph.base_references = sorted_strings(&base.into());
+    graph.engine_references = sorted_strings(&engine.into());
+    for path in graph
+        .base_references
+        .iter()
+        .chain(graph.engine_references.iter())
+    {
+        graph.compiler_inputs.insert(path, file_hash(path)?);
+    }
+    // An assembly that names its precompiled references may name one the
+    // Editor ships (IL2CPP's Cecil), which the Player then gets too.
+    let named: Vec<String> = graph
+        .assemblies
+        .iter()
+        .flat_map(|assembly| assembly.compiled_references.iter().cloned())
+        .filter(|path| graph.compiler_inputs.at(path).is_empty())
+        .collect();
+    for path in named {
+        let hash = file_hash(&path)?;
+        graph.compiler_inputs.insert(&path, hash);
+    }
+    Ok(())
 }
 
 /// These native script assemblies

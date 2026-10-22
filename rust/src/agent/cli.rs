@@ -166,11 +166,28 @@ pub fn run_mcp_cli(arguments: Vec<String>) -> Result<()> {
     )
 }
 
-/// Records the build target group whose scripting define symbols the
-/// project's Player is compiled with; `Standalone` removes the record.
-fn select_compile_for(project: &str, group: &str) -> Result<()> {
+/// Records how the project's Player code is compiled
+/// (`sourcegraph::CodeSelection`): the build target group whose scripting
+/// define symbols it takes (`Standalone` is the default), and whether it is
+/// Play mode code. What is not given stays as recorded; the default removes
+/// the record.
+pub(crate) fn select_code(
+    project: &str,
+    group: Option<&str>,
+    play_mode: Option<bool>,
+) -> Result<()> {
     let path = join(&[project, crate::sourcegraph::COMPILE_FOR_FILE]);
-    if group == "Standalone" {
+    let recorded = crate::sourcegraph::code_selection(project)?;
+    let group = match group {
+        Some("Standalone") => None,
+        Some(group) => Some(group.to_string()),
+        None => recorded.group.clone(),
+    };
+    let play_mode = play_mode.unwrap_or(recorded.play_mode);
+    if group == recorded.group && play_mode == recorded.play_mode {
+        return Ok(());
+    }
+    if group.is_none() && !play_mode {
         return match std::fs::remove_file(&path) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
                 Err(anyhow!("remove {path}: {error}"))
@@ -178,14 +195,15 @@ fn select_compile_for(project: &str, group: &str) -> Result<()> {
             _ => Ok(()),
         };
     }
-    if crate::sourcegraph::compile_for_group(project)?.as_deref() == Some(group) {
-        return Ok(());
-    }
     crate::util::agent_canonical(&path)?;
     sysutil::mkdir_all(&sysutil::dir(&path))?;
     atomic_json(
         &path,
-        &serde_json::json!({"schemaVersion": 1, "group": group}),
+        &serde_json::json!({
+            "schemaVersion": 1,
+            "group": group.as_deref().unwrap_or("Standalone"),
+            "playMode": play_mode,
+        }),
     )?;
     // Refuse a group the settings do not name before anything is prepared.
     if let Err(error) = crate::sourcegraph::read_source_settings(project) {
@@ -224,6 +242,11 @@ pub fn run_auto_prepare_cli(arguments: Vec<String>) -> Result<()> {
         "",
         "compile the Player with the scripting define symbols of this build target group (Android, iPhone, ...; Standalone resets); remembered for the project",
     );
+    flags.bool(
+        "play-mode",
+        false,
+        "compile the Player's code as the Editor's Play mode does: with UNITY_EDITOR, against stand-ins of the Editor's assemblies (--play-mode=false resets); remembered for the project",
+    );
     flags.parse(arguments)?;
     let (project, scene) = (flags.get_string("project"), flags.get_string("scene"));
     if !flags.args().is_empty() || project.is_empty() || scene.is_empty() {
@@ -231,8 +254,15 @@ pub fn run_auto_prepare_cli(arguments: Vec<String>) -> Result<()> {
     }
     let project = eval_symlinks(&lexpath::abs(&project)?)?;
     let group = flags.get_string("compile-for");
-    if !group.is_empty() {
-        select_compile_for(&project, &group)?;
+    let play_mode = flags
+        .is_set("play-mode")
+        .then(|| flags.get_bool("play-mode"));
+    if !group.is_empty() || play_mode.is_some() {
+        select_code(
+            &project,
+            (!group.is_empty()).then_some(group.as_str()),
+            play_mode,
+        )?;
     }
     let editor = eval_symlinks(&crate::util::project_unity_editor(
         &flags.get_string("editor"),

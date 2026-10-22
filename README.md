@@ -59,7 +59,7 @@ Guides:
 - [docs/AGENT_MCP.md](docs/AGENT_MCP.md): MCP configuration, tools, source edits, project tools, simulation and input.
 - [docs/NATIVE_IMPORT.md](docs/NATIVE_IMPORT.md): the import worker coordinator and its commands.
 - [docs/HOSTLESS_PLAYER.md](docs/HOSTLESS_PLAYER.md): what a host build produces, and the experiment toward a Player without one.
-- [docs/UNITY_RELEASES.md](docs/UNITY_RELEASES.md): the supported Unity releases, a game written for Android or iOS (`--compile-for`), packages only the project's Editor could fetch, and scenes the game loads by name.
+- [docs/UNITY_RELEASES.md](docs/UNITY_RELEASES.md): the supported Unity releases, a game written for Android or iOS (`--compile-for`), Play mode code (`--play-mode`, the game's `#if UNITY_EDITOR` paths in the Player), packages only the project's Editor could fetch, and scenes the game loads by name.
 
 ## Commands
 

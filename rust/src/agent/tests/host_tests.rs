@@ -818,3 +818,30 @@ fn a_device_stage_makes_linux_membership_that_of_the_device() {
         None
     );
 }
+
+#[test]
+fn the_code_a_project_is_compiled_as_is_recorded_until_reset() {
+    let (_directory, project) = temp_dir();
+    write(
+        &format!("{project}/ProjectSettings/ProjectSettings.asset"),
+        "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!129 &1\nPlayerSettings:\n  scriptingDefineSymbols:\n    Android: A\n",
+    );
+    let selection = || crate::sourcegraph::code_selection(&project).unwrap();
+    let record = format!("{project}/{}", crate::sourcegraph::COMPILE_FOR_FILE);
+    crate::agent::cli::select_code(&project, Some("Android"), None).unwrap();
+    assert_eq!(selection().group.as_deref(), Some("Android"));
+    assert!(!selection().play_mode);
+    // What is not given stays as recorded.
+    crate::agent::cli::select_code(&project, None, Some(true)).unwrap();
+    assert_eq!(selection().group.as_deref(), Some("Android"));
+    assert!(selection().play_mode);
+    crate::agent::cli::select_code(&project, Some("Standalone"), None).unwrap();
+    assert_eq!(selection().group, None);
+    assert!(selection().play_mode && !absent(&record));
+    // The default removes the record.
+    crate::agent::cli::select_code(&project, None, Some(false)).unwrap();
+    assert!(absent(&record));
+    // A group the settings do not name is refused before anything is recorded.
+    assert!(crate::agent::cli::select_code(&project, Some("iPhone"), Some(true)).is_err());
+    assert!(absent(&record));
+}

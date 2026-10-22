@@ -41,7 +41,9 @@ namespace UnityMicroEditor.Raw
             Addressables.AddResourceLocator(locator);
             SceneManager.sceneLoaded += BuildAdoptedScene;
             Debug.Log("[UnityMicroEditor] Addressables: " + entries.Length + " keys are served from sources.");
-            if (!File.Exists(Addressables.RuntimePath + "/settings.json"))
+            string built = Addressables.PlayerBuildDataPath;
+            UseHostContent(built);
+            if (!File.Exists(built + "/settings.json"))
             {
                 // Without a catalog the package's own initialization fails, as
                 // in any Player built without content. Source keys still resolve.
@@ -53,6 +55,26 @@ namespace UnityMicroEditor.Raw
             AsyncOperationHandle<IResourceLocator> initialization = Addressables.InitializeAsync(false);
             if (initialization.IsDone) Initialized(initialization);
             else initialization.Completed += Initialized;
+        }
+
+        /// <summary>
+        /// Play mode code (the package compiled with UNITY_EDITOR) reads the content an Editor
+        /// builds for Play mode, under <c>Library</c>; the host's build of the content is the
+        /// Player's. The package takes the location of its settings from the key it reads for
+        /// Play mode, and every address of the Editor's build path is the Player's.
+        /// </summary>
+        private static void UseHostContent(string built)
+        {
+            string editorPath = Addressables.RuntimePath;
+            if (editorPath == built) return;
+            PlayerPrefs.SetString(Addressables.kAddressablesRuntimeDataPath, built + "/settings.json");
+            Application.quitting += () => PlayerPrefs.DeleteKey(Addressables.kAddressablesRuntimeDataPath);
+            Func<IResourceLocation, string> previous = Addressables.InternalIdTransformFunc;
+            Addressables.InternalIdTransformFunc = location =>
+            {
+                string id = previous != null ? previous(location) : location.InternalId;
+                return id != null && id.StartsWith(editorPath, StringComparison.Ordinal) ? built + id.Substring(editorPath.Length) : id;
+            };
         }
 
         internal static void Uninstall()

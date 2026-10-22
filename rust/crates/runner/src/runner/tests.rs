@@ -1164,3 +1164,28 @@ fn sdk_tools_do_not_inherit_standard_input() {
     .unwrap();
     assert_eq!(String::from_utf8_lossy(&output).trim(), "/dev/null");
 }
+
+#[test]
+fn unique_symbols_of_a_plugin_become_weak() {
+    // An ELF64 image with one .dynsym section of two symbols: a unique
+    // object and a global function.
+    let mut image = vec![0u8; 176];
+    image[..6].copy_from_slice(b"\x7fELF\x02\x01");
+    image[0x28] = 64; // e_shoff
+    image[0x3a] = 64; // e_shentsize
+    image[0x3c] = 1; // e_shnum
+    image[64 + 4] = 11; // SHT_DYNSYM
+    image[64 + 0x18] = 128; // sh_offset
+    image[64 + 0x20] = 48; // sh_size
+    image[64 + 0x38] = 24; // sh_entsize
+    image[128 + 4] = (10 << 4) | 1;
+    image[152 + 4] = (1 << 4) | 2;
+    assert_eq!(super::player::weaken_unique_symbols(&mut image), 1);
+    assert_eq!(image[128 + 4], (2 << 4) | 1);
+    assert_eq!(image[152 + 4], (1 << 4) | 2);
+    assert_eq!(super::player::weaken_unique_symbols(&mut image), 0);
+    assert_eq!(
+        super::player::weaken_unique_symbols(&mut b"not an ELF".to_vec()),
+        0
+    );
+}

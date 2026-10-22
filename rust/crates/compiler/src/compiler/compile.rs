@@ -531,6 +531,7 @@ impl Compiler {
             current_dlls: NilMap::make(),
             accepted_dll_hashes: NilMap::make(),
             proofs: NilMap::make(),
+            play_mode: manifest.play_mode,
             ..Default::default()
         };
         let data = player_data(staged_player);
@@ -1019,9 +1020,16 @@ impl Compiler {
         built: &BTreeMap<String, String>,
     ) -> Result<NilVec<String>> {
         let config = self.configs.value(&assembly.name);
-        let mut refs: Vec<String> = self.base_references.to_vec();
+        let (base, engine) = match self.play_mode && assembly.editor_only {
+            true => self.editor_only_references(),
+            false => (
+                self.base_references.to_vec(),
+                self.engine_references.to_vec(),
+            ),
+        };
+        let mut refs: Vec<String> = base;
         if !config.config.no_engine_references {
-            refs.extend(self.engine_references.iter().cloned());
+            refs.extend(engine);
         }
         let managed = sysutil::dir(self.current_dlls.at(&assembly.name));
         if self.manifest.backend == "authored_source" {
@@ -1037,7 +1045,7 @@ impl Compiler {
                 if filename.is_empty() {
                     filename = join(&[&managed, &format!("{dependency}.dll")]);
                 }
-                if dependency.starts_with("UnityEditor") {
+                if dependency.starts_with("UnityEditor") && !self.play_mode {
                     bail!("Editor dependency cannot be a Player reference: {dependency}");
                 }
                 self.hashes.file_hash(&filename).map_err(|error| {
@@ -1378,6 +1386,14 @@ impl Compiler {
                     .iter()
                     .cloned(),
             );
+        }
+        if self.play_mode {
+            // The stand-ins hold what the code of the revision names.
+            let report = self.write_play_mode_stand_ins(ctx, &staging, &managed)?;
+            for name in &report.shims {
+                let path = join(&[&managed, &format!("{name}.dll")]);
+                map.wrote(&path, file_hash(&path)?)?;
+            }
         }
         update.elapsed_seconds = float_layout(started.elapsed().as_secs_f64());
         atomic_json(&join(&[&staging, "compile-update.json"]), &update)?;
@@ -1840,6 +1856,12 @@ impl Compiler {
             netcode_key = self.prepare_netcode_processor(ctx)?.key;
             identity.insert("netcodePostprocessor".into(), netcode_key.clone());
         }
+        if self.play_mode {
+            identity.insert(
+                "playModeLink".into(),
+                self.play_mode_link_identity(ctx, &assembly.name)?,
+            );
+        }
         let key = sha256(&marshal(&identity)?);
         lap = self.last_phases.lap("assembly_identity", lap);
         let entry = join(&[&self.stored("assemblies"), &key]);
@@ -1994,6 +2016,13 @@ impl Compiler {
             (dll, proof) = self.postprocess_netcode(ctx, &folder, &dll, assembly, refs, proof)?;
         }
         lap = self.last_phases.lap("netcode", lap);
+        if self.play_mode {
+            let linked = join(&[&folder, "Linked", &library]);
+            sys::mkdir_all(&sysutil::dir(&linked))?;
+            self.link_play_mode_assembly(ctx, &folder, &assembly.name, &dll, &linked)?;
+            dll = linked;
+            lap = self.last_phases.lap("play_mode_link", lap);
+        }
         sys::mkdir_all(&sysutil::dir(&entry))?;
         let payload = sys::mkdir_temp(&sysutil::dir(&entry), ".assembly-")?;
         let mut files = NilMap::make();

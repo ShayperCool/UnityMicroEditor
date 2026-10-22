@@ -235,6 +235,7 @@ namespace UnityMicroEditor
                 if (finished) return;
                 try
                 {
+                    UnityMicroEditor.PlayModeEditor.EditorLoop.Tick();
                     if (!string.IsNullOrEmpty(options.RawManifestPath) && !rawLoaded) return;
                     Scene active = SceneManager.GetActiveScene();
                     if (sceneIndex >= 0 && active.buildIndex != sceneIndex)

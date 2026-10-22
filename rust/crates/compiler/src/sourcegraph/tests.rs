@@ -1153,3 +1153,99 @@ fn a_device_game_compiles_as_the_editor_compiles_it_for_its_group() {
             .all(|assembly| assembly.config.name != "Game")
     );
 }
+
+#[test]
+fn play_mode_code_compiles_as_the_editor_compiles_it_with_its_editor_assemblies() {
+    let (_directory, project) = temp();
+    write_graph_file(&project, "Packages/manifest.json", r#"{"dependencies":{}}"#);
+    write_graph_file(
+        &project,
+        "ProjectSettings/ProjectSettings.asset",
+        "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!129 &1\nPlayerSettings:\n  scriptingDefineSymbols:\n    Android: GAME_DEFINE\n",
+    );
+    write_graph_file(
+        &project,
+        COMPILE_FOR_FILE,
+        r#"{"schemaVersion":1,"group":"Android","playMode":true}"#,
+    );
+    // The game for the device and the Editor; a Linux-only stub, which
+    // Play mode compiles because it names the Editor; an Editor tool the
+    // stub refers to, and one nothing refers to.
+    for (name, platforms, references, guid) in [
+        ("Game", r#"["Android","Editor"]"#, r#"[]"#, "a"),
+        (
+            "Stub",
+            r#"["LinuxStandalone64","Editor"]"#,
+            r#"["Tools"]"#,
+            "b",
+        ),
+        ("Tools", r#"["Editor"]"#, r#"[]"#, "c"),
+        ("Unused", r#"["Editor"]"#, r#"[]"#, "d"),
+    ] {
+        write_graph_file(
+            &project,
+            &format!("Assets/{name}/{name}.asmdef"),
+            &format!(
+                r#"{{"name":"{name}","includePlatforms":{platforms},"references":{references}}}"#
+            ),
+        );
+        write_graph_file(
+            &project,
+            &format!("Assets/{name}/{name}.asmdef.meta"),
+            &format!("guid: {}\n", guid.repeat(32)),
+        );
+        write_graph_file(
+            &project,
+            &format!("Assets/{name}/{name}.cs"),
+            "class Probe {}",
+        );
+        write_graph_file(
+            &project,
+            &format!("Assets/{name}/{name}.cs.meta"),
+            &format!("guid: {}\n", guid.repeat(31) + "e"),
+        );
+    }
+    let options = SourceGraphOptions {
+        project: project.clone(),
+        profile: Some(signed(fixture_profile(&[
+            "ENABLE_MONO",
+            "DEVELOPMENT_BUILD",
+            "UNITY_STANDALONE_LINUX",
+        ]))),
+        packages: Some(resolve(&project, "")),
+        ..Default::default()
+    };
+    let graph = build_source_graph(&background(), &options).unwrap();
+    assert!(graph.play_mode);
+    let names: Vec<&str> = graph
+        .assemblies
+        .iter()
+        .map(|assembly| assembly.config.name.as_str())
+        .collect();
+    assert_eq!(names, ["Game", "Stub", "Tools", "Unused"], "{names:?}");
+    let editor_only: Vec<&str> = graph
+        .assemblies
+        .iter()
+        .filter(|assembly| assembly.editor_only)
+        .map(|assembly| assembly.config.name.as_str())
+        .collect();
+    assert_eq!(editor_only, ["Tools", "Unused"]);
+    let game = &graph.assemblies[0].config;
+    for define in ["GAME_DEFINE", "UNITY_EDITOR", "UNITY_ANDROID", "ENABLE_EGL"] {
+        assert!(
+            game.defines.iter().any(|d| d == define),
+            "{define}: {:?}",
+            game.defines
+        );
+    }
+    for define in ["DEVELOPMENT_BUILD", "UNITY_STANDALONE_LINUX"] {
+        assert!(!game.defines.iter().any(|d| d == define), "{define}");
+    }
+}
+
+#[test]
+fn editor_defines_follow_the_release() {
+    assert!(editor_defines("6000.6.3f1").contains(&"UNITY_INCLUDE_INSTRUMENTATION"));
+    let older = editor_defines("6000.0.71f1");
+    assert!(older.contains(&"UNITY_EDITOR") && !older.contains(&"UNITY_ENABLE_CHECKS"));
+}

@@ -116,7 +116,12 @@ pub fn start_player(
     let mut command = Command::new(&path);
     command
         .args(&args)
-        .current_dir(run_directory)
+        // Play mode code finds the project's files by their paths relative
+        // to it (`Assets/...`), as in the Editor.
+        .current_dir(match opts.play_mode {
+            true => opts.project.as_str(),
+            false => run_directory,
+        })
         .stdin(Stdio::null())
         .stdout(
             log.try_clone()
@@ -129,6 +134,33 @@ pub fn start_player(
         .process_group(0);
     if std::env::var_os("DISPLAY").is_none_or(|display| display.is_empty()) {
         command.env("DISPLAY", ":0");
+    }
+    if opts.play_mode {
+        // The build target the Editor would have active (`UnityEditor.BuildTarget`).
+        let (target, _) = active_build_target(&opts.project);
+        command.env("UME_PLAY_MODE_BUILD_TARGET", target.to_string());
+        // The game's native plugins bind to their own symbols, as zavod's
+        // Editor images open them: Firebase's desktop library and another
+        // gRPC of the game otherwise share one gRPC and crash.
+        match plugin_deepbind(&opts.project) {
+            Ok(library) => {
+                let preload = match std::env::var("LD_PRELOAD") {
+                    Ok(existing) if !existing.is_empty() => format!("{library}:{existing}"),
+                    _ => library,
+                };
+                command.env("LD_PRELOAD", preload);
+                command.env(
+                    "UME_DEEPBIND_PREFIXES",
+                    format!(
+                        "{}/",
+                        sysutil::join(&[&crate::compiler::player_data(&path), "Plugins"])
+                    ),
+                );
+            }
+            Err(error) => eprintln!(
+                "[unity-micro-editor] the game's native plugins share their symbols in this Player: {error:#}"
+            ),
+        }
     }
     // A redirect does not reach the copies an inlining JIT made of a method.
     // Options the caller set for the Player's Mono are passed on as they are.
@@ -572,4 +604,170 @@ pub fn wait_reload_ack(ctx: &Context, path: &str, id: &str, timeout: Duration) -
             error: None,
         };
     }
+}
+
+/// The preload library that opens the game's native plugins with
+/// `RTLD_DEEPBIND` (`tools/PluginDeepbind`), built by the system's C compiler
+/// once per source into the project's compiler store.
+fn plugin_deepbind(project: &str) -> Result<String> {
+    let source = sysutil::join(&[
+        &crate::util::micro_editor_root()?,
+        "tools/PluginDeepbind/plugin-deepbind.c",
+    ]);
+    let code = std::fs::read(&source).map_err(|e| os_error("read", &source, &e))?;
+    let entry = sysutil::join(&[
+        &crate::compiler::project_compiler_store(project),
+        "plugin-deepbind",
+        &crate::sha256(&code)[..32],
+    ]);
+    let library = sysutil::join(&[&entry, "ume-plugin-deepbind.so"]);
+    if std::path::Path::new(&library).is_file() {
+        return Ok(library);
+    }
+    std::fs::create_dir_all(&entry).map_err(|e| os_error("mkdir", &entry, &e))?;
+    let building = format!("{library}.{}", std::process::id());
+    let output = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2", "-o", &building, &source, "-ldl"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| anyhow!("run cc: {e}"))?;
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&building);
+        bail!(
+            "cc could not build {source}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    std::fs::rename(&building, &library).map_err(|e| os_error("rename", &library, &e))?;
+    Ok(library)
+}
+
+/// Makes the `STB_GNU_UNIQUE` symbols of the native plugins of a Player
+/// (`<Player>_Data/Plugins`) weak ones, in place; returns how many changed.
+/// The loader keeps one instance of a unique symbol for the whole process
+/// whatever the library was opened with, so two gRPCs of different versions
+/// (Firebase's desktop library and the game's own) shared the tables of
+/// gRPC's metadata and crashed in the second one's parser. A weak symbol,
+/// with the plugins opened with `RTLD_DEEPBIND`, stays each library's own.
+pub fn isolate_plugin_symbols(player: &str) -> Result<usize> {
+    let directory = sysutil::join(&[&crate::compiler::player_data(player), "Plugins"]);
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+        return Ok(0);
+    };
+    let mut changed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != "so") || !path.is_file() {
+            continue;
+        }
+        let mut image =
+            std::fs::read(&path).map_err(|e| os_error("read", &path.to_string_lossy(), &e))?;
+        let count = weaken_unique_symbols(&mut image);
+        if count > 0 {
+            // A staged copy may share its blocks with the host's (`cp --reflink`).
+            let temporary = path.with_extension("so.isolating");
+            std::fs::write(&temporary, &image)
+                .map_err(|e| os_error("write", &temporary.to_string_lossy(), &e))?;
+            std::fs::set_permissions(&temporary, std::fs::metadata(&path)?.permissions())?;
+            std::fs::rename(&temporary, &path)
+                .map_err(|e| os_error("rename", &path.to_string_lossy(), &e))?;
+            changed += count;
+        }
+    }
+    Ok(changed)
+}
+
+/// Rewrites the binding of every `STB_GNU_UNIQUE` (10) symbol of an ELF64
+/// little-endian image's `.dynsym` to `STB_WEAK` (2); the count of them.
+pub(super) fn weaken_unique_symbols(image: &mut [u8]) -> usize {
+    let read = |image: &[u8], at: usize, width: usize| -> Option<u64> {
+        let bytes = image.get(at..at + width)?;
+        Some(
+            bytes
+                .iter()
+                .rev()
+                .fold(0u64, |value, byte| (value << 8) | u64::from(*byte)),
+        )
+    };
+    if image.get(..6) != Some(b"\x7fELF\x02\x01".as_slice()) {
+        return 0;
+    }
+    let (Some(sections), Some(entry_size), Some(count)) = (
+        read(image, 0x28, 8),
+        read(image, 0x3a, 2),
+        read(image, 0x3c, 2),
+    ) else {
+        return 0;
+    };
+    let mut changed = 0;
+    for index in 0..count as usize {
+        let header = sections as usize + index * entry_size as usize;
+        // SHT_DYNSYM
+        if read(image, header + 4, 4) != Some(11) {
+            continue;
+        }
+        let (Some(offset), Some(size), Some(stride)) = (
+            read(image, header + 0x18, 8),
+            read(image, header + 0x20, 8),
+            read(image, header + 0x38, 8),
+        ) else {
+            continue;
+        };
+        if stride < 24 {
+            continue;
+        }
+        let mut at = offset as usize;
+        while at + stride as usize <= (offset + size) as usize && at + 5 <= image.len() {
+            let info = image[at + 4];
+            if info >> 4 == 10 {
+                image[at + 4] = (2 << 4) | (info & 0x0f);
+                changed += 1;
+            }
+            at += stride as usize;
+        }
+    }
+    changed
+}
+
+/// The build target an Editor of the project would have active: the one of
+/// `--compile-for`, as `UnityEditor.BuildTarget` numbers and names it.
+pub fn active_build_target(project: &str) -> (u32, &'static str) {
+    match crate::sourcegraph::compile_for_group(project)
+        .ok()
+        .flatten()
+        .as_deref()
+    {
+        Some("Android") => (13, "Android"),
+        Some("iPhone") => (9, "iOS"),
+        Some("WebGL") => (20, "WebGL"),
+        _ => (24, "StandaloneLinux64"),
+    }
+}
+
+/// Play mode code checks that the Addressables content it reads was built
+/// for the active build target. The host's content, which stands for it, is
+/// a Linux build; the session's copy of its settings names the active target.
+pub fn adopt_addressables_target(player: &str, project: &str) -> Result<()> {
+    let settings = sysutil::join(&[
+        &crate::compiler::player_data(player),
+        "StreamingAssets/aa/settings.json",
+    ]);
+    let Ok(text) = std::fs::read_to_string(&settings) else {
+        return Ok(());
+    };
+    let key = "\"m_buildTarget\":\"";
+    let Some(start) = text.find(key).map(|at| at + key.len()) else {
+        return Ok(());
+    };
+    let Some(length) = text[start..].find('"') else {
+        return Ok(());
+    };
+    let (_, name) = active_build_target(project);
+    if &text[start..start + length] == name {
+        return Ok(());
+    }
+    let adopted = format!("{}{name}{}", &text[..start], &text[start + length..]);
+    let temporary = format!("{settings}.adopting");
+    std::fs::write(&temporary, adopted).map_err(|e| os_error("write", &temporary, &e))?;
+    std::fs::rename(&temporary, &settings).map_err(|e| os_error("rename", &settings, &e))
 }

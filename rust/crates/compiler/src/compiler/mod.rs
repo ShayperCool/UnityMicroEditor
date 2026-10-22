@@ -10,6 +10,8 @@ mod nilable;
 mod packages;
 pub use packages::PlainCompile;
 mod phases;
+mod playmode;
+pub use playmode::{EditorReferences, editor_references};
 mod prepare;
 mod revision;
 mod script_types;
@@ -201,6 +203,15 @@ pub struct CompileAssembly {
         skip_serializing_if = "is_empty"
     )]
     pub lifecycle_helper: String,
+    /// Of Play mode code (`playmode`): an assembly for the Editor alone,
+    /// which compiles against the .NET Framework API and every module of
+    /// the Editor, as the Editor compiles it.
+    #[serde(
+        rename = "editorOnly",
+        deserialize_with = "nz",
+        skip_serializing_if = "is_false"
+    )]
+    pub editor_only: bool,
 }
 
 /// What the lifecycle helper verified of an assembly's sources: the
@@ -258,6 +269,13 @@ pub struct CompileManifest {
         skip_serializing_if = "is_empty"
     )]
     pub native_slots_sha: String,
+    /// Whether the game's assemblies are Play mode code (`playmode`).
+    #[serde(
+        rename = "playMode",
+        deserialize_with = "nz",
+        skip_serializing_if = "is_false"
+    )]
+    pub play_mode: bool,
     pub assemblies: NilVec<CompileAssembly>,
     #[serde(rename = "compilerInputs")]
     pub compiler_inputs: NilMap<String>,
@@ -368,6 +386,14 @@ pub struct CompilerGraphExport {
     /// edits, which the Editor runs over every assembly it compiles.
     #[serde(rename = "codegenAssemblies", skip_serializing_if = "Vec::is_empty")]
     pub codegen_assemblies: Vec<CodegenAssembly>,
+    /// Whether the runtime assemblies are compiled as the Editor's Play mode
+    /// compiles them (`playmode`).
+    #[serde(
+        rename = "playMode",
+        deserialize_with = "nz",
+        skip_serializing_if = "is_false"
+    )]
+    pub play_mode: bool,
 }
 
 /// One IL post-processor assembly of a package, compiled for the runner.
@@ -611,6 +637,11 @@ pub struct Compiler {
     /// The hash of the settings managers the next code revision's Player
     /// holds (`settings::player_managers_hash`), set by each compile.
     pub settings_key: String,
+    /// Whether the game's assemblies are Play mode code, which each compile
+    /// links into the Player (`playmode`).
+    pub play_mode: bool,
+    /// The Play mode linker, once built, kept by every clone.
+    pub play_mode_linker: Arc<Mutex<Option<String>>>,
 }
 
 /// `UME_COMPILER_COLD=1`: a session starts no process that outlives one
