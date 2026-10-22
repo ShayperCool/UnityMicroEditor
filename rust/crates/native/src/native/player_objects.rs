@@ -328,8 +328,8 @@ pub fn stage_importer(ctx: &Context, editor: &str, project: &str) -> Result<()> 
     let data = sysutil::join(&[&installation, "Data"]);
     let crate::compiler::UnitySdk { dotnet, csc } = crate::compiler::unity_sdk(&data)?;
     let generator = sysutil::join(&[
-        &data,
-        "Tools/BuildPipeline/Unity.SourceGenerators/Unity.SourceGenerators.dll",
+        &crate::compiler::source_generators(&data),
+        "Unity.SourceGenerators.dll",
     ]);
     let source = sysutil::join(&[project, IMPORTER_PATH]);
     mkdir_all(&sysutil::dir(&source), 0o700)?;

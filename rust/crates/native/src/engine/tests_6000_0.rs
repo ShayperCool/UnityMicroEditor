@@ -430,25 +430,34 @@ fn the_source_database_hashes_with_spooky_and_whole_seconds() {
 }
 
 #[test]
-fn etc_compressor_settings_other_than_the_defaults_are_refused() {
+fn the_worker_is_sent_the_projects_etc_compressors() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::create_dir(directory.path().join("ProjectSettings")).unwrap();
     let path = directory.path().to_string_lossy().into_owned();
-    let worker = engine().worker;
-    worker.check_project(&path).unwrap();
     let settings = directory
         .path()
         .join("ProjectSettings/EditorSettings.asset");
-    let text = |fast: i32| {
-        format!(
-            "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!159 &1\nEditorSettings:\n  m_EtcTextureFastCompressor: {fast}\n  m_EtcTextureNormalCompressor: 2\n  m_EtcTextureBestCompressor: 4\n"
-        )
+    std::fs::write(
+        &settings,
+        "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!159 &1\nEditorSettings:\n  m_EtcTextureFastCompressor: 2\n  m_EtcTextureNormalCompressor: 2\n  m_EtcTextureBestCompressor: 5\n",
+    )
+    .unwrap();
+    let read = crate::native::read_editor_settings(&path).unwrap();
+    assert_eq!(read.etc_compressors, [2, 2, 5]);
+    let mut environment = WorkerEnvironment {
+        etc_compressors: read.etc_compressors.to_vec(),
+        ..Default::default()
     };
-    std::fs::write(&settings, text(1)).unwrap();
-    worker.check_project(&path).unwrap();
-    std::fs::write(&settings, text(2)).unwrap();
-    let error = worker.check_project(&path).unwrap_err().to_string();
-    assert!(error.contains("m_EtcTextureFastCompressor 2"), "{error}");
-    // The release of 6000.6 asks nothing of the file.
-    verified().worker.check_project(&path).unwrap();
+    let message = release::environment_message(&environment, 16);
+    let key = b"graphics/etc-compressor\0";
+    let at = message
+        .windows(key.len())
+        .position(|window| window == key)
+        .expect("the key is sent");
+    assert!(message.len() > at);
+    // Without project values the Editor's defaults are sent.
+    environment.etc_compressors.clear();
+    assert_ne!(release::environment_message(&environment, 16), message);
+    assert!(engine().worker.sends_etc_compressors());
+    assert!(!verified().worker.sends_etc_compressors());
 }

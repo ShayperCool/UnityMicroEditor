@@ -534,8 +534,10 @@ fn capture_profile_references(profile: &mut SourceEngineProfile, editor: &str, p
     let data = sysutil::join(&[&sysutil::dir(editor), "Data"]);
     for path in paths {
         // The BCL extensions (`System.Runtime.CompilerServices.Unsafe` and the
-        // like) are given to every assembly the Editor compiles.
+        // like) are given to every assembly the Editor compiles. 6000.0
+        // compiles a Player against its reference assemblies of the 4.8 API.
         if within_directory(path, &sysutil::join(&[&data, "NetStandard"]))
+            || within_directory(path, &sysutil::join(&[&data, "UnityReferenceAssemblies"]))
             || within_directory(path, &sysutil::join(&[&data, "MonoBleedingEdge/lib/mono"]))
             || within_directory(
                 path,

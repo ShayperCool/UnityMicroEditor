@@ -46,7 +46,7 @@ pub use service::{Reply as ServiceReply, Service, ServiceError};
 pub use source_graph::{managed_plugin, remove_source_native_initializers};
 pub use stamp::{HashCache, PlayerMap, Stamp};
 pub use sys::{BUILD_WITHOUT_SERVERS, CommandError, compiler_command, glob, path_match};
-pub use sys::{UnitySdk, unity_sdk};
+pub use sys::{UnitySdk, build_tool, source_generators, unity_sdk};
 pub use sys::{Walk, WalkEntry, glob_lossy, is_not_exist, walk_dir};
 
 use nilable::{is_empty, is_false, nz};

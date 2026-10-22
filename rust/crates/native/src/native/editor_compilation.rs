@@ -145,12 +145,18 @@ pub fn ensure(
     compiler.initialize_sdk()?;
     // The Editor's own analyzers mark the assemblies whose code-load
     // callbacks it runs; an Editor refuses such an assembly without them.
+    // 6000.0 has none.
     let tools = sysutil::join(&[&sysutil::dir(editor), "Data/Tools/BuildPipeline"]);
     for analyzer in [
         "Unity.Analyzers.Common/Unity.Analyzers.Common.dll",
         "Unity.Analyzers.LongLiving/Unity.Analyzers.LongLiving.dll",
     ] {
-        compiler.generators.push(sysutil::join(&[&tools, analyzer]));
+        let path = sysutil::join(&[&tools, analyzer]);
+        if crate::release::project_release(project)? == crate::release::verified().version
+            || std::fs::metadata(&path).is_ok()
+        {
+            compiler.generators.push(path);
+        }
     }
     let staging = sysutil::join(&[
         project,

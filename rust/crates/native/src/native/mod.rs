@@ -31,6 +31,9 @@ pub use context::{
     resolve_project_import_source, verify_project_import_sources,
 };
 pub use datastore::{DataStoreLogEvidence, DataStoreService, DataStoreStatus, read_data_store_log};
+pub(crate) use environment::DEFAULT_ETC_COMPRESSORS;
+#[cfg(test)]
+pub(crate) use environment::read_editor_settings;
 pub use environment::{
     WorkerEnvironment, native_environment_fingerprint, parse_worker_environment,
     read_worker_environment, run_native_environment_cli,

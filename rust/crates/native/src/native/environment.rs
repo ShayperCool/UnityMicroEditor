@@ -46,6 +46,10 @@ pub struct WorkerEnvironment {
     /// SHA-256 of `ProjectSettings/EditorSettings.asset`; empty without one.
     #[serde(deserialize_with = "nul")]
     pub editor_settings_sha256: String,
+    /// The fast, normal and best ETC compressors of `EditorSettings`, for a
+    /// release whose worker is sent them (6000.0); empty otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub etc_compressors: Vec<u32>,
 }
 
 pub fn run_native_environment_cli(args: &[String]) -> Result<()> {
@@ -106,13 +110,17 @@ pub fn read_worker_environment(project: &str) -> Result<WorkerEnvironment> {
     let engine = engine::supported(&version)
         .map_err(|error| anyhow!("native worker environment: {error:#}"))?;
     engine.worker.check_project(project)?;
-    let mut environment = parse_worker_environment(&data)?;
+    let mut environment =
+        parse_release_environment(&data, engine.worker.sends_lightmap_encoding())?;
     environment.unity_version = engine.version.into();
     environment.settings_sha256 = sha256(&data);
     let editor = read_editor_settings(project)?;
     environment.bc7_compressor = editor.bc7_compressor;
     environment.sprite_atlas_v2 = editor.sprite_atlas_v2;
     environment.editor_settings_sha256 = editor.sha256;
+    if engine.worker.sends_etc_compressors() {
+        environment.etc_compressors = editor.etc_compressors.to_vec();
+    }
     Ok(environment)
 }
 
@@ -122,7 +130,12 @@ pub(crate) struct EditorImportSettings {
     pub sha256: String,
     pub bc7_compressor: u32,
     pub sprite_atlas_v2: u32,
+    /// `m_EtcTextureFastCompressor`, `...Normal...` and `...Best...`.
+    pub etc_compressors: [u32; 3],
 }
+
+/// The ETC compressors of a new `EditorSettings.asset` (fast, normal, best).
+pub(crate) const DEFAULT_ETC_COMPRESSORS: [u32; 3] = [1, 2, 4];
 
 pub(crate) const EDITOR_SETTINGS: &str = "ProjectSettings/EditorSettings.asset";
 
@@ -137,6 +150,7 @@ pub(crate) fn read_editor_settings(project: &str) -> Result<EditorImportSettings
                 sha256: String::new(),
                 bc7_compressor: BC7_ISPC,
                 sprite_atlas_v2: 0,
+                etc_compressors: DEFAULT_ETC_COMPRESSORS,
             });
         }
         Err(error) => return Err(error),
@@ -174,17 +188,47 @@ pub(crate) fn read_editor_settings(project: &str) -> Result<EditorImportSettings
             crate::project::value::sprint(other)
         ),
     };
+    let mut etc_compressors = DEFAULT_ETC_COMPRESSORS;
+    for (index, field) in [
+        "m_EtcTextureFastCompressor",
+        "m_EtcTextureNormalCompressor",
+        "m_EtcTextureBestCompressor",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        match get(settings, field) {
+            Value::Null => {}
+            Value::Int(value @ 0..=255) => etc_compressors[index] = *value as u32,
+            other => bail!(
+                "unsupported ETC compressor setting {field}: {}",
+                crate::project::value::sprint(other)
+            ),
+        }
+    }
     Ok(EditorImportSettings {
         sha256: sha256(&data),
         bc7_compressor,
         sprite_atlas_v2,
+        etc_compressors,
     })
 }
+
+/// `LightmapEncodingQuality::High` and `HDRCubemapEncodingQuality::High`,
+/// the Linux standalone defaults the worker is sent.
+const ENCODING_QUALITY_HIGH: u32 = 2;
 
 /// `EditorSettings::Bc7TextureCompressor::Ispc`.
 const BC7_ISPC: u32 = 2;
 
 pub fn parse_worker_environment(data: &[u8]) -> Result<WorkerEnvironment> {
+    parse_release_environment(data, true)
+}
+
+/// `parse_worker_environment` for a release whose worker is sent the
+/// lightmap encoding quality only when `lightmap_encoding` (6000.0's has no
+/// such key).
+fn parse_release_environment(data: &[u8], lightmap_encoding: bool) -> Result<WorkerEnvironment> {
     if data.len() > 1 << 20 {
         bail!("native worker PlayerSettings exceeds supported bounds");
     }
@@ -220,19 +264,28 @@ pub fn parse_worker_environment(data: &[u8]) -> Result<WorkerEnvironment> {
         ..Default::default()
     };
     // The encodings a texture importer asks for are sent as the standalone
-    // defaults; a project that sets one for the standalone target was not
-    // compared with the Editor.
-    for (field, what) in [
-        ("m_BuildTargetNormalMapEncoding", "normal map encoding"),
+    // defaults; a project that sets another one for the standalone target
+    // was not compared with the Editor.
+    for (field, what, default) in [
+        (
+            "m_BuildTargetNormalMapEncoding",
+            "normal map encoding",
+            None,
+        ),
         (
             "m_BuildTargetGroupLightmapEncodingQuality",
             "lightmap encoding quality",
+            Some(i64::from(ENCODING_QUALITY_HIGH)),
         ),
         (
             "m_BuildTargetGroupHDRCubemapEncodingQuality",
             "HDR cubemap encoding quality",
+            Some(i64::from(ENCODING_QUALITY_HIGH)),
         ),
     ] {
+        if field == "m_BuildTargetGroupLightmapEncodingQuality" && !lightmap_encoding {
+            continue;
+        }
         let entries = match get(settings, field) {
             Value::Array(entries) if entries.len() <= 64 => entries,
             Value::Null => continue,
@@ -241,6 +294,11 @@ pub fn parse_worker_environment(data: &[u8]) -> Result<WorkerEnvironment> {
         for item in entries {
             match item.field("m_BuildTarget") {
                 Value::String(name) if name != "Standalone" => {}
+                // The default stated explicitly.
+                Value::String(_)
+                    if default.is_some()
+                        && matches!(item.field("m_EncodingQuality"), Value::Int(value) if Some(*value) == default) =>
+                    {}
                 _ => bail!("native worker requires the default standalone {what}"),
             }
         }

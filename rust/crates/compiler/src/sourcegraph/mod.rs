@@ -203,10 +203,16 @@ fn set_version_defines(target: &mut NilVec<VersionDefine>, value: &Json) -> Resu
     Ok(())
 }
 
+/// An asmdef or asmref without the UTF-8 byte order mark an editor may have
+/// saved it with; Unity reads such files.
+fn without_bom(content: &[u8]) -> &[u8] {
+    content.strip_prefix(b"\xef\xbb\xbf").unwrap_or(content)
+}
+
 /// Decodes an asmdef with case-insensitive field matching and the decoder's error texts.
 pub fn decode_asmdef(content: &[u8]) -> Result<SourceAsmdef, String> {
     let mut definition = SourceAsmdef::default();
-    let members = match jsondoc::parse(content)? {
+    let members = match jsondoc::parse(without_bom(content))? {
         Json::Null => return Ok(definition),
         Json::Object(members) => members,
         other => return Err(Target::VALUE.mismatch(other.kind(), "sourceAsmdef")),
@@ -296,6 +302,16 @@ fn linux_platform(key: &str) -> bool {
 /// Where a project records the build target group whose scripting define
 /// symbols its Player is compiled with.
 pub const COMPILE_FOR_FILE: &str = "Library/UnityMicroEditor/compile-for.json";
+
+/// Whether the Player `player` holds the very plugin `path` among its
+/// managed assemblies.
+fn host_holds(player: &str, path: &str) -> bool {
+    if player.is_empty() {
+        return false;
+    }
+    let held = sysutil::join(&[&managed_directory(player), &sysutil::base(path)]);
+    matches!((file_hash(&held), file_hash(path)), (Ok(held), Ok(source)) if held == source)
+}
 
 /// The platform the Player's code is compiled for: its name in asmdef
 /// platform lists and its entry in a plugin's `PluginImporter` settings.
@@ -698,7 +714,7 @@ pub fn build_source_graph(
                     definitions.insert(definition.name.clone(), definition);
                 }
                 ".asmref" => {
-                    let reference = match jsondoc::parse(&content) {
+                    let reference = match jsondoc::parse(without_bom(&content)) {
                         Ok(Json::Object(members)) => {
                             let mut reference = String::new();
                             jsondoc::decode_struct(&members, &["reference"], |_, member| {
@@ -725,14 +741,42 @@ pub fn build_source_graph(
                             .entry(sysutil::base(path))
                             .or_insert_with(|| path.to_string());
                     }
-                    let plugin = match options.editor_domain {
+                    let mut plugin = match options.editor_domain {
                         true => read_editor_plugin(path, &base)?,
                         false => read_source_plugin(path, &base, platform)?,
                     };
+                    // A project's build callbacks can enable a plugin for the
+                    // Player being built (Odin Inspector's NoEditor
+                    // assemblies); the host is such a build, by the Editor,
+                    // and holds the plugin it took.
+                    if !options.editor_domain
+                        && !plugin.enabled
+                        && managed_plugin(path)
+                        && host_holds(&options.player, path)
+                    {
+                        plugin.enabled = true;
+                    }
                     if plugin.enabled && managed_plugin(path) {
                         let name = sysutil::base(path);
-                        if plugins.contains_key(&name) {
-                            bail!("duplicate active managed plugin filename: {name}");
+                        if let Some(previous) = plugins.get(&name) {
+                            // Two copies of an Editor tool (External Dependency
+                            // Manager in Assets and as a package) are reconciled
+                            // by the tool's own Editor code; the Editor's
+                            // compilation then takes the project's copy.
+                            let project_copy = |path: &str| {
+                                crate::util::within_directory(
+                                    path,
+                                    &sysutil::join(&[&project, "Assets"]),
+                                )
+                            };
+                            if !options.editor_domain
+                                || project_copy(&previous.path) == project_copy(path)
+                            {
+                                bail!("duplicate active managed plugin filename: {name}");
+                            }
+                            if project_copy(&previous.path) {
+                                return Ok(Walk::Continue);
+                            }
                         }
                         plugins.insert(name, plugin);
                     }
@@ -778,14 +822,16 @@ pub fn build_source_graph(
     for (name, definition) in &definitions {
         let mut defines = base.clone();
         for version in &definition.version_defines {
-            if !symbol(&version.define) {
+            // Unity takes a define with the blanks around it removed.
+            let define = version.define.trim();
+            if !symbol(define) {
                 bail!("invalid asmdef version define: {}", definition.path);
             }
             if let Some(current) = versions.get(&version.name).filter(|v| !v.is_empty())
                 && match_version(current, &version.expression)
                     .map_err(|error| anyhow!("{name} version define: {error}"))?
             {
-                defines.push(version.define.clone());
+                defines.push(define.to_string());
             }
         }
         let defines = sorted_strings(&defines);
@@ -841,6 +887,10 @@ pub fn build_source_graph(
             }
             let dependency = match resolve(&definitions, reference) {
                 Ok(dependency) => dependency,
+                // The Editor leaves out a reference, by name or GUID, to an
+                // assembly the project does not have, in the project's own
+                // asmdefs too; code that needs it then fails to compile.
+                Err(_) if definition.package.is_empty() => continue,
                 Err(error) => {
                     let package = package_map.get(definition.package.as_str());
                     // The Editor leaves out a reference to an assembly the
@@ -1051,13 +1101,14 @@ pub fn build_source_graph(
                 }
             }
         }
-        for dependency in &config.dependencies {
-            if definitions.contains_key(dependency)
-                && (!on(&active, dependency) || source_count(&configs, dependency) == 0)
-            {
-                bail!("active assembly {name} references excluded/empty assembly {dependency}");
-            }
-        }
+        // The Editor compiles an assembly without its references to
+        // assemblies the platform or their constraints leave out, or that have
+        // no sources (`UnityEngine.Purchasing.SecurityStub` beside its device
+        // counterpart); code that needs one fails to compile.
+        config.dependencies = retain(&config.dependencies, |dependency| {
+            !(definitions.contains_key(dependency)
+                && (!on(&active, dependency) || source_count(&configs, dependency) == 0))
+        });
         config.dependencies = sorted_strings(&config.dependencies);
         config.sources = sorted_strings(&config.sources);
         let sources = config.sources.clone();

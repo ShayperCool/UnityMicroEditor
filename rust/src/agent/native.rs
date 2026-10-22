@@ -164,6 +164,11 @@ pub(crate) fn project_references(project: &str) -> Result<References> {
 /// Authored content or settings that only the native
 /// importer can provide.
 pub(crate) fn may_need_native(project: &str) -> Result<bool> {
+    // The Editor's export was checked in the verified release alone; in
+    // another one the import worker brings all native content.
+    if super::unity_version(project)? != crate::release::verified().version {
+        return Ok(false);
+    }
     const NATIVE: [&str; 35] = [
         ".fbx",
         ".obj",

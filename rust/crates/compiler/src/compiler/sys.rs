@@ -384,6 +384,24 @@ pub fn glob_lossy(pattern: &str) -> Vec<String> {
     glob(pattern).unwrap_or_default()
 }
 
+/// A build tool of the installation whose `Data` directory is `data`, by
+/// its path below `Tools/BuildPipeline` (6000.6); 6000.0 keeps the same
+/// tools directly below `Tools`.
+pub fn build_tool(data: &str, relative: &str) -> String {
+    let current = sysutil::join(&[data, "Tools/BuildPipeline", relative]);
+    let older = sysutil::join(&[data, "Tools", relative]);
+    if fs::metadata(&current).is_err() && fs::metadata(&older).is_ok() {
+        older
+    } else {
+        current
+    }
+}
+
+/// The directory of Unity's Roslyn source generators.
+pub fn source_generators(data: &str) -> String {
+    build_tool(data, "Unity.SourceGenerators")
+}
+
 /// The C# compiler of a Unity installation and the .NET host that runs it
 /// and the tool's own SDK helpers.
 #[derive(Debug, Clone, PartialEq, Eq)]

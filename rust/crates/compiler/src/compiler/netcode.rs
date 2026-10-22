@@ -246,10 +246,10 @@ impl Compiler {
             )?;
         }
         let data = join(&[&sysutil::dir(&self.editor), "Data"]);
-        let common = join(&[
+        let common = super::sys::build_tool(
             &data,
-            "Tools/BuildPipeline/Compilation/Unity.ILPP.Runner/Unity.CompilationPipeline.Common.dll",
-        ]);
+            "Compilation/Unity.ILPP.Runner/Unity.CompilationPipeline.Common.dll",
+        );
         let destination = join(&["Dependencies", &sysutil::base(&common)]);
         add(common, destination)?;
         let managed = player_managed(&self.player);

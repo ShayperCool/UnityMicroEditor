@@ -29,7 +29,7 @@ use crate::{
     registry::{self, ContentHash},
     sysutil,
 };
-use anyhow::{Context as _, Result, bail, ensure};
+use anyhow::{Context as _, Result, ensure};
 
 pub const VERSION: &str = "6000.0.71f1";
 
@@ -90,12 +90,6 @@ const META_INFO_FILES: usize = 64;
 const NORMAL_MAP_DXT5NM: u32 = 1;
 /// `HDRCubemapEncodingQuality::High`, the Linux standalone default.
 const ENCODING_QUALITY_HIGH: u32 = 2;
-/// The ETC compressors of a new `EditorSettings.asset` (fast, normal, best).
-const ETC_COMPRESSORS: [(&str, i64); 3] = [
-    ("m_EtcTextureFastCompressor", 1),
-    ("m_EtcTextureNormalCompressor", 2),
-    ("m_EtcTextureBestCompressor", 4),
-];
 
 impl WorkerProtocol for Unity6000_0 {
     fn arguments(&self, launch: &WorkerLaunch<'_>) -> Vec<String> {
@@ -168,8 +162,11 @@ impl WorkerProtocol for Unity6000_0 {
     fn logged_version(&self, log: &[u8]) -> Option<String> {
         unity6000_6::logged_version(log)
     }
-    fn check_project(&self, project: &str) -> Result<()> {
-        etc_compressors_are_defaults(project)
+    fn sends_etc_compressors(&self) -> bool {
+        true
+    }
+    fn sends_lightmap_encoding(&self) -> bool {
+        false
     }
 }
 
@@ -300,37 +297,6 @@ fn current_revision(tables: &mut Tables, address: &ImportAddress, id: &[u8; 16])
     Ok(())
 }
 
-/// A project whose ETC compressor settings differ from those of a new
-/// `EditorSettings.asset` is refused: the worker is sent the defaults
-/// (`graphics/etc-compressor`), and no artifact was compared under others.
-fn etc_compressors_are_defaults(project: &str) -> Result<()> {
-    use crate::project::{Value, parse_unity_yaml, value::get};
-    let path = sysutil::join(&[project, "ProjectSettings/EditorSettings.asset"]);
-    let data = match std::fs::read(&path) {
-        Ok(data) => data,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => bail!("read {path}: {error}"),
-    };
-    // The shared reader of the file refuses one it cannot parse.
-    let Ok(documents) = parse_unity_yaml(&data) else {
-        return Ok(());
-    };
-    let Some(settings) = documents.first().map(|document| document.fields()) else {
-        return Ok(());
-    };
-    for (field, default) in ETC_COMPRESSORS {
-        match get(settings, field) {
-            Value::Null => {}
-            Value::Int(value) if *value == default => {}
-            other => bail!(
-                "Unity {VERSION}: {field} {} is not supported (the worker is sent {default})",
-                crate::project::value::sprint(other)
-            ),
-        }
-    }
-    Ok(())
-}
-
 /// Initialize (16) or Prepare (17) for `target` with nothing else set.
 pub fn parameters(kind: u8, target: i32) -> Vec<u8> {
     let mut data = vec![0; PARAMETERS_SIZE];
@@ -384,15 +350,13 @@ pub fn environment_message(environment: &WorkerEnvironment, kind: u8) -> Vec<u8>
             [1, environment.bc7_compressor as u8, 0, 0],
         ),
         // Valid marker, then the fast, normal and best compressors.
-        (
-            "graphics/etc-compressor",
-            [
-                1,
-                ETC_COMPRESSORS[0].1 as u8,
-                ETC_COMPRESSORS[1].1 as u8,
-                ETC_COMPRESSORS[2].1 as u8,
-            ],
-        ),
+        ("graphics/etc-compressor", {
+            let etc = match environment.etc_compressors.as_slice() {
+                [fast, normal, best] => [*fast, *normal, *best],
+                _ => crate::native::DEFAULT_ETC_COMPRESSORS,
+            };
+            [1, etc[0] as u8, etc[1] as u8, etc[2] as u8]
+        }),
         (
             "2d/spriteatlas-import-mode",
             one(environment.sprite_atlas_v2),

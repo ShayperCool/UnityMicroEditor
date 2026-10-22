@@ -239,6 +239,15 @@ pub trait WorkerProtocol: Sync {
     fn check_project(&self, _project: &str) -> Result<()> {
         Ok(())
     }
+    /// Whether the release's worker is sent the project's ETC compressors
+    /// (`WorkerEnvironment::etc_compressors`).
+    fn sends_etc_compressors(&self) -> bool {
+        false
+    }
+    /// Whether the release's worker is sent the lightmap encoding quality.
+    fn sends_lightmap_encoding(&self) -> bool {
+        true
+    }
 }
 
 /// The release's storage service that holds import artifacts.

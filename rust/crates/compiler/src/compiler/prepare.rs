@@ -265,8 +265,23 @@ pub fn prepare_compiler_graph_with(
                 {
                     bail!("Source plugins disagree on assembly filename: {name}");
                 }
-                plugins.insert(name.clone(), hash.clone());
                 let destination = join(&[&managed, &name]);
+                // A plugin named as a facade of the Mono class library: the
+                // Editor's build of this release keeps the facade in the
+                // Player (6000.0 with a package's own System.Buffers.dll), and
+                // the host holds that build.
+                let facade = join(&[
+                    &sysutil::dir(editor),
+                    "Data/MonoBleedingEdge/lib/mono/unityaot-linux/Facades",
+                    &name,
+                ]);
+                if let (Ok(existing), Ok(facade)) = (file_hash(&destination), file_hash(&facade))
+                    && existing != hash
+                    && existing == facade
+                {
+                    continue;
+                }
+                plugins.insert(name.clone(), hash.clone());
                 match file_hash(&destination) {
                     Ok(existing) if existing != hash => bail!(
                         "precompiled plugin differs from native host; prepare a matching native package profile: {name}"

@@ -352,6 +352,10 @@ namespace UnityMicroEditor.Editor
                     ["scenes"] = scenes, ["target"] = "StandaloneLinux64", ["scriptingBackend"] = "Mono2x", ["development"] = development,
                     ["buildResult"] = report.summary.result.ToString(), ["totalBytes"] = report.summary.totalSize,
                     ["elapsedSeconds"] = report.summary.totalTime.TotalSeconds, ["errors"] = report.summary.totalErrors, ["warnings"] = report.summary.totalWarnings };
+                // What failed, as the report's steps name it.
+                if (report.summary.result != BuildResult.Succeeded)
+                    result["errorMessages"] = report.steps.SelectMany(step => step.messages.Where(message => message.type == LogType.Error || message.type == LogType.Exception)
+                        .Select(message => step.name + ": " + Bounded(message.content, 2000))).Take(20).ToArray();
                 return result;
             }
             finally
@@ -377,6 +381,7 @@ namespace UnityMicroEditor.Editor
                 .Select(x => x.name), StringComparer.Ordinal);
             ManagedStrippingLevel stripping = PlayerSettings.GetManagedStrippingLevel(NamedBuildTarget.Standalone);
             bool stripEngine = PlayerSettings.stripEngineCode, background = PlayerSettings.runInBackground;
+            SpritePackerMode spritePacker = EditorSettings.spritePackerMode;
             bool defaultGraphics = PlayerSettings.GetUseDefaultGraphicsAPIs(BuildTarget.StandaloneLinux64);
             GraphicsDeviceType[] graphics = PlayerSettings.GetGraphicsAPIs(BuildTarget.StandaloneLinux64);
             PreloadedIdentity[] preloaded = CapturePreloadedAssets();
@@ -426,10 +431,17 @@ namespace UnityMicroEditor.Editor
                 // Embedding them here would initialize gameplay before raw
                 // hydration or require the excluded original gameplay DLLs.
                 PlayerSettings.SetPreloadedAssets(Array.Empty<UnityEngine.Object>());
+                // The host carries none of the game's content; its sprite
+                // atlases come with the session's imports. Packing them for a
+                // Linux build can fail on sizes set for a device alone.
+                EditorSettings.spritePackerMode = SpritePackerMode.Disabled;
                 PlayerSettings.SetUseDefaultGraphicsAPIs(BuildTarget.StandaloneLinux64, false);
                 PlayerSettings.SetGraphicsAPIs(BuildTarget.StandaloneLinux64, new[] { GraphicsDeviceType.OpenGLCore });
                 HostExcludedAssemblies = excluded;
                 Dictionary<string, object> result = BuildProject(buildArguments, id);
+                if (Text(result, "buildResult") != "Succeeded")
+                    throw new InvalidOperationException("The host build failed (" + Text(result, "buildResult") + "): "
+                        + string.Join(" | ", result.TryGetValue("errorMessages", out object messages) ? (string[])messages : Array.Empty<string>()));
                 var afterBuild = CaptureHostSourceProfile();
                 // A project's build callbacks may switch which precompiled
                 // plugins a Player build takes (Odin Inspector swaps in its
@@ -470,6 +482,7 @@ namespace UnityMicroEditor.Editor
                         () => PlayerSettings.SetManagedStrippingLevel(NamedBuildTarget.Standalone, stripping),
                         () => PlayerSettings.stripEngineCode = stripEngine,
                         () => PlayerSettings.runInBackground = background,
+                        () => EditorSettings.spritePackerMode = spritePacker,
                         () => RestorePreloadedAssets(preloaded),
                         () => PlayerSettings.SetGraphicsAPIs(BuildTarget.StandaloneLinux64, graphics),
                         () => PlayerSettings.SetUseDefaultGraphicsAPIs(BuildTarget.StandaloneLinux64, defaultGraphics),

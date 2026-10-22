@@ -826,11 +826,8 @@ impl Compiler {
             "Unity.SourceGenerators.dll",
             "Unity.UIToolkit.SourceGenerator.dll",
         ] {
-            self.generators.push(join(&[
-                &data,
-                "Tools/BuildPipeline/Unity.SourceGenerators",
-                name,
-            ]));
+            self.generators
+                .push(join(&[&sys::source_generators(&data), name]));
         }
         Ok(())
     }

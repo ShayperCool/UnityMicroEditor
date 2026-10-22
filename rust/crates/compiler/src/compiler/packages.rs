@@ -75,10 +75,10 @@ impl Drop for IlppRunner {
 }
 
 fn compilation_tools(editor: &str) -> String {
-    sysutil::join(&[
-        &sysutil::dir(editor),
-        "Data/Tools/BuildPipeline/Compilation",
-    ])
+    sys::build_tool(
+        &sysutil::join(&[&sysutil::dir(editor), "Data"]),
+        "Compilation",
+    )
 }
 
 /// The post-processors the installation ships, and what they load.
@@ -470,9 +470,25 @@ impl Compiler {
         }
         let processed = sysutil::join(&[staging, "package-builds", name]);
         let editor = self.editor.clone();
-        let post_processors = post
-            .runner(ctx, &editor)?
-            .process(ctx, compiled, &processed, defines, refs)?;
+        // Without post-processors Bee runs none (6000.0 ships none of its
+        // own); the compiled assembly is the built one.
+        let post_processors = if post.processors.is_empty() {
+            sys::mkdir_all(&processed)?;
+            for extension in ["dll", "pdb"] {
+                let from = format!(
+                    "{}.{extension}",
+                    compiled.strip_suffix(".dll").unwrap_or(compiled)
+                );
+                if !sys::absent(&from) {
+                    let to = sysutil::join(&[&processed, &format!("{name}.{extension}")]);
+                    sys::write(&to, &sys::read(&from)?)?;
+                }
+            }
+            String::new()
+        } else {
+            post.runner(ctx, &editor)?
+                .process(ctx, compiled, &processed, defines, refs)?
+        };
         let dll = sysutil::join(&[&processed, &library]);
         let output = compiler_command(
             ctx,
