@@ -924,10 +924,16 @@ fn run_in(
         return Err(error);
     }
     let report = report.ok_or_else(|| anyhow!("worker run left no report"))?;
+    // Every source of the batch but those registered without an import (a
+    // precompiled assembly for a 6000.0 worker) has its artifact.
+    let imported = report
+        .project_context
+        .as_ref()
+        .map_or(batch.len(), |context| context.imported().count());
     let asset = report
         .content
         .as_ref()
-        .filter(|content| content.source_unchanged && content.assets.len() == batch.len())
+        .filter(|content| content.source_unchanged && content.assets.len() == imported)
         .and_then(|content| content.assets.last())
         .ok_or_else(|| {
             anyhow!(

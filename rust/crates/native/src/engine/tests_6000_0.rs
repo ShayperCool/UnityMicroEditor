@@ -472,3 +472,60 @@ fn the_worker_is_sent_the_projects_etc_compressors() {
     assert!(engine().worker.sends_etc_compressors());
     assert!(!verified().worker.sends_etc_compressors());
 }
+
+/// Both releases' Editors key a path in `PathToGuid` and `hash` lowercased
+/// in ASCII alone: `Assets/Textures/DoubleСoinsÄ.png` (a Cyrillic `С`)
+/// is `assets/textures/doubleСoinsÄ.png`. A key lowercased in Unicode is
+/// not found, and the worker aborts importing a prefab of such a name
+/// ("guid is uninitialized").
+#[test]
+fn a_path_is_keyed_lowercased_in_ascii_alone() {
+    for engine in [verified(), engine()] {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("Temp/context");
+        std::fs::create_dir_all(project.join("Library")).unwrap();
+        std::fs::create_dir_all(project.join("Assets/Textures")).unwrap();
+        let name = "Assets/Textures/DoubleСoinsÄ.png";
+        std::fs::write(project.join(name), PROBE_PNG).unwrap();
+        std::fs::write(
+            project.join(format!("{name}.meta")),
+            "fileFormatVersion: 2\nguid: a01ac09a24c8493b862564ce94c80305\n",
+        )
+        .unwrap();
+        let report = engine
+            .asset_database
+            .write_sources(registry::Input {
+                project: project.clone(),
+                unity_version: engine.version.into(),
+                assets: vec![registry::Asset {
+                    path: name.into(),
+                    source: String::new(),
+                    meta: String::new(),
+                    guid: String::new(),
+                    directory: false,
+                    script: false,
+                }],
+                roots: Default::default(),
+                singletons: Default::default(),
+            })
+            .unwrap();
+        let data = std::fs::read(&report.database).unwrap();
+        let image = lmdb::Image::open(&data).unwrap();
+        let key = "assets/textures/doubleСoinsÄ.png\0".as_bytes();
+        for table in ["PathToGuid", HASH_TABLE] {
+            assert!(
+                image
+                    .table(table)
+                    .unwrap()
+                    .iter()
+                    .any(|record| record.key == key),
+                "{table} of Unity {}",
+                engine.version
+            );
+        }
+        engine
+            .asset_database
+            .update_source(project.to_str().unwrap(), name)
+            .unwrap();
+    }
+}

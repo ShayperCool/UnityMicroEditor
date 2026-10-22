@@ -475,6 +475,53 @@ fn assembly_references(image: &[u8]) -> Option<Vec<String>> {
     Some(names)
 }
 
+/// Where the worker gets the precompiled assembly `plugin` an assembly was
+/// compiled against: a build from wherever the compilation found it,
+/// anything else only from an immutable package, and only when asked to.
+fn plugin_place(
+    plugin: &str,
+    purpose: Purpose,
+    packages: &BTreeMap<String, String>,
+    from_packages: bool,
+) -> Result<String, ()> {
+    let directory =
+        package_root(plugin).and_then(|root| packages.get(root).map(|directory| (root, directory)));
+    match (purpose, directory) {
+        (Purpose::Build, Some((root, directory))) => {
+            Ok(format!("{directory}{}", &plugin[root.len()..]))
+        }
+        (Purpose::Build, None) => Ok(plugin.to_string()),
+        (Purpose::Importers | Purpose::Inspectors, Some((root, directory)))
+            if from_packages && directory.starts_with("Library/PackageCache/") =>
+        {
+            Ok(format!("{directory}{}", &plugin[root.len()..]))
+        }
+        (Purpose::Importers | Purpose::Inspectors, _) => Err(()),
+    }
+}
+
+/// The precompiled assemblies `plugins` with every precompiled assembly
+/// they refer to, transitively: `candidates` gives the place of each one
+/// the compilation knows, by assembly name, and `references` the names an
+/// assembly at a place refers to.
+fn with_referenced_plugins(
+    mut plugins: BTreeSet<String>,
+    candidates: &BTreeMap<String, String>,
+    mut references: impl FnMut(&str) -> Result<Vec<String>>,
+) -> Result<BTreeSet<String>> {
+    let mut pending: Vec<String> = plugins.iter().cloned().collect();
+    while let Some(place) = pending.pop() {
+        for name in references(&place)? {
+            if let Some(found) = candidates.get(&name)
+                && plugins.insert(found.clone())
+            {
+                pending.push(found.clone());
+            }
+        }
+    }
+    Ok(plugins)
+}
+
 /// The package root `Packages/<name>` of a logical path.
 fn package_root(logical: &str) -> Option<&str> {
     let rest = logical.strip_prefix("Packages/")?;
@@ -914,6 +961,10 @@ fn read_environment(
     };
     let mut scripts = BTreeSet::new();
     let mut plugins = BTreeSet::new();
+    // Every precompiled assembly an assembly was compiled against, by name,
+    // where the worker gets it: those the plugins taken refer to are taken
+    // too.
+    let mut candidates: BTreeMap<String, String> = BTreeMap::new();
     let mut identity = String::from("script-environment-v1\0");
     for &index in &selected {
         let assembly = &assemblies[index];
@@ -928,33 +979,24 @@ fn read_environment(
         // worker does not have. Every assembly is compiled against all of
         // those that are referenced automatically; one it really uses is
         // named in its metadata.
-        for plugin in assembly
+        let prebuilt = assembly
             .prebuilt_references
             .iter()
-            .filter(|path| !sysutil::is_abs(path) || within_directory(path, &library))
-            .filter(|path| names_assembly(&data, path))
-        {
-            // A build takes one from wherever the compilation found it;
-            // anything else only from an immutable package, and only when
-            // asked to.
-            let directory = package_root(plugin)
-                .and_then(|root| packages.get(root).map(|directory| (root, directory)));
-            let place = match (purpose, directory) {
-                (Purpose::Build, Some((root, directory))) => {
-                    format!("{directory}{}", &plugin[root.len()..])
-                }
-                (Purpose::Build, None) => plugin.clone(),
-                (Purpose::Importers | Purpose::Inspectors, Some((root, directory)))
-                    if selection.plugins && directory.starts_with("Library/PackageCache/") =>
-                {
-                    format!("{directory}{}", &plugin[root.len()..])
-                }
-                (Purpose::Importers | Purpose::Inspectors, _) => bail!(
-                    "importer assembly {} needs the precompiled assembly {plugin}, which a standalone worker does not load",
-                    assembly.name
-                ),
-            };
-            plugins.insert(place);
+            .filter(|path| !sysutil::is_abs(path) || within_directory(path, &library));
+        for plugin in prebuilt {
+            let place = plugin_place(plugin, purpose, &packages, selection.plugins);
+            if names_assembly(&data, plugin) {
+                plugins.insert(place.map_err(|_| {
+                    anyhow!(
+                        "importer assembly {} needs the precompiled assembly {plugin}, which a standalone worker does not load",
+                        assembly.name
+                    )
+                })?);
+            } else if let Ok(place) = place {
+                let name = sysutil::base(plugin);
+                let name = name.strip_suffix(".dll").unwrap_or(&name).to_string();
+                candidates.entry(name).or_insert(place);
+            }
         }
         for source in &assembly.source_files {
             environment
@@ -1031,6 +1073,15 @@ fn read_environment(
             }
         }
     }
+    // A precompiled assembly refers to others (Odin's serialization to its
+    // utilities): without them none of its types loads, nor any class of
+    // the project that derives from one of them, and the worker then ties
+    // the objects of such a class to a script it makes at run time.
+    let plugins = with_referenced_plugins(plugins, &candidates, |place| {
+        Ok(read_file(&sysutil::join(&[&library, place]))
+            .map(|image| assembly_references(&image).unwrap_or_default())
+            .unwrap_or_default())
+    })?;
     environment.assemblies.sort();
     environment.scripts = scripts.into_iter().collect();
     environment.plugins = plugins.into_iter().collect();
@@ -1121,6 +1172,52 @@ mod tests {
             let image = std::fs::read(extra).unwrap();
             eprintln!("{:?}", assembly_references(&image));
         }
+    }
+
+    #[test]
+    fn takes_the_precompiled_assemblies_a_taken_one_refers_to() {
+        let candidates: BTreeMap<String, String> = [
+            (
+                "Sirenix.Utilities",
+                "Assets/Plugins/Sirenix/Sirenix.Utilities.dll",
+            ),
+            (
+                "Sirenix.Serialization.Config",
+                "Assets/Plugins/Sirenix/Sirenix.Serialization.Config.dll",
+            ),
+            ("Unused", "Assets/Plugins/Unused.dll"),
+        ]
+        .into_iter()
+        .map(|(name, place)| (name.to_string(), place.to_string()))
+        .collect();
+        let references = |place: &str| -> Result<Vec<String>> {
+            Ok(match place {
+                "Assets/Plugins/Sirenix/Sirenix.Serialization.dll" => vec![
+                    "mscorlib".into(),
+                    "Sirenix.Utilities".into(),
+                    "Sirenix.Serialization.Config".into(),
+                    "UnityEditor".into(),
+                ],
+                "Assets/Plugins/Sirenix/Sirenix.Utilities.dll" => {
+                    vec!["Sirenix.Serialization.Config".into()]
+                }
+                _ => Vec::new(),
+            })
+        };
+        let direct: BTreeSet<String> =
+            ["Assets/Plugins/Sirenix/Sirenix.Serialization.dll".to_string()].into();
+        let all = with_referenced_plugins(direct, &candidates, references).unwrap();
+        assert_eq!(
+            all.into_iter().collect::<Vec<_>>(),
+            [
+                "Assets/Plugins/Sirenix/Sirenix.Serialization.Config.dll",
+                "Assets/Plugins/Sirenix/Sirenix.Serialization.dll",
+                "Assets/Plugins/Sirenix/Sirenix.Utilities.dll",
+            ]
+        );
+        // Nothing is added to a set whose assemblies refer to none of them.
+        let none = with_referenced_plugins(BTreeSet::new(), &candidates, references).unwrap();
+        assert!(none.is_empty());
     }
 
     #[test]
