@@ -93,7 +93,7 @@ namespace UnityMicroEditor.Raw
             // An object the manifest names by its source, as a content file holds it.
             private Object Resolve(string guid, string fileId)
             {
-                if (IsNull(fileId)) return null;
+                if (IsNull(fileId) || destroyedByGame.Contains(AssetKey(guid, fileId))) return null;
                 if (!assets.TryGetValue(AssetKey(guid, fileId), out Object value))
                     throw new InvalidDataException("The scene's content holds no object " + guid + "/" + fileId + ".");
                 return value;

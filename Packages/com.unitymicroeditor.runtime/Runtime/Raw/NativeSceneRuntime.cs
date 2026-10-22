@@ -36,6 +36,11 @@ namespace UnityMicroEditor.Raw
                 // content file of the scene holds them.
                 foreach (NativeSceneAliasDescriptor alias in descriptor.aliases ?? Array.Empty<NativeSceneAliasDescriptor>())
                 {
+                    if (alias != null && destroyedByGame.Contains(AssetKey(alias.file, alias.localId)))
+                    {
+                        destroyedByGame.Add(AssetKey(alias.guid, alias.fileId));
+                        continue;
+                    }
                     if (alias == null || !assets.TryGetValue(AssetKey(alias.file, alias.localId), out Object held))
                         throw new InvalidDataException("Native scene alias names no published object: " + (alias == null ? "" : alias.guid + "/" + alias.fileId));
                     assets[AssetKey(alias.guid, alias.fileId)] = held;

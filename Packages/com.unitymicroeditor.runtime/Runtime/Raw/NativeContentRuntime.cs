@@ -247,14 +247,21 @@ namespace UnityMicroEditor.Raw
 
             // Waits for the files started by the load, in the order they were
             // started, and reads back what each holds.
+            // The objects of the content files the game's code destroyed while they loaded.
+            private readonly HashSet<string> destroyedByGame = new HashSet<string>(StringComparer.Ordinal);
+
             private void CompleteNativeContentFiles(List<NativeContentHandle> created, Dictionary<string, NativeContentHandle> loaded)
             {
                 int nativeErrors = 0;
                 string nativeFailure = string.Empty;
                 var errorLock = new object();
+                // What the engine reports of the files themselves. An exception of the
+                // game's code that loading runs (a ScriptableObject's OnEnable) and what
+                // that code logs are the game's: the Editor logs them, and the load stands.
                 Application.LogCallback capture = (message, stack, type) =>
                 {
-                    if (type != LogType.Error && type != LogType.Exception && type != LogType.Assert) return;
+                    if (type != LogType.Error && type != LogType.Assert) return;
+                    if (stack != null && stack.Contains("UnityEngine.Debug:Log")) return;
                     lock (errorLock) { nativeErrors++; if (nativeFailure.Length == 0) nativeFailure = message; }
                 };
                 Application.logMessageReceivedThreaded += capture;
@@ -281,6 +288,15 @@ namespace UnityMicroEditor.Raw
                             // An object of an Editor-only class (an animator controller, an audio
                             // mixer) has another, runtime class in a Player; only its presence is checked.
                             bool editorClass = entry.typeName.StartsWith("UnityEditor.", StringComparison.Ordinal);
+                            // The game's code that loading runs may destroy an object of its own
+                            // class (an Editor path of a ScriptableObject's OnEnable that keeps one
+                            // instance of its settings); what refers to it then finds none.
+                            if (value == null && !editorClass && !entry.typeName.StartsWith("UnityEngine.", StringComparison.Ordinal))
+                            {
+                                Debug.LogWarning("[unity-micro-editor] the game's code destroyed " + entry.typeName + " of " + AssetPath(manifest, descriptor.path) + " while it loaded");
+                                destroyedByGame.Add(AssetKey(descriptor.guid, entry.fileId));
+                                continue;
+                            }
                             if (value == null || !editorClass && value.GetType().FullName != entry.typeName)
                                 throw new InvalidDataException("Native ContentFile identity/type readback failed: " + descriptor.guid + "/" + entry.fileId);
                             // A shader a build compiled no program of (every variant stripped) is
