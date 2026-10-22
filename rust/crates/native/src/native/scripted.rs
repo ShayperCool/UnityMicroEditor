@@ -22,7 +22,9 @@ use std::{
 };
 
 const BEE_LIMIT: i64 = 256 * 1024 * 1024;
-const SCRIPT_LIMIT: usize = 3500;
+/// A bound on the scripts one import context takes, far above what a scene of
+/// a large game names (4,000 of a mobile game with 190 assemblies).
+const SCRIPT_LIMIT: usize = 20_000;
 
 /// The compiled code of the importers of one batch and where its sources lie.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -868,12 +870,17 @@ fn read_environment(
             // A scene needs the scripts its objects name as assets, with
             // every other script of their assemblies: the worker ties a
             // script to its class among the scripts of its assembly, and
-            // with some of them missing it ties it to another class. The
-            // assemblies they refer to are loaded without their scripts.
+            // with some of them missing it ties it to another class. Of an
+            // assembly they refer to, the definition and one script make
+            // it a script assembly to the worker; without them a field of
+            // one of its `[Serializable]` classes (Addressables'
+            // `AssetReference`) is not written.
             if selection.all
                 && !whole.contains(&index)
                 && !of_scripts.contains(&index)
                 && !source.starts_with("Assets/")
+                && *source != assembly.asmdef
+                && Some(source) != assembly.source_files.first()
             {
                 continue;
             }
@@ -1086,6 +1093,63 @@ mod tests {
             "Packages/x/Unity.Collections.LowLevel.ILSupport.dll"
         ));
         assert!(!names_assembly(code, "Packages/x/Collections.dll"));
+    }
+
+    #[test]
+    fn a_scene_makes_script_assemblies_of_those_its_scripts_refer_to() {
+        // A behaviour of `Sound` holds `[Serializable]` classes of
+        // `Addressables`: the worker writes their fields only when that
+        // assembly is one of its script assemblies.
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().to_str().unwrap().to_string();
+        let library = sysutil::join(&[&project, super::super::editor_compilation::DIRECTORY]);
+        for (path, data) in [
+            ("Library/ScriptAssemblies/Addressables.dll", "addressables"),
+            ("Library/ScriptAssemblies/Sound.dll", "sound"),
+            (
+                "Library/PackageCache/com.sound@1/Sound.cs.meta",
+                "guid: 8e90999d79dbe4798b193fba81945376\n",
+            ),
+            ("Library/PackageCache/com.sound@1/Sound.cs", ""),
+            ("Library/PackageCache/com.addressables@1/Reference.cs", ""),
+            ("Library/PackageCache/com.addressables@1/Settings.cs", ""),
+            (
+                "Library/PackageCache/com.addressables@1/Addressables.asmdef",
+                "{}",
+            ),
+        ] {
+            let path = sysutil::join(&[&library, path]);
+            std::fs::create_dir_all(sysutil::dir(&path)).unwrap();
+            std::fs::write(path, data).unwrap();
+        }
+        let record = serde_json::json!({
+            "BeeBuildProgramCommon.Data.ConfigurationData": {"Packages": [
+                {"Name": "com.addressables", "ResolvedPath": "Library/PackageCache/com.addressables@1"},
+                {"Name": "com.sound", "ResolvedPath": "Library/PackageCache/com.sound@1"},
+            ]},
+            "ScriptCompilationBuildProgram.Data.ScriptCompilationData": {
+                "OutputDirectory": "Library/ScriptAssemblies",
+                "Assemblies": [
+                    {"Name": "Addressables", "SourceFiles": ["Packages/com.addressables/Reference.cs", "Packages/com.addressables/Settings.cs"],
+                     "Asmdef": "Packages/com.addressables/Addressables.asmdef"},
+                    {"Name": "Sound", "SourceFiles": ["Packages/com.sound/Sound.cs"], "References": [0]},
+                ],
+            },
+        });
+        let bee = sysutil::join(&[&library, "Library/Bee/UnityMicroEditorE-inputdata.json"]);
+        std::fs::create_dir_all(sysutil::dir(&bee)).unwrap();
+        std::fs::write(&bee, record.to_string()).unwrap();
+        let scripts = BTreeSet::from(["8e90999d79dbe4798b193fba81945376".to_string()]);
+        let environment = scene_environment(&project, &scripts, &BTreeSet::new()).unwrap();
+        assert_eq!(environment.assemblies, ["Addressables", "Sound"]);
+        assert_eq!(
+            environment.scripts,
+            [
+                "Packages/com.addressables/Addressables.asmdef",
+                "Packages/com.addressables/Reference.cs",
+                "Packages/com.sound/Sound.cs",
+            ]
+        );
     }
 
     #[test]
