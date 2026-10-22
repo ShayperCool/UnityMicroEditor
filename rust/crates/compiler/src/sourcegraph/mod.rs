@@ -758,6 +758,19 @@ pub fn build_source_graph(
                     }
                     if plugin.enabled && managed_plugin(path) {
                         let name = sysutil::base(path);
+                        // Of two copies, the one the host build took is the
+                        // Player's (Odin keeps one per kind of platform and
+                        // its build callbacks pick it).
+                        if let Some(previous) = plugins.get(&name)
+                            && !options.editor_domain
+                            && host_holds(&options.player, &previous.path)
+                                != host_holds(&options.player, path)
+                        {
+                            if host_holds(&options.player, path) {
+                                plugins.insert(name, plugin);
+                            }
+                            return Ok(Walk::Continue);
+                        }
                         if let Some(previous) = plugins.get(&name) {
                             // Two copies of an Editor tool (External Dependency
                             // Manager in Assets and as a package) are reconciled

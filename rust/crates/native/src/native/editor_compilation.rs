@@ -111,6 +111,23 @@ fn references(editor: &str, engine: &[String]) -> References {
         &data,
         "PlaybackEngines/*/UnityEditor.*.Extensions.dll",
     ])));
+    // 6000.0's Editor also gives its assemblies the other extension
+    // assemblies of the installed platform modules (the iOS `Xcode` and
+    // `Common` ones, Android's Gradle types), as its Bee input lists them.
+    if !std::path::Path::new(&sysutil::join(&[
+        &data,
+        "Managed/Bootstrap/Unity.Scripting.dll",
+    ]))
+    .is_file()
+    {
+        for pattern in [
+            "PlaybackEngines/*/UnityEditor.*.Extensions.*.dll",
+            "PlaybackEngines/AndroidPlayer/Unity.Android.Gradle.dll",
+            "PlaybackEngines/AndroidPlayer/Unity.Android.Types.dll",
+        ] {
+            extras.extend(crate::compiler::sys_glob(&sysutil::join(&[&data, pattern])));
+        }
+    }
     References {
         framework,
         extensions,

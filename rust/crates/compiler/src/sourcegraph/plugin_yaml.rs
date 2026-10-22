@@ -279,7 +279,16 @@ fn platforms(source: &str, node: &Node) -> Decoded<Vec<Platform>> {
             let mut result = Vec::new();
             for pair in node.content.as_chunks::<2>().0 {
                 let name = pair[0].value.clone();
-                let group = if name == "Linux64" { "Standalone" } else { "" };
+                // The older importer keys an entry by its build target; the
+                // newer one names the target's group beside it.
+                let group = match name.as_str() {
+                    "Linux64" => "Standalone",
+                    "Editor" => "Editor",
+                    "Android" => "Android",
+                    "iOS" => "iPhone",
+                    "WebGL" => "WebGL",
+                    _ => "",
+                };
                 let mut platform = Platform {
                     first: BTreeMap::from([(group.to_string(), name)]),
                     ..Default::default()
