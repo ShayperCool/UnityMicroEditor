@@ -436,9 +436,29 @@ pub(crate) fn retarget_stage_graph(
             }
         }
     }
+    // A package the stage holds as an embedded copy (`staging::stage_device_platforms`)
+    // stands for the package the resolver took.
+    for package in &resolved.packages {
+        let copy = join(&[stage, &package.logical_root]);
+        if package.logical_root.starts_with("Packages/")
+            && sysutil::lstat(&copy).is_ok_and(|info| info.is_dir())
+            && sysutil::lstat(&join(&[project, &package.logical_root])).is_err()
+        {
+            roots.insert(0, (copy, package.path.clone()));
+        }
+    }
     let path = |text: &str| -> Option<String> {
         if text == stage {
             return Some(project.into());
+        }
+        if let Some(target) = roots.iter().find_map(|(source, target)| {
+            if text == source {
+                return Some(target.clone());
+            }
+            let rest = text.strip_prefix(source.as_str())?.strip_prefix('/')?;
+            Some(join(&[target, rest]))
+        }) {
+            return Some(target);
         }
         let relative = text.strip_prefix(&prefix)?;
         if ["Assets", "Packages", "ProjectSettings"]

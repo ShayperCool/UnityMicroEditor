@@ -270,7 +270,7 @@ pub fn sync_staging(ctx: &Context, source: &str, editor: &str) -> Result<(String
     super::install_agent_package(&stage)?;
     pin_staged_packages(ctx, source, editor, &stage)?;
     stage_compile_for(source, &stage)?;
-    keep_game_assemblies_out_of_host_builds(ctx, source, &stage)?;
+    stage_device_platforms(ctx, source, editor, &stage)?;
     let staging_marker = join(&[&stage, STAGE_MARKER]);
     if snapshot.files.contains_key(STAGE_MARKER) {
         fs::remove_file(&staging_marker)
@@ -374,60 +374,163 @@ fn stage_compile_for(source: &str, stage: &str) -> Result<()> {
     Ok(())
 }
 
-/// The symbol a stage compiled for a device group defines for its Player
-/// builds (the host's and the Addressables content build's).
-const HOST_BUILD_DEFINE: &str = "UNITY_MICRO_EDITOR_HOST_BUILD";
-
-/// For a project compiled for a device group, makes the stage's own
-/// assemblies under `Assets` stay out of the Player builds of its Editor: a
-/// host leaves the game's assemblies out, the tool compiles them, and with
-/// the device's symbols they need assemblies a Linux build does not have.
-/// Each stage asmdef gets the define constraint
-/// `UNITY_EDITOR || !UNITY_MICRO_EDITOR_HOST_BUILD`, so the stage's Editor
-/// still compiles them. The copies keep the sources' timestamps.
-fn keep_game_assemblies_out_of_host_builds(ctx: &Context, source: &str, stage: &str) -> Result<()> {
-    if crate::sourcegraph::compile_for_group(source)?.is_none() {
+/// For a project compiled for a device group, makes the stage's Linux build
+/// take the assemblies that group's build takes: every asmdef of the stage's
+/// `Assets`, and of the packages it holds, is a Linux one exactly when it is
+/// one of the device (`device_platforms`). The host is then a Linux build of
+/// the device's code, with the device's symbols (`stage_compile_for`), and
+/// the objects its Resources hold are serialized with their scripts. A
+/// package with such an asmdef is embedded in the stage as a copy whose
+/// asmdefs are rewritten. The copies keep the sources' timestamps.
+fn stage_device_platforms(ctx: &Context, source: &str, editor: &str, stage: &str) -> Result<()> {
+    let platform = crate::sourcegraph::code_platform(source)?;
+    if platform == crate::sourcegraph::LINUX_PLAYER {
         return Ok(());
     }
-    let constraint = format!("UNITY_EDITOR || !{HOST_BUILD_DEFINE}");
+    let rewrite = |from: &str, to: &str| -> Result<bool> {
+        let data = read_agent_file(from, 1 << 20)?;
+        let Some(text) = device_platforms(&String::from_utf8_lossy(&data), platform.asmdef)? else {
+            return Ok(false);
+        };
+        fs::write(to, text).map_err(|error| sysutil::Error::os("open", to, &error))?;
+        let modified = fs::metadata(from)
+            .and_then(|info| info.modified())
+            .map_err(|error| sysutil::Error::os("stat", from, &error))?;
+        fs::File::open(to)
+            .and_then(|file| file.set_modified(modified))
+            .map_err(|error| sysutil::Error::os("utimens", to, &error))?;
+        Ok(true)
+    };
+    let mut definitions = Vec::new();
     walk_dir(&join(&[stage, "Assets"]), &mut |entry: &WalkEntry| {
         ctx.err()?;
-        if entry.is_dir() || !entry.path.ends_with(".asmdef") {
-            return Ok(Walk::Continue);
+        if !entry.is_dir() && entry.path.ends_with(".asmdef") {
+            definitions.push(entry.path.to_string());
         }
-        let logical = sysutil::rel(stage, entry.path)
-            .ok_or_else(|| anyhow!("Rel: can't make {} relative to {stage}", entry.path))?;
-        let from = join(&[source, &logical]);
-        let data = read_agent_file(&from, 1 << 20)?;
-        let text = String::from_utf8_lossy(&data);
-        let mut definition: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(text.trim_start_matches('\u{feff}'))
-                .map_err(|error| anyhow!("{from}: {error}"))?;
-        let constraints = definition
-            .entry("defineConstraints")
-            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-        let Some(list) = constraints.as_array_mut() else {
-            return Err(anyhow!("{from}: defineConstraints is not a list"));
-        };
-        if !list
-            .iter()
-            .any(|value| value.as_str() == Some(constraint.as_str()))
-        {
-            list.push(constraint.clone().into());
-        }
-        let mut encoded = serde_json::to_vec_pretty(&definition)?;
-        encoded.push(b'\n');
-        fs::write(entry.path, encoded)
-            .map_err(|error| sysutil::Error::os("open", entry.path, &error))?;
-        let modified = fs::metadata(&from)
-            .and_then(|info| info.modified())
-            .map_err(|error| sysutil::Error::os("stat", &from, &error))?;
-        fs::File::open(entry.path)
-            .and_then(|file| file.set_modified(modified))
-            .map_err(|error| sysutil::Error::os("utimens", entry.path, &error))?;
         Ok(Walk::Continue)
     })?;
+    for path in definitions {
+        let logical = sysutil::rel(stage, &path)
+            .ok_or_else(|| anyhow!("Rel: can't make {path} relative to {stage}"))?;
+        rewrite(&join(&[source, &logical]), &path)?;
+    }
+    // The packages, as the resolver took them.
+    let options = || crate::packages::Options::default().with_runtime_package(source);
+    let resolved = match crate::packages::load_current(ctx, source, editor, options()?) {
+        Ok(snapshot) => snapshot,
+        Err(_) => crate::packages::resolve(ctx, source, editor, options()?)?,
+    };
+    let path = join(&[stage, "Packages/manifest.json"]);
+    let mut manifest = unmarshal_map(&read_agent_file(&path, 1 << 20)?)?.unwrap_or_default();
+    let mut embedded = Vec::new();
+    for package in &resolved.packages {
+        if matches!(package.source.as_str(), "embedded" | "builtin")
+            || package.name == crate::packages::RUNTIME_PACKAGE
+        {
+            continue;
+        }
+        let mut needed = Vec::new();
+        walk_dir(&package.path, &mut |entry: &WalkEntry| {
+            if entry.is_dir() && sysutil::base(entry.path).ends_with('~') {
+                return Ok(Walk::SkipDir);
+            }
+            if !entry.is_dir() && entry.path.ends_with(".asmdef") {
+                let text =
+                    String::from_utf8_lossy(&read_agent_file(entry.path, 1 << 20)?).into_owned();
+                if device_platforms(&text, platform.asmdef)?.is_some() {
+                    needed.push(entry.path.to_string());
+                }
+            }
+            Ok(Walk::Continue)
+        })?;
+        if needed.is_empty() {
+            continue;
+        }
+        let copy = join(&[stage, "Packages", &package.name]);
+        if fs::symlink_metadata(&copy).is_ok() {
+            fs::remove_dir_all(&copy)
+                .map_err(|error| sysutil::Error::os("remove", &copy, &error))?;
+        }
+        compiler_command(
+            ctx,
+            "",
+            "cp",
+            &["-a", "--reflink=auto", "--", &package.path, &copy],
+        )?;
+        for definition in needed {
+            let relative = sysutil::rel(&package.path, &definition).ok_or_else(|| {
+                anyhow!("Rel: can't make {definition} relative to {}", package.path)
+            })?;
+            rewrite(&definition, &join(&[&copy, &relative]))?;
+        }
+        embedded.push(package.name.clone());
+    }
+    if !embedded.is_empty() {
+        if let Some(Any::Object(dependencies)) = manifest.get_mut("dependencies") {
+            for name in &embedded {
+                dependencies.remove(name);
+            }
+        }
+        let mut encoded =
+            jsondoc::marshal_indent(&Any::Object(manifest)).map_err(|e| anyhow!(e))?;
+        encoded.push(b'\n');
+        fs::write(&path, encoded).map_err(|error| sysutil::Error::os("open", &path, &error))?;
+    }
     Ok(())
+}
+
+/// An asmdef whose membership of the Linux Standalone platform is made that
+/// of `device` (`includePlatforms`/`excludePlatforms` as Unity names them),
+/// or `None` when it already is.
+pub(crate) fn device_platforms(text: &str, device: &str) -> Result<Option<String>> {
+    const LINUX: &str = "LinuxStandalone64";
+    let mut definition: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(text.trim_start_matches('\u{feff}'))
+            .map_err(|error| anyhow!("asmdef: {error}"))?;
+    let list =
+        |definition: &serde_json::Map<String, serde_json::Value>, key: &str| -> Vec<String> {
+            definition
+                .get(key)
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+    let (mut include, mut exclude) = (
+        list(&definition, "includePlatforms"),
+        list(&definition, "excludePlatforms"),
+    );
+    let member = |include: &[String], exclude: &[String], platform: &str| {
+        (include.is_empty() || include.iter().any(|item| item == platform))
+            && !exclude.iter().any(|item| item == platform)
+    };
+    let wanted = member(&include, &exclude, device);
+    if member(&include, &exclude, LINUX) == wanted {
+        return Ok(None);
+    }
+    if wanted {
+        exclude.retain(|item| item != LINUX);
+        if !include.is_empty() {
+            include.push(LINUX.into());
+        }
+    } else if include.is_empty() {
+        exclude.push(LINUX.into());
+    } else {
+        include.retain(|item| item != LINUX);
+        if include.is_empty() {
+            // Only Linux was listed; another platform alone keeps it out.
+            include.push(device.into());
+        }
+    }
+    definition.insert("includePlatforms".into(), include.into());
+    definition.insert("excludePlatforms".into(), exclude.into());
+    let mut encoded = serde_json::to_string_pretty(&definition)?;
+    encoded.push('\n');
+    Ok(Some(encoded))
 }
 
 /// `ProjectSettings.asset` with the `Standalone` entry of
@@ -463,9 +566,8 @@ pub(crate) fn with_standalone_defines(text: &str, group: &str) -> Result<String>
     };
     let mut copy: Vec<String> = chosen.iter().map(|line| line.to_string()).collect();
     copy[0] = format!("    Standalone{}", &copy[0][4 + group.len()..]);
-    let mut platform = crate::sourcegraph::group_platform_defines(group).to_vec();
-    platform.push(HOST_BUILD_DEFINE);
-    {
+    let platform = crate::sourcegraph::group_platform_defines(group);
+    if !platform.is_empty() {
         let last = copy.last_mut().unwrap();
         let ending = &last[last.trim_end_matches(['\r', '\n']).len()..];
         let ending = ending.to_string();

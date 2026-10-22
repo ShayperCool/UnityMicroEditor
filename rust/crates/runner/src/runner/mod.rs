@@ -93,6 +93,7 @@ pub struct LaunchOptions {
     /// each also a content scene.
     pub build_scenes: Vec<addressables::BuildSceneRoute>,
     pub no_addressables: bool,
+    pub no_build_scenes: bool,
     pub builtin_shaders: Vec<String>,
     pub game_arguments: Vec<String>,
     pub watch: bool,
@@ -442,6 +443,11 @@ pub(crate) fn run_flags() -> FlagSet {
         false,
         "leave the project's Addressables keys to the host's built content",
     );
+    flags.bool(
+        "no-build-scenes",
+        false,
+        "leave the Build Settings scenes the game loads by name to the host's empty stand-ins",
+    );
     flags.list(
         "builtin-shader",
         string_list,
@@ -517,6 +523,7 @@ pub(crate) fn launch_options(args: &[String]) -> Result<LaunchOptions> {
         addressable_content: Vec::new(),
         build_scenes: Vec::new(),
         no_addressables: flags.get_bool("no-addressables"),
+        no_build_scenes: flags.get_bool("no-build-scenes"),
         builtin_shaders: flags.get_list("builtin-shader"),
         game_arguments: game_args,
         watch: flags.get_bool("watch"),
@@ -669,6 +676,9 @@ fn adopt_addressables(opts: &mut LaunchOptions) -> Vec<String> {
 /// engine loads when the game asks `SceneManager` for it; the bridge then
 /// builds the scene's content into it.
 fn adopt_build_scenes(opts: &mut LaunchOptions, session_scene: &str) {
+    if opts.no_build_scenes {
+        return;
+    }
     let found = match addressables::build_scenes(&opts.project) {
         Ok(found) => found,
         Err(error) => {

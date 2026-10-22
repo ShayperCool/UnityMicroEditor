@@ -183,6 +183,12 @@ impl Resolver<'_> {
             return self.git_materialized_copy(p);
         }
         if self.options.offline {
+            // The copy UPM fingerprinted is local evidence too.
+            if let Some(package) =
+                self.git_fingerprinted_copy(name, request, &commit, &reference.subdir)?
+            {
+                return Ok(package);
+            }
             bail!("offline Git package lacks verified commit/content receipt: {name}");
         }
         self.check_cache_budget(

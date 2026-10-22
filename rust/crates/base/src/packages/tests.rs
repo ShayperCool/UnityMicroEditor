@@ -1526,8 +1526,9 @@ fn unreachable_git_package_takes_the_cache_copy_upm_fingerprinted() {
         "{p:?}"
     );
     load_current(&background(), &root, "", Options::default()).unwrap();
-    // Offline resolution still requires a verified commit.
-    assert!(resolve(&background(), &root, "", offline()).is_err());
+    // Offline resolution takes the same local copy.
+    let offline = resolve(&background(), &root, "", offline()).unwrap();
+    assert_eq!(package_by_name(&offline, "com.example.git").path, cache);
 }
 
 #[test]

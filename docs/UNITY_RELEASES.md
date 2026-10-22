@@ -51,7 +51,7 @@ The engine stays a Linux Player: code that calls the device's native plugins und
 A project may take packages from a scoped registry that needs credentials, or from private Git repositories, which the user's Editor fetched with its own. The resolver then works from what that Editor's Package Manager left in `Library/PackageCache`:
 
 - A registry package found there is taken by its manifest, as before; a copy the resolver downloaded and verified by its receipt wins over UPM's copy of the same version, whose `package.json` UPM rewrites.
-- A Git package whose remote cannot be read is taken from the PackageCache copy whose `_fingerprint` is the commit `packages-lock.json` names (proof `upm_fingerprinted_cache_copy`). `--offline` still requires a verified commit.
+- A Git package whose remote cannot be read is taken from the PackageCache copy whose `_fingerprint` is the commit `packages-lock.json` names (proof `upm_fingerprinted_cache_copy`), online and offline alike.
 - The stage's `Packages/manifest.json` names every package of a scoped registry other than Unity's, and every Git package, as a `file:` dependency on the copy the resolver took, so the stage's Editor fetches nothing it could not authenticate and builds with exactly the packages the tool compiles.
 
 ## Scenes the game loads by name

@@ -240,11 +240,13 @@ namespace UnityMicroEditor.Editor
                     ["config"] = new Dictionary<string, object> { ["allowUnsafeCode"] = assembly.compilerOptions.AllowUnsafeCode || responseData.Any(data => data.Unsafe),
                         ["noEngineReferences"] = Boolean(definition, "noEngineReferences"), ["overrideReferences"] = Boolean(definition, "overrideReferences"),
                         ["precompiledReferences"] = definition.TryGetValue("precompiledReferences", out object precompiledNative) ? precompiledNative : new string[0] } };
-                if (!game) { hostAssemblies.Add(new Dictionary<string, object> { ["name"] = assembly.name, ["path"] = path, ["sha256"] = HashFile(path), ["sources"] = sources,
-                    ["defines"] = playerDefines, ["editorDefines"] = editorDefines[assembly.name], ["configuration"] = configuration,
+                // A Player assembly the Editor leaves out (`excludePlatforms: Editor`) has no Editor build.
+                string built = File.Exists(path) ? HashFile(path) : "";
+                if (!game) { hostAssemblies.Add(new Dictionary<string, object> { ["name"] = assembly.name, ["path"] = path, ["sha256"] = built, ["sources"] = sources,
+                    ["defines"] = playerDefines, ["editorDefines"] = editorDefines.TryGetValue(assembly.name, out string[] editorOnly) ? editorOnly : new string[0], ["configuration"] = configuration,
                     ["compiledReferences"] = compiledReferences,
                     ["responseFiles"] = responseFiles.Select(ResolveEditorSource).ToArray() }); continue; }
-                assemblies.Add(new Dictionary<string, object> { ["name"] = assembly.name, ["path"] = path, ["sha256"] = HashFile(path), ["sources"] = sources,
+                assemblies.Add(new Dictionary<string, object> { ["name"] = assembly.name, ["path"] = path, ["sha256"] = built, ["sources"] = sources,
                     ["references"] = assembly.assemblyReferences.Select(x => x.name).OrderBy(x => x, StringComparer.Ordinal).ToArray(),
                     ["compiledReferences"] = compiledReferences,
                     ["responseFiles"] = responseFiles.Select(ResolveEditorSource).ToArray(),
