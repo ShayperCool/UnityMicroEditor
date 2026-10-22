@@ -573,8 +573,25 @@ namespace UnityMicroEditor.Worker
             File.WriteAllText(Path.Combine(directory, "report.txt"), report.ToString());
         }
 
+        // A standalone worker starts with a tag manager of its own, which knows the Default sorting
+        // layer and the built-in tags only; a build writes every other sorting layer of a renderer as
+        // Default and every other tag as Untagged. The project's are its settings file's.
+        static void UseProjectTags(StringBuilder report)
+        {
+            // A project that never saved its tags has the default ones.
+            const string path = "ProjectSettings/TagManager.asset";
+            if (!File.Exists(path)) { report.Append("tag-manager default\n"); return; }
+            var live = Unsupported.GetSerializedAssetInterfaceSingleton("TagManager");
+            var saved = UnityEditorInternal.InternalEditorUtility.LoadSerializedFileAndForget(path);
+            if (live == null || saved == null || saved.Length == 0 || saved[0] == null || saved[0].GetType() != live.GetType())
+                throw new InvalidOperationException("the worker cannot take the project's tags and sorting layers");
+            EditorUtility.CopySerialized(saved[0], live);
+            report.Append("tag-manager ").Append(SortingLayer.layers.Length).Append(' ').Append(UnityEditorInternal.InternalEditorUtility.tags.Length).Append('\n');
+        }
+
         static void Write(AssetImportContext ctx, StringBuilder report)
         {
+            UseProjectTags(report);
             var written = new List<ObjectIdentifier>();
             var writtenPaths = new List<string>();
             var embedded = new List<ObjectIdentifier>();
