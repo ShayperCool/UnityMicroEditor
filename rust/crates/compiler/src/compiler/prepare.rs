@@ -300,6 +300,37 @@ pub fn prepare_compiler_graph_with(
                 compiler.manifest.compiler_inputs.insert(destination, hash);
             }
         }
+        // The class library assemblies the plugins use that the host lacks
+        // (`System.Web` of `nunit.framework`), from the Player's own profile,
+        // as a build copies them.
+        let library = join(&[
+            &sysutil::dir(editor),
+            "Data/MonoBleedingEdge/lib/mono/unityjit-linux",
+        ]);
+        let mut pending: Vec<String> = plugins.keys().map(|name| join(&[&managed, name])).collect();
+        while let Some(file) = pending.pop() {
+            let Ok(image) = sys::read(&file) else {
+                continue;
+            };
+            for name in super::assembly_references(&image).unwrap_or_default() {
+                let destination = join(&[&managed, &format!("{name}.dll")]);
+                let source = join(&[&library, &format!("{name}.dll")]);
+                if !sys::absent(&destination) || sys::absent(&source) {
+                    continue;
+                }
+                compiler_command(
+                    ctx,
+                    "",
+                    "cp",
+                    &["--reflink=auto", "--", &source, &destination],
+                )?;
+                compiler
+                    .manifest
+                    .compiler_inputs
+                    .insert(destination.clone(), file_hash(&destination)?);
+                pending.push(destination);
+            }
+        }
         let slots: Vec<CompileAssembly> = plugins
             .keys()
             .map(|name| CompileAssembly {

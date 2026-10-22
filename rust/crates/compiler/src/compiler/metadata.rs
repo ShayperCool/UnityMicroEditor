@@ -190,3 +190,146 @@ impl MetadataGuidIndex {
         Ok(result)
     }
 }
+
+/// The names in the AssemblyRef table of a managed PE image (ECMA-335
+/// II.22.5); `None` for anything else.
+pub fn assembly_references(image: &[u8]) -> Option<Vec<String>> {
+    let u16_at = |at: usize| Some(u16::from_le_bytes(image.get(at..at + 2)?.try_into().ok()?));
+    let u32_at = |at: usize| Some(u32::from_le_bytes(image.get(at..at + 4)?.try_into().ok()?));
+    let pe = u32_at(0x3c)? as usize;
+    if image.get(pe..pe + 4)? != b"PE\0\0" {
+        return None;
+    }
+    let coff = pe + 4;
+    let sections = u16_at(coff + 2)? as usize;
+    let optional = coff + 20;
+    let directories = match u16_at(optional)? {
+        0x10b => optional + 96,
+        0x20b => optional + 112,
+        _ => return None,
+    };
+    let cli_rva = u32_at(directories + 14 * 8)?;
+    let table = optional + u16_at(coff + 16)? as usize;
+    let offset = |rva: u32| -> Option<usize> {
+        (0..sections).find_map(|index| {
+            let section = table + index * 40;
+            let (size, address) = (u32_at(section + 8)?, u32_at(section + 12)?);
+            let raw = u32_at(section + 20)?;
+            (rva >= address && rva < address + size.max(u32_at(section + 16)?))
+                .then(|| (raw + rva - address) as usize)
+        })
+    };
+    let cli = offset(cli_rva)?;
+    let root = offset(u32_at(cli + 8)?)?;
+    if u32_at(root)? != 0x424a_5342 {
+        return None;
+    }
+    let version = u32_at(root + 12)? as usize;
+    let streams = u16_at(root + 16 + version + 2)? as usize;
+    let mut at = root + 16 + version + 4;
+    let (mut tables, mut strings) = (None, None);
+    for _ in 0..streams {
+        let (stream, _) = (u32_at(at)? as usize, u32_at(at + 4)?);
+        let name_start = at + 8;
+        let end = name_start + image.get(name_start..)?.iter().position(|&b| b == 0)?;
+        match image.get(name_start..end)? {
+            b"#~" | b"#-" => tables = Some(root + stream),
+            b"#Strings" => strings = Some(root + stream),
+            _ => {}
+        }
+        at = name_start + (end - name_start + 4) / 4 * 4;
+    }
+    let (tables, strings) = (tables?, strings?);
+    let heaps = *image.get(tables + 6)?;
+    let valid = u64::from_le_bytes(image.get(tables + 8..tables + 16)?.try_into().ok()?);
+    let mut rows = [0usize; 64];
+    let mut at = tables + 24;
+    for (index, count) in rows.iter_mut().enumerate() {
+        if valid & (1 << index) != 0 {
+            *count = u32_at(at)? as usize;
+            at += 4;
+        }
+    }
+    let string = if heaps & 1 != 0 { 4 } else { 2 };
+    let guid = if heaps & 2 != 0 { 4 } else { 2 };
+    let blob = if heaps & 4 != 0 { 4 } else { 2 };
+    let index = |table: usize| if rows[table] > 0xffff { 4 } else { 2 };
+    let coded = |tables: &[usize], bits: u32| {
+        let most = tables.iter().map(|&table| rows[table]).max().unwrap_or(0);
+        if most >= 1 << (16 - bits) { 4 } else { 2 }
+    };
+    let type_def_or_ref = coded(&[2, 1, 0x1b], 2);
+    let has_constant = coded(&[4, 8, 0x17], 2);
+    let has_custom_attribute = coded(
+        &[
+            6, 4, 1, 2, 8, 9, 0xa, 0, 0xe, 0x17, 0x14, 0x11, 0x1a, 0x1b, 0x20, 0x23, 0x26, 0x27,
+            0x28, 0x2a, 0x2c, 0x2b,
+        ],
+        5,
+    );
+    let has_field_marshal = coded(&[4, 8], 1);
+    let has_decl_security = coded(&[2, 6, 0x20], 2);
+    let member_ref_parent = coded(&[2, 1, 0x1a, 6, 0x1b], 3);
+    let has_semantics = coded(&[0x14, 0x17], 1);
+    let method_def_or_ref = coded(&[6, 0xa], 1);
+    let member_forwarded = coded(&[4, 6], 1);
+    let custom_attribute_type = coded(&[6, 0xa], 3);
+    // The row size of every table before AssemblyRef (0x23).
+    let sizes: [usize; 0x23] = [
+        2 + string + guid * 3,
+        coded(&[0, 0x1a, 0x23, 1], 2) + string * 2,
+        4 + string * 2 + type_def_or_ref + index(4) + index(6),
+        index(4),
+        2 + string + blob,
+        index(6),
+        4 + 2 + 2 + string + blob + index(8),
+        index(8),
+        2 + 2 + string,
+        index(2) + type_def_or_ref,
+        member_ref_parent + string + blob,
+        2 + has_constant + blob,
+        has_custom_attribute + custom_attribute_type + blob,
+        has_field_marshal + blob,
+        2 + has_decl_security + blob,
+        2 + 4 + index(2),
+        4 + index(4),
+        blob,
+        index(2) + index(0x14),
+        index(0x14),
+        2 + string + type_def_or_ref,
+        index(2) + index(0x17),
+        index(0x17),
+        2 + string + blob,
+        2 + index(6) + has_semantics,
+        index(2) + method_def_or_ref * 2,
+        string,
+        blob,
+        2 + member_forwarded + string + index(0x1a),
+        4 + index(4),
+        4 + 4,
+        4,
+        4 + 2 * 4 + 4 + blob + string * 2,
+        4,
+        4 * 3,
+    ];
+    let mut start = at;
+    for (table, size) in sizes.iter().enumerate() {
+        start += rows[table] * size;
+    }
+    let row = 2 * 4 + 4 + blob + string * 2 + blob;
+    let read_index = |at: usize, width: usize| -> Option<usize> {
+        Some(if width == 4 {
+            u32_at(at)? as usize
+        } else {
+            u16_at(at)? as usize
+        })
+    };
+    let mut names = Vec::with_capacity(rows[0x23]);
+    for reference in 0..rows[0x23] {
+        let name = read_index(start + reference * row + 12 + blob, string)?;
+        let text = image.get(strings + name..)?;
+        let end = text.iter().position(|&b| b == 0)?;
+        names.push(String::from_utf8_lossy(&text[..end]).into_owned());
+    }
+    Some(names)
+}

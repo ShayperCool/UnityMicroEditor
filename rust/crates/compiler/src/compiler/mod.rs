@@ -31,6 +31,7 @@ pub use compile::{
 pub use host::{player_assembly_paths, stage_host};
 pub use metadata::{
     METADATA_GUID_BUFFER_SIZE, METADATA_GUID_MAXIMUM, MetadataGuidIdentity, MetadataGuidIndex,
+    assembly_references,
 };
 pub use netcode::{HOST_CODEGEN_DIRECTORY, NetcodeProcessor, needs_netcode};
 pub use nilable::{NilMap, NilVec};
