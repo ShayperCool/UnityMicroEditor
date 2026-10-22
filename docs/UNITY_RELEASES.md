@@ -42,9 +42,11 @@ unity-micro-editor auto-prepare \
 
 - the group's scripting define symbols instead of the Standalone ones, with the group's platform symbols (`UNITY_ANDROID`, `UNITY_ANDROID_API`, `PLATFORM_ANDROID`; `UNITY_IOS`, `UNITY_IPHONE`, `PLATFORM_IOS`);
 - the group's platform in asmdef `includePlatforms`/`excludePlatforms` and in the platform settings of managed plugins;
-- the stage's Linux build gets the same symbols, and the stage's own asmdefs under `Assets` stay out of its Player builds (the define constraint `UNITY_EDITOR || !UNITY_MICRO_EDITOR_HOST_BUILD`): the host leaves the game's assemblies out anyway, and with the device's symbols they need assemblies a Linux build does not have.
+- the stage's Linux build gets the same symbols, and takes the device's assemblies: every asmdef of the stage's `Assets`, and of an embedded copy of each package that has one, is a Linux assembly exactly when it is one of the device. The host is then a Linux build of the device's code, and what its Resources hold is serialized with the game's scripts (Zenject's `ProjectContext` and the like are loaded from there).
 
-The engine stays a Linux Player: code that calls the device's native plugins under those symbols (JNI, Objective-C bindings) fails at run time unless it also checks for the Editor, and native libraries for the device are not loaded.
+The engine stays a Linux Player: code that calls the device's native plugins under those symbols (JNI, Objective-C bindings) fails at run time unless it also checks for the Editor, and native libraries for the device are not loaded. In the Editor's Play mode such code is skipped by `#if UNITY_EDITOR`, which a Player cannot define: the Editor's symbols change the API between assemblies (UGUI's `OnValidate` overrides, Editor-only engine members), so a mix of assemblies compiled with and without them does not compile. A game whose start waits on such a plugin (a consent SDK that only answers through JNI) stops there; it needs a path of its own for a desktop Player.
+
+The Player also gets the class library assemblies its plugins use that the host lacks (`System.Web` of `nunit.framework`), from the Player's `unityjit-linux` profile, as a build copies them; and a plugin below an `Editor` folder is never a Player's.
 
 ## Packages only the project's Editor could fetch
 

@@ -14,7 +14,7 @@ It runs on Linux with one pinned Unity version. Coverage of Editor features is p
 ## Requirements
 
 - Linux x64.
-- Unity `6000.6.3f1` (revision `45d8eee7de74`) with Linux Mono build support, installed separately. The tool does not distribute Unity binaries.
+- Unity `6000.6.3f1` (revision `45d8eee7de74`) with Linux Mono build support, installed separately; a project of Unity `6000.0.71f1` (revision `907bc2d768b5`) runs with that release installed as well ([docs/UNITY_RELEASES.md](docs/UNITY_RELEASES.md)). The tool does not distribute Unity binaries.
 - Rust `1.99.0`; `rustup` installs it from `rust-toolchain.toml`. No system `dotnet` is needed: C# tooling uses the .NET SDK `8.0.318` inside the Unity installation.
 - A hardware GPU. The tested backend is OpenGL Core on NVIDIA; a Null or software renderer is rejected.
 
@@ -59,6 +59,7 @@ Guides:
 - [docs/AGENT_MCP.md](docs/AGENT_MCP.md): MCP configuration, tools, source edits, project tools, simulation and input.
 - [docs/NATIVE_IMPORT.md](docs/NATIVE_IMPORT.md): the import worker coordinator and its commands.
 - [docs/HOSTLESS_PLAYER.md](docs/HOSTLESS_PLAYER.md): what a host build produces, and the experiment toward a Player without one.
+- [docs/UNITY_RELEASES.md](docs/UNITY_RELEASES.md): the supported Unity releases, a game written for Android or iOS (`--compile-for`), packages only the project's Editor could fetch, and scenes the game loads by name.
 
 ## Commands
 
@@ -74,7 +75,7 @@ Guides:
 | `source-graph`, `compiler-source-prepare`, `compiler-prepare`, `prepare-project`, `engine-profile-capture` | Individual preparation steps, for diagnostics. |
 | `version` | Print the pinned engine profile. |
 
-Every command takes an explicit `--project`. `--editor` selects the Unity installation; its default is `UNITY_EDITOR`, then `$HOME/Unity/Hub/Editor/6000.6.3f1/Editor/Unity`.
+Every command takes an explicit `--project`. `--editor` selects the Unity installation; its default is `UNITY_EDITOR`, then the Hub installation of the project's release, `$HOME/Unity/Hub/Editor/<ProjectVersion>/Editor/Unity`.
 
 ## Where output goes
 

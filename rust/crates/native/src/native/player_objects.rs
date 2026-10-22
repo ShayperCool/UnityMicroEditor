@@ -511,6 +511,10 @@ fn linked_shaders(
         for (name, only_passes) in super::baked::linked_shader_links(&text) {
             let path = match &sources.shaders_named(&name)?[..] {
                 [] if only_passes && builtin(&name)? => continue,
+                // A fallback neither a source nor the engine declares is
+                // left out by the build, with the warning the worker logs
+                // ("fallback shader ... not found"), as the Editor builds it.
+                [] if !only_passes && !builtin(&name)? => continue,
                 [] => bail!(Unsupported(format!(
                     "the shader {name:?} that {from} names, which no source of the project or its packages declares"
                 ))),
