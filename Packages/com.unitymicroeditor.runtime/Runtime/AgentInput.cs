@@ -9,7 +9,10 @@ namespace UnityMicroEditor
 {
     internal sealed class AgentInputExecutionException : InvalidOperationException
     { internal AgentInputExecutionException(string message, Exception inner) : base(message, inner) { } }
-    /// <summary>Uses public optional package APIs. It does not inject legacy Input or native OS events.</summary>
+    /// <summary>
+    /// Uses public optional package APIs, and for Play mode code the legacy Input it reads through the
+    /// bridge (<see cref="LegacyInput"/>). It does not inject native OS events.
+    /// </summary>
     internal sealed class AgentInput : IDisposable
     {
         private readonly Func<string> projectRoot;
@@ -29,7 +32,7 @@ namespace UnityMicroEditor
             return new Dictionary<string, object> { ["inputSystemAvailable"] = input != null, ["activeInputHandling"] = mode < 0 ? null : (object)mode,
                 ["profileError"] = profileError, ["keyMouseInjectionSupported"] = input != null && (mode == 1 || mode == 2),
                 ["inputSystemAssemblyVersion"] = input == null ? null : input.Assembly.GetName().Version.ToString(),
-                ["legacyInputInjection"] = false, ["nativeOsInputInjection"] = false,
+                ["legacyInputInjection"] = LegacyInput.Answers, ["nativeOsInputInjection"] = false,
                 ["deviceSemantics"] = "owned_virtual_keyboard_and_mouse", ["eventSemantics"] = "queued_for_next_input_system_update",
                 ["uiPointerAvailable"] = events != null, ["uiSemantics"] = "targeted_public_pointer_down_up_click",
                 ["queuedEvents"] = queuedEvents, ["uiClicks"] = uiClicks };
@@ -47,8 +50,25 @@ namespace UnityMicroEditor
             }
         }
 
+        /// <summary>Whether the target reads the Input System, which takes the virtual devices.</summary>
+        private bool InputSystemReads()
+        {
+            int mode = InputMode(out _);
+            return (mode == 1 || mode == 2) && PackageType("UnityEngine.InputSystem.InputSystem", "Unity.InputSystem") != null;
+        }
+
         private object Key(Dictionary<string, object> arguments)
         {
+            if (LegacyInput.Answers)
+            {
+                string legacyName = Text(arguments, "key"); bool legacyPressed = Boolean(arguments, "pressed");
+                KeyCode code = LegacyInput.FromInputSystem(legacyName);
+                if (code == KeyCode.None) throw new InvalidDataException("Unknown key: " + legacyName);
+                LegacyInput.Key(code, legacyPressed);
+                if (!InputSystemReads())
+                    return new Dictionary<string, object> { ["action"] = "key", ["key"] = code.ToString(), ["pressed"] = legacyPressed,
+                        ["queued"] = true, ["delivery"] = "next_frame_legacy_input" };
+            }
             RequireInputProfile();
             Type input = RequirePackage("UnityEngine.InputSystem.InputSystem", "Unity.InputSystem");
             Type keyType = RequirePackage("UnityEngine.InputSystem.Key", "Unity.InputSystem");
@@ -71,6 +91,32 @@ namespace UnityMicroEditor
 
         private object Mouse(Dictionary<string, object> arguments)
         {
+            if (LegacyInput.Answers)
+            {
+                Vector2 at = arguments.TryGetValue("position", out object legacyRaw) ? Vector(legacyRaw) : LegacyInput.Position;
+                int index = -1; bool legacyPressed = false;
+                string legacyButton = Text(arguments, "button");
+                if (!string.IsNullOrEmpty(legacyButton))
+                {
+                    switch (legacyButton.ToLowerInvariant())
+                    {
+                        case "left": index = 0; break;
+                        case "right": index = 1; break;
+                        case "middle": index = 2; break;
+                        case "back": index = 3; break;
+                        case "forward": index = 4; break;
+                        default: throw new InvalidDataException("Unknown mouse button: " + legacyButton);
+                    }
+                    legacyPressed = Boolean(arguments, "pressed");
+                }
+                // The legacy Input gives the wheel in notches; a viewer sends pixels, 120 to a notch.
+                Vector2 wheel = arguments.TryGetValue("scroll", out object legacyScroll) ? Vector(legacyScroll) / 120f : Vector2.zero;
+                LegacyInput.Mouse(at, index, legacyPressed, wheel);
+                mousePosition = at;
+                if (!InputSystemReads())
+                    return new Dictionary<string, object> { ["action"] = "mouse", ["position"] = new Dictionary<string, object> { ["x"] = at.x, ["y"] = at.y },
+                        ["queued"] = true, ["delivery"] = "next_frame_legacy_input" };
+            }
             RequireInputProfile();
             Type input = RequirePackage("UnityEngine.InputSystem.InputSystem", "Unity.InputSystem");
             Type stateType = RequirePackage("UnityEngine.InputSystem.LowLevel.MouseState", "Unity.InputSystem");
@@ -140,6 +186,7 @@ namespace UnityMicroEditor
         /// <summary>Releases every key and mouse button the virtual devices hold down.</summary>
         internal void ReleaseAll()
         {
+            if (LegacyInput.Answers) LegacyInput.ReleaseAll();
             Type input = PackageType("UnityEngine.InputSystem.InputSystem", "Unity.InputSystem"); if (input == null) return;
             if (keyboard != null && heldKeys.Count > 0)
             {

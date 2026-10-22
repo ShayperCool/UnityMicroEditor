@@ -343,6 +343,29 @@ namespace UnityMicroEditor.PlayModeEditor
             Debug.LogWarning("[unity-micro-editor] the game's code quit (" + exitCode + "), which Play mode ignores.\n" + Environment.StackTrace);
     }
 
+    /// <summary>
+    /// The legacy Input of Play mode code: what the Player's own window gives, and what a remote
+    /// viewer or an agent sends (<see cref="LegacyInput"/>), as the Editor's Game view gives a
+    /// mouse and keys to the same API. The linker calls these for the game's and the packages' code
+    /// (uGUI's <c>BaseInput</c> among it); touches stay the engine's, none, as in the Editor.
+    /// </summary>
+    public static class UnityEngine_Input
+    {
+        public static Vector3 get_mousePosition() => LegacyInput.Pointing ? (Vector3)LegacyInput.Position : Input.mousePosition;
+        public static Vector2 get_mouseScrollDelta() => Input.mouseScrollDelta + LegacyInput.Scroll;
+        public static bool GetMouseButton(int button) => Input.GetMouseButton(button) || LegacyInput.Held(button);
+        public static bool GetMouseButtonDown(int button) => Input.GetMouseButtonDown(button) || LegacyInput.Down(button);
+        public static bool GetMouseButtonUp(int button) => Input.GetMouseButtonUp(button) || LegacyInput.Up(button);
+        public static bool GetKey(KeyCode key) => Input.GetKey(key) || LegacyInput.Held(key);
+        public static bool GetKeyDown(KeyCode key) => Input.GetKeyDown(key) || LegacyInput.Down(key);
+        public static bool GetKeyUp(KeyCode key) => Input.GetKeyUp(key) || LegacyInput.Up(key);
+        public static bool GetKey(string name) => Input.GetKey(name) || LegacyInput.Held(LegacyInput.Key(name));
+        public static bool GetKeyDown(string name) => Input.GetKeyDown(name) || LegacyInput.Down(LegacyInput.Key(name));
+        public static bool GetKeyUp(string name) => Input.GetKeyUp(name) || LegacyInput.Up(LegacyInput.Key(name));
+        public static bool get_anyKey() => Input.anyKey || LegacyInput.AnyHeld;
+        public static bool get_anyKeyDown() => Input.anyKeyDown || LegacyInput.AnyDown;
+    }
+
     public static class UnityEditor_PlayerSettings
     {
         public static string get_productName() => Application.productName;

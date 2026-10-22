@@ -191,6 +191,20 @@ sealed class AssemblyLink
         "UnityEngine.RuntimePlatform UnityEngine.Application::get_platform()",
         "System.Void UnityEngine.Application::Quit()",
         "System.Void UnityEngine.Application::Quit(System.Int32)",
+        // The legacy Input, which also gives what a remote viewer or an agent sends.
+        "UnityEngine.Vector3 UnityEngine.Input::get_mousePosition()",
+        "UnityEngine.Vector2 UnityEngine.Input::get_mouseScrollDelta()",
+        "System.Boolean UnityEngine.Input::GetMouseButton(System.Int32)",
+        "System.Boolean UnityEngine.Input::GetMouseButtonDown(System.Int32)",
+        "System.Boolean UnityEngine.Input::GetMouseButtonUp(System.Int32)",
+        "System.Boolean UnityEngine.Input::GetKey(UnityEngine.KeyCode)",
+        "System.Boolean UnityEngine.Input::GetKeyDown(UnityEngine.KeyCode)",
+        "System.Boolean UnityEngine.Input::GetKeyUp(UnityEngine.KeyCode)",
+        "System.Boolean UnityEngine.Input::GetKey(System.String)",
+        "System.Boolean UnityEngine.Input::GetKeyDown(System.String)",
+        "System.Boolean UnityEngine.Input::GetKeyUp(System.String)",
+        "System.Boolean UnityEngine.Input::get_anyKey()",
+        "System.Boolean UnityEngine.Input::get_anyKeyDown()",
     };
 
     readonly Request request;

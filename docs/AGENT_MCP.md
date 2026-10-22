@@ -931,7 +931,11 @@ means they could not be.
 
 Keyboard/mouse actions queue events on owned virtual Input System devices and
 require the target's active Input System profile and matching host package.
-Legacy Input and OS injection are not advertised. UI dispatch targets public
+Play mode code ([UNITY_RELEASES.md](UNITY_RELEASES.md#play-mode-code)) also
+reads them through the legacy Input, as the Editor's Game view gives its mouse
+and keys to that API (`legacyInputInjection: true`): each press and release
+takes effect on a frame of its own, the frame after it arrived. Other legacy
+Input and OS injection are not advertised. UI dispatch targets public
 EventSystem pointer handlers; it does not simulate OS hit-testing. Read current
 runtime capabilities before choosing the route.
 
@@ -1071,8 +1075,9 @@ Limits:
   transports are verified in Chrome only.
 - Keyboard and mouse use the same virtual Input System devices as
   `runtime_command(input)`, so they need the target's Input System profile
-  (`activeInputHandler` 1 or 2). A legacy-Input project is shown but cannot be
-  played. Text typed into input fields that read IMGUI events is not delivered.
+  (`activeInputHandler` 1 or 2), or Play mode code, which reads them through
+  the legacy Input as in the Editor. Any other legacy-Input project is shown
+  but cannot be played. Text typed into input fields that read IMGUI events is not delivered.
 - Keys are matched by physical position (`KeyboardEvent.code`). The browser
   keeps F11, F12 and whatever the operating system intercepts; Escape also
   releases a captured pointer.
