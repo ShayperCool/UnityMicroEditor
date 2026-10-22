@@ -539,7 +539,7 @@ impl Inventory<'_> {
                 );
             }
         }
-        let lower = asset.path.to_lowercase();
+        let lower = asset.path.to_ascii_lowercase();
         if let Some(previous) = self.cases.get(&lower) {
             ensure!(
                 *previous == asset.path,
@@ -699,7 +699,7 @@ pub fn update_source_with(schema: &Schema, project: &str, logical: &str) -> Resu
     let physical = Path::new(project).join(logical);
     let mut buffer = vec![0u8; 128 * 1024];
     let digest = hash_file(&physical, 1 << 30, &mut buffer, schema)?;
-    let key = format!("{}\0", logical.to_lowercase()).into_bytes();
+    let key = format!("{}\0", logical.to_ascii_lowercase()).into_bytes();
     let database = format!("{project}/Library/SourceAssetDB");
     lmdb::commit(&database, |tables| {
         let table = tables
@@ -863,7 +863,7 @@ pub fn write_with(schema: &Schema, input: Input) -> Result<Report> {
         mapping.extend_from_slice(&inventory.hashes.get(name).unwrap_or(&zero).hash);
         add(
             "PathToGuid",
-            format!("{}\0", name.to_lowercase()).into_bytes(),
+            format!("{}\0", name.to_ascii_lowercase()).into_bytes(),
             mapping,
         );
         let mut props = properties(&entry.meta).with_context(|| name.clone())?;
@@ -926,7 +926,7 @@ pub fn write_with(schema: &Schema, input: Input) -> Result<Report> {
         put_u64(&mut value, 24, digest.size);
         add(
             "hash",
-            format!("{}\0", name.to_lowercase()).into_bytes(),
+            format!("{}\0", name.to_ascii_lowercase()).into_bytes(),
             value,
         );
     }
