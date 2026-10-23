@@ -115,17 +115,30 @@ unity-micro-editor player-file compare F <worker's ume-deps>
 ```
 
 Main of Bouncemasters, against the dependencies file the worker wrote: 1734
-sources, 21185 objects paired (226 of the worker's unpaired), 19721 equal
+sources, 21185 objects paired (226 of the worker's unpaired), 20089 equal
 field by field. The type trees and samples still come from a worker file
 (`--library`); a release's trees and default objects are to be captured
 once and shipped, so that a user needs no licence.
+
+Transparent pixels of an RGBA texture with *Alpha Is Transparency* take the
+colour of the nearest pixel whose alpha is not zero and stay transparent
+(the Editor's `ImageAlphaDilate.cpp`): jump flooding over the image as the
+engine stores it (rows from the bottom), the steps from half the larger
+side, at most 16, halved down to 1, each pixel choosing from its own
+nearest and those of its four neighbours at the step (left, right, below,
+above) the one nearest in Manhattan distance, the first on a tie; a pixel
+no step reaches, beyond 31, keeps its colour. Main: 406 of the 501 paired
+textures equal (38 without). Of the other 95, 50 differ only in
+`m_LightmapFormat` (the engine's texture usage mode, 6 for sprites and two
+NPOT textures, 0 for the other default ones, by a rule not known yet), 10
+are scaled, 10 in `m_IsAlphaChannelOptional` (three of them stored RGB24
+by the engine) and 3 are TextMesh Pro font atlases.
 
 What differs, by count of objects:
 
 | What | Objects | Needs |
 |---|---|---|
 | Sprites with a tight mesh: vertices, indices and the rect of their bounds | ~420 | the engine's outline and triangulation (Ghidra) |
-| Transparent pixels of textures with *Alpha Is Transparency* | ~400 | the engine's dilation: one neighbour's colour per pass, horizontal before vertical, at most ~31 pixels; a model of it matched 306 of 594 textures exactly |
 | Compressed (DXT) and scaled textures | ~90 | a BC compressor and the engine's resampling |
 | Shaders (project and built-in) | all materials | built by the worker today; `playerbake`'s own baker serves 6000.6 only |
 | Fields a newer engine added to an older source | few | per-class default objects instead of samples |
@@ -210,7 +223,7 @@ given, which for a session are those its Player runs.
 `player-file closure ... --layouts <layouts.json>` takes the trees, samples
 and `MonoScript`s of all scripts from the layouts instead of the worker's
 file (which still gives the classes of the engine). Main:
-19666 objects equal against 19721 with the worker's script trees. All 57
+20034 objects equal against 20089 with the worker's script trees. All 57
 fewer are Odin's: the 26 managers that hold `serializationData` and the
 `MonoScript`s of 31 Odin classes, whose hashes follow the trees; two objects
 whose fields the worker's samples gave wrongly are now equal.

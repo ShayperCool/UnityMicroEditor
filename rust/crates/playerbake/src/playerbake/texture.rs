@@ -210,7 +210,20 @@ pub fn convert(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let (width, height) = (image.width as usize, image.height as usize);
-    let data = pixels(&image, format);
+    let mut bottom_up = pixels(&image, RGBA32);
+    // Alpha Is Transparency: an image the importer keeps with alpha gives its
+    // transparent pixels the colour of the nearest one that is not.
+    if settings.int("alphaIsTransparency", 0) != 0 && image.alpha && format != RGB24 {
+        dilate_alpha(&mut bottom_up, width, height);
+    }
+    let data = match format {
+        RGBA32 => bottom_up,
+        RGB24 => bottom_up
+            .chunks(4)
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect(),
+        _ => bottom_up.chunks(4).map(|p| p[3]).collect(),
+    };
     let filter = match settings.int("textureSettings.filterMode", -1) {
         -1 => 1,
         mode => mode,
@@ -309,6 +322,64 @@ pub fn convert(
         }
     }
     Ok(Textured { objects, data })
+}
+
+/// Gives each transparent pixel of `rgba` (8-bit RGBA, rows from the bottom)
+/// the colour of the nearest pixel that is not transparent, keeping it
+/// transparent, as the engine's importer does with *Alpha Is Transparency*:
+/// by jump flooding with steps from half the larger side, at most 16,
+/// halved down to 1, each pixel taking from itself and its four neighbours
+/// at the step (left, right, below, above) the nearest one in Manhattan
+/// distance, the first on a tie. A pixel no step reaches is left alone.
+fn dilate_alpha(rgba: &mut [u8], width: usize, height: usize) {
+    const NONE: u16 = u16::MAX;
+    if width >= NONE as usize || height >= NONE as usize {
+        return;
+    }
+    let opaque = |rgba: &[u8], index: usize| rgba[index * 4 + 3] != 0;
+    let mut nearest: Vec<(u16, u16)> = (0..width * height)
+        .map(|index| match opaque(rgba, index) {
+            true => ((index % width) as u16, (index / width) as u16),
+            false => (NONE, NONE),
+        })
+        .collect();
+    let mut next = nearest.clone();
+    let mut step = (width.max(height) / 2).min(16) as i64;
+    while step > 0 {
+        for y in 0..height {
+            for x in 0..width {
+                let mut seed = nearest[y * width + x];
+                if seed != (x as u16, y as u16) {
+                    let distance = |seed: (u16, u16)| match seed.0 {
+                        NONE => i64::MAX,
+                        _ => (seed.0 as i64 - x as i64).abs() + (seed.1 as i64 - y as i64).abs(),
+                    };
+                    let mut best = distance(seed);
+                    for (dx, dy) in [(-step, 0), (step, 0), (0, -step), (0, step)] {
+                        let (nx, ny) = (x as i64 + dx, y as i64 + dy);
+                        if nx < 0 || ny < 0 || nx >= width as i64 || ny >= height as i64 {
+                            continue;
+                        }
+                        let candidate = nearest[ny as usize * width + nx as usize];
+                        if candidate.0 != NONE && distance(candidate) < best {
+                            best = distance(candidate);
+                            seed = candidate;
+                        }
+                    }
+                }
+                next[y * width + x] = seed;
+            }
+        }
+        std::mem::swap(&mut nearest, &mut next);
+        step /= 2;
+    }
+    for (index, &(x, y)) in nearest.iter().enumerate() {
+        if x != NONE && !opaque(rgba, index) {
+            let from = (y as usize * width + x as usize) * 4;
+            let colour = [rgba[from], rgba[from + 1], rgba[from + 2]];
+            rgba[index * 4..index * 4 + 4].copy_from_slice(&[colour[0], colour[1], colour[2], 0]);
+        }
+    }
 }
 
 /// The image's pixels in a format, rows from the bottom as the engine
@@ -545,6 +616,22 @@ mod tests {
         writer.write_image_data(rgba).unwrap();
         writer.finish().unwrap();
         out
+    }
+
+    #[test]
+    fn transparent_pixels_take_the_colour_of_the_nearest_opaque_one_within_reach() {
+        // One opaque pixel and four transparent ones in a row: steps 2 and 1
+        // carry its colour three pixels far; the fourth keeps its own.
+        let mut rgba = vec![
+            200, 10, 20, 255, 1, 1, 1, 0, 2, 2, 2, 0, 3, 3, 3, 0, 4, 4, 4, 0,
+        ];
+        dilate_alpha(&mut rgba, 5, 1);
+        assert_eq!(
+            rgba,
+            [
+                200, 10, 20, 255, 200, 10, 20, 0, 200, 10, 20, 0, 200, 10, 20, 0, 4, 4, 4, 0
+            ]
+        );
     }
 
     #[test]
