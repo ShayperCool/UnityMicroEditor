@@ -271,6 +271,39 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                 unity_micro_editor::compiler::player_script_layouts(&ctx, project, editor, player)?;
             fs::write(output, layouts)?;
         }
+        ["sprite-mesh", png, rest @ ..] => {
+            // The outlines and tight mesh the generator makes of a PNG's alpha
+            // (its rows from the bottom), optionally within `x y w h`.
+            use unity_micro_editor::playerbake::{decode_png, spritemesh};
+            let image = decode_png(&fs::read(png)?)?;
+            let (width, height) = (image.width as usize, image.height as usize);
+            let rect: Vec<usize> = rest.iter().map(|v| v.parse()).collect::<Result<_, _>>()?;
+            let [x, y, w, h] = match rect.as_slice() {
+                [x, y, w, h] => [*x, *y, *w, *h],
+                _ => [0, 0, width, height],
+            };
+            let mut alpha = Vec::with_capacity(w * h);
+            for row in y..y + h {
+                let top = height - 1 - row;
+                for column in x..x + w {
+                    alpha.push(image.rgba[(top * width + column) * 4 + 3]);
+                }
+            }
+            let settings = spritemesh::Settings {
+                detail: -1.0,
+                extrude: 1,
+                alpha_tolerance: 0,
+                hole_detection: true,
+            };
+            let outlines = spritemesh::outlines(&alpha, w as i32, h as i32, &settings);
+            for (i, outline) in outlines.outlines.iter().enumerate() {
+                println!("outline {i}: {outline:?}");
+            }
+            let mesh = spritemesh::tight_mesh(&alpha, w as i32, h as i32, &settings);
+            println!("bounds {:?}", mesh.bounds);
+            println!("vertices {:?}", mesh.vertices);
+            println!("indices {:?}", mesh.indices);
+        }
         ["script-templates", output, files @ ..] => {
             use unity_micro_editor::playerbake as bake;
             let mut trees = Vec::new();

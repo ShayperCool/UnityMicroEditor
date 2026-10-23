@@ -4,9 +4,9 @@
 //!
 //! Covered: PNG sources of the Default, Sprite and Single Channel types kept
 //! uncompressed (RGBA32, RGB24, Alpha8) at their own size without mipmaps,
-//! with *Alpha Is Transparency*, single and multiple sprites with a
-//! full-rect mesh. Anything else is refused, so a caller can leave it to the
-//! worker.
+//! with *Alpha Is Transparency*, single and multiple sprites with a tight or
+//! full-rect mesh and their fallback physics shape. Anything else is
+//! refused, so a caller can leave it to the worker.
 use super::{Kind, typetree::Val, unsupported};
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Map, Value};
@@ -226,6 +226,8 @@ pub fn convert(
     if settings.int("alphaIsTransparency", 0) != 0 && image.alpha && format != RGB24 {
         dilate_alpha(&mut bottom_up, width, height);
     }
+    // What a tight sprite mesh is traced from: the alpha the texture keeps.
+    let alpha: Vec<u8> = bottom_up.chunks(4).map(|p| p[3]).collect();
     let data = match format {
         RGBA32 => bottom_up,
         RGB24 => bottom_up
@@ -335,6 +337,7 @@ pub fn convert(
                     pivot,
                     border,
                     file_id,
+                    (&alpha, width, height),
                 )?,
             ));
         }
@@ -507,30 +510,146 @@ fn sprite_value(
     pivot: [f64; 2],
     border: [f64; 4],
     file_id: i64,
+    (alpha, image_width, image_height): (&[u8], usize, usize),
 ) -> Result<Val> {
-    if settings.int("spriteMeshType", 1) != 0 {
-        // A tight mesh follows the outline of the opaque pixels; a full rect
-        // shows the same pixels.
-    }
     let ppu = settings.float("spritePixelsToUnits", 100.0);
     let [x, y, w, h] = rect;
-    let left = -pivot[0] * w / ppu;
-    let right = (1.0 - pivot[0]) * w / ppu;
-    let bottom = -pivot[1] * h / ppu;
-    let top = (1.0 - pivot[1]) * h / ppu;
-    let mut vertices = Vec::with_capacity(80);
-    for (vx, vy) in [(left, top), (right, top), (left, bottom), (right, bottom)] {
-        for component in [vx as f32, vy as f32, 0.0] {
-            vertices.extend_from_slice(&component.to_le_bytes());
+    let ppu = ppu as f32;
+    let (xf, yf, wf, hf) = (x as f32, y as f32, w as f32, h as f32);
+    // The pivot from the rect's centre, in its pixels.
+    let offset = [
+        (pivot[0] as f32 * wf + xf) - (wf * 0.5 + xf),
+        (pivot[1] as f32 * hf + yf) - (hf * 0.5 + yf),
+    ];
+    let tight = settings.int("spriteMeshType", 1) == 1;
+    // A tight mesh follows the outline of the pixels the sprite's rect holds,
+    // in whole pixels of it; a sprite smaller than 32 pixels across keeps
+    // the full rect.
+    // The whole pixels the rect covers, and the pivot from their corner.
+    let (x0, y0) = (xf.floor() as i32, yf.floor() as i32);
+    let x1 = ((xf + wf).ceil() as i32).min(image_width as i32);
+    let y1 = ((yf + hf).ceil() as i32).min(image_height as i32);
+    let region = (x0 >= 0 && y0 >= 0 && x1 >= x0 && y1 >= y0).then(|| {
+        let (cw, ch) = (x1 - x0, y1 - y0);
+        let mut pixels = Vec::with_capacity((cw * ch) as usize);
+        for row in y0..y1 {
+            let start = row as usize * image_width + x0 as usize;
+            pixels.extend_from_slice(&alpha[start..start + cw as usize]);
+        }
+        let shift = [
+            (offset[0] + cw as f32 * 0.5) - (xf - x0 as f32),
+            (offset[1] + ch as f32 * 0.5) - (yf - y0 as f32),
+        ];
+        (pixels, cw, ch, shift)
+    });
+    let mut mesh = None;
+    if let Some((pixels, cw, ch, shift)) = &region
+        && tight
+        && wf >= 32.0
+        && hf >= 32.0
+    {
+        let generated = super::spritemesh::tight_mesh(
+            pixels,
+            *cw,
+            *ch,
+            &super::spritemesh::Settings {
+                detail: settings.float("spriteTessellationDetail", -1.0) as f32,
+                extrude: settings.int("spriteExtrude", 1).max(0) as u32,
+                alpha_tolerance: 0,
+                hole_detection: true,
+            },
+        );
+        if !generated.vertices.is_empty() {
+            let bounds = generated
+                .bounds
+                .unwrap_or([0.0, 0.0, *cw as f32, *ch as f32]);
+            mesh = Some((generated, *shift, bounds));
         }
     }
-    vertices.extend_from_slice(&[0u8; 32]);
-    let indices: Vec<u8> = [0u16, 1, 2, 2, 1, 3]
-        .iter()
-        .flat_map(|i| i.to_le_bytes())
-        .collect();
+    // The physics shape the importer falls back to: the outlines of the
+    // pixels nearly opaque, coarser.
+    let mut physics = Vec::new();
+    if settings.int("spriteGenerateFallbackPhysicsShape", 1) != 0
+        && let Some((pixels, cw, ch, shift)) = &region
+    {
+        let shape = super::spritemesh::outlines(
+            pixels,
+            *cw,
+            *ch,
+            &super::spritemesh::Settings {
+                detail: 0.25,
+                extrude: 0,
+                alpha_tolerance: 200,
+                hole_detection: true,
+            },
+        );
+        let scale = 1.0 / ppu;
+        for outline in shape.outlines {
+            physics.push(Val::Seq(
+                outline
+                    .iter()
+                    .map(|p| {
+                        Val::map([
+                            ("x", Val::F((p[0] - shift[0]) * scale)),
+                            ("y", Val::F((p[1] - shift[1]) * scale)),
+                        ])
+                    })
+                    .collect(),
+            ));
+        }
+    }
+    let mut vertices = Vec::with_capacity(80);
+    type Layout = (usize, Vec<u16>, [f32; 4], [f32; 2], [f32; 2]);
+    let (vertex_count, indices, texture_rect, texture_offset, uv_pivot): Layout = match &mesh {
+        Some((generated, shift, bounds)) => {
+            for v in &generated.vertices {
+                for component in [(v[0] - shift[0]) / ppu, (v[1] - shift[1]) / ppu, 0.0] {
+                    vertices.extend_from_slice(&component.to_le_bytes());
+                }
+            }
+            let mut indices = generated.indices.clone();
+            indices.reverse();
+            (
+                generated.vertices.len(),
+                indices,
+                [xf + bounds[0], yf + bounds[1], bounds[2], bounds[3]],
+                [bounds[0], bounds[1]],
+                [xf + shift[0], yf + shift[1]],
+            )
+        }
+        None => {
+            let (half_w, half_h) = (wf * 0.5, 0.5 * hf);
+            let corners = [
+                (-half_w, half_h),
+                (half_w, half_h),
+                (-half_w, -half_h),
+                (half_w, -half_h),
+            ];
+            for (vx, vy) in corners {
+                for component in [(vx - offset[0]) / ppu, (vy - offset[1]) / ppu, 0.0] {
+                    vertices.extend_from_slice(&component.to_le_bytes());
+                }
+            }
+            (
+                4,
+                vec![0, 1, 2, 2, 1, 3],
+                [xf, yf, wf, hf],
+                [0.0, 0.0],
+                [xf + half_w + offset[0], yf + half_h + offset[1]],
+            )
+        }
+    };
+    // The texture coordinates, a stream of their own aligned to 16 bytes,
+    // are left to the Player, which derives them.
+    while !vertices.len().is_multiple_of(16) {
+        vertices.push(0);
+    }
+    vertices.extend(std::iter::repeat_n(0u8, vertex_count * 8));
+    let index_count = indices.len();
+    let indices: Vec<u8> = indices.iter().flat_map(|i| i.to_le_bytes()).collect();
     let mut value = kind.sample.clone();
     let float = |v: f64| Val::F(v as f32);
+    let single = |v: f32| Val::F(v);
     let rect_val = |r: Rect| {
         Val::map([
             ("x", float(r[0])),
@@ -542,7 +661,11 @@ fn sprite_value(
     let vector2 = |a: f64, b: f64| Val::map([("x", float(a)), ("y", float(b))]);
     set(&mut value, "m_Name", Val::Str(name.to_string()));
     set(&mut value, "m_Rect", rect_val(rect));
-    set(&mut value, "m_Offset", vector2(0.0, 0.0));
+    set(
+        &mut value,
+        "m_Offset",
+        Val::map([("x", single(offset[0])), ("y", single(offset[1]))]),
+    );
     set(
         &mut value,
         "m_Border",
@@ -553,7 +676,7 @@ fn sprite_value(
             ("w", float(border[3])),
         ]),
     );
-    set(&mut value, "m_PixelsToUnits", float(ppu));
+    set(&mut value, "m_PixelsToUnits", single(ppu));
     set(&mut value, "m_Pivot", vector2(pivot[0], pivot[1]));
     set(
         &mut value,
@@ -580,24 +703,41 @@ fn sprite_value(
         ]),
     );
     set(&mut value, "m_AtlasTags", Val::Seq(Vec::new()));
-    set(&mut value, "m_PhysicsShape", Val::Seq(Vec::new()));
+    set(&mut value, "m_PhysicsShape", Val::Seq(physics));
     set(&mut value, "m_Bones", Val::Seq(Vec::new()));
     set(&mut value, "m_ScriptableObjects", Val::Seq(Vec::new()));
     let Some(render) = value.field_mut("m_RD") else {
         bail!("the Sprite tree has no m_RD");
     };
-    set(render, "textureRect", rect_val(rect));
-    set(render, "textureRectOffset", vector2(0.0, 0.0));
+    set(
+        render,
+        "textureRect",
+        Val::map([
+            ("x", single(texture_rect[0])),
+            ("y", single(texture_rect[1])),
+            ("width", single(texture_rect[2])),
+            ("height", single(texture_rect[3])),
+        ]),
+    );
+    set(
+        render,
+        "textureRectOffset",
+        Val::map([
+            ("x", single(texture_offset[0])),
+            ("y", single(texture_offset[1])),
+        ]),
+    );
     set(render, "atlasRectOffset", vector2(-1.0, -1.0));
-    set(render, "settingsRaw", Val::U(0));
+    // The settings' mesh type bit: tight.
+    set(render, "settingsRaw", Val::U(if tight { 64 } else { 0 }));
     set(
         render,
         "uvTransform",
         Val::map([
-            ("x", float(ppu)),
-            ("y", float(x + pivot[0] * w)),
-            ("z", float(ppu)),
-            ("w", float(y + pivot[1] * h)),
+            ("x", single(ppu)),
+            ("y", single(uv_pivot[0])),
+            ("z", single(ppu)),
+            ("w", single(uv_pivot[1])),
         ]),
     );
     set(render, "downscaleMultiplier", float(1.0));
@@ -607,15 +747,15 @@ fn sprite_value(
     if let Some(Val::Seq(meshes)) = render.field_mut("m_SubMeshes") {
         let mut mesh = meshes.first().cloned().unwrap_or(Val::Zero);
         set(&mut mesh, "firstByte", Val::U(0));
-        set(&mut mesh, "indexCount", Val::U(6));
+        set(&mut mesh, "indexCount", Val::U(index_count as u64));
         set(&mut mesh, "topology", Val::I(0));
         set(&mut mesh, "baseVertex", Val::U(0));
         set(&mut mesh, "firstVertex", Val::U(0));
-        set(&mut mesh, "vertexCount", Val::U(4));
+        set(&mut mesh, "vertexCount", Val::U(vertex_count as u64));
         *meshes = vec![mesh];
     }
     if let Some(data) = render.field_mut("m_VertexData") {
-        set(data, "m_VertexCount", Val::U(4));
+        set(data, "m_VertexCount", Val::U(vertex_count as u64));
         set(data, "m_DataSize", Val::Bytes(vertices));
     }
     Ok(value)

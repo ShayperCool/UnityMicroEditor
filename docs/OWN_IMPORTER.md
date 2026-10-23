@@ -92,7 +92,8 @@ Libraries the importers link and their public equivalents:
   modifications set fields by property path, removed objects are left out,
   added components and children are listed by their owners.
 - `texture.rs` writes PNG sources kept uncompressed (RGBA32, RGB24, Alpha8)
-  and their sprites with a full-rect mesh.
+  and their sprites, with the tight mesh and physics shape `spritemesh.rs`
+  makes (below) or a full rect.
 - `assemble.rs` writes the closure of root sources into one file with its
   streamed data, like the worker's `ume-deps`: text assets, textures held in
   `.asset` files, the objects of the Editor's `unity_builtin_extra` the
@@ -115,7 +116,7 @@ unity-micro-editor player-file compare F <worker's ume-deps>
 ```
 
 Main of Bouncemasters, against the dependencies file the worker wrote: 1734
-sources, 21185 objects paired (226 of the worker's unpaired), 20152 equal
+sources, 21185 objects paired (226 of the worker's unpaired), 20629 equal
 field by field. The type trees and samples still come from a worker file
 (`--library`); a release's trees and default objects are to be captured
 once and shipped, so that a user needs no licence.
@@ -138,11 +139,72 @@ TextMesh Pro font atlases, and two Default textures of Spine (`chest_red`,
 `tap_to_bump`, with the same `.meta` as a Default one the engine gives 0)
 have usage mode 6 by a rule not known yet.
 
+### Sprite meshes
+
+`spritemesh.rs` makes a sprite's tight mesh and its fallback physics shape as
+the 6000.0 Editor's `SpriteMeshGenerator` does (`Runtime/Geometry`), in
+`f32` and in the order the engine computes, from the alpha of the pixels the
+sprite's rect covers (floor of its corner to ceiling of its far corner,
+rows from the bottom):
+
+1. The pixels above the alpha tolerance (0 for the mesh, 200 for the physics
+   shape), grown by the extrusion (`spriteExtrude`; 0 is 1, at most 32) by
+   Manhattan distance, mark the corners of their pixels.
+2. Outlines are traced over the corners, counter-clockwise from the first
+   corner left in row order (Moore neighbours, starting one past the step
+   back); after each, the corners between each row's crossings and the
+   first vertex's column are toggled, which clears what the outline encloses
+   and brings out its holes, then its own corners are cleared. An outline of
+   less than 4 pixels is passed; a hole is one whose first corner was not
+   marked. Holes are kept with hole detection (always, for both); with the
+   detail left to the area, a hole of less than a quarter of the image goes.
+3. An outline keeps the corners where a run of steps in at most two
+   neighbouring directions ends, and between them the corners farther than
+   half a pixel (along the line's longer axis) off the line, farthest first;
+   every vertex then moves a pixel along its normal (the two edges' normals
+   summed). Its bounds are those of the moved vertices within the image.
+4. The detail is `1 - spriteTessellationDetail`, or, below zero, `1 -`
+   (area of the outlines, holes negative) × 0.000406901 / (triangles: each
+   outline's vertices less two, two per hole), within 0 and 1. Vertices go,
+   the one costing least area (with the area its removal already moved
+   onto it) first, down to the count `(1 - detail) × n` leaves (at least
+   five, then one more): a convex vertex costs the triangle it and its
+   neighbours make; a concave one moves its neighbours along their normals
+   by the root of the quadratic that keeps the area and costs the area that
+   adds. A removal that would cross the outline or leave its bounds is not
+   made. An outer outline is then clipped to its bounds, left, right,
+   bottom, top (Sutherland–Hodgman, crossings in `f64`), every vertex is
+   rounded to a whole pixel, and vertices within 0.0001 of the segment
+   between their neighbours are dropped.
+5. libtess2 tessellates the outlines (non-zero winding); its vertices,
+   deduplicated in the order its triangles use them and rounded again, are
+   the mesh's, with the index buffer reversed. Where outlines touch, only
+   libtess2 v1.0.2 (to its commits of 2018) gives Unity's triangles; it is
+   vendored as C (`playerbake/vendor/libtess2`).
+
+The sprite takes `textureRect` = rect corner + the outlines' bounds,
+`textureRectOffset` = the bounds' corner, positions `(v - pivot) / ppu`
+with the pivot `m_Offset + region / 2 - (rect - region corner)`,
+`m_Offset = (pivot × size + corner) - (size / 2 + corner)`, the mesh type bit
+64 in `settingsRaw`, and texture coordinates left zero in a second vertex
+stream aligned to 16 bytes. A sprite less than 32 pixels across, or whose
+outline is empty, keeps the full rect (whose corners are `(±size / 2 -
+m_Offset) / ppu`). The physics shape (`spriteGenerateFallbackPhysicsShape`)
+is the outlines at detail 0.25 and tolerance 200, before tessellation,
+less the pivot and times `1 / ppu`.
+
+Main: 434 of the 436 sprites equal paired by their render data key (the
+other two are built-in), 393 by the comparison's keys, where sprites of the
+same name in other folders pair by order. `player-file sprite-mesh <png> [x y
+w h]` prints the outlines and mesh of an image; `UME_DUMP_FULL_BYTES=1`
+makes `player-file dump` print every byte string whole. The comparison
+orders assets of the same class and name by a hash of their values without
+references, so equal ones take the same key in both files.
+
 What differs, by count of objects:
 
 | What | Objects | Needs |
 |---|---|---|
-| Sprites with a tight mesh: vertices, indices and the rect of their bounds | ~420 | the engine's outline and triangulation (Ghidra) |
 | Compressed (DXT) and scaled textures | ~90 | a BC compressor and the engine's resampling |
 | Shaders (project and built-in) | all materials | built by the worker today; `playerbake`'s own baker serves 6000.6 only |
 | Fields a newer engine added to an older source | few | per-class default objects instead of samples |
@@ -227,7 +289,7 @@ given, which for a session are those its Player runs.
 `player-file closure ... --layouts <layouts.json>` takes the trees, samples
 and `MonoScript`s of all scripts from the layouts instead of the worker's
 file (which still gives the classes of the engine). Main:
-20097 objects equal against 20152 with the worker's script trees. All 57
+20574 objects equal against 20629 with the worker's script trees. All 57
 fewer are Odin's: the 26 managers that hold `serializationData` and the
 `MonoScript`s of 31 Odin classes, whose hashes follow the trees; two objects
 whose fields the worker's samples gave wrongly are now equal.

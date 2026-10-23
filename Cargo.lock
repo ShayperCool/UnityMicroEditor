@@ -2683,6 +2683,7 @@ name = "ume-playerbake"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cc",
  "lz4-sys",
  "png",
  "regex",

@@ -251,7 +251,19 @@ impl Names {
             }
         }
         let mut ordered: Vec<&Read> = objects.iter().collect();
-        ordered.sort_by_key(|o| position_of.get(&o.local_id).copied().unwrap_or(usize::MAX));
+        // Components by their position on their game object; assets of the
+        // same class and name by what they hold, so that equal ones take the
+        // same key in both files.
+        let fingerprint_of = |id: i64| values.get(&id).map(fingerprint).unwrap_or_default();
+        ordered.sort_by_key(|o| {
+            (
+                position_of.get(&o.local_id).copied().unwrap_or(usize::MAX),
+                match pointer(field(o.local_id, "m_GameObject")) {
+                    Some(_) => 0,
+                    None => fingerprint_of(o.local_id),
+                },
+            )
+        });
         let mut keys = HashMap::new();
         let mut seen: HashMap<String, usize> = HashMap::new();
         for object in ordered {
@@ -293,6 +305,41 @@ impl Names {
     fn class(&self, id: i64) -> String {
         self.classes.get(&id).cloned().unwrap_or_default()
     }
+}
+
+/// A hash of a value without its references and the places of its streamed
+/// data, which differ between two files holding the same object.
+fn fingerprint(value: &Val) -> u128 {
+    fn feed(value: &Val, hasher: &mut xxhash_rust::xxh3::Xxh3) {
+        match value {
+            Val::Zero => hasher.update(&[0]),
+            Val::Bool(b) => hasher.update(&[1, *b as u8]),
+            Val::I(v) => hasher.update(&v.to_le_bytes()),
+            Val::U(v) => hasher.update(&v.to_le_bytes()),
+            Val::F(v) => hasher.update(&v.to_le_bytes()),
+            Val::D(v) => hasher.update(&v.to_le_bytes()),
+            Val::Str(text) => hasher.update(text.as_bytes()),
+            Val::Bytes(bytes) => hasher.update(bytes),
+            Val::Seq(items) => {
+                hasher.update(&(items.len() as u64).to_le_bytes());
+                for item in items {
+                    feed(item, hasher);
+                }
+            }
+            Val::Map(fields) => {
+                for (name, field) in fields {
+                    if matches!(name.as_ref(), "m_FileID" | "m_PathID" | "m_StreamData") {
+                        continue;
+                    }
+                    hasher.update(name.as_bytes());
+                    feed(field, hasher);
+                }
+            }
+        }
+    }
+    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+    feed(value, &mut hasher);
+    hasher.digest128()
 }
 
 fn int(value: &Val) -> Option<i64> {
@@ -359,7 +406,8 @@ fn normalize(
             {
                 json!(text)
             }
-            _ if bytes.len() <= 128 => {
+            // `UME_DUMP_FULL_BYTES=1` prints every byte string whole.
+            _ if bytes.len() <= 128 || std::env::var_os("UME_DUMP_FULL_BYTES").is_some() => {
                 json!({"$hex": bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()})
             }
             _ => {
