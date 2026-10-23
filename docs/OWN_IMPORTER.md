@@ -201,6 +201,29 @@ makes `player-file dump` print every byte string whole. The comparison
 orders assets of the same class and name by a hash of their values without
 references, so equal ones take the same key in both files.
 
+### A release's engine classes
+
+`player-file closure` without `--library` takes the engine's classes from the
+release's pack (`playerbake/engine/<release>/library.bin`, a Player file of
+one object per class, read like a worker's file), the script templates from
+theirs and the scripts from `--layouts`: no file of the worker is read.
+`player-file engine-pack <release> <output> <file>...` makes it from files
+the engine wrote: each class's type tree and a sample that keeps its numbers
+and short lists of them (up to 32, without strings or references; byte
+strings up to 64), the defaults of the fields a source lacks
+(`m_CallbackLayers`, `m_TrailVertexStreams`, ...), and loses strings,
+references and longer lists. A `MonoScript` takes its execution order from
+its `.cs.meta` (`MonoImporter.executionOrder`, by the file's name).
+
+6000.0.71f1's pack comes from the worker's files of Bouncemasters and the
+Editor's `unity_builtin_extra`: 41 classes, those the game uses; a project
+with others (`Light`, `Rigidbody`, `MeshCollider`, the scene's settings
+managers, ...) needs them captured too. Main without the worker's file:
+20574 objects equal, as with it. What a sample still carries of the game:
+the short lists of the one `AudioMixerController` (`m_MixerConstant`, which
+a build derives from the mixer's groups and snapshots and the tool does not
+yet), so another project's mixer would take wrong ones.
+
 What differs, by count of objects:
 
 | What | Objects | Needs |

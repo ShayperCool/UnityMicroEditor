@@ -47,6 +47,78 @@ impl Library {
         Ok(library)
     }
 
+    /// The engine classes of the library as a Player file of one object each,
+    /// a release's pack: the samples keep their numbers, and short lists of
+    /// them (the defaults of the fields a source lacks, such as a renderer's
+    /// trail streams), and lose what an object holds of its own — strings,
+    /// references, longer lists and byte strings.
+    pub fn to_pack(&self, format: super::serialized::FileFormat) -> Result<Vec<u8>> {
+        fn plain(value: &Val) -> bool {
+            match value {
+                Val::Str(_) => false,
+                Val::Seq(items) => items.iter().all(plain),
+                Val::Map(fields) => fields
+                    .iter()
+                    .all(|(name, field)| name != "m_PathID" && plain(field)),
+                _ => true,
+            }
+        }
+        fn clear(value: &mut Val) {
+            match value {
+                Val::Str(text) => text.clear(),
+                Val::Bytes(bytes) if bytes.len() > 64 => bytes.clear(),
+                Val::Seq(items) if items.len() > 32 || !items.iter().all(plain) => items.clear(),
+                Val::Map(fields) => {
+                    let pointer = fields.iter().any(|(name, _)| name == "m_PathID");
+                    for (_, field) in fields {
+                        if pointer {
+                            *field = match field {
+                                Val::I(_) => Val::I(0),
+                                Val::U(_) => Val::U(0),
+                                _ => Val::Zero,
+                            };
+                        } else {
+                            clear(field);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut classes: Vec<(&i32, &Kind)> = self
+            .classes
+            .iter()
+            .filter(|(class, _)| **class != super::typetree::SCRIPT_CLASS)
+            .collect();
+        classes.sort_by_key(|(class, _)| **class);
+        let mut objects = Vec::new();
+        for (index, (class, kind)) in classes.iter().enumerate() {
+            let mut sample = kind.sample.clone();
+            clear(&mut sample);
+            let data = kind
+                .tree
+                .encode(&sample)
+                .with_context(|| format!("encode the sample of class {class}"))?;
+            objects.push(super::serialized::Object {
+                local_id: index as i64 + 1,
+                tree: &kind.tree,
+                data,
+                script: None,
+            });
+        }
+        super::serialized::write_in(format, &objects, &[])
+    }
+
+    /// The pack the tool ships for a release (`to_pack`), if any.
+    pub fn of_release(unity_version: &str) -> Option<Result<Self>> {
+        let pack: &'static [u8] = match unity_version {
+            "6000.0.71f1" => include_bytes!("engine/6000.0.71f1/library.bin"),
+            _ => return None,
+        };
+        let mut library = Library::default();
+        Some(library.add(pack).map(|()| library))
+    }
+
     pub fn add(&mut self, file: &[u8]) -> Result<()> {
         let (objects, _) = read_with_externals(file)?;
         let mut names = HashMap::new();
@@ -85,6 +157,7 @@ impl Library {
     pub fn add_scripts(
         &mut self,
         layout: &super::scripts::Layout,
+        execution_orders: &HashMap<String, i64>,
     ) -> Result<Vec<(String, String)>> {
         let mono_script = self
             .classes
@@ -120,6 +193,9 @@ impl Library {
                     *target = Val::Str(value.clone());
                 }
             }
+            if let Some(order) = object.field_mut("m_ExecutionOrder") {
+                *order = Val::I(execution_orders.get(&script.name).copied().unwrap_or(0));
+            }
             if let Some(Val::Map(bytes)) = object.field_mut("m_PropertiesHash") {
                 for (index, (_, byte)) in bytes.iter_mut().enumerate() {
                     *byte = Val::U(type_hash[index] as u64);
@@ -148,6 +224,45 @@ impl Library {
     pub fn script_object(&self, full_name: &str) -> Option<&Val> {
         self.script_objects.get(full_name)
     }
+}
+
+/// The execution order each script's `.cs.meta` sets (`MonoImporter`), by
+/// the file's name, which is its class's, in the project's assets and
+/// packages.
+pub fn script_execution_orders(project: &Path) -> HashMap<String, i64> {
+    let mut orders = HashMap::new();
+    let mut pending: Vec<std::path::PathBuf> = ["Assets", "Packages", "Library/PackageCache"]
+        .iter()
+        .map(|root| project.join(root))
+        .collect();
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                pending.push(path);
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(stem) = name.strip_suffix(".cs.meta") else {
+                continue;
+            };
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let order = text
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("executionOrder:"))
+                .and_then(|value| value.trim().parse::<i64>().ok())
+                .unwrap_or(0);
+            if order != 0 {
+                orders.insert(stem.to_string(), order);
+            }
+        }
+    }
+    orders
 }
 
 pub const MONO_SCRIPT: i32 = 115;

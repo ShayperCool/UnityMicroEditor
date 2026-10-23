@@ -304,6 +304,28 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
             println!("vertices {:?}", mesh.vertices);
             println!("indices {:?}", mesh.indices);
         }
+        ["engine-pack", version, output, files @ ..] => {
+            // A release's pack of engine classes from files the engine wrote.
+            use unity_micro_editor::playerbake::{FileFormat, Library};
+            let paths: Vec<&Path> = files.iter().map(Path::new).collect();
+            let mut library = Library::default();
+            for path in paths {
+                if let Err(error) = library.add(&fs::read(path)?) {
+                    eprintln!("{} skipped: {error:#}", path.display());
+                }
+            }
+            let format = FileFormat {
+                version: if version.starts_with("6000.0.") {
+                    22
+                } else {
+                    23
+                },
+                unity_version: Box::leak(version.to_string().into_boxed_str()),
+            };
+            let pack = library.to_pack(format)?;
+            println!("{} bytes", pack.len());
+            fs::write(output, pack)?;
+        }
         ["script-templates", output, files @ ..] => {
             use unity_micro_editor::playerbake as bake;
             let mut trees = Vec::new();
@@ -517,7 +539,15 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                 "{}.resS",
                 output.file_name().unwrap_or_default().to_string_lossy()
             );
-            let mut library = Library::read(&libraries)?;
+            // Without a worker's file, the release's pack gives the engine's
+            // classes.
+            let mut library = match libraries.is_empty() {
+                false => Library::read(&libraries)?,
+                true => match Library::of_release(format.unity_version) {
+                    Some(library) => library?,
+                    None => anyhow::bail!("no pack of engine classes for {}", format.unity_version),
+                },
+            };
             // Script layouts from the compiled assemblies, in place of the
             // libraries' script trees; the engine's templates from the
             // release's pack, or else from those files.
@@ -537,7 +567,8 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                     }
                 };
                 let layout = bake::Layout::new(&layouts, &templates);
-                for (name, error) in library.add_scripts(&layout)? {
+                let orders = bake::script_execution_orders(project);
+                for (name, error) in library.add_scripts(&layout, &orders)? {
                     println!("script {name} not laid out: {error}");
                 }
             }

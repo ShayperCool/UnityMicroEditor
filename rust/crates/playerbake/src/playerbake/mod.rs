@@ -21,7 +21,7 @@ mod typetree;
 pub use assemble::{Assembled, write_closure};
 pub use authored::{
     Converted, Kind, Library, MONO_SCRIPT, Reference, Renames, Resolve, Sources, Tags, Written,
-    convert as convert_authored, full_name, write_source,
+    convert as convert_authored, full_name, script_execution_orders, write_source,
 };
 pub use compare::{Difference, Inspected, compare as compare_files, inspect as inspect_file};
 pub use managers::{
