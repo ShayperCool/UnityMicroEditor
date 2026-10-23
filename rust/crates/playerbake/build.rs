@@ -1,4 +1,5 @@
-//! Builds libtess2, the tessellator of sprite meshes (`vendor/libtess2`).
+//! Builds libtess2, the tessellator of sprite meshes (`vendor/libtess2`), and
+//! stb_image_resize, the texture resizer (`vendor/stb`).
 fn main() {
     let dir = std::path::Path::new("vendor/libtess2/Source");
     let sources = [
@@ -20,4 +21,11 @@ fn main() {
         println!("cargo:rerun-if-changed=vendor/libtess2/Source/{source}");
     }
     build.compile("tess2");
+    // stb_image_resize, the texture resizer.
+    cc::Build::new()
+        .file("vendor/stb/stb_image_resize.c")
+        .warnings(false)
+        .compile("stbir");
+    println!("cargo:rerun-if-changed=vendor/stb/stb_image_resize.c");
+    println!("cargo:rerun-if-changed=vendor/stb/stb_image_resize.h");
 }

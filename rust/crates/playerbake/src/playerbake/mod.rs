@@ -13,6 +13,7 @@ mod shader;
 mod shader_names;
 mod source;
 pub mod spritemesh;
+pub mod texcomp;
 mod text_values;
 mod texture;
 pub use texture::decode_png;

@@ -947,6 +947,64 @@ pub fn tight_mesh(alpha: &[u8], width: i32, height: i32, settings: &Settings) ->
     }
 }
 
+/// The mesh of outlines given in pixels of a `width` × `height` image (a
+/// sprite's own): tessellated as they stand, without tracing or simplifying;
+/// the bounds are theirs within the image.
+pub fn mesh_of_outlines(outlines: &[Vec<[f32; 2]>], width: i32, height: i32) -> Mesh {
+    let (w, h) = (width as f32, height as f32);
+    let clamp = |v: f32, limit: f32| {
+        if v < 0.0 {
+            0.0
+        } else if v <= limit {
+            v
+        } else {
+            limit
+        }
+    };
+    let mut bounds: Option<[f32; 4]> = None;
+    let mut cleaned = Vec::new();
+    for outline in outlines {
+        let (mut min, mut max) = ([f32::MAX; 2], [f32::MIN_POSITIVE; 2]);
+        for &[x, y] in outline {
+            min = [
+                if min[0] <= x { min[0] } else { x },
+                if min[1] <= y { min[1] } else { y },
+            ];
+            max = [
+                if x <= max[0] { max[0] } else { x },
+                if y <= max[1] { max[1] } else { y },
+            ];
+        }
+        let own = [
+            clamp(min[0], w),
+            clamp(min[1], h),
+            clamp(max[0], w),
+            clamp(max[1], h),
+        ];
+        bounds = Some(match bounds {
+            None => own,
+            Some(b) => [
+                b[0].min(own[0]),
+                b[1].min(own[1]),
+                b[2].max(own[2]),
+                b[3].max(own[3]),
+            ],
+        });
+        let mut points = outline.clone();
+        without_straight_vertices(&mut points);
+        cleaned.push(points);
+    }
+    let (mut vertices, indices) = tessellate(&cleaned);
+    for v in &mut vertices {
+        *v = [(v[0] + 0.5).floor(), (v[1] + 0.5).floor()];
+    }
+    Mesh {
+        vertices,
+        indices,
+        bounds: bounds.map(|b| [b[0], b[1], b[2] - b[0], b[3] - b[1]]),
+    }
+}
+
 /// The outlines the generator makes of an image's alpha, as a sprite's mesh
 /// and physics shape take them.
 pub fn outlines(alpha: &[u8], width: i32, height: i32, settings: &Settings) -> Outlines {

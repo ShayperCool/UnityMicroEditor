@@ -508,6 +508,10 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                     "--output" => output = Some(Path::new(*value)),
                     "--unity-version" => version = Some(value.to_string()),
                     "--layouts" => layouts_path = Some(Path::new(*value)),
+                    // The installation whose texture compressor is used.
+                    "--editor" => {
+                        unity_micro_editor::playerbake::texcomp::use_editor(Path::new(*value))
+                    }
                     other => anyhow::bail!("unknown flag {other}"),
                 }
             }

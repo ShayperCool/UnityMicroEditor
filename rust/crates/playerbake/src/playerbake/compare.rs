@@ -375,6 +375,10 @@ impl Streams {
         }
         let data = &self.files[&name];
         match data.get(offset as usize..(offset + size) as usize) {
+            // `UME_DUMP_STREAMS=1` gives where the data lies instead.
+            Some(_) if std::env::var_os("UME_DUMP_STREAMS").is_some() => {
+                json!({"file": self.directory.join(&name), "offset": offset, "size": size})
+            }
             Some(bytes) => {
                 json!({"$stream": format!("{:032x}", xxhash_rust::xxh3::xxh3_128(bytes)), "size": size})
             }

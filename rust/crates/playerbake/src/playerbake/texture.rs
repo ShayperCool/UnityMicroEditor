@@ -153,6 +153,8 @@ pub struct Textured {
 }
 
 const RGBA32: i64 = 4;
+const DXT1: i64 = 10;
+const DXT5: i64 = 12;
 const RGB24: i64 = 3;
 const ALPHA8: i64 = 1;
 
@@ -178,12 +180,16 @@ pub fn convert(
         )));
     }
     let image = decode_png(&std::fs::read(path)?)?;
-    let max = settings.platform_int("maxTextureSize", 2048);
-    if image.width as i64 > max || image.height as i64 > max {
-        return Err(unsupported(
-            "a texture larger than its maximum size is scaled",
-        ));
-    }
+    // A texture larger than its maximum size is scaled down to it, keeping
+    // its proportions.
+    let max = settings.platform_int("maxTextureSize", 2048).max(1) as f64;
+    let larger = image.width.max(image.height) as f64;
+    let (width, height) = if larger > max {
+        let side = |v: u32| ((v as f64 * max / larger).round() as usize).max(1);
+        (side(image.width), side(image.height))
+    } else {
+        (image.width as usize, image.height as usize)
+    };
     if settings.int("mipmaps.enableMipMap", 1) != 0 {
         return Err(unsupported("mipmaps"));
     }
@@ -202,16 +208,30 @@ pub fn convert(
     // An image with no pixel less than opaque keeps its alpha channel only
     // where a format asks for one.
     let opaque = image.rgba.chunks(4).all(|pixel| pixel[3] == 255);
+    let with_alpha = image.alpha && !opaque && settings.int("alphaUsage", 1) != 0;
+    let uncompressed = if texture_type == 10 {
+        ALPHA8
+    } else if with_alpha {
+        RGBA32
+    } else {
+        RGB24
+    };
     let format = match settings.platform_int("textureFormat", -1) {
-        -1 if settings.platform_int("textureCompression", 1) == 0 => {
-            if texture_type == 10 {
-                ALPHA8
-            } else if image.alpha && !opaque && settings.int("alphaUsage", 1) != 0 {
-                RGBA32
-            } else {
-                RGB24
+        -1 => match settings.platform_int("textureCompression", 1) {
+            0 => uncompressed,
+            // Normal and low quality compress to DXT; an image whose sides
+            // are not multiples of four is kept uncompressed.
+            1 | 3 if settings.platform_int("crunchedCompression", 0) == 0 => {
+                if !width.is_multiple_of(4) || !height.is_multiple_of(4) || texture_type == 10 {
+                    uncompressed
+                } else if with_alpha {
+                    DXT5
+                } else {
+                    DXT1
+                }
             }
-        }
+            other => return Err(unsupported(format!("texture compression {other}"))),
+        },
         format @ (RGBA32 | RGB24 | ALPHA8) => format,
         other => return Err(unsupported(format!("texture format {other}"))),
     };
@@ -219,16 +239,25 @@ pub fn convert(
         .file_stem()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let (width, height) = (image.width as usize, image.height as usize);
+    let (source_width, source_height) = (image.width as usize, image.height as usize);
     let mut bottom_up = pixels(&image, RGBA32);
     // Alpha Is Transparency: an image the importer keeps with alpha gives its
     // transparent pixels the colour of the nearest one that is not.
     if settings.int("alphaIsTransparency", 0) != 0 && image.alpha && format != RGB24 {
-        dilate_alpha(&mut bottom_up, width, height);
+        dilate_alpha(&mut bottom_up, source_width, source_height);
     }
+    if (width, height) != (source_width, source_height) {
+        bottom_up = resize(&bottom_up, (source_width, source_height), (width, height))?;
+    }
+    // How much smaller the texture is than its source, along each side.
+    let scale = [
+        width as f32 / source_width as f32,
+        height as f32 / source_height as f32,
+    ];
     // What a tight sprite mesh is traced from: the alpha the texture keeps.
     let alpha: Vec<u8> = bottom_up.chunks(4).map(|p| p[3]).collect();
     let data = match format {
+        DXT1 | DXT5 => super::texcomp::compress(&bottom_up, width, height, format == DXT5)?,
         RGBA32 => bottom_up,
         RGB24 => bottom_up
             .chunks(4)
@@ -251,8 +280,9 @@ pub fn convert(
         -1 => 1,
         aniso => aniso,
     };
+    // -100, and -1 in older settings, stand for no bias.
     let mip_bias = match settings.float("textureSettings.mipBias", -100.0) {
-        -100.0 => 0.0,
+        -100.0 | -1.0 => 0.0,
         bias => bias,
     };
     let mut value = texture.sample.clone();
@@ -310,20 +340,39 @@ pub fn convert(
         Val::I(settings.int("mipmaps.sRGBTexture", 1)),
     );
     set(&mut value, "m_PlatformBlob", Val::Seq(Vec::new()));
-    set(&mut value, "image data", Val::Bytes(Vec::new()));
-    set(
-        &mut value,
-        "m_StreamData",
-        Val::map([
-            ("offset", Val::U(stream.1)),
-            ("size", Val::U(data.len() as u64)),
-            ("path", Val::Str(stream.0.to_string())),
-        ]),
-    );
+    // A readable texture keeps its pixels in its object; another's are
+    // streamed.
+    let readable = settings.int("isReadable", 0) != 0;
+    let data = if readable {
+        set(&mut value, "image data", Val::Bytes(data));
+        set(
+            &mut value,
+            "m_StreamData",
+            Val::map([
+                ("offset", Val::U(0)),
+                ("size", Val::U(0)),
+                ("path", Val::Str(String::new())),
+            ]),
+        );
+        Vec::new()
+    } else {
+        set(&mut value, "image data", Val::Bytes(Vec::new()));
+        set(
+            &mut value,
+            "m_StreamData",
+            Val::map([
+                ("offset", Val::U(stream.1)),
+                ("size", Val::U(data.len() as u64)),
+                ("path", Val::Str(stream.0.to_string())),
+            ]),
+        );
+        data
+    };
     let mut objects = vec![(TEXTURE_FILE_ID, TEXTURE_2D, value)];
     if texture_type == 8 {
         let sprite = sprite.context("no type tree of Sprite")?;
-        for (file_id, sprite_name, rect, pivot, border) in sprites(&settings, &name, width, height)?
+        for (file_id, sprite_name, rect, pivot, border, shapes) in
+            sprites(&settings, &name, source_width, source_height)?
         {
             objects.push((
                 file_id,
@@ -338,6 +387,8 @@ pub fn convert(
                     border,
                     file_id,
                     (&alpha, width, height),
+                    scale,
+                    &shapes,
                 )?,
             ));
         }
@@ -403,6 +454,108 @@ fn dilate_alpha(rgba: &mut [u8], width: usize, height: usize) {
     }
 }
 
+unsafe extern "C" {
+    #[allow(clippy::too_many_arguments)]
+    fn stbir_resize_region(
+        input: *const u8,
+        input_w: i32,
+        input_h: i32,
+        input_stride: i32,
+        output: *mut u8,
+        output_w: i32,
+        output_h: i32,
+        output_stride: i32,
+        datatype: i32,
+        channels: i32,
+        alpha_channel: i32,
+        flags: i32,
+        edge_horizontal: i32,
+        edge_vertical: i32,
+        filter_horizontal: i32,
+        filter_vertical: i32,
+        space: i32,
+        alloc_context: *mut std::ffi::c_void,
+        s0: f32,
+        t0: f32,
+        s1: f32,
+        t1: f32,
+    ) -> i32;
+}
+
+/// Scales 8-bit RGBA as the importer does, with stb_image_resize: a
+/// Mitchell filter along a side that shrinks (a cubic B-spline along one
+/// that does not), edges clamped, alpha taken as premultiplied, in linear
+/// space (an sRGB texture too). The importer splits the rows into a band per
+/// worker thread, at least 16 rows each, and each band's sample positions
+/// are those of its region, so the bytes depend on the count: this machine's
+/// threads less one, as the engine's job queue has them.
+fn resize(rgba: &[u8], from: (usize, usize), to: (usize, usize)) -> Result<Vec<u8>> {
+    const MITCHELL: i32 = 5;
+    const CUBIC_B_SPLINE: i32 = 3;
+    let filter = |source: usize, target: usize| {
+        if target < source {
+            MITCHELL
+        } else {
+            CUBIC_B_SPLINE
+        }
+    };
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .saturating_sub(1)
+        .max(1);
+    let bands = workers.min(to.1 / 16).max(1);
+    let per_band = to.1 / bands;
+    let mut out = vec![0u8; to.0 * to.1 * 4];
+    for band in 0..bands {
+        let start = per_band * band;
+        let rows = if band + 1 == bands {
+            to.1 - start
+        } else {
+            per_band
+        };
+        let (t0, t1) = if bands == 1 {
+            (0.0, 1.0)
+        } else {
+            (
+                start as f32 / to.1 as f32,
+                (start + rows) as f32 / to.1 as f32,
+            )
+        };
+        // SAFETY: both buffers hold the images their sizes give; the band
+        // lies within the output.
+        let done = unsafe {
+            stbir_resize_region(
+                rgba.as_ptr(),
+                from.0 as i32,
+                from.1 as i32,
+                0,
+                out.as_mut_ptr().add(start * to.0 * 4),
+                to.0 as i32,
+                rows as i32,
+                (to.0 * 4) as i32,
+                0,
+                4,
+                3,
+                1,
+                1,
+                1,
+                filter(from.0, to.0),
+                filter(from.1, to.1),
+                0,
+                std::ptr::null_mut(),
+                0.0,
+                t0,
+                1.0,
+                t1,
+            )
+        };
+        if done == 0 {
+            bail!("the texture could not be scaled");
+        }
+    }
+    Ok(out)
+}
+
 /// The image's pixels in a format, rows from the bottom as the engine
 /// stores them.
 fn pixels(image: &Image, format: i64) -> Vec<u8> {
@@ -429,7 +582,37 @@ fn set(value: &mut Val, name: &str, field: Val) {
 type Rect = [f64; 4];
 
 /// A sprite of an image: `(fileID, name, rect, pivot, border)`.
-type SpriteRect = (i64, String, Rect, [f64; 2], [f64; 4]);
+type SpriteRect = (i64, String, Rect, [f64; 2], [f64; 4], Shapes);
+
+/// A sprite's own outline and physics shape, in pixels from its rect's
+/// centre, as the Sprite Editor saves them.
+#[derive(Default, Clone)]
+struct Shapes {
+    outline: Vec<Vec<[f32; 2]>>,
+    physics: Vec<Vec<[f32; 2]>>,
+}
+
+fn shapes_of(value: Option<&Value>) -> Vec<Vec<[f32; 2]>> {
+    let Some(Value::Array(shapes)) = value else {
+        return Vec::new();
+    };
+    shapes
+        .iter()
+        .filter_map(Value::as_array)
+        .map(|points| {
+            points
+                .iter()
+                .map(|p| {
+                    [
+                        number(p.get("x")).unwrap_or(0.0) as f32,
+                        number(p.get("y")).unwrap_or(0.0) as f32,
+                    ]
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|points| !points.is_empty())
+        .collect()
+}
 
 /// The sprites of the image: `(fileID, name, rect, pivot, border)`.
 fn sprites(
@@ -465,6 +648,10 @@ fn sprites(
             [0.0, 0.0, width as f64, height as f64],
             pivot_of(settings.int("alignment", 0), settings.get("spritePivot")),
             border_of(settings.get("spriteBorder")),
+            Shapes {
+                outline: shapes_of(settings.get("spriteSheet.outline")),
+                physics: shapes_of(settings.get("spriteSheet.physicsShape")),
+            },
         )]),
         2 => {
             let mut result = Vec::new();
@@ -474,8 +661,14 @@ fn sprites(
                 .cloned()
                 .unwrap_or_default();
             for entry in entries {
-                let id = number(entry.get("internalID"))
-                    .map(|n| n as i64)
+                // A 64-bit ID, which a float would round.
+                let id = entry
+                    .get("internalID")
+                    .and_then(|value| match value {
+                        Value::Number(n) => n.as_i64(),
+                        Value::String(text) => text.trim().parse().ok(),
+                        _ => None,
+                    })
                     .filter(|id| *id != 0)
                     .context("a sprite of the sheet has no internalID")?;
                 let rect = entry.get("rect");
@@ -492,6 +685,10 @@ fn sprites(
                     rect,
                     pivot_of(alignment, entry.get("pivot")),
                     border_of(entry.get("border")),
+                    Shapes {
+                        outline: shapes_of(entry.get("outline")),
+                        physics: shapes_of(entry.get("physicsShape")),
+                    },
                 ));
             }
             Ok(result)
@@ -511,11 +708,20 @@ fn sprite_value(
     border: [f64; 4],
     file_id: i64,
     (alpha, image_width, image_height): (&[u8], usize, usize),
+    scale: [f32; 2],
+    shapes: &Shapes,
 ) -> Result<Val> {
     let ppu = settings.float("spritePixelsToUnits", 100.0);
-    let [x, y, w, h] = rect;
-    let ppu = ppu as f32;
-    let (xf, yf, wf, hf) = (x as f32, y as f32, w as f32, h as f32);
+    // A sprite of a texture scaled down keeps its size in the world: its rect
+    // scales along each side, its pixels per unit by the smaller factor.
+    let ppu = ppu as f32 * scale[0].min(scale[1]);
+    let (xf, yf, wf, hf) = (
+        rect[0] as f32 * scale[0],
+        rect[1] as f32 * scale[1],
+        rect[2] as f32 * scale[0],
+        rect[3] as f32 * scale[1],
+    );
+    let rect = [xf as f64, yf as f64, wf as f64, hf as f64];
     // The pivot from the rect's centre, in its pixels.
     let offset = [
         (pivot[0] as f32 * wf + xf) - (wf * 0.5 + xf),
@@ -543,7 +749,30 @@ fn sprite_value(
         (pixels, cw, ch, shift)
     });
     let mut mesh = None;
-    if let Some((pixels, cw, ch, shift)) = &region
+    // An outline of the sprite's own is tessellated as it stands, whatever
+    // the sprite's size and mesh type.
+    if let Some((_, cw, ch, shift)) = &region
+        && !shapes.outline.is_empty()
+    {
+        let centre = [*cw as f32 * 0.5, *ch as f32 * 0.5];
+        let outlines: Vec<Vec<[f32; 2]>> = shapes
+            .outline
+            .iter()
+            .map(|points| {
+                points
+                    .iter()
+                    .map(|p| [p[0] + centre[0], p[1] + centre[1]])
+                    .collect()
+            })
+            .collect();
+        let generated = super::spritemesh::mesh_of_outlines(&outlines, *cw, *ch);
+        if !generated.vertices.is_empty() {
+            let bounds = generated
+                .bounds
+                .unwrap_or([0.0, 0.0, *cw as f32, *ch as f32]);
+            mesh = Some((generated, *shift, bounds));
+        }
+    } else if let Some((pixels, cw, ch, shift)) = &region
         && tight
         && wf >= 32.0
         && hf >= 32.0
@@ -569,7 +798,23 @@ fn sprite_value(
     // The physics shape the importer falls back to: the outlines of the
     // pixels nearly opaque, coarser.
     let mut physics = Vec::new();
-    if settings.int("spriteGenerateFallbackPhysicsShape", 1) != 0
+    let scale_units = 1.0 / ppu;
+    if !shapes.physics.is_empty() {
+        // A physics shape of the sprite's own, from its pivot.
+        for points in &shapes.physics {
+            physics.push(Val::Seq(
+                points
+                    .iter()
+                    .map(|p| {
+                        Val::map([
+                            ("x", Val::F((p[0] - offset[0]) * scale_units)),
+                            ("y", Val::F((p[1] - offset[1]) * scale_units)),
+                        ])
+                    })
+                    .collect(),
+            ));
+        }
+    } else if settings.int("spriteGenerateFallbackPhysicsShape", 1) != 0
         && let Some((pixels, cw, ch, shift)) = &region
     {
         let shape = super::spritemesh::outlines(
@@ -815,7 +1060,7 @@ mod tests {
         assert_eq!(settings.platform_int("maxTextureSize", 0), 512);
         let sprites = sprites(&settings, "image", 8, 8).unwrap();
         assert_eq!(sprites.len(), 1);
-        let (id, name, rect, pivot, _) = &sprites[0];
+        let (id, name, rect, pivot, _, _) = &sprites[0];
         assert_eq!((*id, name.as_str()), (42, "a"));
         assert_eq!(*rect, [0.0, 2.0, 4.0, 6.0]);
         assert_eq!(*pivot, [0.5, 0.0]);

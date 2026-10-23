@@ -234,7 +234,11 @@ pub fn write_closure(
                 let Some(textured) = images.remove(guid) else {
                     continue;
                 };
-                let offset = align(&mut assembled.stream);
+                // A readable texture keeps its pixels in its object.
+                let offset = match textured.data.is_empty() {
+                    true => 0,
+                    false => align(&mut assembled.stream),
+                };
                 assembled.stream.extend_from_slice(&textured.data);
                 let texture_id = ids[&(guid.clone(), texture::TEXTURE_FILE_ID)];
                 for (file_id, class, mut value) in textured.objects {
@@ -316,8 +320,13 @@ pub fn write_closure(
                                 keep_textures(&mut converted.value, &names);
                             }
                             // A texture's pixels go to the streamed data, as a
-                            // build writes them.
+                            // build writes them, but a readable one's.
+                            let readable = matches!(
+                                converted.value.field("m_IsReadable"),
+                                Some(Val::Bool(true) | Val::U(1) | Val::I(1))
+                            );
                             if document.class_id == texture::TEXTURE_2D as i64
+                                && !readable
                                 && let Some(Val::Bytes(pixels)) = converted
                                     .value
                                     .field_mut("image data")
@@ -335,6 +344,32 @@ pub fn write_closure(
                                         (Cow::Borrowed("path"), Val::Str(stream_name.to_string())),
                                     ]);
                                 }
+                            }
+                            // A built-in sprite's render data is the built-in
+                            // resources' object, by its file ID.
+                            if guid == BUILTIN_EXTRA
+                                && document.class_id == SPRITE as i64
+                                && let Some(words) = super::managers::guid_words(BUILTIN_EXTRA)
+                                && let Some(key) = converted.value.field_mut("m_RenderDataKey")
+                            {
+                                *key = Val::Map(vec![
+                                    (
+                                        Cow::Borrowed("first"),
+                                        Val::Map(
+                                            words
+                                                .iter()
+                                                .enumerate()
+                                                .map(|(i, w)| {
+                                                    (
+                                                        Cow::Owned(format!("data[{i}]")),
+                                                        Val::U(*w as u64),
+                                                    )
+                                                })
+                                                .collect(),
+                                        ),
+                                    ),
+                                    (Cow::Borrowed("second"), Val::I(document.file_id.parse()?)),
+                                ]);
                             }
                             let script_id = document
                                 .data
@@ -625,7 +660,11 @@ fn yaml_form(value: &Val, externals: &[String]) -> serde_json::Value {
             }
             let mut map = serde_json::Map::new();
             for (name, field) in fields {
-                if let (true, Val::Bytes(bytes)) = (name == "image data", field) {
+                // A texture's pixels and a mesh's vertex data are written as
+                // their size, the bytes beside it.
+                if let (true, Val::Bytes(bytes)) =
+                    (name == "image data" || name == "m_DataSize", field)
+                {
                     map.insert(name.to_string(), Value::String(bytes.len().to_string()));
                     map.insert(
                         "_typelessdata".into(),

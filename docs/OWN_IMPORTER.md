@@ -139,6 +139,38 @@ TextMesh Pro font atlases, and two Default textures of Spine (`chest_red`,
 `tap_to_bump`, with the same `.meta` as a Default one the engine gives 0)
 have usage mode 6 by a rule not known yet.
 
+### Compressed and scaled textures
+
+A texture whose format is left to the importer and whose compression is on
+(normal or low quality, not crunched) is DXT5 with alpha and DXT1 without, if
+its sides are multiples of four, else kept uncompressed. The blocks are
+those of the Intel ISPC Texture Compressor the Editor ships and calls
+(`CompressSingleImageTexture` → `CompressBlocksBC1`/`BC3` on 8-bit RGBA
+rows from the bottom, DXT1 with alpha set opaque): `texcomp.rs` loads the
+installation's `libispc_texcomp.so` (`player-file closure --editor`).
+
+A texture larger than its maximum size is scaled down to it, the longer side
+to the maximum and the other in proportion, rounded. The importer scales
+with stb_image_resize v0.97 (`BlitScaleStbImageImpl`, vendored in
+`playerbake/vendor/stb`): Mitchell along a shrinking side (a cubic B-spline
+along another), edges clamped, alpha taken as premultiplied, in linear space
+even for an sRGB texture, after the alpha dilation. It splits the rows into
+`min(worker threads, rows / 16)` bands, each resized as a region of its own,
+and the bands' sample positions round apart: the bytes depend on the count of
+the engine's worker threads, which is the machine's threads less one (15 on
+the machine whose worker wrote Bouncemasters' files), and the tool takes the
+same count of its machine. A sprite of a scaled texture keeps its size in the
+world: its rect scales along each side, its pixels per unit by the smaller
+factor, and its mesh is made from the scaled pixels.
+
+A readable texture keeps its pixels in its object (`image data`, an empty
+`m_StreamData`), another's are streamed. `mipBias: -1`, as older settings
+write it, is no bias.
+
+Main without the worker's file: the 49 compressed and 38 scaled textures are
+written too (refused sources 155 to 63); 584 of 588 textures equal, the other
+four images of the same name paired the other way.
+
 ### Sprite meshes
 
 `spritemesh.rs` makes a sprite's tight mesh and its fallback physics shape as
@@ -193,9 +225,16 @@ m_Offset) / ppu`). The physics shape (`spriteGenerateFallbackPhysicsShape`)
 is the outlines at detail 0.25 and tolerance 200, before tessellation,
 less the pivot and times `1 / ppu`.
 
-Main: 434 of the 436 sprites equal paired by their render data key (the
-other two are built-in), 393 by the comparison's keys, where sprites of the
-same name in other folders pair by order. `player-file sprite-mesh <png> [x y
+A sprite's own outline (the Sprite Editor's `outline`, in pixels from the
+rect's centre) is tessellated as it stands, moved to the region's corner,
+whatever the sprite's size and mesh type; its own physics shape
+(`physicsShape`) is taken less the pivot offset, times `1 / ppu`. A sheet's
+sprite takes its 64-bit `internalID` exactly. A sprite of the built-in
+resources keys its render data by them (`0000000000000000f000000000000000`,
+its file ID) and keeps its vertex data.
+
+Main: all 484 sprites equal paired by their render data key; by the
+comparison's keys, sprites of the same name in other folders pair by order. `player-file sprite-mesh <png> [x y
 w h]` prints the outlines and mesh of an image; `UME_DUMP_FULL_BYTES=1`
 makes `player-file dump` print every byte string whole. The comparison
 orders assets of the same class and name by a hash of their values without
@@ -219,7 +258,8 @@ its `.cs.meta` (`MonoImporter.executionOrder`, by the file's name).
 Editor's `unity_builtin_extra`: 41 classes, those the game uses; a project
 with others (`Light`, `Rigidbody`, `MeshCollider`, the scene's settings
 managers, ...) needs them captured too. Main without the worker's file:
-20574 objects equal, as with it. What a sample still carries of the game:
+20574 objects equal, as with it; with the compressed and scaled textures
+written too, 21320 paired and 20844 equal. What a sample still carries of the game:
 the short lists of the one `AudioMixerController` (`m_MixerConstant`, which
 a build derives from the mixer's groups and snapshots and the tool does not
 yet), so another project's mixer would take wrong ones.
