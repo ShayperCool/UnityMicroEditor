@@ -3,8 +3,8 @@
 pub use ume_authoring::authoring;
 pub use ume_base::{ENGINE_PROFILE, ENGINE_VERSION, hex, sha256};
 pub use ume_base::{
-    cache, cancel, editorbridge, flags, graph, hashstore, jsondoc, lmdb, packages, parity, paths,
-    project, protocol, registry, release, runtimeartifact, sysutil, util, yaml,
+    cache, cancel, editorbridge, flags, graph, hashstore, jsondoc, lmdb, memory, packages, parity,
+    paths, project, protocol, registry, release, runtimeartifact, sysutil, util, yaml,
 };
 pub use ume_compiler::{compiler, hotreload, sourcegraph};
 pub use ume_native::{engine, native};

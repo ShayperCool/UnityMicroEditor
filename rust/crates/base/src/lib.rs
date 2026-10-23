@@ -8,6 +8,7 @@ pub mod graph;
 pub mod hashstore;
 pub mod jsondoc;
 pub mod lmdb;
+pub mod memory;
 pub mod packages;
 pub mod parity;
 pub mod paths;

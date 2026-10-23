@@ -9,10 +9,12 @@ use unity_micro_editor::{ENGINE_PROFILE, graph::SourceProject, yaml};
 const USAGE: &str = "usage: unity-micro-editor <run|mcp|auto-prepare|build-project|resolve-packages|cache-component-defaults|project-import|native-environment|source-graph|compiler-source-prepare|compiler-prepare|prepare-project|engine-profile-capture|version> [flags]";
 
 fn execute() -> Result<()> {
-    let mut args = env::args().skip(1);
+    let mut arguments: Vec<String> = env::args().skip(1).collect();
+    unity_micro_editor::memory::take_argument(&mut arguments).map_err(anyhow::Error::msg)?;
+    let mut args = arguments.into_iter();
     let command = args.next().unwrap_or_default();
     match command.as_str() {
-        "version" | "profile" if env::args().len() == 2 => {
+        "version" | "profile" if args.len() == 0 => {
             print!("{ENGINE_PROFILE}");
         }
         "mcp" => unity_micro_editor::agent::run_mcp_cli(args.collect())?,

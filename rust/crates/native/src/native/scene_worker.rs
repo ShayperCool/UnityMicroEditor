@@ -26,13 +26,21 @@ use std::{
     time::{Duration, Instant},
 };
 
-const DEFAULT_IDLE: Duration = Duration::from_secs(120);
+/// How long an idle worker is kept by `UME_MEMORY`: none in `low`, two
+/// minutes by default, ten in `fast`.
+fn default_idle() -> Duration {
+    match crate::memory::memory() {
+        crate::memory::Memory::Low => Duration::ZERO,
+        crate::memory::Memory::Balanced => Duration::from_secs(120),
+        crate::memory::Memory::Fast => Duration::from_secs(600),
+    }
+}
 
 fn idle_limit() -> Duration {
     std::env::var("UME_SCENE_WORKER_IDLE_SECONDS")
         .ok()
         .and_then(|value| value.parse().ok())
-        .map_or(DEFAULT_IDLE, Duration::from_secs)
+        .map_or_else(default_idle, Duration::from_secs)
 }
 
 struct Warm {

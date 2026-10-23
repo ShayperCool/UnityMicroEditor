@@ -240,10 +240,10 @@ pub struct Session {
 }
 
 pub struct Inner {
-    /// The revision this session published last and the text of its
-    /// manifest: a preparation whose manifest would equal it but for the
-    /// revision id is that revision again, and nothing is written.
-    pub published: Option<(String, Prepared)>,
+    /// The revision this session published last and the SHA-256 of its
+    /// manifest's text: a preparation whose manifest would equal it but for
+    /// the revision id is that revision again, and nothing is written.
+    pub published: Option<([u8; 32], Prepared)>,
     pub project: String,
     pub baseline: Map,
     pub catalog: Catalog,
@@ -717,7 +717,9 @@ impl Inner {
                 base: &self.baseline,
                 over: std::mem::take(&mut over),
             };
-            let same = again.encode().is_ok_and(|text| text == *payload);
+            let same = again
+                .encode()
+                .is_ok_and(|text| <[u8; 32]>::from(Sha256::digest(text.as_bytes())) == *payload);
             over = again.over;
             if same && fs::metadata(&prepared.manifest).is_ok_and(|info| info.is_file()) {
                 return Ok(Prepared {
@@ -763,7 +765,9 @@ impl Inner {
             elapsed_seconds: started.elapsed().as_secs_f64(),
             cache: self.cache.stats,
         };
-        self.published = payload.ok().map(|payload| (payload, prepared.clone()));
+        self.published = payload
+            .ok()
+            .map(|payload| (Sha256::digest(payload.as_bytes()).into(), prepared.clone()));
         Ok(prepared)
     }
 }

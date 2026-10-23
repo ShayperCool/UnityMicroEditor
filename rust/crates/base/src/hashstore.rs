@@ -12,7 +12,9 @@
 //!
 //! The hashes are appended, one line each, to a log in the user's cache
 //! (`$XDG_CACHE_HOME/unity-micro-editor/file-hashes-v1.log`) that every
-//! process reads at its first hash. `UME_HASH_CACHE=0` turns it off.
+//! process reads at its first hash. `UME_HASH_CACHE=0` turns it off. A
+//! process holds 68 bytes for each, and once a day one writes the log again
+//! without the files that are gone or changed since.
 use crate::{cache::Identity, hex};
 use anyhow::{Result, ensure};
 use sha2::{Digest, Sha256};
@@ -31,10 +33,61 @@ const SETTLED: f64 = 2.0;
 const LIMIT: u64 = 1024 * 1024 * 1024;
 const VERSION: &str = "v1";
 
+/// A kept hash: 68 bytes with its key for a file however long its path is
+/// (a log holds some 350 000 of them).
+#[derive(Clone, Copy)]
+struct Kept {
+    /// A digest of the identity the file had.
+    identity: [u8; 16],
+    sha: [u8; 32],
+    /// The line of the log that holds it, for writing the log again.
+    line: u32,
+}
+
+/// The key of a path: a 128-bit digest, as no two of a store's paths share.
+/// SipHash, twice: a log of 350 000 lines loads in a fraction of a second.
+fn key(path: &Path) -> [u8; 16] {
+    digest16(path.as_os_str().as_encoded_bytes())
+}
+
+fn digest16(bytes: &[u8]) -> [u8; 16] {
+    use std::hash::{DefaultHasher, Hasher};
+    let mut key = [0u8; 16];
+    for (half, seed) in [(0, 0u8), (8, 1u8)] {
+        // `DefaultHasher::new` has fixed keys: the same digest in every
+        // process.
+        let mut hasher = DefaultHasher::new();
+        hasher.write_u8(seed);
+        hasher.write(bytes);
+        key[half..half + 8].copy_from_slice(&hasher.finish().to_le_bytes());
+    }
+    key
+}
+
+fn identity_key(identity: &Identity) -> [u8; 16] {
+    let mut bytes = [0u8; 64];
+    for (at, field) in identity.fields().iter().enumerate() {
+        bytes[at * 8..at * 8 + 8].copy_from_slice(&field.to_le_bytes());
+    }
+    digest16(&bytes)
+}
+
+fn sha_bytes(sha: &str) -> Option<[u8; 32]> {
+    let mut bytes = [0u8; 32];
+    for (at, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(sha.get(at * 2..at * 2 + 2)?, 16).ok()?;
+    }
+    Some(bytes)
+}
+
+/// How often a process prunes the log of files that are gone, in seconds.
+const PRUNE_EVERY: u64 = 24 * 3600;
+
 /// Kept hashes by path, and the log they are appended to.
 pub(crate) struct Store {
     log: Option<PathBuf>,
-    hashes: HashMap<PathBuf, (Identity, String)>,
+    hashes: HashMap<[u8; 16], Kept>,
+    lines: u32,
     appender: Option<File>,
     loaded: bool,
 }
@@ -45,6 +98,7 @@ impl Store {
         Self {
             log,
             hashes: HashMap::new(),
+            lines: 0,
             appender: None,
             loaded: false,
         }
@@ -60,35 +114,76 @@ impl Store {
         let Ok(file) = File::open(&log) else {
             return;
         };
-        let mut lines = 0usize;
         for line in io::BufReader::new(file).split(b'\n').map_while(Result::ok) {
-            lines += 1;
-            if let Some((path, identity, sha)) = parse(&line) {
-                self.hashes.insert(path, (identity, sha));
+            if let Some((path, identity, sha)) = parse(&line)
+                && let Some(sha) = sha_bytes(&sha)
+            {
+                self.hashes.insert(
+                    key(&path),
+                    Kept {
+                        identity: identity_key(&identity),
+                        sha,
+                        line: self.lines,
+                    },
+                );
             }
+            self.lines = self.lines.saturating_add(1);
         }
-        // A log that holds mostly superseded lines is written again.
+        let lines = self.lines as usize;
+        // A log that holds mostly superseded lines is written again, and
+        // once a day without the files that are gone.
+        let stamp = log.with_extension("pruned");
+        let pruned = std::fs::metadata(&stamp)
+            .and_then(|info| info.modified())
+            .ok()
+            .and_then(|time| time.elapsed().ok())
+            .is_some_and(|age| age.as_secs() < PRUNE_EVERY);
+        let newest = || -> HashMap<[u8; 16], u32> {
+            self.hashes
+                .iter()
+                .map(|(key, kept)| (*key, kept.line))
+                .collect()
+        };
         if lines > 100_000 && lines > 4 * self.hashes.len() {
-            self.compact(&log);
+            let newest = newest();
+            if let Some(lines) = rewrite(&log, &newest, false) {
+                self.appender = None;
+                self.renumber(&lines);
+            }
+        } else if !pruned && lines > 10_000 {
+            // A pass over every file of the log takes seconds: it runs beside
+            // the process, which keeps what it loaded.
+            let _ = File::create(&stamp);
+            let newest = newest();
+            let _ = std::thread::Builder::new()
+                .name("ume-hash-log".into())
+                .spawn(move || rewrite(&log, &newest, true));
         }
     }
 
-    fn compact(&mut self, log: &Path) {
-        let temporary = log.with_extension(format!("{}.tmp", crate::util::random_id()));
-        let written = File::create(&temporary).and_then(|file| {
-            let mut writer = io::BufWriter::new(file);
-            for (path, (identity, sha)) in &self.hashes {
-                if let Some(line) = line(path, identity, sha) {
-                    writer.write_all(&line)?;
+    /// Takes the line numbers of a log written again.
+    fn renumber(&mut self, lines: &HashMap<[u8; 16], u32>) {
+        self.hashes
+            .retain(|path_key, entry| match lines.get(path_key) {
+                Some(line) => {
+                    entry.line = *line;
+                    true
                 }
-            }
-            writer.flush()
-        });
-        match written.and_then(|()| std::fs::rename(&temporary, log)) {
-            Ok(()) => self.appender = None,
-            Err(_) => {
-                let _ = std::fs::remove_file(&temporary);
-            }
+                None => false,
+            });
+        self.lines = lines.len() as u32;
+    }
+
+    #[cfg(test)]
+    fn compact(&mut self, log: &Path, prune: bool) {
+        let newest = self
+            .hashes
+            .iter()
+            .map(|(key, kept)| (*key, kept.line))
+            .collect();
+        if let Some(lines) = rewrite(log, &newest, prune) {
+            self.appender = None;
+            self.renumber(&lines);
         }
     }
 
@@ -96,9 +191,9 @@ impl Store {
     pub(crate) fn kept(&mut self, path: &Path, identity: &Identity) -> Option<String> {
         self.load();
         self.hashes
-            .get(path)
-            .filter(|(kept, _)| kept == identity)
-            .map(|(_, sha)| sha.clone())
+            .get(&key(path))
+            .filter(|kept| kept.identity == identity_key(identity))
+            .map(|kept| hex(&kept.sha))
     }
 
     /// Keeps the hash of a file that was read at `read` and was as
@@ -107,11 +202,16 @@ impl Store {
         if !identity.settled_before(read, SETTLED) {
             return;
         }
+        let Some(sha_bytes) = sha_bytes(sha) else {
+            return;
+        };
         self.load();
+        let path_key = key(path);
+        let identity_digest = identity_key(&identity);
         if self
             .hashes
-            .get(path)
-            .is_some_and(|(kept, kept_sha)| *kept == identity && kept_sha == sha)
+            .get(&path_key)
+            .is_some_and(|kept| kept.identity == identity_digest && kept.sha == sha_bytes)
         {
             return;
         }
@@ -130,8 +230,57 @@ impl Store {
                 self.appender = None;
             }
         }
-        self.hashes
-            .insert(path.to_path_buf(), (identity, sha.to_string()));
+        self.hashes.insert(
+            path_key,
+            Kept {
+                identity: identity_digest,
+                sha: sha_bytes,
+                line: self.lines,
+            },
+        );
+        self.lines = self.lines.saturating_add(1);
+    }
+}
+
+/// Writes the log again with the line `newest` names for each path, with
+/// `prune` only of the files that are as the line says, and returns the new
+/// line of each path kept. Lines another process appends meanwhile are lost,
+/// which costs it a hash.
+fn rewrite(
+    log: &Path,
+    newest: &HashMap<[u8; 16], u32>,
+    prune: bool,
+) -> Option<HashMap<[u8; 16], u32>> {
+    let temporary = log.with_extension(format!("{}.tmp", crate::util::random_id()));
+    let mut lines = HashMap::new();
+    let written = File::open(log).and_then(|source| {
+        let mut writer = io::BufWriter::new(File::create(&temporary)?);
+        for (at, line) in io::BufReader::new(source)
+            .split(b'\n')
+            .map_while(Result::ok)
+            .enumerate()
+        {
+            let Some((path, identity, _)) = parse(&line) else {
+                continue;
+            };
+            let path_key = key(&path);
+            if newest.get(&path_key) != Some(&(at as u32))
+                || prune && !Identity::read(&path).is_ok_and(|now| now == identity)
+            {
+                continue;
+            }
+            writer.write_all(&line)?;
+            writer.write_all(b"\n")?;
+            lines.insert(path_key, lines.len() as u32);
+        }
+        writer.flush()
+    });
+    match written.and_then(|()| std::fs::rename(&temporary, log)) {
+        Ok(()) => Some(lines),
+        Err(_) => {
+            let _ = std::fs::remove_file(&temporary);
+            None
+        }
     }
 }
 
@@ -266,5 +415,30 @@ mod tests {
         let mut store = Store::new(Some(log));
         store.load();
         assert!(store.hashes.is_empty());
+    }
+
+    #[test]
+    fn a_written_log_keeps_the_newest_line_of_each_file_there() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("hashes.log");
+        let (one, two) = (root.path().join("one"), root.path().join("two"));
+        let first = write_settled(&one, "1");
+        let gone = write_settled(&two, "2");
+        let later = SystemTime::now() + Duration::from_secs(3);
+        let mut store = Store::new(Some(log.clone()));
+        store.keep(&one, first, &"a".repeat(64), later);
+        store.keep(&two, gone, &"b".repeat(64), later);
+        let second = write_settled(&one, "11");
+        store.keep(&one, second, &"c".repeat(64), later);
+        std::fs::remove_file(&two).unwrap();
+        let mut other = Store::new(Some(log.clone()));
+        other.load();
+        other.compact(&log, true);
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
+        assert_eq!(other.kept(&one, &second), Some("c".repeat(64)));
+        assert_eq!(other.kept(&two, &gone), None);
+        let mut third = Store::new(Some(log));
+        assert_eq!(third.kept(&one, &second), Some("c".repeat(64)));
+        assert_eq!(third.kept(&one, &first), None);
     }
 }

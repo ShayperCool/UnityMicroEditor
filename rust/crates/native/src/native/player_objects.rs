@@ -854,7 +854,7 @@ pub fn graph_sources(sources: &Sources, target: &str) -> Result<Vec<String>> {
 }
 
 pub(super) fn job_workers() -> usize {
-    std::thread::available_parallelism().map_or(2, |count| count.get().clamp(2, 32))
+    crate::memory::workers(std::thread::available_parallelism().map_or(2, |count| count.get()))
 }
 
 struct Run {

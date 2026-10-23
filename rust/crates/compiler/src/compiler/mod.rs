@@ -655,10 +655,14 @@ pub struct Compiler {
     pub play_mode_stand_ins: BTreeMap<String, String>,
 }
 
-/// `UME_COMPILER_COLD=1`: a session starts no process that outlives one
-/// request and keeps no hash between two compiles.
+/// `UME_COMPILER_COLD=1` (by default with `UME_MEMORY=low`): a session
+/// starts no process that outlives one request and keeps no hash between
+/// two compiles. `UME_COMPILER_COLD=0` keeps them in any mode.
 pub fn compiler_cold() -> bool {
-    std::env::var_os("UME_COMPILER_COLD").is_some_and(|value| value == "1")
+    match std::env::var_os("UME_COMPILER_COLD") {
+        Some(value) => value == "1",
+        None => crate::memory::memory() == crate::memory::Memory::Low,
+    }
 }
 
 impl Compiler {

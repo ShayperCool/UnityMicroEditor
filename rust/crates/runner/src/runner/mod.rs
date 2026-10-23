@@ -1563,6 +1563,8 @@ fn run_session(
         keep.extend(initial_compile.iter().map(|compile| compile.player.clone()));
         prune::report(&pruner.prune(&keep));
     }
+    // What the start freed goes back to the system.
+    crate::memory::release();
     let Some(watcher) = watcher else {
         loop {
             let seen = wake.seen();
@@ -1685,6 +1687,7 @@ pub fn watch<S: Steps>(
             return Ok(());
         }
         let result = state.window(ctx, steps, &window, &|| watcher.pending());
+        crate::memory::release_if_low();
         steps.window_done(&window);
         result?;
     }

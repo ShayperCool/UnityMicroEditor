@@ -210,7 +210,8 @@ impl SourceCache {
             path.into(),
             FileRecord {
                 identity: after,
-                content: content.clone(),
+                // With `UME_MEMORY=low` a text is read again when needed.
+                content: content.clone().filter(|_| crate::memory::keeps_sources()),
                 digest: digest.clone(),
             },
         );
@@ -228,13 +229,15 @@ impl SourceCache {
         }
         let docs = parse_unity_yaml(&content.context("text cache has no content")?)
             .with_context(|| path.display().to_string())?;
-        self.documents.insert(
-            path.into(),
-            YamlRecord {
-                digest,
-                documents: Arc::from(docs.clone()),
-            },
-        );
+        if crate::memory::keeps_sources() {
+            self.documents.insert(
+                path.into(),
+                YamlRecord {
+                    digest,
+                    documents: Arc::from(docs.clone()),
+                },
+            );
+        }
         self.stats.yaml_parses += 1;
         Ok(docs)
     }
