@@ -2,6 +2,7 @@
 //! file format and type trees, the shaders of a built-in render pipeline
 //! baked from their sources, and the settings managers of a Player written
 //! from the project's settings.
+mod compare;
 mod managers;
 mod serialized;
 mod shader;
@@ -10,6 +11,7 @@ mod source;
 mod text_values;
 mod typetree;
 
+pub use compare::{Difference, Inspected, compare as compare_files, inspect as inspect_file};
 pub use managers::{
     ManagerReport, PlainFile, compare_managers, manager_trees, write_project_managers,
 };

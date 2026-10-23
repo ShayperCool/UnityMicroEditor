@@ -81,6 +81,7 @@ fn execute() -> Result<()> {
         "run" => unity_micro_editor::runner::run_cli(&args.collect::<Vec<_>>())?,
         "game-managers" => run_game_managers(args.collect())?,
         "scene-objects" => run_scene_objects(args.collect())?,
+        "player-file" => run_player_file(args.collect())?,
         "debug-build-environment" => {
             let args: Vec<String> = args.collect();
             let (project, scripts) = args.split_first().ok_or_else(|| {
@@ -130,6 +131,64 @@ fn read_text(path: &Path) -> Result<Vec<u8>> {
         "text source grew while reading"
     );
     Ok(data)
+}
+
+/// `player-file dump <file>` prints the objects of a Player serialized file
+/// under the keys `player-file compare <ours> <theirs> [--tolerance T]`
+/// pairs them by; the comparison lists what differs per class.
+fn run_player_file(args: Vec<String>) -> Result<()> {
+    use unity_micro_editor::playerbake::{compare_files, inspect_file};
+    match args
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        ["dump", file] => {
+            let mut out = io::stdout().lock();
+            for object in inspect_file(Path::new(file))? {
+                serde_json::to_writer(
+                    &mut out,
+                    &serde_json::json!({"key": object.key, "class": object.class, "localId": object.local_id, "value": object.value}),
+                )?;
+                println!();
+            }
+        }
+        ["compare", ours, theirs, rest @ ..] => {
+            let tolerance = match rest {
+                [] => 0.0,
+                ["--tolerance", value] => value.parse()?,
+                _ => anyhow::bail!("player-file compare <ours> <theirs> [--tolerance T]"),
+            };
+            let difference = compare_files(Path::new(ours), Path::new(theirs), tolerance)?;
+            println!(
+                "matched {} (equal {}), only ours {}, only theirs {}",
+                difference.matched,
+                difference.equal,
+                difference.only_ours.len(),
+                difference.only_theirs.len()
+            );
+            for (class, objects) in &difference.fields {
+                println!("{class}: {} differ", objects.len());
+                for (key, fields) in objects.iter().take(3) {
+                    println!("  {key}");
+                    for field in fields {
+                        println!("    {field}");
+                    }
+                }
+            }
+            for (label, keys) in [
+                ("only ours", &difference.only_ours),
+                ("only theirs", &difference.only_theirs),
+            ] {
+                for key in keys.iter().take(20) {
+                    println!("{label}: {key}");
+                }
+            }
+        }
+        _ => anyhow::bail!("player-file dump <file> | compare <ours> <theirs> [--tolerance T]"),
+    }
+    Ok(())
 }
 
 /// `game-managers --project P --base globalgamemanagers --output F [--compare F]`:
