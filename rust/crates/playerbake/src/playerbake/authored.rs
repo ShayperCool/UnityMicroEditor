@@ -260,12 +260,89 @@ fn settle(document: &Document, tags: &Tags, value: &mut Val) -> Result<()> {
             });
         }
     }
+    strip_unused_curves(value);
     // The Editor caches a renderer's sorting layer value; the Player looks
     // it up by the layer's ID and a build writes 0.
     if let Some(field) = value.field_mut("m_SortingLayer") {
         *field = Val::I(0);
     }
     Ok(())
+}
+
+/// A build keeps the keys of a min-max curve only where its mode reads
+/// them: none for a constant (0) or two constants (3), the upper curve for a
+/// curve (1), both for two curves (2).
+fn strip_unused_curves(value: &mut Val) {
+    match value {
+        Val::Map(fields) => {
+            let state = fields
+                .iter()
+                .find(|(k, _)| k == "minMaxState")
+                .map(|(_, v)| match v {
+                    Val::I(n) => *n,
+                    Val::U(n) => *n as i64,
+                    _ => -1,
+                });
+            let gradients = fields.iter().any(|(k, _)| k == "maxGradient");
+            if let Some(state) = state {
+                for (name, field) in fields.iter_mut() {
+                    if gradients {
+                        // A gradient the mode does not read is the default
+                        // one: maxGradient serves a gradient (1), two
+                        // gradients (3) and a random color (4).
+                        let keep = match name.as_ref() {
+                            "maxGradient" => matches!(state, 1 | 3 | 4),
+                            "minGradient" => state == 3,
+                            _ => true,
+                        };
+                        if !keep {
+                            reset_gradient(field);
+                        }
+                        continue;
+                    }
+                    let keep = match name.as_ref() {
+                        "maxCurve" => matches!(state, 1 | 2),
+                        "minCurve" => state == 2,
+                        _ => true,
+                    };
+                    // An unread curve is written as a new, empty one, in the
+                    // default rotation order.
+                    if !keep {
+                        if let Some(Val::Seq(keys)) = field.field_mut("m_Curve") {
+                            keys.clear();
+                        }
+                        if let Some(order) = field.field_mut("m_RotationOrder") {
+                            *order = Val::I(4);
+                        }
+                    }
+                }
+            }
+            for (_, field) in fields.iter_mut() {
+                strip_unused_curves(field);
+            }
+        }
+        Val::Seq(items) => items.iter_mut().for_each(strip_unused_curves),
+        _ => {}
+    }
+}
+
+/// Two white keys at the ends, as a new gradient has.
+fn reset_gradient(gradient: &mut Val) {
+    let Val::Map(fields) = gradient else { return };
+    for (name, field) in fields.iter_mut() {
+        *field = match name.as_ref() {
+            "key0" | "key1" => Val::map([
+                ("r", Val::F(1.0)),
+                ("g", Val::F(1.0)),
+                ("b", Val::F(1.0)),
+                ("a", Val::F(1.0)),
+            ]),
+            "ctime1" | "atime1" => Val::U(65535),
+            "m_ColorSpace" => Val::I(-1),
+            "m_NumColorKeys" | "m_NumAlphaKeys" => Val::U(2),
+            _ => Val::Zero,
+        };
+    }
 }
 
 fn clear_pointers(value: &mut Val) {
