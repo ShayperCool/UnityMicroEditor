@@ -224,9 +224,22 @@ impl Names {
             parts.reverse();
             parts.join("/")
         };
+        // A component's position among its game object's components.
+        let mut position_of: HashMap<i64, usize> = HashMap::new();
+        for object in objects {
+            if let Some(Val::Seq(components)) = field(object.local_id, "m_Component") {
+                for (position, entry) in components.iter().enumerate() {
+                    if let Some((0, id)) = pointer(entry.field("component").cloned()) {
+                        position_of.insert(id, position);
+                    }
+                }
+            }
+        }
+        let mut ordered: Vec<&Read> = objects.iter().collect();
+        ordered.sort_by_key(|o| position_of.get(&o.local_id).copied().unwrap_or(usize::MAX));
         let mut keys = HashMap::new();
         let mut seen: HashMap<String, usize> = HashMap::new();
-        for object in objects {
+        for object in ordered {
             let id = object.local_id;
             let class = &classes[&id];
             let base = if class == "GameObject" {

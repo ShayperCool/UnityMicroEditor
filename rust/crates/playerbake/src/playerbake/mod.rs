@@ -6,6 +6,7 @@ mod assemble;
 mod authored;
 mod compare;
 mod managers;
+mod prefab;
 mod serialized;
 mod shader;
 mod shader_names;
@@ -23,6 +24,7 @@ pub use compare::{Difference, Inspected, compare as compare_files, inspect as in
 pub use managers::{
     ManagerReport, PlainFile, compare_managers, manager_trees, write_project_managers,
 };
+pub use prefab::Unpacked;
 pub use serialized::{
     External, FileFormat, Object, Read, ReferenceType, VERIFIED_FORMAT, external_paths,
     local_ids_of_class, read as read_serialized, read_of_class as read_serialized_of_class,

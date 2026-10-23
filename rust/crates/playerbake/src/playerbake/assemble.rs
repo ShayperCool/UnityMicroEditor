@@ -56,6 +56,7 @@ pub fn write_closure(
     let mut loaded: HashMap<String, Source> = HashMap::new();
     let mut queue: VecDeque<String> = roots.iter().map(|g| g.to_string()).collect();
     let mut seen: HashSet<String> = queue.iter().cloned().collect();
+    let mut unpacked = super::prefab::Unpacked::default();
     while let Some(guid) = queue.pop_front() {
         let Some(path) = sources.path(&guid) else {
             assembled
@@ -63,7 +64,12 @@ pub fn write_closure(
                 .push((guid, "no source with this GUID".into()));
             continue;
         };
-        let source = match load(path, &guid, sources) {
+        let source = match load(path, &guid, sources).and_then(|source| match source {
+            Some(Source::Yaml(documents)) => {
+                Ok(Some(Source::Yaml(unpacked.unpack(sources, documents)?)))
+            }
+            other => Ok(other),
+        }) {
             Ok(Some(source)) => source,
             Ok(None) => {
                 assembled.refused.push((
@@ -290,9 +296,6 @@ pub fn write_closure(
                             ));
                         }
                     }
-                }
-                if documents.iter().any(|d| d.class_id == PREFAB_INSTANCE) {
-                    failed.get_or_insert("nested prefab instances are not written yet".into());
                 }
                 if let Some(why) = failed {
                     assembled.refused.push((guid.clone(), why));

@@ -268,6 +268,25 @@ fn settle(document: &Document, tags: &Tags, value: &mut Val) -> Result<()> {
     Ok(())
 }
 
+fn clear_pointers(value: &mut Val) {
+    match value {
+        Val::Map(fields) => {
+            let pointer = fields.len() == 2
+                && fields.iter().any(|(k, _)| k == "m_FileID")
+                && fields.iter().any(|(k, _)| k == "m_PathID");
+            for (_, field) in fields.iter_mut() {
+                if pointer {
+                    *field = Val::I(0);
+                } else {
+                    clear_pointers(field);
+                }
+            }
+        }
+        Val::Seq(items) => items.iter_mut().for_each(clear_pointers),
+        _ => {}
+    }
+}
+
 struct Walk<'t, 'r, 'a> {
     tree: &'t TypeTree,
     resolve: &'r mut Resolve<'a>,
@@ -275,8 +294,11 @@ struct Walk<'t, 'r, 'a> {
 }
 
 impl Walk<'_, '_, '_> {
-    fn derive(&mut self, sample: Val, path: &str) -> Val {
+    /// A field the source lacks: the sample's value, but no reference into
+    /// the sample's file.
+    fn derive(&mut self, mut sample: Val, path: &str) -> Val {
         self.derived.push(path.to_string());
+        clear_pointers(&mut sample);
         sample
     }
 
