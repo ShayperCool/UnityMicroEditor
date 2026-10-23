@@ -101,7 +101,7 @@ impl ShaderCompiler {
                 _ => Ok(()),
             });
         }
-        let mut child = command.spawn().map_err(|error| {
+        let mut child = crate::sysutil::spawn_tied(command).map_err(|error| {
             anyhow!(
                 "launch UnityShaderCompiler: fork/exec {executable}: {}",
                 sysutil::errno_text(&error)

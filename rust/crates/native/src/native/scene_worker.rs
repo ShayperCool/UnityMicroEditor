@@ -567,8 +567,10 @@ impl SceneWorker {
                 &build.shader_cache,
             );
         }
-        let written = Self::read(warm)?;
+        // The idle time counts from here also when the read fails: the
+        // reaper otherwise sleeps on until a later write.
         self.shared.wake.notify_all();
+        let written = Self::read(warm)?;
         Event::new("scene-worker-wrote")
             .with("scene", &build.target)
             .with("reused", &reused)

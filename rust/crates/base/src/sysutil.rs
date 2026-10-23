@@ -542,6 +542,63 @@ pub unsafe fn default_stop_signals() {
     }
 }
 
+/// Starts `command` as a process that the kernel kills when this process
+/// ends, however it ends: a worker of a release whose engine does not watch
+/// its parent (6000.0 has no `-parentPid`) outlived a session killed by a
+/// signal, with its memory. The kernel ties a child to the thread that
+/// started it (`PR_SET_PDEATHSIG`), so every such child is started by one
+/// thread that lives as long as the process.
+pub fn spawn_tied(command: std::process::Command) -> io::Result<std::process::Child> {
+    use std::{
+        os::unix::process::CommandExt,
+        sync::{Mutex, OnceLock, mpsc},
+    };
+    type Request = (
+        std::process::Command,
+        mpsc::Sender<io::Result<std::process::Child>>,
+    );
+    static SPAWNER: OnceLock<Mutex<mpsc::Sender<Request>>> = OnceLock::new();
+    let spawner = SPAWNER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<Request>();
+        std::thread::Builder::new()
+            .name("ume-spawner".into())
+            .spawn(move || {
+                // SAFETY: getpid has no preconditions.
+                let parent = unsafe { libc::getpid() };
+                for (mut command, reply) in receiver {
+                    // SAFETY: the hook runs between fork and exec and makes
+                    // only async-signal-safe system calls.
+                    unsafe {
+                        command.pre_exec(move || {
+                            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong)
+                                != 0
+                            {
+                                return Err(io::Error::last_os_error());
+                            }
+                            // The process ended before the call above.
+                            if libc::getppid() != parent {
+                                libc::kill(libc::getpid(), libc::SIGKILL);
+                            }
+                            Ok(())
+                        });
+                    }
+                    let _ = reply.send(command.spawn());
+                }
+            })
+            .expect("start the spawner thread");
+        Mutex::new(sender)
+    });
+    let (reply, answer) = mpsc::channel();
+    spawner
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .send((command, reply))
+        .map_err(|_| io::Error::other("the spawner thread ended"))?;
+    answer
+        .recv()
+        .map_err(|_| io::Error::other("the spawner thread ended"))?
+}
+
 /// Sends a signal; a PID outside the kernel's range names no process.
 pub fn kill(pid: i64, signal: libc::c_int) -> io::Result<()> {
     let pid = libc::pid_t::try_from(pid).map_err(|_| io::Error::from_raw_os_error(libc::ESRCH))?;
@@ -610,6 +667,50 @@ pub fn exit_error(status: ExitStatus) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Run by the test below in a process of its own: starts a tied child
+    /// and exits at once, as a process killed by a signal ends.
+    #[test]
+    fn tied_child_helper() {
+        if std::env::var_os("UME_TIED_HELPER").is_none() {
+            return;
+        }
+        let mut command = std::process::Command::new("sleep");
+        command.arg("60");
+        let child = spawn_tied(command).unwrap();
+        println!("child {}", child.id());
+        std::process::exit(0);
+    }
+
+    #[test]
+    fn a_tied_child_ends_with_its_process() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "sysutil::tests::tied_child_helper",
+                "--nocapture",
+            ])
+            .env("UME_TIED_HELPER", "1")
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&output.stdout);
+        let pid: i64 = text
+            .lines()
+            .find_map(|line| line.strip_prefix("child "))
+            .unwrap_or_else(|| panic!("no child in {text}"))
+            .trim()
+            .parse()
+            .unwrap();
+        let gone = |pid: i64| {
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .map_or(true, |stat| stat.contains(") Z "))
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !gone(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(gone(pid), "the child {pid} outlived its process");
+    }
 
     #[test]
     fn lexical_paths_are_cleaned() {

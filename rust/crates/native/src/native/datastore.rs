@@ -262,7 +262,7 @@ impl DataStoreService {
             });
         }
         let started = Instant::now();
-        let child = command.spawn().map_err(|error| {
+        let child = crate::sysutil::spawn_tied(command).map_err(|error| {
             anyhow!(
                 "launch Unity.DataStore: fork/exec {executable}: {}",
                 sysutil::errno_text(&error)

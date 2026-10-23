@@ -474,7 +474,7 @@ impl Probe<'_> {
             .stderr(stdout.try_clone()?)
             .process_group(0);
         let stage = Instant::now();
-        let child = command.spawn().map_err(|error| {
+        let child = sysutil::spawn_tied(command).map_err(|error| {
             anyhow!(
                 "fork/exec {}: {}",
                 self.opts.editor,
@@ -903,7 +903,7 @@ impl WarmWorker {
             .stdout(stdout.try_clone()?)
             .stderr(stdout.try_clone()?)
             .process_group(0);
-        let child = command.spawn().map_err(|error| {
+        let child = sysutil::spawn_tied(command).map_err(|error| {
             anyhow!("fork/exec {}: {}", opts.editor, sysutil::errno_text(&error))
         })?;
         Ok((Waiter::new(child), stdout))
