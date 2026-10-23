@@ -265,6 +265,12 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                 }
             }
         }
+        ["script-layouts", project, editor, player, output] => {
+            let ctx = unity_micro_editor::mcp::signal_context()?;
+            let layouts =
+                unity_micro_editor::compiler::player_script_layouts(&ctx, project, editor, player)?;
+            fs::write(output, layouts)?;
+        }
         ["script-templates", output, files @ ..] => {
             use unity_micro_editor::playerbake as bake;
             let mut trees = Vec::new();
@@ -585,7 +591,7 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
             }
         }
         _ => anyhow::bail!(
-            "player-file dump <file> | compare <ours> <theirs> [--tolerance T] | convert ..."
+            "player-file dump <file> | compare <ours> <theirs> [--tolerance T] | convert ... | closure ... | trees <file> | script-trees <layouts> <file> [--unity-version V] | script-templates <output> <file>... | script-layouts <project> <editor> <player> <output>"
         ),
     }
     Ok(())

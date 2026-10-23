@@ -141,7 +141,15 @@ are neither constant nor read-only nor `[NonSerialized]`, public or
 underlying type), a string, an engine object, an engine value type, a
 serializable class or struct, or an array or `List<T>` of one.
 `player-file script-trees <layouts.json> <file>` lays them out and compares
-each with the tree the file has.
+each with the tree the file has. The compiler builds the tool once into the
+project's store, as it does the Play mode linker (`Compiler::built_tool`),
+and `Compiler::script_layouts` runs it on a Player's managed assemblies,
+the newest compile's in place of the Player's own, keeping the layouts in the
+store by the assemblies' hashes (`player-file script-layouts <project>
+<editor> <player> <output>`; Bouncemasters: 7 s built and read, 0.3 s
+again). With a session Player's assemblies Main's trees are 245 equal: the
+Player's Addressables has no `AssetReference.m_SubObjectGUID`, which the
+worker lays out from the Editor's (`SoundConfig`), besides the 26 of Odin.
 
 The rules the engine's trees show, besides the field order:
 

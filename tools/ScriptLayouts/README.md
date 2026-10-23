@@ -1,6 +1,6 @@
 # Script layouts
 
-Prints what Unity's serializer stores of the script classes of compiled assemblies, for `playerbake` to lay out as Player type trees without the Editor ([docs/OWN_IMPORTER.md](../../docs/OWN_IMPORTER.md#script-type-trees)). It uses the Cecil of the installation's IL2CPP (`Data/il2cpp/build/deploy`) and is built with the .NET SDK the compiler uses, like the Play mode linker.
+Prints what Unity's serializer stores of the script classes of compiled assemblies, for `playerbake` to lay out as Player type trees without the Editor ([docs/OWN_IMPORTER.md](../../docs/OWN_IMPORTER.md#script-type-trees)). It uses the Cecil of the installation's IL2CPP (`Data/il2cpp/build/deploy`) and is built with the .NET SDK the compiler uses into the project's compiler store, like the Play mode linker (`Compiler::built_tool`); `Compiler::script_layouts` runs it on a Player's assemblies.
 
 ```
 ScriptLayouts <directory or assembly>...

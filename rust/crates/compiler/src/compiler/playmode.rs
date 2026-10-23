@@ -15,18 +15,17 @@
 //! fields that only one kind of build declares with the host's build, whose
 //! data the Player reads without type trees.
 use super::{
-    Compiler, NilMap,
+    Compiler,
     nilable::nz,
     sys::{self, compiler_command},
 };
 use crate::{
     cancel::Context,
     sha256, sysutil,
-    util::{atomic_json, file_hash, marshal, micro_editor_root, read_json_file},
+    util::{atomic_json, file_hash, read_json_file},
 };
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 /// The .NET Framework assemblies the Editor references for its own
 /// assemblies, besides the facades.
@@ -233,8 +232,6 @@ pub struct LinkReport {
     pub unresolved: Vec<String>,
 }
 
-const LINKER: &str = "PlayModeLinker.dll";
-
 impl Compiler {
     /// What an assembly for the Editor alone compiles against in Play mode
     /// code, as the Editor compiles it: the .NET Framework API and every
@@ -251,76 +248,7 @@ impl Compiler {
         if let Some(linker) = self.play_mode_linker.lock().unwrap().clone() {
             return Ok(linker);
         }
-        let sources = sysutil::join(&[&micro_editor_root()?, "tools/PlayModeLinker"]);
-        // Unity's own Cecil, which IL2CPP ships with every installation.
-        let cecil = sysutil::join(&[&sysutil::dir(&self.editor), "Data/il2cpp/build/deploy"]);
-        let mut inputs: BTreeMap<String, String> = BTreeMap::new();
-        for name in ["PlayModeLinker.csproj", "Program.cs"] {
-            inputs.insert(name.into(), file_hash(&sysutil::join(&[&sources, name]))?);
-        }
-        inputs.insert(
-            "Mono.Cecil.dll".into(),
-            file_hash(&sysutil::join(&[&cecil, "Mono.Cecil.dll"]))?,
-        );
-        inputs.insert("dotnet".into(), file_hash(&self.dotnet)?);
-        let key = sha256(&marshal(&inputs)?);
-        let entry = sysutil::join(&[&self.stored("play-mode-linker"), &key]);
-        let valid = |entry: &str| {
-            read_json_file::<NilMap<String>>(&sysutil::join(&[entry, "files.json"])).is_ok_and(
-                |files| {
-                    !files.at(LINKER).is_empty()
-                        && files.iter().all(|(name, hash)| {
-                            file_hash(&sysutil::join(&[entry, name]))
-                                .is_ok_and(|actual| actual == *hash)
-                        })
-                },
-            )
-        };
-        if !valid(&entry) {
-            sys::mkdir_all(&sysutil::dir(&entry))?;
-            let staging = sys::mkdir_temp(&sysutil::dir(&entry), ".linker-build-")?;
-            for name in ["PlayModeLinker.csproj", "Program.cs"] {
-                let payload = sys::read(&sysutil::join(&[&sources, name]))?;
-                if sha256(&payload) != inputs[name] {
-                    bail!("the Play mode linker's source changed while it was built: {name}");
-                }
-                sys::write(&sysutil::join(&[&staging, name]), &payload)?;
-            }
-            sys::write(
-                &sysutil::join(&[&staging, "NuGet.Config"]),
-                b"<configuration><packageSources><clear /></packageSources></configuration>\n",
-            )?;
-            let payload = sysutil::join(&[&staging, "payload"]);
-            compiler_command(
-                ctx,
-                &staging,
-                &self.dotnet,
-                &[
-                    "build",
-                    &sysutil::join(&[&staging, "PlayModeLinker.csproj"]),
-                    "--nologo",
-                    "-v:q",
-                    "-o",
-                    &payload,
-                    "-p:NuGetAudit=false",
-                    &format!("-p:CecilPath={cecil}"),
-                    sys::BUILD_WITHOUT_SERVERS[0],
-                    sys::BUILD_WITHOUT_SERVERS[1],
-                ],
-            )
-            .map_err(|error| anyhow!("build the Play mode linker: {error}"))?;
-            let mut files = NilMap::make();
-            for name in sys::regular_files(&payload)? {
-                files.insert(name.clone(), file_hash(&sysutil::join(&[&payload, &name]))?);
-            }
-            if files.at(LINKER).is_empty() {
-                bail!("the Play mode linker's build produced no {LINKER}");
-            }
-            atomic_json(&sysutil::join(&[&payload, "files.json"]), &files)?;
-            sys::publish(&payload, &entry, || valid(&entry))?;
-            let _ = std::fs::remove_dir_all(&staging);
-        }
-        let linker = sysutil::join(&[&entry, LINKER]);
+        let linker = self.built_tool(ctx, "PlayModeLinker", "play-mode-linker")?;
         *self.play_mode_linker.lock().unwrap() = Some(linker.clone());
         Ok(linker)
     }
