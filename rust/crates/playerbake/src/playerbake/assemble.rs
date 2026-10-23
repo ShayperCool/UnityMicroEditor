@@ -805,6 +805,10 @@ fn load(path: &Path, guid: &str, sources: &Sources) -> Result<Option<Source>> {
         let name = path.file_stem().map(|n| n.to_string_lossy().into_owned());
         return Ok(name.map(Source::Assembly));
     }
+    if meta.windows(21).any(|w| w == b"TrueTypeFontImporter:") {
+        let settings = super::font::importer_settings(&meta, "TrueTypeFontImporter")?;
+        return Ok(Some(Source::Yaml(super::font::documents(path, &settings)?)));
+    }
     if meta.windows(19).any(|w| w == b"TextScriptImporter:") {
         return Ok(Some(Source::Text(path.to_path_buf())));
     }

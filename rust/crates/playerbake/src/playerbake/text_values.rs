@@ -76,7 +76,7 @@ pub(super) fn scalar(type_name: &str, source: &str, path: &str) -> Result<Val> {
 pub(super) fn hex_items(type_name: &str, dump: &str, path: &str) -> Result<Vec<Val>> {
     let (size, signed, suffix) = match type_name {
         "UInt8" => (1, false, ""),
-        "SInt8" => (1, true, ""),
+        "SInt8" | "char" => (1, true, ""),
         "UInt16" | "unsigned short" => (2, false, ""),
         "SInt16" | "short" => (2, true, ""),
         "unsigned int" => (4, false, "u"),

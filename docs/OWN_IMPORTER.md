@@ -171,6 +171,19 @@ Main without the worker's file: the 49 compressed and 38 scaled textures are
 written too (refused sources 155 to 63); 584 of 588 textures equal, the other
 four images of the same name paired the other way.
 
+### Fonts
+
+`font.rs` makes a TrueType or OpenType font a dynamic `Font` as the
+importer does with its data included and the face's ascent: the file's
+bytes, the names and settings of its `TrueTypeFontImporter`, `m_Ascent` and
+`m_Descent` as `hhea`'s ascender and descender times `size / unitsPerEm`
+(in `f32`, the factor first), `m_LineSpacing` as (ascender − descender +
+line gap) × size / unitsPerEm, and the two objects it holds, `Font
+Material` (the built-in Font shader, white, the texture) and an empty `Font
+Texture` the Player fills. They go through the authored conversion as the
+documents a font asset would hold. Main: the 6 fonts equal but for which of
+the identical materials and textures of the same name each pairs with.
+
 ### Sprite meshes
 
 `spritemesh.rs` makes a sprite's tight mesh and its fallback physics shape as

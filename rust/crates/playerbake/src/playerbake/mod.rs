@@ -5,6 +5,7 @@
 mod assemble;
 mod authored;
 mod compare;
+mod font;
 mod managers;
 mod prefab;
 mod scripts;
