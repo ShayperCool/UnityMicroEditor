@@ -2,9 +2,11 @@
 //! `TextureImporter` settings, as a build for the Linux standalone target
 //! writes them.
 //!
-//! Covered: PNG sources kept uncompressed (RGBA32, RGB24, Alpha8) at their
-//! own size without mipmaps, single and multiple sprites with a full-rect
-//! mesh. Anything else is refused, so a caller can leave it to the worker.
+//! Covered: PNG sources of the Default, Sprite and Single Channel types kept
+//! uncompressed (RGBA32, RGB24, Alpha8) at their own size without mipmaps,
+//! with *Alpha Is Transparency*, single and multiple sprites with a
+//! full-rect mesh. Anything else is refused, so a caller can leave it to the
+//! worker.
 use super::{Kind, typetree::Val, unsupported};
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Map, Value};
@@ -186,6 +188,11 @@ pub fn convert(
         return Err(unsupported("mipmaps"));
     }
     let texture_type = settings.int("textureType", 0);
+    // Default, Sprite and Single Channel; a normal map or a lightmap takes a
+    // usage mode of its own.
+    if ![0, 8, 10].contains(&texture_type) {
+        return Err(unsupported(format!("texture type {texture_type}")));
+    }
     let npot = !(image.width.is_power_of_two() && image.height.is_power_of_two());
     if npot && settings.int("nPOTScale", 1) != 0 && texture_type != 8 {
         return Err(unsupported(
@@ -287,7 +294,14 @@ pub fn convert(
             ("m_WrapW", Val::I(wrap("W"))),
         ]),
     );
-    set(&mut value, "m_LightmapFormat", Val::I(6));
+    // The texture's usage mode: always padded (6) for a sprite, the default
+    // (0) otherwise. Two Default textures of Bouncemasters (Spine's
+    // `chest_red`, `tap_to_bump`) are 6 by a rule not known.
+    set(
+        &mut value,
+        "m_LightmapFormat",
+        Val::I(if texture_type == 8 { 6 } else { 0 }),
+    );
     set(
         &mut value,
         "m_ColorSpace",

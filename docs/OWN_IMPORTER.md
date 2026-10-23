@@ -115,7 +115,7 @@ unity-micro-editor player-file compare F <worker's ume-deps>
 ```
 
 Main of Bouncemasters, against the dependencies file the worker wrote: 1734
-sources, 21185 objects paired (226 of the worker's unpaired), 20100 equal
+sources, 21185 objects paired (226 of the worker's unpaired), 20152 equal
 field by field. The type trees and samples still come from a worker file
 (`--library`); a release's trees and default objects are to be captured
 once and shipped, so that a user needs no licence.
@@ -129,11 +129,14 @@ nearest and those of its four neighbours at the step (left, right, below,
 above) the one nearest in Manhattan distance, the first on a tie; a pixel
 no step reaches, beyond 31, keeps its colour. An image with no pixel less
 than opaque is `m_IsAlphaChannelOptional`, and stored RGB24 when its format
-is left to the importer even if its source has an alpha channel. Main: 417
-of the 501 paired textures equal (38 without both). Of the other 84, 50
-differ only in `m_LightmapFormat` (the engine's texture usage mode, 6 for
-sprites and two NPOT textures, 0 for the other default ones, by a rule not
-known yet), 10 are scaled, 3 are TextMesh Pro font atlases.
+is left to the importer even if its source has an alpha channel. The usage
+mode (`m_LightmapFormat`, set from what the importer computes) is 6, always
+padded, for a sprite and 0 for a Default or Single Channel texture; other
+texture types are left to the worker. Main: 469 of the 501 paired textures
+equal (38 before these three rules). Of the other 32, 10 are scaled, 3 are
+TextMesh Pro font atlases, and two Default textures of Spine (`chest_red`,
+`tap_to_bump`, with the same `.meta` as a Default one the engine gives 0)
+have usage mode 6 by a rule not known yet.
 
 What differs, by count of objects:
 
@@ -224,7 +227,7 @@ given, which for a session are those its Player runs.
 `player-file closure ... --layouts <layouts.json>` takes the trees, samples
 and `MonoScript`s of all scripts from the layouts instead of the worker's
 file (which still gives the classes of the engine). Main:
-20045 objects equal against 20100 with the worker's script trees. All 57
+20097 objects equal against 20152 with the worker's script trees. All 57
 fewer are Odin's: the 26 managers that hold `serializationData` and the
 `MonoScript`s of 31 Odin classes, whose hashes follow the trees; two objects
 whose fields the worker's samples gave wrongly are now equal.
