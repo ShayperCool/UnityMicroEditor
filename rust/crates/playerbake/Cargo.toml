@@ -15,6 +15,7 @@ xxhash-rust.workspace = true
 lz4-sys.workspace = true
 png.workspace = true
 libc.workspace = true
+tempfile.workspace = true
 
 [build-dependencies]
 cc.workspace = true

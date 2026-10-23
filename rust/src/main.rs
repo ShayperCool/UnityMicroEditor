@@ -540,9 +540,11 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                     "--layouts" => layouts_path = Some(Path::new(*value)),
                     // A root whose own objects go to a scene file beside the output.
                     "--scene" => scene_root = Some(*value),
-                    // The installation whose texture compressor is used.
+                    // The installation whose texture compressor and audio
+                    // encoder are used.
                     "--editor" => {
-                        unity_micro_editor::playerbake::texcomp::use_editor(Path::new(*value))
+                        unity_micro_editor::playerbake::texcomp::use_editor(Path::new(*value));
+                        unity_micro_editor::playerbake::audio::use_editor(Path::new(*value));
                     }
                     other => anyhow::bail!("unknown flag {other}"),
                 }
@@ -635,6 +637,10 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
             }
             fs::write(output, &assembled.file)?;
             fs::write(output.with_file_name(&stream), &assembled.stream)?;
+            if !assembled.resource.is_empty() {
+                let name = format!("{}.resource", stream.trim_end_matches(".resS"));
+                fs::write(output.with_file_name(name), &assembled.resource)?;
+            }
             fs::write(
                 output.with_file_name(format!(
                     "{}.externals.json",

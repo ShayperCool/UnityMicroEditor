@@ -184,6 +184,22 @@ Texture` the Player fills. They go through the authored conversion as the
 documents a font asset would hold. Main: the 6 fonts equal but for which of
 the identical materials and textures of the same name each pairs with.
 
+### Audio
+
+An `AudioImporter` source becomes an `AudioClip` whose samples the
+Editor's own `FSBTool` (`Data/Tools/FSBTool/x64`, FMOD's bank tool, which
+the Editor runs for each import over a socket) encodes, run here from its
+command line: `-C fsb -c vorbis|pcm|adpcm -q <quality x 100>`, `-m` for
+`forceToMono` and then `-n` for `normalize`, `-r` to optimize the sample
+rate, `-s <rate>` to override it. The settings are the `.meta`'s override
+for the standalone group (`1`), else its defaults. The FSB5 bank goes, at a
+32-byte boundary, to the `.resource` file beside the written one (the
+stream's name with that extension), and its sample header gives the clip's
+channels, frequency and length (samples over frequency, in `f32`). 140
+clips of Bouncemasters against the worker's: all 139 paired equal, banks
+included, in 1.8 s. MP3 and the platforms' own formats are left to the
+worker.
+
 ### Sprite meshes
 
 `spritemesh.rs` makes a sprite's tight mesh and its fallback physics shape as
@@ -320,6 +336,24 @@ the tool does not import yet: the models' 33 meshes, 2 avatars and 2 clips,
 importers' 6 certificates, and 2 project settings objects
 (`LocalizationSettings`, `UIParticleProjectSettings`), with their 4
 `MonoScript`s.
+
+### In a session
+
+`UME_OWN_IMPORTER=1` has a session write its native scenes with the tool's
+writer and the worker only when that fails; `UME_OWN_IMPORTER=only` never
+starts the worker for them. The engine's classes come from the release's
+pack, the scripts' layouts from the Editor compilation the worker would
+load (its assemblies and plugins over the session Player's `Managed`), the
+texture compressor and `FSBTool` from the installation; the scene and its
+closure are stored under a key of their own (`native-scene-own-v1`).
+Shaders stay external and are published by the session as for the worker's
+files; references to other sources the tool does not write yet (models,
+animator controllers, ...) are written empty and reported in
+`native-scene-written`'s `refused`, and an addressed asset of which nothing
+was written is given up with all the others in one pass. Limitations: a
+session still needs the Editor installation (its compressor, `FSBTool`,
+`unity_builtin_extra` and shader compiler), and a scene whose models or
+animations matter plays without them.
 
 ### Script type trees
 

@@ -3,6 +3,7 @@
 //! baked from their sources, and the settings managers of a Player written
 //! from the project's settings.
 mod assemble;
+pub mod audio;
 mod authored;
 mod compare;
 mod font;

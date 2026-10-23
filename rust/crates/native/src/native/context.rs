@@ -536,7 +536,7 @@ pub fn create_build_import_context(
 }
 
 /// A file of the project an importer's assemblies were compiled in.
-fn resolve_script_source(library: &str, relative: &str) -> Result<String> {
+pub(super) fn resolve_script_source(library: &str, relative: &str) -> Result<String> {
     let canonical = eval_symlinks(&sysutil::join(&[library, relative]))
         .map_err(|e| wrap(&format!("resolve importer source {relative}"), e))?;
     // A package the compilation placed by a link to where the resolver

@@ -19,8 +19,12 @@ use crate::{
     sha256, sysutil,
     util::random_id,
 };
-use anyhow::{Result, bail};
-use std::{collections::BTreeSet, time::Duration};
+use anyhow::{Context as _, Result, bail};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    time::Duration,
+};
 
 /// The engine's resources a Player holds itself, by the name a written file
 /// gives them.
@@ -31,6 +35,29 @@ const BUILTIN_EXTRA: &str = "Resources/unity_builtin_extra";
 const DEPENDENCIES_NAME: &str = "ume-deps";
 /// How the worker names the file a source is published in (a shader).
 const PUBLISHED_PREFIX: &str = "ume-asset/";
+
+/// The names the tool's own writer gives the closure's streamed data: of
+/// textures and meshes, and of audio.
+const DEPENDENCIES_STREAM: &str = "ume-deps.resS";
+const DEPENDENCIES_RESOURCE: &str = "ume-deps.resource";
+
+/// Which writer writes a scene, by `UME_OWN_IMPORTER`: the import worker
+/// (unset or `0`), the tool's own writer with the worker when it fails
+/// (`1`), or the tool's own writer alone (`only`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Writer {
+    Worker,
+    Own,
+    OwnOnly,
+}
+
+fn writer() -> Writer {
+    match std::env::var("UME_OWN_IMPORTER").as_deref() {
+        Ok("only") => Writer::OwnOnly,
+        Ok("") | Ok("0") | Err(_) => Writer::Worker,
+        Ok(_) => Writer::Own,
+    }
+}
 
 /// The scene's file, the file of what it refers to and the files of that
 /// file's streamed data.
@@ -212,9 +239,14 @@ impl NativeProjectImporter {
         let scripts = sha256(
             format!("{}\0{}", environment.sha256, environment.scripts.join("\0")).as_bytes(),
         );
+        // The writers' files differ: each keeps its own.
+        let version = match writer() {
+            Writer::Worker => "native-scene-v4",
+            Writer::Own | Writer::OwnOnly => "native-scene-own-v1",
+        };
         let key = sha256(
             format!(
-                "native-scene-v4\0{}\0{}\0{scripts}\0{}",
+                "{version}\0{}\0{}\0{scripts}\0{}",
                 importer_identity(),
                 self.environment_sha256,
                 needed.key
@@ -244,8 +276,20 @@ impl NativeProjectImporter {
                 kept
             }
             None => {
-                let (scene, mut dependencies, resources) =
-                    self.write_native_scene(ctx, &needed.scene, &includes)?;
+                let written = match writer() {
+                    Writer::Worker => self.write_native_scene(ctx, &needed.scene, &includes),
+                    Writer::OwnOnly => self.write_own_native_scene(ctx, &needed.scene, &includes),
+                    Writer::Own => self
+                        .write_own_native_scene(ctx, &needed.scene, &includes)
+                        .or_else(|error| {
+                            Event::new("native-scene-own-failed")
+                                .with("scene", &needed.scene)
+                                .with("error", &format!("{error:#}"))
+                                .emit();
+                            self.write_native_scene(ctx, &needed.scene, &includes)
+                        }),
+                };
+                let (scene, mut dependencies, resources) = written?;
                 for (name, data) in &resources {
                     let built = built_store::Built {
                         file: data.clone(),
@@ -387,6 +431,158 @@ impl NativeProjectImporter {
             assets: dependencies.assets.clone(),
         });
         Ok(())
+    }
+
+    /// Writes the scene as the worker does, with the tool's own writer and no
+    /// worker: the engine's classes from the release's pack, the scripts laid
+    /// out from the Editor compilation the worker would load, against the
+    /// session's Player. Shaders stay external, published by the session as
+    /// for the worker's files; what else the writer does not import yet
+    /// (models, animator controllers, ...) is reported and left out.
+    fn write_own_native_scene(
+        &self,
+        ctx: &Context,
+        scene: &str,
+        includes: &[String],
+    ) -> Result<WrittenNativeScene> {
+        let started = std::time::Instant::now();
+        let project = self.opts.project.clone();
+        if self.opts.player.is_empty() {
+            bail!("the tool's own writer lays scripts out against a Player, and there is none");
+        }
+        let version = crate::engine::project_version(&project)?;
+        let format = playerbake::FileFormat::of_release(&version)
+            .with_context(|| format!("the tool writes no files of {version}"))?;
+        let mut library = playerbake::Library::of_release(&version)
+            .with_context(|| format!("no pack of the engine classes of {version}"))??;
+        let templates = playerbake::Templates::of_release(&version)
+            .with_context(|| format!("no script templates of {version}"))?;
+        // The scripts as the worker would lay them out: the Editor
+        // compilation's assemblies and the plugins it names.
+        let sources = super::player_objects::open_sources(&project)?;
+        let environment = super::player_objects::scene_closure(&sources, scene, includes)?
+            .environment(&project)?;
+        let mut assemblies = BTreeMap::new();
+        for name in &environment.assemblies {
+            assemblies.insert(name.clone(), environment.assembly_path(name));
+        }
+        for plugin in &environment.plugins {
+            let path = super::context::resolve_script_source(&environment.library, plugin)?;
+            let name = sysutil::base(plugin);
+            let name = name.strip_suffix(".dll").unwrap_or(&name).to_string();
+            assemblies.insert(name, path);
+        }
+        let layouts = crate::compiler::script_layouts_with(
+            ctx,
+            &project,
+            &self.opts.editor,
+            &self.opts.player,
+            assemblies,
+        )?;
+        let layouts: playerbake::Layouts = serde_json::from_slice(&layouts)?;
+        let layout = playerbake::Layout::new(&layouts, &templates);
+        let root = Path::new(&project);
+        for (name, error) in
+            library.add_scripts(&layout, &playerbake::script_execution_orders(root))?
+        {
+            Event::new("native-scene-script-not-laid-out")
+                .with("script", &name)
+                .with("error", &error)
+                .emit();
+        }
+        let editor = sysutil::dir(&self.opts.editor);
+        playerbake::texcomp::use_editor(Path::new(&editor));
+        playerbake::audio::use_editor(Path::new(&editor));
+        let builtin_extra = sysutil::join(&[&editor, "Data/Resources/unity_builtin_extra"]);
+        let (scene_guid, included) = {
+            let mut session = self.session.lock();
+            session.index_guids()?;
+            let included: Vec<String> = includes
+                .iter()
+                .map(|path| session.guid_of(path).to_string())
+                .collect();
+            (session.guid_of(scene).to_string(), included)
+        };
+        if scene_guid.is_empty() {
+            bail!("{scene} has no GUID");
+        }
+        let mut roots: Vec<&str> = vec![&scene_guid];
+        roots.extend(
+            included
+                .iter()
+                .map(String::as_str)
+                .filter(|g| !g.is_empty()),
+        );
+        let assembled = playerbake::write_scene_closure(
+            &library,
+            &playerbake::Tags::of_project(root)?,
+            &playerbake::Sources::of_project(root)?,
+            &roots,
+            Some(&scene_guid),
+            format,
+            DEPENDENCIES_STREAM,
+            Some(Path::new(&builtin_extra)),
+        )?;
+        let Some(scene_file) = assembled.scene else {
+            bail!("the tool wrote no file of {scene}");
+        };
+        let listed: Vec<_> = assembled
+            .objects
+            .iter()
+            .filter(|(_, class, ..)| class != "UnityEditor.MonoScript")
+            .collect();
+        let mut assets: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (_, _, guid, file_id) in &listed {
+            if included.contains(guid) && !assembled.roots.contains_key(guid) {
+                assets
+                    .entry(guid.clone())
+                    .or_default()
+                    .push(file_id.to_string());
+            }
+        }
+        let refused: Vec<String> = assembled
+            .refused
+            .iter()
+            .map(|(guid, why)| format!("{guid}: {why}"))
+            .collect();
+        Event::new("native-scene-written")
+            .with("scene", &scene)
+            .with("writer", "own")
+            .with("refused", &refused)
+            .seconds("elapsedSeconds", started.elapsed().as_secs_f64())
+            .emit();
+        let mut resources = Vec::new();
+        if !assembled.stream.is_empty() {
+            resources.push((DEPENDENCIES_STREAM.to_string(), assembled.stream));
+        }
+        if !assembled.resource.is_empty() {
+            resources.push((DEPENDENCIES_RESOURCE.to_string(), assembled.resource));
+        }
+        Ok((
+            built_store::Built {
+                file: scene_file,
+                ..Default::default()
+            },
+            built_store::Built {
+                file: assembled.file,
+                objects: listed
+                    .iter()
+                    .map(|(id, class, ..)| (id.to_string(), class.clone()))
+                    .collect(),
+                sources: listed
+                    .iter()
+                    .map(|(_, _, guid, file_id)| format!("{guid}/{file_id}"))
+                    .collect(),
+                roots: assembled
+                    .roots
+                    .iter()
+                    .map(|(guid, id)| (guid.clone(), id.to_string()))
+                    .collect(),
+                assets,
+                ..Default::default()
+            },
+            resources,
+        ))
     }
 
     fn write_native_scene(

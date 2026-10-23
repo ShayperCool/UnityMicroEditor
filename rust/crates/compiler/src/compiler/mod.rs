@@ -24,7 +24,7 @@ mod sys;
 #[cfg(test)]
 mod tests;
 mod tools;
-pub use tools::player_script_layouts;
+pub use tools::{player_script_layouts, script_layouts_with};
 
 pub use cli::run_compiler_prepare_cli;
 pub use compile::{

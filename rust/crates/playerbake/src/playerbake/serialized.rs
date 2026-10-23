@@ -79,6 +79,20 @@ pub const VERIFIED_FORMAT: FileFormat = FileFormat {
     unity_version: crate::ENGINE_VERSION,
 };
 
+impl FileFormat {
+    /// The format a release writes, of the releases the tool knows.
+    pub fn of_release(unity_version: &str) -> Option<FileFormat> {
+        match unity_version {
+            "6000.0.71f1" => Some(FileFormat {
+                version: 22,
+                unity_version: "6000.0.71f1",
+            }),
+            version if version == crate::ENGINE_VERSION => Some(VERIFIED_FORMAT),
+            _ => None,
+        }
+    }
+}
+
 pub fn write(objects: &[Object<'_>], externals: &[External]) -> Result<Vec<u8>> {
     write_with_references(objects, externals, &[])
 }

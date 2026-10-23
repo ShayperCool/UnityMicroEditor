@@ -157,3 +157,27 @@ pub fn player_script_layouts(
     };
     compiler.script_layouts(ctx)
 }
+
+/// `player_script_layouts` with `assemblies` (name to path) in place of the
+/// Player's assemblies of the same names: the layouts of another
+/// compilation of the project's scripts, against the Player's engine.
+pub fn script_layouts_with(
+    ctx: &Context,
+    project: &str,
+    editor: &str,
+    player: &str,
+    assemblies: BTreeMap<String, String>,
+) -> Result<Vec<u8>> {
+    let sdk = sys::unity_sdk(&sysutil::join(&[&sysutil::dir(editor), "Data"]))?;
+    let compiler = Compiler {
+        project: project.into(),
+        editor: editor.into(),
+        store: super::project_compiler_store(project),
+        player: player.into(),
+        dotnet: sdk.dotnet,
+        csc: sdk.csc,
+        current_dlls: NilMap::from(assemblies),
+        ..Compiler::default()
+    };
+    compiler.script_layouts(ctx)
+}

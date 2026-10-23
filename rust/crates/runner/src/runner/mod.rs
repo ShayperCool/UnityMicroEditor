@@ -766,14 +766,16 @@ fn drop_addressable_prefabs(
     let named = error
         .chain()
         .find_map(|cause| cause.downcast_ref::<project::RefusedPrefab>())
-        .filter(|refused| prefabs.contains(&refused.path));
-    if let Some(refused) = named {
-        give_up_prefabs(
-            opts,
-            session,
-            std::slice::from_ref(&refused.path),
-            &err_text(error),
-        );
+        .map(|refused| {
+            std::iter::once(&refused.path)
+                .chain(&refused.also)
+                .filter(|path| prefabs.contains(path))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .filter(|named| !named.is_empty());
+    if let Some(named) = named {
+        give_up_prefabs(opts, session, &named, &err_text(error));
         return true;
     }
     give_up_prefabs(opts, session, &prefabs, &err_text(error));

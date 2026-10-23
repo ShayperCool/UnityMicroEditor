@@ -2690,6 +2690,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "tempfile",
  "ume-base",
  "xxhash-rust",
 ]

@@ -53,12 +53,15 @@ impl std::error::Error for NeedsImportError {}
 #[derive(Debug)]
 pub struct RefusedPrefab {
     pub path: String,
+    /// Other assets refused for the same cause, given up with it.
+    pub also: Vec<String>,
     cause: anyhow::Error,
 }
 impl RefusedPrefab {
     pub(crate) fn new(path: &str, cause: anyhow::Error) -> Self {
         Self {
             path: path.into(),
+            also: Vec::new(),
             cause,
         }
     }

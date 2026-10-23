@@ -22,6 +22,9 @@ pub struct Assembled {
     pub file: Vec<u8>,
     /// Streamed texture data, to be saved under the name given.
     pub stream: Vec<u8>,
+    /// Encoded audio, to be saved beside it under the name with the
+    /// extension `.resource` (`resource_name`).
+    pub resource: Vec<u8>,
     /// Sources left out or written in part, with the reason.
     pub refused: Vec<(String, String)>,
     /// GUIDs of the sources other files hold, in external-reference order.
@@ -37,6 +40,8 @@ pub struct Assembled {
     /// Each object of `file`: its local ID, its class's managed name, and the
     /// source it comes from (GUID and file ID).
     pub objects: Vec<(i64, String, String, i64)>,
+    /// Of each root that is a prefab, the file ID of its root game object.
+    pub roots: std::collections::BTreeMap<String, i64>,
 }
 
 /// The path a written file names an external reference by, as the worker's
@@ -111,6 +116,8 @@ enum Source {
     Yaml(Vec<Document>),
     /// A text or binary file a `TextScriptImporter` makes a `TextAsset` of.
     Text(PathBuf),
+    /// An audio file an `AudioImporter` makes an `AudioClip` of.
+    Audio(PathBuf, super::audio::Settings),
     Image(PathBuf, Vec<u8>),
     Script(String),
     /// A plugin's compiled assembly, by its name: the script classes
@@ -145,6 +152,9 @@ pub fn write_scene_closure(
     let mut seen: HashSet<String> = queue.iter().cloned().collect();
     let mut unpacked = super::prefab::Unpacked::default();
     let renames = sources.renames();
+    // Sources the tool does not write, but shaders, which the session
+    // publishes: references to them are written empty.
+    let mut left_out: HashSet<String> = HashSet::new();
     while let Some(guid) = queue.pop_front() {
         let Some(path) = sources.path(&guid) else {
             assembled
@@ -160,6 +170,9 @@ pub fn write_scene_closure(
         }) {
             Ok(Some(source)) => source,
             Ok(None) => {
+                if !is_shader(path) {
+                    left_out.insert(guid.clone());
+                }
                 assembled.refused.push((
                     guid,
                     format!("{} is not written by the tool", path.display()),
@@ -167,6 +180,9 @@ pub fn write_scene_closure(
                 continue;
             }
             Err(error) => {
+                if !is_shader(path) {
+                    left_out.insert(guid.clone());
+                }
                 assembled.refused.push((guid, format!("{error:#}")));
                 continue;
             }
@@ -185,6 +201,13 @@ pub fn write_scene_closure(
                     }
                 }
             }
+        }
+        if let Source::Yaml(documents) = &source
+            && roots.contains(&guid.as_str())
+            && scene != Some(guid.as_str())
+            && let Some(root) = root_game_object(documents)
+        {
+            assembled.roots.insert(guid.clone(), root);
         }
         order.push(guid.clone());
         loaded.insert(guid, source);
@@ -241,6 +264,41 @@ pub fn write_scene_closure(
     let mut images: HashMap<String, texture::Textured> = HashMap::new();
     let texture_kind = library.class(texture::TEXTURE_2D).cloned();
     let sprite_kind = library.class(SPRITE).cloned();
+    // The clips, each encoded by a process of its own, side by side.
+    let resource_name = match stream_name.strip_suffix(".resS") {
+        Some(stem) => format!("{stem}.resource"),
+        None => format!("{stream_name}.resource"),
+    };
+    let wanted: Vec<(&String, &PathBuf, &super::audio::Settings)> = order
+        .iter()
+        .filter_map(|guid| match &loaded[guid] {
+            Source::Audio(path, settings) => Some((guid, path, settings)),
+            _ => None,
+        })
+        .collect();
+    let mut clips: HashMap<String, std::result::Result<super::audio::Encoded, String>> =
+        HashMap::new();
+    let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
+    for batch in wanted.chunks(workers.max(1)) {
+        let encoded: Vec<_> = std::thread::scope(|scope| {
+            let running: Vec<_> = batch
+                .iter()
+                .map(|(_, path, settings)| {
+                    scope.spawn(move || super::audio::encode(path, settings))
+                })
+                .collect();
+            running
+                .into_iter()
+                .map(|thread| match thread.join() {
+                    Ok(result) => result.map_err(|error| format!("{error:#}")),
+                    Err(_) => Err("the encoder panicked".to_string()),
+                })
+                .collect()
+        });
+        for ((guid, ..), result) in batch.iter().zip(encoded) {
+            clips.insert((*guid).clone(), result);
+        }
+    }
     for guid in &order {
         match &loaded[guid] {
             Source::Yaml(documents) => {
@@ -298,6 +356,14 @@ pub fn write_scene_closure(
                 ids.insert((guid.clone(), TEXT_FILE_ID), next);
                 next += 1;
             }
+            Source::Audio(..) => match clips.get(guid) {
+                Some(Ok(_)) => {
+                    ids.insert((guid.clone(), super::audio::AUDIO_CLIP_FILE_ID), next);
+                    next += 1;
+                }
+                Some(Err(error)) => assembled.refused.push((guid.clone(), error.clone())),
+                None => {}
+            },
         }
     }
     let mut shader_textures = ShaderTextures::default();
@@ -345,6 +411,63 @@ pub fn write_scene_closure(
                         None,
                     ));
                 }
+            }
+            Source::Audio(path, settings) => {
+                let Some(Ok(clip)) = clips.remove(guid) else {
+                    continue;
+                };
+                let Some(kind) = library.class(AUDIO_CLIP) else {
+                    assembled
+                        .refused
+                        .push((guid.clone(), "no type tree of AudioClip".into()));
+                    continue;
+                };
+                let offset = align_to(&mut assembled.resource, 32);
+                assembled.resource.extend_from_slice(&clip.data);
+                let mut value = kind.sample.clone();
+                let name = path
+                    .file_stem()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if let Some(field) = value.field_mut("m_Name") {
+                    *field = Val::Str(name);
+                }
+                let length = clip.samples as f32 / clip.frequency as f32;
+                for (field, number) in [
+                    ("m_LoadType", settings.load_type as f64),
+                    ("m_Channels", clip.channels as f64),
+                    ("m_Frequency", clip.frequency as f64),
+                    ("m_BitsPerSample", 16.0),
+                    ("m_Length", length as f64),
+                    ("m_IsTrackerFormat", 0.0),
+                    ("m_Ambisonic", settings.ambisonic as i64 as f64),
+                    ("m_SubsoundIndex", 0.0),
+                    ("m_PreloadAudioData", settings.preload as i64 as f64),
+                    (
+                        "m_LoadInBackground",
+                        settings.load_in_background as i64 as f64,
+                    ),
+                    ("m_Legacy3D", settings.legacy_3d as i64 as f64),
+                    ("m_CompressionFormat", settings.compression as f64),
+                ] {
+                    set_number(&mut value, field, number);
+                }
+                if let Some(Val::Map(fields)) = value.field_mut("m_Resource") {
+                    for (name, field) in fields.iter_mut() {
+                        match name.as_ref() {
+                            "m_Source" => *field = Val::Str(resource_name.clone()),
+                            "m_Offset" => *field = Val::U(offset as u64),
+                            "m_Size" => *field = Val::U(clip.data.len() as u64),
+                            _ => {}
+                        }
+                    }
+                }
+                objects.push((
+                    ids[&(guid.clone(), super::audio::AUDIO_CLIP_FILE_ID)],
+                    kind.tree.clone(),
+                    value,
+                    None,
+                ));
             }
             Source::Text(path) => {
                 let Some(kind) = library.class(TEXT_ASSET) else {
@@ -429,9 +552,13 @@ pub fn write_scene_closure(
                             return Ok(Some((0, *id)));
                         }
                         // A reference to an asset the project lacks is null,
-                        // as the worker writes it; the engine's own files
-                        // have no source.
-                        if sources.path(owner).is_none() && !owner.starts_with("0000000000000000") {
+                        // as the worker writes it (the engine's own files
+                        // have no source), and so is one to a source left
+                        // out or to an object a written source lacks.
+                        if (sources.path(owner).is_none() && !engine_resource(owner))
+                            || left_out.contains(owner)
+                            || (loaded.contains_key(owner) && !engine_resource(owner))
+                        {
                             return Ok(None);
                         }
                         let position = match externals.iter().position(|g| g == owner) {
@@ -955,6 +1082,7 @@ fn yaml_form(value: &Val, externals: &[String]) -> serde_json::Value {
     }
 }
 const TEXT_ASSET: i32 = 49;
+const AUDIO_CLIP: i32 = 83;
 const TEXT_FILE_ID: i64 = 4900000;
 
 fn clear_missing(value: &mut Val, present: &HashSet<i64>) {
@@ -997,6 +1125,26 @@ fn written(document: &Document) -> bool {
         && ![PREFAB_INSTANCE, OCCLUSION_CULLING_SETTINGS, SCENE_ROOTS].contains(&document.class_id)
 }
 
+fn align_to(stream: &mut Vec<u8>, alignment: usize) -> usize {
+    while !stream.len().is_multiple_of(alignment) {
+        stream.push(0);
+    }
+    stream.len()
+}
+
+/// Sets a number field of a sample in the kind of number it holds.
+fn set_number(value: &mut Val, name: &str, number: f64) {
+    if let Some(field) = value.field_mut(name) {
+        *field = match field {
+            Val::Bool(_) => Val::Bool(number != 0.0),
+            Val::U(_) => Val::U(number as u64),
+            Val::F(_) => Val::F(number as f32),
+            Val::D(_) => Val::D(number),
+            _ => Val::I(number as i64),
+        };
+    }
+}
+
 fn align(stream: &mut Vec<u8>) -> usize {
     while !stream.len().is_multiple_of(16) {
         stream.push(0);
@@ -1031,6 +1179,10 @@ fn load(path: &Path, guid: &str, sources: &Sources) -> Result<Option<Source>> {
     if meta.windows(19).any(|w| w == b"TextScriptImporter:") {
         return Ok(Some(Source::Text(path.to_path_buf())));
     }
+    if meta.windows(14).any(|w| w == b"AudioImporter:") {
+        let settings = super::audio::settings(&meta)?;
+        return Ok(Some(Source::Audio(path.to_path_buf(), settings)));
+    }
     if meta.windows(16).any(|w| w == b"TextureImporter:") {
         return Ok(Some(Source::Image(path.to_path_buf(), meta)));
     }
@@ -1043,7 +1195,29 @@ fn load(path: &Path, guid: &str, sources: &Sources) -> Result<Option<Source>> {
     Ok(None)
 }
 
-/// Every reference a document's fields hold.
+fn is_shader(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("shader"))
+}
+
+/// The game object of a prefab's transform that has no parent.
+fn root_game_object(documents: &[Document]) -> Option<i64> {
+    let transform = documents.iter().filter(|d| written(d)).find(|d| {
+        (d.class_id == 4 || d.class_id == 224)
+            && d.data
+                .get("m_Father")
+                .and_then(Reference::from_value)
+                .is_none_or(|father| father.file_id == 0)
+    })?;
+    Some(
+        transform
+            .data
+            .get("m_GameObject")
+            .and_then(Reference::from_value)?
+            .file_id,
+    )
+}
+
 /// The references of the fields of a document the Player reads.
 fn dependencies(
     library: &Library,
@@ -1069,6 +1243,7 @@ fn dependencies(
         .collect()
 }
 
+/// Every reference a value holds.
 fn references(value: &serde_json::Value) -> Vec<Reference> {
     let mut found = Vec::new();
     let mut pending = vec![value];

@@ -211,6 +211,7 @@ impl Inner {
         // any other asset by those of its objects the file holds (a shader
         // is published on its own, an editor-only object is left out), the
         // main one first.
+        let mut refused: Vec<String> = Vec::new();
         for path in self.extra_assets.clone() {
             let guid = self.guid_of(&path).to_string();
             if let Some(root) = written.roots.get(&guid) {
@@ -226,13 +227,20 @@ impl Inner {
                 .cloned()
                 .collect();
             if held.is_empty() {
-                return Err(super::RefusedPrefab::new(
-                    &path,
-                    anyhow::anyhow!("the worker wrote no object of the addressed asset"),
-                )
-                .into());
+                refused.push(path);
+                continue;
             }
             sources.extend(held.into_iter().map(|id| (guid.clone(), id)));
+        }
+        // All the assets of which the file holds nothing are refused at
+        // once, so that the runner gives them up in one pass.
+        if let Some((first, rest)) = refused.split_first() {
+            let mut error = super::RefusedPrefab::new(
+                first,
+                anyhow::anyhow!("the worker wrote no object of the addressed asset"),
+            );
+            error.also = rest.to_vec();
+            return Err(error.into());
         }
         let mut scene = written.scene.clone();
         for (guid, file_id) in sources {
