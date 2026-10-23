@@ -340,6 +340,20 @@ impl Walk<'_, '_, '_> {
                     return Ok(Val::Seq(hex_items(item, dump, path)?));
                 }
                 Value::Array(items) => items,
+                // A map the Editor writes as one mapping of its entries.
+                Value::Object(entries) => &entries
+                    .iter()
+                    .map(|(key, value)| {
+                        Value::Object(
+                            [
+                                ("first".to_string(), Value::String(key.clone())),
+                                ("second".to_string(), value.clone()),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
                 other => bail!("{path}: expected a sequence, found {other}"),
             };
             let mut values = Vec::with_capacity(items.len());
@@ -389,6 +403,23 @@ impl Walk<'_, '_, '_> {
                 .map(|position| samples.swap_remove(position).1)
                 .unwrap_or(Val::Zero);
             let value = match fields.get(&name) {
+                // Typeless data is written as its size, its bytes follow
+                // as one hexadecimal run under `_typelessdata`.
+                Some(Value::String(_)) if self.tree.nodes[child].type_name == "TypelessData" => {
+                    let dump = fields
+                        .get("_typelessdata")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    Val::Bytes(
+                        hex_items("UInt8", dump, &child_path)?
+                            .into_iter()
+                            .map(|item| match item {
+                                Val::U(byte) => byte as u8,
+                                _ => 0,
+                            })
+                            .collect(),
+                    )
+                }
                 Some(field) => self.value(child, sample, field, &child_path)?,
                 None => self.derive(sample, &child_path),
             };

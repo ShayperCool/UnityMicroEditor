@@ -60,7 +60,7 @@ pub(super) fn scalar(type_name: &str, source: &str, path: &str) -> Result<Val> {
             Ok(number) if decimal(source, false) => Val::U(number),
             _ => return Err(refused()),
         },
-        "SInt8" | "SInt16" | "short" | "int" | "SInt64" | "long long" => {
+        "SInt8" | "SInt16" | "short" | "int" | "Type*" | "SInt64" | "long long" => {
             match source.parse::<i64>() {
                 Ok(number) if decimal(source, false) => Val::I(number),
                 _ => return Err(refused()),

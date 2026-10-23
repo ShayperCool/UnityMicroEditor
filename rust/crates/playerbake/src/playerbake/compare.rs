@@ -63,6 +63,8 @@ pub struct Difference {
     pub equal: usize,
     pub only_ours: Vec<String>,
     pub only_theirs: Vec<String>,
+    /// Per class: objects matched and equal.
+    pub classes: BTreeMap<String, (usize, usize)>,
     /// Per class: the differing objects and the first differing fields.
     pub fields: BTreeMap<String, Vec<(String, Vec<String>)>>,
 }
@@ -81,7 +83,10 @@ pub fn compare(ours: &Path, theirs: &Path, tolerance: f64) -> Result<Difference>
         difference.matched += 1;
         let mut found = Vec::new();
         differ("", &object.value, &other.value, tolerance, &mut found);
+        let class = difference.classes.entry(object.class.clone()).or_default();
+        class.0 += 1;
         if found.is_empty() {
+            class.1 += 1;
             difference.equal += 1;
         } else {
             difference

@@ -168,6 +168,45 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                 difference.only_ours.len(),
                 difference.only_theirs.len()
             );
+            for (class, (matched, equal)) in &difference.classes {
+                println!("class {class}: matched {matched}, equal {equal}");
+            }
+            let mut fields: std::collections::BTreeMap<(String, String), usize> =
+                Default::default();
+            for (class, objects) in &difference.fields {
+                for (_, found) in objects {
+                    for field in found {
+                        let path: String = field
+                            .split(": ")
+                            .next()
+                            .unwrap_or_default()
+                            .split('[')
+                            .enumerate()
+                            .map(|(i, part)| {
+                                if i == 0 {
+                                    part.to_string()
+                                } else {
+                                    format!(
+                                        "[]{}",
+                                        part.split_once(']').map_or("", |(_, rest)| rest)
+                                    )
+                                }
+                            })
+                            .collect();
+                        *fields
+                            .entry((
+                                class.split('<').next().unwrap_or_default().to_string(),
+                                path,
+                            ))
+                            .or_default() += 1;
+                    }
+                }
+            }
+            let mut ranked: Vec<_> = fields.into_iter().collect();
+            ranked.sort_by(|a, b| b.1.cmp(&a.1));
+            for ((class, path), count) in ranked.iter().take(60) {
+                println!("field {count:6} {class} {path}");
+            }
             for (class, objects) in &difference.fields {
                 println!("{class}: {} differ", objects.len());
                 for (key, fields) in objects.iter().take(3) {

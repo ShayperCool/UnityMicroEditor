@@ -31,6 +31,8 @@ pub struct Assembled {
 
 enum Source {
     Yaml(Vec<Document>),
+    /// A text or binary file a `TextScriptImporter` makes a `TextAsset` of.
+    Text(PathBuf),
     Image(PathBuf, Vec<u8>),
     Script(String),
 }
@@ -134,6 +136,10 @@ pub fn write_closure(
                 ids.insert((guid.clone(), 11500000), next);
                 next += 1;
             }
+            Source::Text(_) => {
+                ids.insert((guid.clone(), TEXT_FILE_ID), next);
+                next += 1;
+            }
         }
     }
     let mut externals: Vec<String> = Vec::new();
@@ -156,6 +162,31 @@ pub fn write_closure(
                     ids[&(guid.clone(), 11500000)],
                     script_tree.clone(),
                     value.clone(),
+                    None,
+                ));
+            }
+            Source::Text(path) => {
+                let Some(kind) = library.class(TEXT_ASSET) else {
+                    assembled
+                        .refused
+                        .push((guid.clone(), "no type tree of TextAsset".into()));
+                    continue;
+                };
+                let mut value = kind.sample.clone();
+                let name = path
+                    .file_stem()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if let Some(field) = value.field_mut("m_Name") {
+                    *field = Val::Str(name);
+                }
+                if let Some(field) = value.field_mut("m_Script") {
+                    *field = Val::Bytes(std::fs::read(path)?);
+                }
+                objects.push((
+                    ids[&(guid.clone(), TEXT_FILE_ID)],
+                    kind.tree.clone(),
+                    value,
                     None,
                 ));
             }
@@ -217,7 +248,28 @@ pub fn write_closure(
                         Ok(Some((position as i32 + 1, reference.file_id)))
                     };
                     match convert(library, tags, document, script.as_deref(), &mut resolve) {
-                        Ok(converted) => {
+                        Ok(mut converted) => {
+                            // A texture's pixels go to the streamed data, as a
+                            // build writes them.
+                            if document.class_id == texture::TEXTURE_2D as i64
+                                && let Some(Val::Bytes(pixels)) = converted
+                                    .value
+                                    .field_mut("image data")
+                                    .map(|field| std::mem::replace(field, Val::Bytes(Vec::new())))
+                            {
+                                let offset = align(&mut assembled.stream);
+                                assembled.stream.extend_from_slice(&pixels);
+                                if let Some(field) = converted.value.field_mut("image data") {
+                                    *field = Val::Bytes(Vec::new());
+                                }
+                                if let Some(field) = converted.value.field_mut("m_StreamData") {
+                                    *field = Val::Map(vec![
+                                        (Cow::Borrowed("offset"), Val::U(offset as u64)),
+                                        (Cow::Borrowed("size"), Val::U(pixels.len() as u64)),
+                                        (Cow::Borrowed("path"), Val::Str(stream_name.to_string())),
+                                    ]);
+                                }
+                            }
                             let script_id = document
                                 .data
                                 .get("m_Script")
@@ -248,6 +300,12 @@ pub fn write_closure(
             }
         }
     }
+    // A reference to an object that was not written is empty, as a build
+    // leaves a reference to a missing object.
+    let present: HashSet<i64> = objects.iter().map(|(id, ..)| *id).collect();
+    for (_, _, value, _) in objects.iter_mut() {
+        clear_missing(value, &present);
+    }
     let written: Vec<Object<'_>> = objects
         .iter()
         .map(|(local_id, tree, value, script)| {
@@ -270,6 +328,35 @@ pub fn write_closure(
 }
 
 const PREFAB_INSTANCE: i64 = 1001;
+const TEXT_ASSET: i32 = 49;
+const TEXT_FILE_ID: i64 = 4900000;
+
+fn clear_missing(value: &mut Val, present: &HashSet<i64>) {
+    match value {
+        Val::Map(fields) => {
+            let file = fields
+                .iter()
+                .find(|(k, _)| k == "m_FileID")
+                .map(|(_, v)| v.clone());
+            if fields.len() == 2
+                && file == Some(Val::I(0))
+                && let Some((_, Val::I(id))) = fields.iter_mut().find(|(k, _)| k == "m_PathID")
+            {
+                if !present.contains(id) {
+                    *id = 0;
+                }
+                return;
+            }
+            for (_, field) in fields.iter_mut() {
+                clear_missing(field, present);
+            }
+        }
+        Val::Seq(items) => items
+            .iter_mut()
+            .for_each(|item| clear_missing(item, present)),
+        _ => {}
+    }
+}
 
 /// Documents a build writes: not the prefab instance records and their
 /// stripped stand-ins, which a build resolves into the objects they stand
@@ -301,6 +388,9 @@ fn load(path: &Path, guid: &str, sources: &Sources) -> Result<Option<Source>> {
         return Ok(sources.script_class(guid).map(Source::Script));
     }
     let meta = std::fs::read(format!("{}.meta", path.display()))?;
+    if meta.windows(19).any(|w| w == b"TextScriptImporter:") {
+        return Ok(Some(Source::Text(path.to_path_buf())));
+    }
     if meta.windows(16).any(|w| w == b"TextureImporter:") {
         return Ok(Some(Source::Image(path.to_path_buf(), meta)));
     }
