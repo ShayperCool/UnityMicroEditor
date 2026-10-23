@@ -265,6 +265,72 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                 }
             }
         }
+        ["script-trees", layouts, file] => {
+            use unity_micro_editor::playerbake as bake;
+            let layouts: bake::Layouts = serde_json::from_slice(&fs::read(layouts)?)?;
+            let data = fs::read(file)?;
+            let (objects, _) = bake::read_serialized_with_externals(&data)?;
+            let templates = bake::Templates::of_trees(objects.iter().map(|o| &*o.tree));
+            let mut names = std::collections::HashMap::new();
+            for object in objects.iter().filter(|o| o.tree.class_id == 115) {
+                let value = object.tree.decode(&object.data)?;
+                let text = |name: &str| match value.field(name) {
+                    Some(bake::Val::Str(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                let namespace = text("m_Namespace");
+                let class = text("m_ClassName");
+                names.insert(
+                    object.local_id,
+                    match namespace.is_empty() {
+                        true => class,
+                        false => format!("{namespace}.{class}"),
+                    },
+                );
+            }
+            // The entries the tool encodes from the engine's nodes are the engine's.
+            let mut encoded = 0;
+            for object in &objects {
+                let tree = &object.tree;
+                let at = if tree.class_id == 114 { 7 + 16 } else { 7 };
+                let script = (tree.class_id == 114)
+                    .then(|| <[u8; 16]>::try_from(&tree.entry[7..23]).unwrap());
+                let hash = <[u8; 16]>::try_from(&tree.entry[at..at + 16]).unwrap();
+                let ours =
+                    bake::TypeTree::of_nodes(tree.class_id, script, hash, tree.nodes.clone())?;
+                let skip = at + 32;
+                if ours.entry[skip..] != tree.entry[skip..] || ours.entry[..5] != tree.entry[..5] {
+                    anyhow::bail!("entry of class {} is encoded otherwise", tree.class_id);
+                }
+                encoded += 1;
+            }
+            println!("{encoded} entries encoded as the engine wrote them");
+            let layout = bake::Layout::new(&layouts, &templates);
+            let (mut equal, mut differ, mut missing) = (0, 0, 0);
+            let mut seen = std::collections::HashSet::new();
+            for object in &objects {
+                let Some(name) = object.script.and_then(|script| names.get(&script)) else {
+                    continue;
+                };
+                if !seen.insert(name.clone()) {
+                    continue;
+                }
+                match layout.script(name) {
+                    Ok(nodes) => match bake::first_difference(&nodes, &object.tree.nodes) {
+                        None => equal += 1,
+                        Some(difference) => {
+                            differ += 1;
+                            println!("== {name} {difference}");
+                        }
+                    },
+                    Err(error) => {
+                        missing += 1;
+                        println!("== {name} not laid out: {error:#}");
+                    }
+                }
+            }
+            println!("equal {equal}, different {differ}, not laid out {missing}");
+        }
         ["closure", rest @ ..] => {
             use unity_micro_editor::playerbake::{
                 FileFormat, Library, Sources, Tags, write_closure,
@@ -342,6 +408,9 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
             );
             for (guid, why) in &assembled.refused {
                 println!("refused {guid}: {why}");
+            }
+            for (field, count) in &assembled.derived {
+                println!("derived {count} {field}");
             }
         }
         ["convert", rest @ ..] => {

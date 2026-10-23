@@ -36,6 +36,24 @@ pub struct TypeTree {
 /// `MonoBehaviour`, the class of every script-backed object.
 pub(super) const SCRIPT_CLASS: i32 = 114;
 
+/// The offset of a name in the engine's common strings, if it is one of them.
+fn common_offset(text: &str) -> Option<u32> {
+    static OFFSETS: std::sync::OnceLock<std::collections::HashMap<&'static [u8], u32>> =
+        std::sync::OnceLock::new();
+    let offsets = OFFSETS.get_or_init(|| {
+        let mut offsets = std::collections::HashMap::new();
+        let mut at = 0;
+        for part in COMMON_STRINGS.split(|&byte| byte == 0) {
+            if !part.is_empty() {
+                offsets.entry(part).or_insert(at as u32);
+            }
+            at += part.len() + 1;
+        }
+        offsets
+    });
+    offsets.get(text.as_bytes()).copied()
+}
+
 fn le32(data: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]])
 }
@@ -115,6 +133,70 @@ impl TypeTree {
             entry: owned,
             nodes,
         })
+    }
+
+    /// The entry of a tree laid out by the tool, as the engine writes one: the
+    /// nodes in order, each name in the engine's common strings by its offset
+    /// there and otherwise in the tree's own table at its first use. A script
+    /// class takes the hash of its script, every class the hash of its tree;
+    /// the second hash format 23 has is that of the blob.
+    pub fn of_nodes(
+        class_id: i32,
+        script_hash: Option<[u8; 16]>,
+        type_hash: [u8; 16],
+        nodes: Vec<Node>,
+    ) -> Result<Self> {
+        if nodes.first().is_none_or(|root| root.level != 0) {
+            bail!("type tree root is not at level zero");
+        }
+        if (class_id == SCRIPT_CLASS) != script_hash.is_some() {
+            bail!("only a script class has a script hash");
+        }
+        let mut local: Vec<u8> = Vec::new();
+        let mut offsets: std::collections::HashMap<String, u32> = Default::default();
+        let mut offset = |text: &str| -> u32 {
+            if let Some(at) = common_offset(text) {
+                return 0x8000_0000 | at;
+            }
+            *offsets.entry(text.to_string()).or_insert_with(|| {
+                let at = local.len() as u32;
+                local.extend_from_slice(text.as_bytes());
+                local.push(0);
+                at
+            })
+        };
+        let mut table = Vec::with_capacity(nodes.len() * 32);
+        for (index, node) in nodes.iter().enumerate() {
+            table.extend_from_slice(&node.version.to_le_bytes());
+            table.push(node.level);
+            table.push(node.type_flags);
+            table.extend_from_slice(&offset(&node.type_name).to_le_bytes());
+            table.extend_from_slice(&offset(&node.name).to_le_bytes());
+            table.extend_from_slice(&node.size.to_le_bytes());
+            table.extend_from_slice(&(index as u32).to_le_bytes());
+            table.extend_from_slice(&node.meta.to_le_bytes());
+            table.extend_from_slice(&0u64.to_le_bytes());
+        }
+        let mut blob = Vec::with_capacity(16 + table.len() + local.len());
+        blob.extend_from_slice(&0x7474_686d_u32.to_le_bytes());
+        blob.extend_from_slice(&23u32.to_le_bytes());
+        blob.extend_from_slice(&(nodes.len() as u32).to_le_bytes());
+        blob.extend_from_slice(&(local.len() as u32).to_le_bytes());
+        blob.extend_from_slice(&table);
+        blob.extend_from_slice(&local);
+        let mut entry = Vec::with_capacity(blob.len() + 64);
+        entry.extend_from_slice(&class_id.to_le_bytes());
+        entry.push(0);
+        entry.extend_from_slice(&(if script_hash.is_some() { 0i16 } else { -1 }).to_le_bytes());
+        if let Some(hash) = script_hash {
+            entry.extend_from_slice(&hash);
+        }
+        entry.extend_from_slice(&type_hash);
+        entry.extend_from_slice(&xxhash_rust::xxh3::xxh3_128(&blob[16..]).to_le_bytes());
+        entry.extend_from_slice(&(blob.len() as u32).to_le_bytes());
+        entry.extend_from_slice(&blob);
+        entry.extend_from_slice(&0u32.to_le_bytes());
+        Self::parse(entry)
     }
 
     fn end(&self, index: usize) -> usize {

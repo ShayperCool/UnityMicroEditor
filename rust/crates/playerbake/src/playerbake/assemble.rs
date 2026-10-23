@@ -27,6 +27,9 @@ pub struct Assembled {
     /// GUIDs of the sources other files hold, in external-reference order.
     pub externals: Vec<String>,
     pub sources: usize,
+    /// How many objects took a field from the class's sample, by class or
+    /// script and field: the fields their sources lack.
+    pub derived: std::collections::BTreeMap<String, usize>,
 }
 
 enum Source {
@@ -293,6 +296,15 @@ pub fn write_closure(
                         &mut resolve,
                     ) {
                         Ok(mut converted) => {
+                            let class = script
+                                .clone()
+                                .unwrap_or_else(|| converted.tree.nodes[0].type_name.clone());
+                            for field in &converted.derived {
+                                *assembled
+                                    .derived
+                                    .entry(format!("{class} {field}"))
+                                    .or_default() += 1;
+                            }
                             if document.class_id == MATERIAL
                                 && let Some(shader) = document
                                     .data

@@ -98,6 +98,11 @@ Libraries the importers link and their public equivalents:
   `.asset` files, the objects of the Editor's `unity_builtin_extra` the
   sources name (but shaders), and a material's textures kept only where its
   shader declares them.
+- `scripts.rs` lays out the type trees of script classes from what
+  `tools/ScriptLayouts` (Cecil) reads of the compiled assemblies, and
+  `TypeTree::of_nodes` encodes a tree's type table entry as the engine does
+  (each name in the common strings by its offset, otherwise in the tree's
+  own table at first use).
 - `compare.rs` pairs the objects of two Player files by what they are
   (hierarchy path, component class and position, asset name), follows
   references by those keys and compares streamed data by its bytes.
@@ -125,6 +130,58 @@ What differs, by count of objects:
 | Shaders (project and built-in) | all materials | built by the worker today; `playerbake`'s own baker serves 6000.6 only |
 | Fields a newer engine added to an older source | few | per-class default objects instead of samples |
 | Animator controllers, models, audio | few | not written yet |
+
+### Script type trees
+
+`ScriptLayouts <directory or assembly>...` prints, for every class derived from
+`MonoBehaviour` or `ScriptableObject`, its serialized fields (the bases'
+first) and those of the `[Serializable]` types they hold: instance fields that
+are neither constant nor read-only nor `[NonSerialized]`, public or
+`[SerializeField]`/`[SerializeReference]`, of a primitive, an enum (its
+underlying type), a string, an engine object, an engine value type, a
+serializable class or struct, or an array or `List<T>` of one.
+`player-file script-trees <layouts.json> <file>` lays them out and compares
+each with the tree the file has.
+
+The rules the engine's trees show, besides the field order:
+
+- `bool` is `UInt8` with the flags *align* and *integer as boolean*
+  (`0x4100`), `char` is `UInt16` with *character* (`0x2000000`); 1- and 2-byte
+  primitives align.
+- An array is `vector` › `Array` (array flag) › `int size`, `data`. An array
+  of a serializable type is named after that type (`PersistentCall m_Calls`),
+  one of managed references after the referenced type with type flag 8 and
+  `managedRefArrayItem` elements. Arrays of primitives, strings and engine
+  values align after their elements; those of objects and serializable types
+  do not. Elements narrower than four bytes do not align each, and their
+  flags (`0x100` of `bool`) hold for `vector`, `Array` and `size` too.
+- An engine object is `PPtr<$Class>` with `m_FileID`/`m_PathID` flagged
+  *don't animate* and *hidden* (`0x800001`); `[HideInInspector]` sets *hidden*
+  (`0x1`) on the whole field.
+- A node with an aligned descendant is flagged `0x8000`. A structure has the
+  size of its fields when all have one.
+- An object with managed references ends in the `ManagedReferencesRegistry`
+  `references`.
+- The engine value types (`Vector3` as `Vector3f`, `Color32` as a 4-byte
+  `ColorRGBA`, `LayerMask` as `BitField`, `AnimationCurve`, ...) and the
+  header every script object starts with (`m_GameObject` to `m_Name`) are
+  templates of the release, taken today from a file the engine wrote.
+
+In a type table, a script's hash is MD4 of its class name, namespace and
+assembly name, concatenated (all 265 scripts of Main). Its type hash is the
+`m_PropertiesHash` of its `MonoScript`, which is not a hash of the tree alone:
+four scripts with the same tree (only the header) have four hashes. How the
+engine makes it is open.
+
+Main of Bouncemasters, against the 265 script trees of the worker's file
+(the host Player's managed directory and the game's Player compile, with
+the Editor's compile of Addressables): 239 equal. The other 26 derive from Odin's `SerializedMonoBehaviour`, whose
+`serializationData` the worker leaves out although the Editor writes it into
+the scenes and prefabs (`Main.unity`, the managers' prefabs): the worker's
+files lose what Odin serialized there. The worker lays scripts out by the
+Editor's compile, with fields under `UNITY_EDITOR`
+(`AssetReference.m_SubObjectGUID`); the layout is that of the assemblies
+given, which for a session are those its Player runs.
 
 ## Order of work
 
