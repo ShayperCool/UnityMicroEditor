@@ -232,6 +232,7 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
             let mut libraries = Vec::new();
             let mut roots = Vec::new();
             let (mut project, mut output, mut version) = (None, None, None);
+            let mut builtin: Option<std::path::PathBuf> = None;
             let mut items = rest.iter();
             while let Some(flag) = items.next() {
                 let value = items
@@ -241,6 +242,7 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                     "--library" => libraries.push(Path::new(*value)),
                     "--project" => project = Some(Path::new(*value)),
                     "--root" => roots.push(*value),
+                    "--builtin-extra" => builtin = Some(Path::new(*value).to_path_buf()),
                     "--output" => output = Some(Path::new(*value)),
                     "--unity-version" => version = Some(value.to_string()),
                     other => anyhow::bail!("unknown flag {other}"),
@@ -281,9 +283,17 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                 &guids,
                 format,
                 &stream,
+                builtin.as_deref(),
             )?;
             fs::write(output, &assembled.file)?;
             fs::write(output.with_file_name(&stream), &assembled.stream)?;
+            fs::write(
+                output.with_file_name(format!(
+                    "{}.externals.json",
+                    output.file_name().unwrap_or_default().to_string_lossy()
+                )),
+                serde_json::to_string(&assembled.externals)?,
+            )?;
             println!(
                 "sources {}, externals {}, refused {}",
                 assembled.sources,

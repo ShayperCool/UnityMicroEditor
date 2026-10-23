@@ -7,7 +7,7 @@ use super::{
     texture::{self, SPRITE},
     typetree::{TypeTree, Val},
 };
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet, VecDeque},
@@ -49,6 +49,7 @@ pub fn write_closure(
     roots: &[&str],
     format: FileFormat,
     stream_name: &str,
+    builtin_extra: Option<&Path>,
 ) -> Result<Assembled> {
     let mut assembled = Assembled::default();
     // Sources by GUID, in the order they are reached.
@@ -97,6 +98,34 @@ pub fn write_closure(
         }
         order.push(guid.clone());
         loaded.insert(guid, source);
+    }
+    // The objects of the Editor's built-in resources the sources name are
+    // written beside them, as a build copies them; their shaders stay
+    // external.
+    if let Some(path) = builtin_extra {
+        let mut wanted: Vec<i64> = Vec::new();
+        for source in loaded.values() {
+            if let Source::Yaml(documents) = source {
+                for document in documents {
+                    for reference in references(&serde_json::Value::Object(document.data.clone())) {
+                        if reference.guid == BUILTIN_EXTRA {
+                            wanted.push(reference.file_id);
+                        }
+                    }
+                }
+            }
+        }
+        if !wanted.is_empty() {
+            match builtin_documents(path, &wanted) {
+                Ok(documents) => {
+                    order.push(BUILTIN_EXTRA.to_string());
+                    loaded.insert(BUILTIN_EXTRA.to_string(), Source::Yaml(documents));
+                }
+                Err(error) => assembled
+                    .refused
+                    .push((BUILTIN_EXTRA.to_string(), format!("{error:#}"))),
+            }
+        }
     }
     // Local IDs: every object of every source, scripts last.
     let mut ids: HashMap<(String, i64), i64> = HashMap::new();
@@ -148,6 +177,8 @@ pub fn write_closure(
             }
         }
     }
+    let mut shader_textures = ShaderTextures::default();
+    let renames = sources.renames();
     let mut externals: Vec<String> = Vec::new();
     let mut objects: Vec<(i64, Arc<TypeTree>, Val, Option<i64>)> = Vec::new();
     let script_tree = library
@@ -253,8 +284,25 @@ pub fn write_closure(
                         };
                         Ok(Some((position as i32 + 1, reference.file_id)))
                     };
-                    match convert(library, tags, document, script.as_deref(), &mut resolve) {
+                    match convert(
+                        library,
+                        tags,
+                        &renames,
+                        document,
+                        script.as_deref(),
+                        &mut resolve,
+                    ) {
                         Ok(mut converted) => {
+                            if document.class_id == MATERIAL
+                                && let Some(shader) = document
+                                    .data
+                                    .get("m_Shader")
+                                    .and_then(Reference::from_value)
+                                && let Some(names) =
+                                    shader_textures.get(sources, builtin_extra, &shader)
+                            {
+                                keep_textures(&mut converted.value, &names);
+                            }
                             // A texture's pixels go to the streamed data, as a
                             // build writes them.
                             if document.class_id == texture::TEXTURE_2D as i64
@@ -331,6 +379,254 @@ pub fn write_closure(
 }
 
 const PREFAB_INSTANCE: i64 = 1001;
+const MATERIAL: i64 = 21;
+
+/// The texture properties each shader declares, read once.
+#[derive(Default)]
+struct ShaderTextures {
+    builtin: Option<HashMap<i64, HashSet<String>>>,
+    project: HashMap<String, Option<HashSet<String>>>,
+}
+
+impl ShaderTextures {
+    fn get(
+        &mut self,
+        sources: &Sources,
+        builtin_extra: Option<&Path>,
+        shader: &Reference,
+    ) -> Option<HashSet<String>> {
+        if shader.guid == BUILTIN_EXTRA {
+            let builtin = self.builtin.get_or_insert_with(|| {
+                builtin_extra
+                    .and_then(|path| builtin_shader_textures(path).ok())
+                    .unwrap_or_default()
+            });
+            return builtin.get(&shader.file_id).cloned();
+        }
+        self.project
+            .entry(shader.guid.clone())
+            .or_insert_with(|| {
+                let path = sources.path(&shader.guid)?;
+                if path.extension().is_none_or(|e| e != "shader") {
+                    return None;
+                }
+                Some(shader_source_textures(&std::fs::read_to_string(path).ok()?))
+            })
+            .clone()
+    }
+}
+
+/// A build drops the textures of a material its shader does not declare,
+/// so that they do not come along into the build.
+fn keep_textures(material: &mut Val, names: &HashSet<String>) {
+    let Some(properties) = material.field_mut("m_SavedProperties") else {
+        return;
+    };
+    if let Some(Val::Seq(textures)) = properties.field_mut("m_TexEnvs") {
+        textures.retain(|entry| match entry.field("first") {
+            Some(Val::Str(name)) => names.contains(name),
+            Some(Val::Bytes(name)) => names.contains(&*String::from_utf8_lossy(name)),
+            _ => true,
+        });
+    }
+}
+
+/// The texture properties of the built-in shaders, by local ID.
+fn builtin_shader_textures(path: &Path) -> Result<HashMap<i64, HashSet<String>>> {
+    let file = std::fs::read(path)?;
+    let objects = super::read_serialized_of_class(&file, SHADER)?;
+    let mut result = HashMap::new();
+    for object in objects {
+        let Ok(value) = object.tree.decode(&object.data) else {
+            continue;
+        };
+        let props = value
+            .field("m_ParsedForm")
+            .and_then(|f| f.field("m_PropInfo"))
+            .and_then(|f| f.field("m_Props"));
+        let Some(Val::Seq(props)) = props else {
+            continue;
+        };
+        let names = props
+            .iter()
+            .filter(|p| matches!(p.field("m_Type"), Some(Val::I(4)) | Some(Val::U(4))))
+            .filter_map(|p| match p.field("m_Name") {
+                Some(Val::Str(name)) => Some(name.clone()),
+                Some(Val::Bytes(name)) => Some(String::from_utf8_lossy(name).into_owned()),
+                _ => None,
+            })
+            .collect();
+        result.insert(object.local_id, names);
+    }
+    Ok(result)
+}
+
+/// The texture properties a ShaderLab source declares in its `Properties`
+/// block: `_Name ("Label", 2D) = "white" {}` and the like.
+fn shader_source_textures(source: &str) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let Some(start) = source.find("Properties") else {
+        return names;
+    };
+    let Some(open) = source[start..].find('{') else {
+        return names;
+    };
+    let mut depth = 0;
+    let mut end = source.len();
+    for (offset, c) in source[start + open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = start + open + offset;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    for line in source[start + open + 1..end].lines() {
+        // Attributes such as [NoScaleOffset] come before the name.
+        let mut rest = line.trim();
+        while let Some(stripped) = rest.strip_prefix('[') {
+            rest = stripped.split_once(']').map_or("", |(_, r)| r).trim_start();
+        }
+        let Some((name, declaration)) = rest.split_once('(') else {
+            continue;
+        };
+        let kind = declaration
+            .rsplit_once(',')
+            .map(|(_, kind)| kind.split(')').next().unwrap_or("").trim())
+            .unwrap_or("");
+        if matches!(
+            kind,
+            "2D" | "3D" | "Cube" | "2DArray" | "CubeArray" | "Any" | "Rect"
+        ) {
+            names.insert(name.trim().to_string());
+        }
+    }
+    names
+}
+
+pub const BUILTIN_EXTRA: &str = "0000000000000000f000000000000000";
+const DEFAULT_RESOURCES: &str = "0000000000000000e000000000000000";
+const SHADER: i32 = 48;
+
+/// The wanted objects of the Editor's `unity_builtin_extra` and those they
+/// refer to in it, but shaders, as documents in the form of authored YAML.
+fn builtin_documents(path: &Path, wanted: &[i64]) -> Result<Vec<Document>> {
+    let file = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let (objects, externals) = super::read_serialized_with_externals(&file)?;
+    let by_id: HashMap<i64, &super::Read> = objects.iter().map(|o| (o.local_id, o)).collect();
+    let mut pending: Vec<i64> = wanted.to_vec();
+    let mut taken: HashSet<i64> = HashSet::new();
+    let mut documents = Vec::new();
+    while let Some(id) = pending.pop() {
+        let Some(object) = by_id.get(&id) else {
+            continue;
+        };
+        if object.tree.class_id == SHADER || !taken.insert(id) {
+            continue;
+        }
+        let value = object.tree.decode(&object.data)?;
+        let serde_json::Value::Object(data) = yaml_form(&value, &externals) else {
+            bail!("built-in object {id} is not a structure");
+        };
+        for reference in references(&serde_json::Value::Object(data.clone())) {
+            if reference.guid == BUILTIN_EXTRA {
+                pending.push(reference.file_id);
+            }
+        }
+        documents.push(Document {
+            class_id: object.tree.class_id as i64,
+            file_id: id.to_string(),
+            type_name: object.tree.nodes[0].type_name.clone(),
+            data,
+            stripped: false,
+        });
+    }
+    Ok(documents)
+}
+
+/// A decoded object in the form the YAML parser gives authored values:
+/// scalars as their text, references as `{fileID, guid}`, typeless data as
+/// its size with the bytes in hexadecimal beside it.
+fn yaml_form(value: &Val, externals: &[String]) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Val::Zero => Value::String("0".into()),
+        Val::Bool(flag) => Value::String((*flag as u8).to_string()),
+        Val::I(n) => Value::String(n.to_string()),
+        Val::U(n) => Value::String(n.to_string()),
+        Val::F(f) => Value::String(f.to_string()),
+        Val::D(d) => Value::String(d.to_string()),
+        Val::Str(text) => Value::String(text.clone()),
+        Val::Bytes(bytes) => Value::String(String::from_utf8_lossy(bytes).into_owned()),
+        Val::Seq(items) => Value::Array(items.iter().map(|i| yaml_form(i, externals)).collect()),
+        Val::Map(fields) => {
+            let get = |name: &str| fields.iter().find(|(k, _)| k == name).map(|(_, v)| v);
+            if let (2, Some(file), Some(Val::I(id))) =
+                (fields.len(), get("m_FileID"), get("m_PathID"))
+            {
+                let file = match file {
+                    Val::I(n) => *n,
+                    _ => 0,
+                };
+                let guid = match file {
+                    0 => BUILTIN_EXTRA,
+                    n if externals
+                        .get(n as usize - 1)
+                        .is_some_and(|p| p.contains("unity default resources")) =>
+                    {
+                        DEFAULT_RESOURCES
+                    }
+                    _ => "",
+                };
+                let mut reference = serde_json::Map::new();
+                reference.insert("fileID".into(), Value::String(id.to_string()));
+                if *id != 0 {
+                    reference.insert("guid".into(), Value::String(guid.into()));
+                }
+                return Value::Object(reference);
+            }
+            // A GUID is written as its 32 digits, each word's lowest nibble
+            // first.
+            if fields.len() == 4
+                && fields
+                    .iter()
+                    .enumerate()
+                    .all(|(i, (k, _))| *k == format!("data[{i}]"))
+            {
+                let digits: String = fields
+                    .iter()
+                    .map(|(_, word)| {
+                        let word = match word {
+                            Val::U(n) => *n as u32,
+                            Val::I(n) => *n as u32,
+                            _ => 0,
+                        };
+                        format!("{word:08x}").chars().rev().collect::<String>()
+                    })
+                    .collect();
+                return Value::String(digits);
+            }
+            let mut map = serde_json::Map::new();
+            for (name, field) in fields {
+                if let (true, Val::Bytes(bytes)) = (name == "image data", field) {
+                    map.insert(name.to_string(), Value::String(bytes.len().to_string()));
+                    map.insert(
+                        "_typelessdata".into(),
+                        Value::String(bytes.iter().map(|b| format!("{b:02x}")).collect()),
+                    );
+                    continue;
+                }
+                map.insert(name.to_string(), yaml_form(field, externals));
+            }
+            Value::Object(map)
+        }
+    }
+}
 const TEXT_ASSET: i32 = 49;
 const TEXT_FILE_ID: i64 = 4900000;
 

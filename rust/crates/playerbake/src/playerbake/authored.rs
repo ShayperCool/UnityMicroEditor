@@ -194,6 +194,36 @@ impl Tags {
     }
 }
 
+/// The former names of serialized script fields, from the
+/// `[FormerlySerializedAs("old")]` attributes of a project's C# sources.
+#[derive(Default)]
+pub struct Renames {
+    former: HashMap<String, Vec<String>>,
+}
+
+impl Renames {
+    pub fn of_sources<'a>(texts: impl IntoIterator<Item = &'a str>) -> Self {
+        let attribute = regex::Regex::new(
+            r#"FormerlySerializedAs\(\s*"(\w+)"\s*\)\s*\][^;={}()]*?(\w+)\s*[;=]"#,
+        )
+        .expect("valid pattern");
+        let mut former: HashMap<String, Vec<String>> = HashMap::new();
+        for text in texts {
+            for capture in attribute.captures_iter(text) {
+                let list = former.entry(capture[2].to_string()).or_default();
+                if !list.contains(&capture[1].to_string()) {
+                    list.push(capture[1].to_string());
+                }
+            }
+        }
+        Renames { former }
+    }
+
+    fn former(&self, name: &str) -> &[String] {
+        self.former.get(name).map(Vec::as_slice).unwrap_or(&[])
+    }
+}
+
 /// An object converted from its document.
 pub struct Converted {
     pub tree: Arc<TypeTree>,
@@ -211,6 +241,7 @@ pub type Resolve<'a> = dyn FnMut(&Reference) -> Result<Option<(i32, i64)>> + 'a;
 pub fn convert(
     library: &Library,
     tags: &Tags,
+    renames: &Renames,
     document: &Document,
     script: Option<&str>,
     resolve: &mut Resolve<'_>,
@@ -227,6 +258,11 @@ pub fn convert(
         tree: &kind.tree,
         resolve,
         derived: Vec::new(),
+        renames: if script.is_some() {
+            Some(renames)
+        } else {
+            None
+        },
     };
     let source = Value::Object(document.data.clone());
     let mut value = walk.value(0, kind.sample.clone(), &source, "")?;
@@ -368,6 +404,8 @@ struct Walk<'t, 'r, 'a> {
     tree: &'t TypeTree,
     resolve: &'r mut Resolve<'a>,
     derived: Vec<String>,
+    /// Former names of script fields, for a script's object.
+    renames: Option<&'t Renames>,
 }
 
 impl Walk<'_, '_, '_> {
@@ -501,7 +539,14 @@ impl Walk<'_, '_, '_> {
                 .position(|(key, _)| *key == name)
                 .map(|position| samples.swap_remove(position).1)
                 .unwrap_or(Val::Zero);
-            let value = match fields.get(&name) {
+            // A field read under a name it had before (`FormerlySerializedAs`).
+            let authored = fields.get(&name).or_else(|| {
+                self.renames?
+                    .former(&name)
+                    .iter()
+                    .find_map(|former| fields.get(former))
+            });
+            let value = match authored {
                 // Typeless data is written as its size, its bytes follow
                 // as one hexadecimal run under `_typelessdata`.
                 Some(Value::String(_)) if self.tree.nodes[child].type_name == "TypelessData" => {
@@ -567,6 +612,18 @@ impl Sources {
             }
         }
         Ok(Sources { paths })
+    }
+
+    /// The former names of the script fields of every C# source.
+    pub fn renames(&self) -> Renames {
+        let texts: Vec<String> = self
+            .paths
+            .values()
+            .filter(|path| path.extension().is_some_and(|e| e == "cs"))
+            .filter_map(|path| std::fs::read_to_string(path).ok())
+            .filter(|text| text.contains("FormerlySerializedAs"))
+            .collect();
+        Renames::of_sources(texts.iter().map(String::as_str))
     }
 
     pub fn path(&self, guid: &str) -> Option<&Path> {
@@ -662,8 +719,15 @@ pub fn write_source(
             };
             Ok(Some((position as i32 + 1, reference.file_id)))
         };
-        let object = convert(library, tags, document, script.as_deref(), &mut resolve)
-            .with_context(|| format!("{} &{}", document.type_name, document.file_id))?;
+        let object = convert(
+            library,
+            tags,
+            &Renames::default(),
+            document,
+            script.as_deref(),
+            &mut resolve,
+        )
+        .with_context(|| format!("{} &{}", document.type_name, document.file_id))?;
         derived.push((
             format!("{} &{}", document.type_name, document.file_id),
             object.derived.clone(),
@@ -748,6 +812,7 @@ mod tests {
         let converted = convert(
             &library,
             &Tags::new(Vec::new()),
+            &Renames::default(),
             document,
             None,
             &mut resolve,
@@ -768,5 +833,24 @@ mod tests {
                 .any(|field| field == "m_AssemblyName")
         );
         assert!(converted.value.field("m_EditorOnly").is_none());
+    }
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::*;
+
+    #[test]
+    fn former_names_come_from_the_attributes_of_fields() {
+        let renames = Renames::of_sources([
+            "[SerializeField] [FormerlySerializedAs(\"m_enableWordWrapping\")]\n protected TextWrappingModes m_TextWrappingMode;",
+            "[FormerlySerializedAs(\"speed\")] public float velocity = 2f;",
+        ]);
+        assert_eq!(
+            renames.former("m_TextWrappingMode"),
+            ["m_enableWordWrapping"]
+        );
+        assert_eq!(renames.former("velocity"), ["speed"]);
+        assert!(renames.former("other").is_empty());
     }
 }

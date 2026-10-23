@@ -24,7 +24,22 @@ pub struct Inspected {
 /// The objects of a file under their keys, in the file's order.
 pub fn inspect(path: &Path) -> Result<Vec<Inspected>> {
     let file = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    let (objects, externals) = read_with_externals(&file)?;
+    let (objects, mut externals) = read_with_externals(&file)?;
+    // A file the tool wrote names its external files by GUID beside it.
+    let names = path.with_file_name(format!(
+        "{}.externals.json",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    if let Ok(text) = std::fs::read_to_string(&names) {
+        let guids: Vec<String> = serde_json::from_str(&text)?;
+        externals = guids
+            .iter()
+            .map(|guid| match guid.as_str() {
+                "0000000000000000e000000000000000" => "Library/unity default resources".to_string(),
+                guid => format!("ume-asset/{guid}"),
+            })
+            .collect();
+    }
     let directory = path.parent().map(Path::to_path_buf).unwrap_or_default();
     let mut values = HashMap::new();
     let mut failures = HashMap::new();
