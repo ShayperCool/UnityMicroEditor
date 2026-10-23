@@ -19,6 +19,10 @@ pub struct Node {
     /// The serialized version of the type, which a source states for its
     /// own layout when it is not 1.
     pub version: u16,
+    /// The node's type flags (1: array, 2: held by managed reference) and
+    /// meta flags (0x4000: aligned after, 0x8000: ...), as stored.
+    pub type_flags: u8,
+    pub meta: u32,
 }
 
 /// One class of a SerializedFile type table: the verbatim entry and its nodes.
@@ -99,6 +103,8 @@ impl TypeTree {
                 align: le32(node, 20) & 0x4000 != 0,
                 size: le32(node, 12) as i32,
                 version: u16::from_le_bytes([node[0], node[1]]),
+                type_flags: node[3],
+                meta: le32(node, 20),
             });
         }
         if nodes[0].level != 0 {

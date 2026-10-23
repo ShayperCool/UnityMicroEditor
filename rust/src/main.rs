@@ -225,6 +225,46 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                 }
             }
         }
+        ["trees", file] => {
+            let data = fs::read(file)?;
+            let (objects, _) =
+                unity_micro_editor::playerbake::read_serialized_with_externals(&data)?;
+            let mut names = std::collections::HashMap::new();
+            for object in objects.iter().filter(|o| o.tree.class_id == 115) {
+                let value = object.tree.decode(&object.data)?;
+                let text = |name: &str| match value.field(name) {
+                    Some(unity_micro_editor::playerbake::Val::Str(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                names.insert(
+                    object.local_id,
+                    format!("{}.{}", text("m_Namespace"), text("m_ClassName")),
+                );
+            }
+            let mut seen = std::collections::HashSet::new();
+            for object in &objects {
+                let label = match object.script {
+                    Some(script) => names.get(&script).cloned().unwrap_or_default(),
+                    None => object.tree.nodes[0].type_name.clone(),
+                };
+                if !seen.insert(label.clone()) {
+                    continue;
+                }
+                println!("== {label} (class {})", object.tree.class_id);
+                for node in &object.tree.nodes {
+                    println!(
+                        "{}{} {} size={} v={} flags={} meta={:#x}",
+                        "  ".repeat(node.level as usize),
+                        node.type_name,
+                        node.name,
+                        node.size,
+                        node.version,
+                        node.type_flags,
+                        node.meta
+                    );
+                }
+            }
+        }
         ["closure", rest @ ..] => {
             use unity_micro_editor::playerbake::{
                 FileFormat, Library, Sources, Tags, write_closure,
