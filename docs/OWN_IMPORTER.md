@@ -550,3 +550,27 @@ takes no environment in `initializeCompiler` and keeps its includes in
 worker resolves no `Packages/...` include, since it passes no redirected
 include folders; the package shaders that include a file of their package
 fail there as here.
+
+The Editor's half is the tool's (`playerbake::shaderlab`): the ShaderLab
+is parsed into commands, each block knowing its keywords; a subshader's or
+category's commands apply in order, a pass taking the state and name set
+before it; tag names and values take the spelling of the names the engine
+registers (`QUEUE`, `LIGHTMODE`, `SHADOWCASTER`, `RenderType`, `Vertex`,
+`true`, ...), a pass's tags merge into its state's, in order of name. The
+shader names the four stereo keywords and then each program's in order of
+first use; a program lists the indices it reads, in order. `Blend` without
+a target sets the first; `Int` properties are floats, `Integer` integers.
+The compile information lays each snippet out as the compiler reported it
+(the number before the language is the pragmas' compile flags). The import
+compiles the shader once afterwards (`m_CompileSmokeTestAfterImport`)
+unless it failed or takes passes of other shaders; the default textures of
+the `.meta` that name a texture property are kept, in order of name.
+
+`player-file shader-import --editor E --project P --reference DIR
+<asset>[=<file>]...` builds the Editor's `Shader` object and compares it
+with `DIR/<guid>-0000.bin`. Bouncemasters' 77 shaders against the 6000.0
+worker's artifacts: 73 equal to the byte. The other four have
+fixed-function passes, for which the Editor generates programs
+(`GenerateFixedFunctionPassCode`); a generated snippet's ID is the low 16
+bits of XXH32 of its code with the seed `0x8f37154b`, with the count of the
+shader's snippets before it above them.

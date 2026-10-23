@@ -637,3 +637,81 @@ impl Val {
         Val::Str(text.to_string())
     }
 }
+
+impl TypeTree {
+    /// A value from JSON shaped as `player-file dump` prints values: fields
+    /// by name (a fixed array's items as `name[i]`), sequences and maps as
+    /// arrays (a map's entries as `first` and `second`), a reference that
+    /// leads nowhere as null. Every field of the tree must be present.
+    pub fn val_of_json(&self, value: &serde_json::Value) -> Result<Val> {
+        self.json_at(0, value, "")
+    }
+
+    fn json_at(&self, index: usize, value: &serde_json::Value, path: &str) -> Result<Val> {
+        use serde_json::Value as J;
+        let node = &self.nodes[index];
+        let children = self.children(index);
+        let fail =
+            |what: &str| anyhow::anyhow!("{path}: {what} for {} {}", node.type_name, node.name);
+        if children.is_empty() && node.size <= 0 {
+            return Ok(Val::Zero);
+        }
+        if children.is_empty() {
+            return Ok(match (node.type_name.as_str(), value) {
+                ("bool", J::Bool(b)) => Val::Bool(*b),
+                ("float", J::Number(n)) => Val::F(n.as_f64().unwrap_or(0.0) as f32),
+                ("double", J::Number(n)) => Val::D(n.as_f64().unwrap_or(0.0)),
+                (
+                    "UInt8" | "UInt16" | "unsigned short" | "unsigned int" | "UInt64"
+                    | "unsigned long long" | "FileSize",
+                    J::Number(n),
+                ) => Val::U(n.as_u64().ok_or_else(|| fail("not an unsigned number"))?),
+                (_, J::Number(n)) => Val::I(n.as_i64().ok_or_else(|| fail("not an integer"))?),
+                (_, J::Bool(b)) => Val::I(*b as i64),
+                _ => return Err(fail("not a scalar")),
+            });
+        }
+        if node.type_name == "string" {
+            return match value {
+                J::String(text) => Ok(Val::Str(text.clone())),
+                _ => Err(fail("not a string")),
+            };
+        }
+        if let Some((_, element)) = self.element(index) {
+            let J::Array(items) = value else {
+                return Err(fail("not an array"));
+            };
+            return Ok(Val::Seq(
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, item)| self.json_at(element, item, &format!("{path}[{i}]")))
+                    .collect::<Result<_>>()?,
+            ));
+        }
+        if node.type_name.starts_with("PPtr<") {
+            return match value {
+                J::Null => Ok(Val::Map(vec![
+                    (Cow::Borrowed("m_FileID"), Val::I(0)),
+                    (Cow::Borrowed("m_PathID"), Val::I(0)),
+                ])),
+                _ => Err(fail("a reference that leads somewhere")),
+            };
+        }
+        let J::Object(fields) = value else {
+            return Err(fail("not a structure"));
+        };
+        let mut out = Vec::with_capacity(children.len());
+        for child in children {
+            let name = &self.nodes[child].name;
+            let field = fields
+                .get(name)
+                .ok_or_else(|| anyhow::anyhow!("{path}.{name}: missing"))?;
+            out.push((
+                Cow::Owned(name.clone()),
+                self.json_at(child, field, &format!("{path}.{name}"))?,
+            ));
+        }
+        Ok(Val::Map(out))
+    }
+}

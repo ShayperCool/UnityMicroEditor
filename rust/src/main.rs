@@ -250,6 +250,16 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                 }
             }
         }
+        ["type-entry", file, class, output] => {
+            // The type table entry of a native class, as the engine wrote it.
+            let data = fs::read(file)?;
+            let class: i32 = class.parse()?;
+            let objects = unity_micro_editor::playerbake::read_serialized_of_class(&data, class)?;
+            let object = objects
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("{file} holds no object of class {class}"))?;
+            fs::write(output, &object.tree.entry[..])?;
+        }
         ["trees", file] => {
             let data = fs::read(file)?;
             let (objects, _) =
@@ -337,16 +347,89 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                     );
                 let reply = compiler.preprocess(&request)?;
                 if std::env::var_os("UME_PARSED_FORM").is_some() {
-                    let form =
-                        unity_micro_editor::playerbake::shaderlab::parsed_form(&reply.shader)
-                            .unwrap_or_else(
-                                |error| serde_json::json!({"error": format!("{error:#}")}),
-                            );
-                    println!("{}", serde_json::json!({"file": asset, "form": form}));
+                    let form = unity_micro_editor::playerbake::shaderlab::parsed_form(&reply)
+                        .unwrap_or_else(|error| serde_json::json!({"error": format!("{error:#}")}));
+                    let info = unity_micro_editor::playerbake::shaderlab::compile_info(
+                        &reply,
+                        &request.directory,
+                        &request.file,
+                        &request.source,
+                    );
+                    println!(
+                        "{}",
+                        serde_json::json!({"file": asset, "form": form, "info": info})
+                    );
                     continue;
                 }
                 println!("{}", serde_json::to_string(&reply)?);
             }
+        }
+        [
+            "shader-import",
+            "--editor",
+            editor,
+            "--project",
+            project,
+            "--reference",
+            reference,
+            assets @ ..,
+        ] => {
+            // Each source imported as the Editor imports it, against the
+            // Editor's artifact of it in `reference` (`<guid>-0000.bin`).
+            use unity_micro_editor::playerbake::{self as bake, shaderlab};
+            let ctx = unity_micro_editor::cancel::Context::background();
+            let logs =
+                std::env::temp_dir().join(format!("ume-shader-import-{}", std::process::id()));
+            let mut compiler = unity_micro_editor::native::ShaderCompiler::start(
+                &ctx,
+                editor,
+                project,
+                &logs.to_string_lossy(),
+            )?;
+            let tree = shaderlab::editor_shader_tree("6000.0.71f1")
+                .ok_or_else(|| anyhow::anyhow!("no Editor Shader tree"))?;
+            let (mut equal, mut total) = (0, 0);
+            for item in assets {
+                let (asset, physical) = item.split_once('=').unwrap_or((item, item));
+                let physical = Path::new(project).join(physical);
+                let source = fs::read_to_string(&physical)?;
+                let meta = fs::read(format!("{}.meta", physical.display()))?;
+                let guid = String::from_utf8_lossy(&meta)
+                    .lines()
+                    .find_map(|l| l.strip_prefix("guid: ").map(|g| g.trim().to_string()))
+                    .unwrap_or_default();
+                let request = shaderlab::PreprocessRequest::standalone(asset, source);
+                let reply = compiler.preprocess(&request)?;
+                total += 1;
+                let built = shaderlab::editor_object(&reply, &request, &guid, &meta)
+                    .inspect(|value| {
+                        if let Some(dir) = std::env::var_os("UME_SHADER_DUMP") {
+                            let name = format!("{}.json", asset.replace('/', "_"));
+                            let _ = fs::write(Path::new(&dir).join(name), value.to_string());
+                        }
+                    })
+                    .and_then(|value| tree.val_of_json(&value))
+                    .and_then(|value| tree.encode(&value));
+                let reference_file = Path::new(reference).join(format!("{guid}-0000.bin"));
+                let theirs = fs::read(&reference_file)
+                    .ok()
+                    .and_then(|file| bake::read_serialized_of_class(&file, 48).ok())
+                    .and_then(|objects| objects.into_iter().next());
+                match (built, theirs) {
+                    (Err(error), _) => println!("{asset}: {error:#}"),
+                    (Ok(_), None) => println!("{asset}: no reference"),
+                    (Ok(ours), Some(theirs)) if ours == theirs.data => equal += 1,
+                    (Ok(ours), Some(theirs)) => {
+                        let at = ours.iter().zip(&theirs.data).position(|(a, b)| a != b);
+                        println!(
+                            "{asset}: {} bytes against {}, first difference at {at:?}",
+                            ours.len(),
+                            theirs.data.len()
+                        );
+                    }
+                }
+            }
+            println!("equal {equal} of {total}");
         }
         ["script-layouts", project, editor, player, output] => {
             let ctx = unity_micro_editor::mcp::signal_context()?;

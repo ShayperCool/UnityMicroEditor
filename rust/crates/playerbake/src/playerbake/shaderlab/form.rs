@@ -701,3 +701,165 @@ fn subshader(commands: &[Command], inherited: &State) -> Result<Value> {
         "m_LOD": lod,
     }))
 }
+
+/// The keywords every shader names first, for single-pass stereo rendering.
+const STEREO_KEYWORDS: [&str; 4] = [
+    "STEREO_INSTANCING_ON",
+    "UNITY_SINGLE_PASS_STEREO",
+    "STEREO_MULTIVIEW_ON",
+    "STEREO_CUBEMAP_RENDER_ON",
+];
+
+/// The program fields of a pass, by program type.
+const PROGRAMS: [&str; 6] = [
+    "progVertex",
+    "progFragment",
+    "progGeometry",
+    "progHull",
+    "progDomain",
+    "progRayTracing",
+];
+
+fn program(keywords: &[usize]) -> Value {
+    json!({
+        "m_CommonParameters": {
+            "m_BufferParams": [], "m_ConstantBufferBindings": [], "m_ConstantBuffers": [],
+            "m_MatrixParams": [], "m_Samplers": [], "m_TextureParams": [], "m_UAVParams": [],
+            "m_VectorParams": [],
+        },
+        "m_ParameterBlobIndices": [],
+        "m_PlayerSubPrograms": [],
+        "m_SerializedKeywordStateMask": keywords,
+        "m_SubPrograms": [],
+    })
+}
+
+fn package_requirements() -> Value {
+    json!({"m_CombinedStatus": 1, "m_Requirements": [], "m_StatusMessage": ""})
+}
+
+/// The state of a pass another shader's pass stands for (`UsePass`).
+fn empty_state() -> Value {
+    let zero = Float::of(0.0);
+    let blend = Blend {
+        src: Float::of(1.0),
+        dst: zero.clone(),
+        src_alpha: Float::of(1.0),
+        dst_alpha: zero.clone(),
+        op: zero.clone(),
+        op_alpha: zero.clone(),
+        mask: Float::of(15.0),
+    };
+    let stencil = StencilOp {
+        pass: zero.clone(),
+        fail: zero.clone(),
+        zfail: zero.clone(),
+        comp: zero.clone(),
+    };
+    let state = State {
+        blend: vec![blend; 8],
+        separate_blend: false,
+        zclip: zero.clone(),
+        ztest: zero.clone(),
+        zwrite: zero.clone(),
+        culling: zero.clone(),
+        conservative: zero.clone(),
+        offset_factor: zero.clone(),
+        offset_units: zero.clone(),
+        alpha_to_mask: zero.clone(),
+        stencil: stencil.clone(),
+        stencil_front: stencil.clone(),
+        stencil_back: stencil,
+        stencil_read: zero.clone(),
+        stencil_write: zero.clone(),
+        stencil_ref: zero.clone(),
+        fog_mode: -1,
+        fog_color: [zero.clone(), zero.clone(), zero.clone(), zero.clone()],
+        fog_color_name: "<noninit>".into(),
+        fog_density: zero.clone(),
+        fog_start: zero.clone(),
+        fog_end: zero,
+        lighting: false,
+        tags: Vec::new(),
+    };
+    state.json("", 0, -1)
+}
+
+/// Completes a parsed form with what its programs say: the keywords the
+/// shader names (the stereo ones, then each program's in order of first
+/// use), each pass's programs with the keywords they read, and the fields a
+/// pass of another shader (`UsePass`) takes empty.
+pub fn complete(form: &mut Value, snippets: &[super::PreprocessedSnippet]) {
+    let mut names: Vec<String> = STEREO_KEYWORDS.iter().map(|k| k.to_string()).collect();
+    for snippet in snippets {
+        for (_, _, sets) in &snippet.keywords {
+            for set in sets {
+                for keyword in set.split_whitespace() {
+                    if !keyword.chars().all(|c| c == '_') && !names.iter().any(|n| n == keyword) {
+                        names.push(keyword.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let index = |keyword: &str| names.iter().position(|n| n == keyword);
+    let passes = form["m_SubShaders"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+        .flat_map(|subshader| {
+            subshader["m_PackageRequirements"] = package_requirements();
+            subshader["m_Passes"].as_array_mut().into_iter().flatten()
+        });
+    for pass in passes {
+        let use_pass = pass["m_Type"] == 1;
+        if use_pass {
+            pass["m_State"] = empty_state();
+            pass["m_Tags"] = json!({"tags": []});
+            pass["m_Name"] = json!("");
+            pass["m_TextureName"] = json!("");
+            pass["m_ProgramMask"] = json!(0);
+        }
+        let gpu = pass["m_State"]["gpuProgramID"].as_i64().unwrap_or(0);
+        let snippet = snippets.iter().find(|s| s.header.first() == Some(&gpu));
+        let types = snippet.and_then(|s| s.header.get(3)).copied().unwrap_or(0);
+        for (program_type, field) in PROGRAMS.iter().enumerate() {
+            let keywords: Vec<usize> = match (snippet, types >> program_type & 1) {
+                (Some(snippet), 1) => {
+                    let mut used: Vec<usize> = (0..STEREO_KEYWORDS.len()).collect();
+                    for (_, kind_type, sets) in &snippet.keywords {
+                        if *kind_type as usize != program_type {
+                            continue;
+                        }
+                        for keyword in sets.iter().flat_map(|s| s.split_whitespace()) {
+                            if let Some(i) = index(keyword)
+                                && !used.contains(&i)
+                            {
+                                used.push(i);
+                            }
+                        }
+                    }
+                    used.sort_unstable();
+                    used
+                }
+                _ => Vec::new(),
+            };
+            pass[*field] = program(&keywords);
+        }
+        if snippet.is_some() {
+            pass["m_ProgramMask"] = json!(types << 1);
+        }
+        let instancing = snippet.is_some_and(|s| {
+            s.keywords
+                .iter()
+                .flat_map(|(_, _, sets)| sets.iter())
+                .any(|set| set.split_whitespace().any(|k| k == "INSTANCING_ON"))
+        });
+        pass["m_HasInstancingVariant"] = json!(instancing);
+        pass["m_HasProceduralInstancingVariant"] = json!(false);
+        pass["m_NameIndices"] = json!([]);
+        pass["m_PackageRequirements"] = package_requirements();
+    }
+    form["m_KeywordNames"] = json!(names);
+    form["m_KeywordFlags"] = json!(vec![0; names.len()]);
+}
