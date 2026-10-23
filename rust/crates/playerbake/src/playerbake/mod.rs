@@ -20,7 +20,7 @@ mod texture;
 pub use texture::decode_png;
 mod typetree;
 
-pub use assemble::{Assembled, write_closure};
+pub use assemble::{Assembled, external_path, write_closure, write_scene_closure};
 pub use authored::{
     Converted, Kind, Library, MONO_SCRIPT, Reference, Renames, Resolve, Sources, Tags, Written,
     convert as convert_authored, full_name, script_execution_orders, write_source,

@@ -16,7 +16,12 @@ use super::{
 };
 use anyhow::{Context as _, Result, bail};
 use serde_json::Value;
-use std::{borrow::Cow, collections::HashMap, path::Path, sync::Arc};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::Arc,
+};
 use ume_base::yaml::Document;
 
 /// The layout of a class and an object of it as the engine wrote one.
@@ -104,6 +109,7 @@ impl Library {
                 tree: &kind.tree,
                 data,
                 script: None,
+                script_file: 0,
             });
         }
         super::serialized::write_in(format, &objects, &[])
@@ -139,7 +145,11 @@ impl Library {
                 tree: object.tree.clone(),
                 sample,
             };
-            match object.script.and_then(|script| names.get(&script)) {
+            match object
+                .script
+                .filter(|_| object.script_file == 0)
+                .and_then(|script| names.get(&script))
+            {
                 Some(name) => {
                     self.scripts.entry(name.clone()).or_insert(kind);
                 }
@@ -409,6 +419,29 @@ impl Renames {
     fn former(&self, name: &str) -> &[String] {
         self.former.get(name).map(Vec::as_slice).unwrap_or(&[])
     }
+}
+
+/// The fields of a document its conversion reads: those of its class's or
+/// script's tree, under their names or former ones. `None` when the tree is
+/// not known, and every field may be.
+pub fn fields_read(
+    library: &Library,
+    renames: &Renames,
+    document: &Document,
+    script: Option<&str>,
+) -> Option<HashSet<String>> {
+    let kind = match script {
+        Some(name) => library.script(name)?,
+        None => library.class(document.class_id as i32)?,
+    };
+    let tree = &kind.tree;
+    let mut names = HashSet::new();
+    for child in tree.children(0) {
+        let name = &tree.nodes[child].name;
+        names.extend(renames.former(name).iter().cloned());
+        names.insert(name.clone());
+    }
+    Some(names)
 }
 
 /// An object converted from its document.
@@ -937,6 +970,7 @@ pub fn write_source(
             tree: &script_tree,
             data: script_tree.encode(value)?,
             script: None,
+            script_file: 0,
         });
     }
     for (local_id, object, script) in &converted {
@@ -947,11 +981,15 @@ pub fn write_source(
             script: script.as_ref().map(|name| {
                 script_base + scripts.iter().position(|s| s == name).unwrap_or(0) as i64
             }),
+            script_file: 0,
         });
     }
     let external_refs: Vec<super::External> = externals
         .iter()
-        .map(|guid| super::External { guid: guid.clone() })
+        .map(|guid| super::External {
+            guid: guid.clone(),
+            path: String::new(),
+        })
         .collect();
     Ok(Written {
         file: super::write_in(format, &objects, &external_refs)?,
@@ -985,6 +1023,7 @@ mod tests {
                 tree,
                 data: tree.encode(&sample).unwrap(),
                 script: None,
+                script_file: 0,
             }],
             &[],
         )

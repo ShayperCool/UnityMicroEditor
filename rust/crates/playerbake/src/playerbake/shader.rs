@@ -681,6 +681,7 @@ pub fn bake_shader(
             tree: shader_tree()?,
             data,
             script: None,
+            script_file: 0,
         }],
         &externals,
     )?;

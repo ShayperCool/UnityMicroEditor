@@ -42,6 +42,30 @@ fn reference(fields: &Map<String, Value>, name: &str) -> Option<Reference> {
     fields.get(name).and_then(Reference::from_value)
 }
 
+/// Points the references a file makes to its own stripped objects at the
+/// objects they stand for.
+fn redirect(value: &mut Value, stand_ins: &HashMap<i64, i64>) {
+    match value {
+        Value::Object(fields) => {
+            let own = fields
+                .get("guid")
+                .is_none_or(|guid| guid.as_str() == Some(""));
+            if own
+                && let Some(Value::String(id)) = fields.get_mut("fileID")
+                && let Some(target) = id.parse::<i64>().ok().and_then(|id| stand_ins.get(&id))
+            {
+                *id = target.to_string();
+                return;
+            }
+            for field in fields.values_mut() {
+                redirect(field, stand_ins);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(|item| redirect(item, stand_ins)),
+        _ => {}
+    }
+}
+
 fn local(file_id: i64) -> Value {
     let mut fields = Map::new();
     fields.insert("fileID".into(), Value::String(file_id.to_string()));
@@ -63,6 +87,20 @@ impl Unpacked {
             .collect();
         let mut own: Vec<Document> = Vec::new();
         let mut instances = Vec::new();
+        // A stripped object stands for the object of an instance it
+        // corresponds to: references to it go to that object.
+        let mut stand_ins: HashMap<i64, i64> = HashMap::new();
+        for document in documents.iter().filter(|d| d.stripped) {
+            if let (Some(instance), Some(source)) = (
+                reference(&document.data, "m_PrefabInstance"),
+                reference(&document.data, "m_CorrespondingSourceObject"),
+            ) {
+                stand_ins.insert(
+                    id_of(document)?,
+                    instance_id(instance.file_id, source.file_id),
+                );
+            }
+        }
         for document in documents {
             // The prefab record of the format before nested prefabs marks
             // the asset itself and stands for nothing.
@@ -75,6 +113,13 @@ impl Unpacked {
                 instances.push(document);
             } else if !document.stripped {
                 own.push(document);
+            }
+        }
+        if !stand_ins.is_empty() {
+            for document in &mut own {
+                for value in document.data.values_mut() {
+                    redirect(value, &stand_ins);
+                }
             }
         }
         let mut merged: Vec<Document> = Vec::new();
@@ -296,10 +341,21 @@ impl Unpacked {
             let Some(path) = change.get("propertyPath").and_then(Value::as_str) else {
                 continue;
             };
-            let object = change
+            let mut object = change
                 .get("objectReference")
                 .cloned()
                 .unwrap_or(Value::Null);
+            // An object of the source prefab is, in the instance, its copy.
+            if let Some(reference) = Reference::from_value(&object)
+                && reference.guid == source.guid
+            {
+                let id = if removed.contains(&reference.file_id) {
+                    0
+                } else {
+                    instance_id(file_id, reference.file_id)
+                };
+                object = local(id);
+            }
             let value = change.get("value").cloned().unwrap_or(Value::Null);
             let document = &mut documents[position];
             set_path(&mut document.data, path, value, object);

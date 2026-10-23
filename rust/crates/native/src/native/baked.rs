@@ -710,7 +710,10 @@ impl NativeProjectImporter {
                 externals: kept
                     .externals
                     .into_iter()
-                    .map(|guid| playerbake::External { guid })
+                    .map(|guid| playerbake::External {
+                        guid,
+                        path: String::new(),
+                    })
                     .collect(),
             });
         }
@@ -726,7 +729,10 @@ impl NativeProjectImporter {
             externals: kept
                 .externals
                 .into_iter()
-                .map(|guid| playerbake::External { guid })
+                .map(|guid| playerbake::External {
+                    guid,
+                    path: String::new(),
+                })
                 .collect(),
         })
     }
@@ -849,6 +855,7 @@ fn build_source(ctx: &Context, build: &Build, guid: &str) -> Result<built_store:
         external_paths.insert(external.guid.clone(), path);
         externals.push(playerbake::External {
             guid: external.guid.clone(),
+            path: String::new(),
         });
     }
     // The object itself and the shaders of packages it names, under the
@@ -858,6 +865,7 @@ fn build_source(ctx: &Context, build: &Build, guid: &str) -> Result<built_store:
         tree: &main.tree,
         data: main.data.clone(),
         script: None,
+        script_file: 0,
     }];
     for object in &built.objects {
         if object.local_id != main.local_id {
@@ -866,6 +874,7 @@ fn build_source(ctx: &Context, build: &Build, guid: &str) -> Result<built_store:
                 tree: &object.tree,
                 data: object.data.clone(),
                 script: None,
+                script_file: 0,
             });
         }
     }

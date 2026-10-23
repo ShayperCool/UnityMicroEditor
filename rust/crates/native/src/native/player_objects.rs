@@ -1667,6 +1667,7 @@ mod tests {
             tree: &report.tree,
             data: report.data.clone(),
             script: None,
+            script_file: 0,
         }];
         let format = crate::engine::supported("6000.0.71f1")
             .unwrap()

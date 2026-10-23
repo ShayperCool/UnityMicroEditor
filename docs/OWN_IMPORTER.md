@@ -271,10 +271,10 @@ the file ID `MD4("s\0\0\0" + namespace + name)`'s first four bytes as a
 little-endian integer, with the DLL's GUID: its `MonoScript` is written for
 each file ID the sources name (Main: Gadsme's 24 behaviours, all equal).
 
-6000.0.71f1's pack comes from the worker's files of Bouncemasters and the
-Editor's `unity_builtin_extra`: 41 classes, those the game uses; a project
-with others (`Light`, `Rigidbody`, `MeshCollider`, the scene's settings
-managers, ...) needs them captured too. Main without the worker's file:
+6000.0.71f1's pack comes from the worker's files of Bouncemasters (with its
+scene file, for the scene's settings managers) and the Editor's
+`unity_builtin_extra`: the classes the game uses; a project with others
+(`Light`, `Rigidbody`, `MeshCollider`, ...) needs them captured too. Main without the worker's file:
 20574 objects equal, as with it; with the compressed and scaled textures
 written too, 21320 paired and 20844 equal. What a sample still carries of the game:
 the short lists of the one `AudioMixerController` (`m_MixerConstant`, which
@@ -285,10 +285,41 @@ What differs, by count of objects:
 
 | What | Objects | Needs |
 |---|---|---|
-| Compressed (DXT) and scaled textures | ~90 | a BC compressor and the engine's resampling |
 | Shaders (project and built-in) | all materials | built by the worker today; `playerbake`'s own baker serves 6000.6 only |
 | Fields a newer engine added to an older source | few | per-class default objects instead of samples |
 | Animator controllers, models, audio | few | not written yet |
+
+### A scene's own file
+
+`player-file closure ... --scene <scene>` writes, as a build does, the
+scene's own objects to a file of their own (`<output>.scene`) and what they
+refer to to the closure's file, which the scene names as its first external
+file (`ume-deps`). The scene file holds the scene's objects and those of its
+prefab instances, its `RenderSettings`, `LightmapSettings`,
+`NavMeshSettings` and the `LightingSettings` it names, in order of class with
+scripts last and local IDs from 1; its `MonoBehaviour`s take their scripts
+from the closure's file. The Editor's `OcclusionCullingSettings` and
+`SceneRoots` are not written. Unpacking an instance points a modification's
+reference to an object of the source prefab at the instance's copy, and the
+file's references to its stripped objects at the objects they stand for. A
+reference to an asset the project lacks is written empty, as the worker
+writes it. Only the fields the Player reads (those of the class's or
+script's tree, under their names or former ones) bring their references into
+the closure: a font asset's `m_SourceFontFile_EditorRef` or a renderer's
+`m_LightmapParameters` do not.
+
+`player-file compare <ours> <theirs> --external ume-deps <our closure>
+<their closure>` pairs references into the closure's file by the objects
+they lead to. Main against the worker's scene file: 169 objects paired, 163
+equal; the other six are the five Odin managers' `serializationData` (see
+below) and `LightmapSettings.m_LightProbes`, which comes from the scene's
+`LightingData` the tool does not write yet. The closure's file: 21357
+paired, 20919 equal, none only the tool's. The worker's own 54 are what
+the tool does not import yet: the models' 33 meshes, 2 avatars and 2 clips,
+3 shaders, the scene's `LightProbes`, a Spine `.skel.bytes`, the scripted
+importers' 6 certificates, and 2 project settings objects
+(`LocalizationSettings`, `UIParticleProjectSettings`), with their 4
+`MonoScript`s.
 
 ### Script type trees
 

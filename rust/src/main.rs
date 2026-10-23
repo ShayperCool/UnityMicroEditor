@@ -155,12 +155,30 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
             }
         }
         ["compare", ours, theirs, rest @ ..] => {
-            let tolerance = match rest {
-                [] => 0.0,
-                ["--tolerance", value] => value.parse()?,
-                _ => anyhow::bail!("player-file compare <ours> <theirs> [--tolerance T]"),
-            };
-            let difference = compare_files(Path::new(ours), Path::new(theirs), tolerance)?;
+            let usage = "player-file compare <ours> <theirs> [--tolerance T] \
+                         [--external <name> <ours> <theirs>]...";
+            let mut tolerance = 0.0;
+            let mut links = Vec::new();
+            let mut rest = rest;
+            loop {
+                rest = match rest {
+                    [] => break,
+                    ["--tolerance", value, rest @ ..] => {
+                        tolerance = value.parse()?;
+                        rest
+                    }
+                    ["--external", name, a, b, rest @ ..] => {
+                        links.push((
+                            name.to_string(),
+                            std::path::PathBuf::from(a),
+                            std::path::PathBuf::from(b),
+                        ));
+                        rest
+                    }
+                    _ => anyhow::bail!("{usage}"),
+                };
+            }
+            let difference = compare_files(Path::new(ours), Path::new(theirs), tolerance, &links)?;
             println!(
                 "matched {} (equal {}), only ours {}, only theirs {}",
                 difference.matched,
@@ -220,7 +238,14 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                 ("only ours", &difference.only_ours),
                 ("only theirs", &difference.only_theirs),
             ] {
-                for key in keys.iter().take(20) {
+                for key in keys
+                    .iter()
+                    .take(if std::env::var_os("UME_COMPARE_ALL").is_some() {
+                        usize::MAX
+                    } else {
+                        20
+                    })
+                {
                     println!("{label}: {key}");
                 }
             }
@@ -448,8 +473,10 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
             // The hashes of the engine's script layouts are the tool's.
             let (mut hashed, mut misshashed) = (0, 0);
             for object in objects.iter().filter(|o| o.tree.class_id == 114) {
-                let Some((class, namespace, assembly)) =
-                    object.script.and_then(|script| assemblies.get(&script))
+                let Some((class, namespace, assembly)) = object
+                    .script
+                    .filter(|_| object.script_file == 0)
+                    .and_then(|script| assemblies.get(&script))
                 else {
                     continue;
                 };
@@ -464,7 +491,11 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
             let (mut equal, mut differ, mut missing) = (0, 0, 0);
             let mut seen = std::collections::HashSet::new();
             for object in &objects {
-                let Some(name) = object.script.and_then(|script| names.get(&script)) else {
+                let Some(name) = object
+                    .script
+                    .filter(|_| object.script_file == 0)
+                    .and_then(|script| names.get(&script))
+                else {
                     continue;
                 };
                 if !seen.insert(name.clone()) {
@@ -487,14 +518,13 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
             println!("equal {equal}, different {differ}, not laid out {missing}");
         }
         ["closure", rest @ ..] => {
-            use unity_micro_editor::playerbake::{
-                FileFormat, Library, Sources, Tags, write_closure,
-            };
+            use unity_micro_editor::playerbake::{FileFormat, Library, Sources, Tags};
             let mut libraries = Vec::new();
             let mut roots = Vec::new();
             let (mut project, mut output, mut version) = (None, None, None);
             let mut builtin: Option<std::path::PathBuf> = None;
             let mut layouts_path: Option<&Path> = None;
+            let mut scene_root: Option<&str> = None;
             let mut items = rest.iter();
             while let Some(flag) = items.next() {
                 let value = items
@@ -508,6 +538,8 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                     "--output" => output = Some(Path::new(*value)),
                     "--unity-version" => version = Some(value.to_string()),
                     "--layouts" => layouts_path = Some(Path::new(*value)),
+                    // A root whose own objects go to a scene file beside the output.
+                    "--scene" => scene_root = Some(*value),
                     // The installation whose texture compressor is used.
                     "--editor" => {
                         unity_micro_editor::playerbake::texcomp::use_editor(Path::new(*value))
@@ -528,17 +560,6 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                 },
                 unity_version: Box::leak(version.into_boxed_str()),
             };
-            let guids: Vec<String> = roots
-                .iter()
-                .map(|root| {
-                    let meta = fs::read_to_string(project.join(format!("{root}.meta")))?;
-                    meta.lines()
-                        .find_map(|line| line.strip_prefix("guid: "))
-                        .map(|guid| guid.trim().to_string())
-                        .ok_or_else(|| anyhow::anyhow!("{root}.meta has no GUID"))
-                })
-                .collect::<Result<_>>()?;
-            let guids: Vec<&str> = guids.iter().map(String::as_str).collect();
             let stream = format!(
                 "{}.resS",
                 output.file_name().unwrap_or_default().to_string_lossy()
@@ -576,15 +597,42 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                     println!("script {name} not laid out: {error}");
                 }
             }
-            let assembled = write_closure(
+            if let Some(scene) = scene_root {
+                roots.push(scene);
+            }
+            let scene_guid = match scene_root {
+                Some(scene) => {
+                    let meta = fs::read_to_string(project.join(format!("{scene}.meta")))?;
+                    meta.lines()
+                        .find_map(|line| line.strip_prefix("guid: "))
+                        .map(|guid| guid.trim().to_string())
+                }
+                None => None,
+            };
+            let guids: Vec<String> = roots
+                .iter()
+                .map(|root| {
+                    let meta = fs::read_to_string(project.join(format!("{root}.meta")))?;
+                    meta.lines()
+                        .find_map(|line| line.strip_prefix("guid: "))
+                        .map(|guid| guid.trim().to_string())
+                        .ok_or_else(|| anyhow::anyhow!("{root}.meta has no GUID"))
+                })
+                .collect::<Result<_>>()?;
+            let guids: Vec<&str> = guids.iter().map(String::as_str).collect();
+            let assembled = unity_micro_editor::playerbake::write_scene_closure(
                 &library,
                 &Tags::of_project(project)?,
                 &Sources::of_project(project)?,
                 &guids,
+                scene_guid.as_deref(),
                 format,
                 &stream,
                 builtin.as_deref(),
             )?;
+            if let Some(scene) = &assembled.scene {
+                fs::write(output.with_extension("scene"), scene)?;
+            }
             fs::write(output, &assembled.file)?;
             fs::write(output.with_file_name(&stream), &assembled.stream)?;
             fs::write(

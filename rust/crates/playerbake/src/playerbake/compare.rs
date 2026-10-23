@@ -23,6 +23,27 @@ pub struct Inspected {
 
 /// The objects of a file under their keys, in the file's order.
 pub fn inspect(path: &Path) -> Result<Vec<Inspected>> {
+    inspect_linked(path, &HashMap::new())
+}
+
+/// The keys of a file's objects by local ID.
+fn keys(path: &Path) -> Result<HashMap<i64, String>> {
+    let file = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let (objects, _) = read_with_externals(&file)?;
+    let values: HashMap<i64, Val> = objects
+        .iter()
+        .filter_map(|o| Some((o.local_id, o.tree.decode(&o.data).ok()?)))
+        .collect();
+    let names = Names::new(&objects, &values);
+    Ok(objects
+        .iter()
+        .map(|o| (o.local_id, names.key(o.local_id)))
+        .collect())
+}
+
+/// The objects of a file, references into the external files `linked`
+/// names by path given by the key of the object they lead to.
+pub fn inspect_linked(path: &Path, linked: &HashMap<String, PathBuf>) -> Result<Vec<Inspected>> {
     let file = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let (objects, mut externals) = read_with_externals(&file)?;
     // A file the tool wrote names its external files by GUID beside it.
@@ -40,6 +61,12 @@ pub fn inspect(path: &Path) -> Result<Vec<Inspected>> {
             })
             .collect();
     }
+    let resolved = externals
+        .iter()
+        .map(|name| linked.get(name).map(|path| keys(path)).transpose())
+        .collect::<Result<Vec<_>>>()?;
+    let externals: Vec<(String, Option<HashMap<i64, String>>)> =
+        externals.into_iter().zip(resolved).collect();
     let directory = path.parent().map(Path::to_path_buf).unwrap_or_default();
     let mut values = HashMap::new();
     let mut failures = HashMap::new();
@@ -84,9 +111,22 @@ pub struct Difference {
     pub fields: BTreeMap<String, Vec<(String, Vec<String>)>>,
 }
 
-pub fn compare(ours: &Path, theirs: &Path, tolerance: f64) -> Result<Difference> {
-    let ours = inspect(ours)?;
-    let theirs = inspect(theirs)?;
+/// Compares two files, references into the external files `links` names
+/// (each with our file and theirs) by the objects they lead to.
+pub fn compare(
+    ours: &Path,
+    theirs: &Path,
+    tolerance: f64,
+    links: &[(String, PathBuf, PathBuf)],
+) -> Result<Difference> {
+    let side = |pick: fn(&(String, PathBuf, PathBuf)) -> &PathBuf| -> HashMap<String, PathBuf> {
+        links
+            .iter()
+            .map(|link| (link.0.clone(), pick(link).clone()))
+            .collect()
+    };
+    let ours = inspect_linked(ours, &side(|link| &link.1))?;
+    let theirs = inspect_linked(theirs, &side(|link| &link.2))?;
     let mut by_key: HashMap<&str, &Inspected> =
         theirs.iter().map(|o| (o.key.as_str(), o)).collect();
     let mut difference = Difference::default();
@@ -198,11 +238,15 @@ impl Names {
         let mut classes = HashMap::new();
         for object in objects {
             let mut class = object.tree.nodes[0].type_name.clone();
-            if let Some(script) = object.script.or_else(|| {
-                pointer(field(object.local_id, "m_Script"))
-                    .filter(|p| p.0 == 0)
-                    .map(|p| p.1)
-            }) {
+            if let Some(script) = object
+                .script
+                .filter(|_| object.script_file == 0)
+                .or_else(|| {
+                    pointer(field(object.local_id, "m_Script"))
+                        .filter(|p| p.0 == 0)
+                        .map(|p| p.1)
+                })
+            {
                 let class_name = match field(script, "m_ClassName") {
                     Some(Val::Str(name)) => name,
                     Some(Val::Bytes(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
@@ -390,7 +434,7 @@ impl Streams {
 fn normalize(
     value: &Val,
     names: &Names,
-    externals: &[String],
+    externals: &[(String, Option<HashMap<i64, String>>)],
     streams: &mut Streams,
 ) -> Result<Value> {
     Ok(match value {
@@ -434,10 +478,14 @@ fn normalize(
                 return Ok(match (file, path) {
                     (_, 0) => Value::Null,
                     (0, id) => json!({"$ref": names.key(id)}),
-                    (n, id) => {
-                        let file = externals.get(n as usize - 1).cloned().unwrap_or_default();
-                        json!({"$ref": format!("{file}:{id}")})
-                    }
+                    (n, id) => match externals.get(n as usize - 1) {
+                        Some((file, Some(keys))) => match keys.get(&id) {
+                            Some(key) => json!({"$ref": format!("{file}:{key}")}),
+                            None => json!({"$ref": format!("{file}:{id}")}),
+                        },
+                        Some((file, None)) => json!({"$ref": format!("{file}:{id}")}),
+                        None => json!({"$ref": format!(":{id}")}),
+                    },
                 });
             }
             let text = |name: &str| match get(name) {
@@ -488,6 +536,7 @@ mod tests {
                     tree,
                     data: tree.encode(&value).unwrap(),
                     script: None,
+                    script_file: 0,
                 }
             })
             .collect();
@@ -502,12 +551,12 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let ours = file(&["A", "B"], &directory, "ours");
         let theirs = file(&["A", "B"], &directory, "theirs");
-        let same = compare(&ours, &theirs, 0.0).unwrap();
+        let same = compare(&ours, &theirs, 0.0, &[]).unwrap();
         assert_eq!((same.matched, same.equal), (2, 2));
         // B moves to position 0: both objects keep their keys, and the
         // execution order each was given differs.
         let swapped = file(&["B", "A", "C"], &directory, "swapped");
-        let difference = compare(&swapped, &theirs, 0.0).unwrap();
+        let difference = compare(&swapped, &theirs, 0.0, &[]).unwrap();
         assert_eq!((difference.matched, difference.equal), (2, 0));
         assert_eq!(difference.only_ours, ["MonoScript:C"]);
         let fields = &difference.fields["MonoScript"][0].1;

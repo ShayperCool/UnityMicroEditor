@@ -30,6 +30,81 @@ pub struct Assembled {
     /// How many objects took a field from the class's sample, by class or
     /// script and field: the fields their sources lack.
     pub derived: std::collections::BTreeMap<String, usize>,
+    /// With a scene: its own objects in a file of their own, which refers to
+    /// `file` first (`ume-deps`) and then to `scene_externals`.
+    pub scene: Option<Vec<u8>>,
+    pub scene_externals: Vec<String>,
+    /// Each object of `file`: its local ID, its class's managed name, and the
+    /// source it comes from (GUID and file ID).
+    pub objects: Vec<(i64, String, String, i64)>,
+}
+
+/// The path a written file names an external reference by, as the worker's
+/// files do: the engine's own resources by their place, any other source
+/// (a shader, which the session publishes) as `ume-asset/<GUID>`.
+pub fn external_path(guid: &str) -> String {
+    match guid {
+        BUILTIN_EXTRA => "Resources/unity_builtin_extra".into(),
+        DEFAULT_RESOURCES => "Library/unity default resources".into(),
+        other => format!("ume-asset/{other}"),
+    }
+}
+
+/// The managed name of an engine class, as the worker reports its objects.
+fn managed_class_name(type_name: &str) -> String {
+    match type_name {
+        "AnimatorController" => "UnityEditor.Animations.AnimatorController".into(),
+        "AudioMixerController" | "AudioMixerGroupController" | "AudioMixerSnapshotController" => {
+            format!("UnityEditor.Audio.{type_name}")
+        }
+        "MonoScript" => "UnityEditor.MonoScript".into(),
+        "SpriteAtlas" => "UnityEngine.U2D.SpriteAtlas".into(),
+        other => format!("UnityEngine.{other}"),
+    }
+}
+
+/// Rewrites every pointer of a value.
+fn map_pointers(value: &mut Val, map: &mut impl FnMut(i64, i64) -> (i64, i64)) {
+    match value {
+        Val::Map(fields) => {
+            if fields.len() == 2
+                && fields[0].0 == "m_FileID"
+                && fields[1].0 == "m_PathID"
+                && let (Val::I(file), Val::I(path)) = (&fields[0].1, &fields[1].1)
+            {
+                let (file, path) = map(*file, *path);
+                fields[0].1 = Val::I(file);
+                fields[1].1 = Val::I(path);
+                return;
+            }
+            for (_, field) in fields.iter_mut() {
+                map_pointers(field, map);
+            }
+        }
+        Val::Seq(items) => items.iter_mut().for_each(|item| map_pointers(item, map)),
+        _ => {}
+    }
+}
+
+pub fn write_closure(
+    library: &Library,
+    tags: &Tags,
+    sources: &Sources,
+    roots: &[&str],
+    format: FileFormat,
+    stream_name: &str,
+    builtin_extra: Option<&Path>,
+) -> Result<Assembled> {
+    write_scene_closure(
+        library,
+        tags,
+        sources,
+        roots,
+        None,
+        format,
+        stream_name,
+        builtin_extra,
+    )
 }
 
 enum Source {
@@ -48,11 +123,16 @@ fn engine_resource(guid: &str) -> bool {
     guid.starts_with("0000000000000000")
 }
 
-pub fn write_closure(
+/// Writes the closure of `roots`; with `scene`, one of them, the scene's own
+/// objects (and its lighting settings) go to a file of their own that refers
+/// to the closure's, as a build writes a scene beside what it refers to.
+#[allow(clippy::too_many_arguments)]
+pub fn write_scene_closure(
     library: &Library,
     tags: &Tags,
     sources: &Sources,
     roots: &[&str],
+    scene: Option<&str>,
     format: FileFormat,
     stream_name: &str,
     builtin_extra: Option<&Path>,
@@ -64,6 +144,7 @@ pub fn write_closure(
     let mut queue: VecDeque<String> = roots.iter().map(|g| g.to_string()).collect();
     let mut seen: HashSet<String> = queue.iter().cloned().collect();
     let mut unpacked = super::prefab::Unpacked::default();
+    let renames = sources.renames();
     while let Some(guid) = queue.pop_front() {
         let Some(path) = sources.path(&guid) else {
             assembled
@@ -90,9 +171,12 @@ pub fn write_closure(
                 continue;
             }
         };
+        // What an unwritten object (an instance of a prefab, which unpacking
+        // has merged) names is not a dependency, nor what a field the Player
+        // lacks does (a font asset's `m_SourceFontFile_EditorRef`).
         if let Source::Yaml(documents) = &source {
-            for document in documents {
-                for reference in references(&serde_json::Value::Object(document.data.clone())) {
+            for document in documents.iter().filter(|d| written(d)) {
+                for reference in dependencies(library, &renames, sources, document) {
                     if !reference.guid.is_empty()
                         && !engine_resource(&reference.guid)
                         && seen.insert(reference.guid.clone())
@@ -112,8 +196,8 @@ pub fn write_closure(
         let mut wanted: Vec<i64> = Vec::new();
         for source in loaded.values() {
             if let Source::Yaml(documents) = source {
-                for document in documents {
-                    for reference in references(&serde_json::Value::Object(document.data.clone())) {
+                for document in documents.iter().filter(|d| written(d)) {
+                    for reference in dependencies(library, &renames, sources, document) {
                         if reference.guid == BUILTIN_EXTRA {
                             wanted.push(reference.file_id);
                         }
@@ -217,7 +301,6 @@ pub fn write_closure(
         }
     }
     let mut shader_textures = ShaderTextures::default();
-    let renames = sources.renames();
     let mut externals: Vec<String> = Vec::new();
     let mut objects: Vec<(i64, Arc<TypeTree>, Val, Option<i64>)> = Vec::new();
     let script_tree = library
@@ -345,6 +428,12 @@ pub fn write_closure(
                         if let Some(id) = ids.get(&(owner.clone(), reference.file_id)) {
                             return Ok(Some((0, *id)));
                         }
+                        // A reference to an asset the project lacks is null,
+                        // as the worker writes it; the engine's own files
+                        // have no source.
+                        if sources.path(owner).is_none() && !owner.starts_with("0000000000000000") {
+                            return Ok(None);
+                        }
                         let position = match externals.iter().position(|g| g == owner) {
                             Some(position) => position,
                             None => {
@@ -467,6 +556,56 @@ pub fn write_closure(
     for (_, _, value, _) in objects.iter_mut() {
         clear_missing(value, &present);
     }
+    // Where each object comes from.
+    let origin: HashMap<i64, (String, i64)> = ids
+        .iter()
+        .map(|((guid, file_id), local)| (*local, (guid.clone(), *file_id)))
+        .collect();
+    // The class of a script-backed object, by its MonoScript's names.
+    let script_names: HashMap<i64, String> = objects
+        .iter()
+        .filter(|(_, tree, ..)| tree.class_id == MONO_SCRIPT)
+        .map(|(id, _, value, _)| {
+            let text = |name: &str| match value.field(name) {
+                Some(Val::Str(text)) => text.clone(),
+                _ => String::new(),
+            };
+            (
+                *id,
+                super::full_name(&text("m_Namespace"), &text("m_ClassName")),
+            )
+        })
+        .collect();
+    let in_scene = |id: i64, tree: &TypeTree| -> bool {
+        scene.is_some_and(|scene| {
+            origin.get(&id).is_some_and(|(guid, _)| guid == scene)
+                || tree.class_id == LIGHTING_SETTINGS
+        })
+    };
+    let (mut scene_objects, objects): (Vec<_>, Vec<_>) = objects
+        .into_iter()
+        .partition(|(id, tree, ..)| in_scene(*id, tree));
+    let paths = |guids: &[String]| -> Vec<super::External> {
+        guids
+            .iter()
+            .map(|guid| super::External {
+                guid: guid.clone(),
+                path: external_path(guid),
+            })
+            .collect()
+    };
+    let deps: HashSet<i64> = objects.iter().map(|(id, ..)| *id).collect();
+    let mut objects = objects;
+    // What the closure keeps of the scene is left out of it.
+    for (_, _, value, _) in objects.iter_mut() {
+        map_pointers(
+            value,
+            &mut |file, path| match file == 0 && !deps.contains(&path) {
+                true => (0, 0),
+                false => (file, path),
+            },
+        );
+    }
     let written: Vec<Object<'_>> = objects
         .iter()
         .map(|(local_id, tree, value, script)| {
@@ -475,18 +614,92 @@ pub fn write_closure(
                 tree,
                 data: tree.encode(value)?,
                 script: *script,
+                script_file: 0,
             })
         })
         .collect::<Result<_>>()?;
-    let references: Vec<super::External> = externals
+    assembled.file = super::write_in(format, &written, &paths(&externals))?;
+    assembled.objects = objects
         .iter()
-        .map(|guid| super::External { guid: guid.clone() })
+        .filter_map(|(id, tree, _, script)| {
+            let (guid, file_id) = origin.get(id)?;
+            let class = match script {
+                Some(script) => script_names.get(script).cloned().unwrap_or_default(),
+                None => managed_class_name(&tree.nodes[0].type_name),
+            };
+            Some((*id, class, guid.clone(), *file_id))
+        })
         .collect();
-    assembled.file = super::write_in(format, &written, &references)?;
+    if scene.is_some() {
+        // The scene's objects, numbered from 1 in the order a build writes
+        // them: by class, the script-backed last.
+        scene_objects.sort_by_key(|(id, tree, ..)| {
+            let class = tree.class_id;
+            (
+                class == 114,
+                if class == LIGHTING_SETTINGS {
+                    i32::MAX
+                } else {
+                    class
+                },
+                *id,
+            )
+        });
+        let local: HashMap<i64, i64> = scene_objects
+            .iter()
+            .enumerate()
+            .map(|(index, (id, ..))| (*id, index as i64 + 1))
+            .collect();
+        // The closure's file is the scene's first external reference.
+        let mut scene_externals: Vec<String> = Vec::new();
+        for (_, _, value, _) in scene_objects.iter_mut() {
+            map_pointers(value, &mut |file, path| match file {
+                0 if path == 0 => (0, 0),
+                0 => match local.get(&path) {
+                    Some(own) => (0, *own),
+                    None if deps.contains(&path) => (1, path),
+                    None => (0, 0),
+                },
+                n => {
+                    let guid = &externals[n as usize - 1];
+                    let position = match scene_externals.iter().position(|known| known == guid) {
+                        Some(position) => position,
+                        None => {
+                            scene_externals.push(guid.clone());
+                            scene_externals.len() - 1
+                        }
+                    };
+                    (position as i64 + 2, path)
+                }
+            });
+        }
+        let written: Vec<Object<'_>> = scene_objects
+            .iter()
+            .map(|(id, tree, value, script)| {
+                Ok(Object {
+                    local_id: local[id],
+                    tree,
+                    data: tree.encode(value)?,
+                    script: *script,
+                    script_file: script.map_or(0, |_| 1),
+                })
+            })
+            .collect::<Result<_>>()?;
+        let mut references = vec![super::External {
+            guid: String::new(),
+            path: "ume-deps".into(),
+        }];
+        references.extend(paths(&scene_externals));
+        assembled.scene = Some(super::write_in(format, &written, &references)?);
+        assembled.scene_externals = scene_externals;
+    }
     assembled.externals = externals;
     assembled.sources = order.len();
     Ok(assembled)
 }
+
+/// A scene's lighting settings, which a build writes into the scene.
+const LIGHTING_SETTINGS: i32 = 850_595_691;
 
 const PREFAB_INSTANCE: i64 = 1001;
 const MATERIAL: i64 = 21;
@@ -774,8 +987,14 @@ fn clear_missing(value: &mut Val, present: &HashSet<i64>) {
 /// Documents a build writes: not the prefab instance records and their
 /// stripped stand-ins, which a build resolves into the objects they stand
 /// for.
+/// A scene's occlusion culling settings and its list of roots are the
+/// Editor's, which a build leaves out of the scene.
+const OCCLUSION_CULLING_SETTINGS: i64 = 29;
+const SCENE_ROOTS: i64 = 1_660_057_539;
+
 fn written(document: &Document) -> bool {
-    !document.stripped && document.class_id != PREFAB_INSTANCE
+    !document.stripped
+        && ![PREFAB_INSTANCE, OCCLUSION_CULLING_SETTINGS, SCENE_ROOTS].contains(&document.class_id)
 }
 
 fn align(stream: &mut Vec<u8>) -> usize {
@@ -825,6 +1044,31 @@ fn load(path: &Path, guid: &str, sources: &Sources) -> Result<Option<Source>> {
 }
 
 /// Every reference a document's fields hold.
+/// The references of the fields of a document the Player reads.
+fn dependencies(
+    library: &Library,
+    renames: &super::authored::Renames,
+    sources: &Sources,
+    document: &Document,
+) -> Vec<Reference> {
+    let script = if document.class_id == 114 {
+        document
+            .data
+            .get("m_Script")
+            .and_then(Reference::from_value)
+            .and_then(|r| sources.script_class(&r.guid))
+    } else {
+        None
+    };
+    let read = super::authored::fields_read(library, renames, document, script.as_deref());
+    document
+        .data
+        .iter()
+        .filter(|(name, _)| read.as_ref().is_none_or(|read| read.contains(*name)))
+        .flat_map(|(_, value)| references(value))
+        .collect()
+}
+
 fn references(value: &serde_json::Value) -> Vec<Reference> {
     let mut found = Vec::new();
     let mut pending = vec![value];

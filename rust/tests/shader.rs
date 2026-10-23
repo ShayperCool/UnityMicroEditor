@@ -235,6 +235,7 @@ fn artifact(name: &str) -> Vec<u8> {
             tree: &tree,
             data,
             script: None,
+            script_file: 0,
         }],
         &[],
     )
@@ -329,7 +330,8 @@ fn fallback_and_used_passes_refer_to_other_published_shaders() {
         assert_eq!(
             baked.externals,
             [playerbake::External {
-                guid: guid.to_string()
+                guid: guid.to_string(),
+                path: String::new(),
             }],
             "{name}"
         );

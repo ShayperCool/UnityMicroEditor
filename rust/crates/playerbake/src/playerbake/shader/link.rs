@@ -262,7 +262,10 @@ pub(super) fn resolve(parsed: &Val, sources: &dyn ShaderSources) -> Result<Links
                 let position = match externals.iter().position(|known| known.guid == *guid) {
                     Some(position) => position,
                     None => {
-                        externals.push(External { guid: guid.clone() });
+                        externals.push(External {
+                            guid: guid.clone(),
+                            path: String::new(),
+                        });
                         externals.len() - 1
                     }
                 };

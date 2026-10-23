@@ -11,8 +11,11 @@ pub struct Object<'a> {
     pub tree: &'a TypeTree,
     pub data: Vec<u8>,
     /// For an object of a script class: the local ID of the `MonoScript`
-    /// object in the same file that names the class.
+    /// object that names the class.
     pub script: Option<i64>,
+    /// The file that `MonoScript` lies in: 0 for this one, else the position
+    /// of an external reference plus one.
+    pub script_file: i32,
 }
 
 /// Another source asset this file refers to, in external-reference order.
@@ -20,6 +23,10 @@ pub struct Object<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct External {
     pub guid: String,
+    /// The path the reference names, as the worker's files name theirs
+    /// (`ume-deps`, `ume-asset/<guid>`, `Library/unity default resources`),
+    /// or empty for the Player to take the file by position.
+    pub path: String,
 }
 
 /// A class of which objects of the file hold objects by managed reference:
@@ -135,23 +142,24 @@ fn write_file(
     // One type per class and, for script classes, per script, in order of
     // first use. The Player finds the class of a script-backed object through
     // the script type table, which lists the `MonoScript` objects by ID.
-    let mut types: Vec<(&TypeTree, Option<i64>)> = Vec::new();
+    let mut types: Vec<(&TypeTree, Option<(i32, i64)>)> = Vec::new();
     let mut scripts = std::collections::BTreeSet::new();
     for object in objects {
         if (object.tree.class_id == SCRIPT_CLASS) != object.script.is_some() {
             bail!("exactly the objects of script classes name a script");
         }
         if let Some(script) = object.script {
-            if !objects.iter().any(|other| other.local_id == script) {
+            if object.script_file == 0 && !objects.iter().any(|other| other.local_id == script) {
                 bail!("script-backed object names a script outside its file");
             }
-            scripts.insert(script);
+            scripts.insert((object.script_file, script));
         }
+        let script = object.script.map(|id| (object.script_file, id));
         if !types
             .iter()
-            .any(|(tree, script)| tree.class_id == object.tree.class_id && *script == object.script)
+            .any(|(tree, known)| tree.class_id == object.tree.class_id && *known == script)
         {
-            types.push((object.tree, object.script));
+            types.push((object.tree, script));
         }
     }
     if scripts.len() > i16::MAX as usize {
@@ -165,7 +173,8 @@ fn write_file(
         let index = types
             .iter()
             .position(|(tree, script)| {
-                tree.class_id == object.tree.class_id && *script == object.script
+                tree.class_id == object.tree.class_id
+                    && *script == object.script.map(|id| (object.script_file, id))
             })
             .unwrap();
         for kind in held {
@@ -232,7 +241,8 @@ fn write_file(
         let index = types
             .iter()
             .position(|(tree, script)| {
-                tree.class_id == object.tree.class_id && *script == object.script
+                tree.class_id == object.tree.class_id
+                    && *script == object.script.map(|id| (object.script_file, id))
             })
             .unwrap();
         meta.extend_from_slice(&object.local_id.to_le_bytes());
@@ -242,21 +252,22 @@ fn write_file(
         data.extend_from_slice(&object.data);
     }
     meta.extend_from_slice(&(scripts.len() as u32).to_le_bytes());
-    for script in &scripts {
+    for (file, script) in &scripts {
         while !(48 + meta.len()).is_multiple_of(4) {
             meta.push(0);
         }
-        meta.extend_from_slice(&0i32.to_le_bytes()); // This file.
+        meta.extend_from_slice(&file.to_le_bytes());
         meta.extend_from_slice(&script.to_le_bytes());
     }
     meta.extend_from_slice(&(externals.len() as u32).to_le_bytes());
-    // An external reference carries no GUID or path: the Player then takes
-    // the file from the dependency list it is given, by position. With a GUID
-    // it would look the file up itself and find nothing.
-    for _ in externals {
+    // An external reference carries no GUID: the Player then takes the file
+    // from the dependency list it is given, by position. With a GUID it would
+    // look the file up itself and find nothing. The path only names it.
+    for external in externals {
         meta.push(0);
         meta.extend_from_slice(&[0u8; 16]);
         meta.extend_from_slice(&0u32.to_le_bytes());
+        meta.extend_from_slice(external.path.as_bytes());
         meta.push(0);
     }
     meta.extend_from_slice(&(references.len() as u32).to_le_bytes());
@@ -287,6 +298,10 @@ pub struct Read {
     pub data: Vec<u8>,
     /// The local ID of the object's `MonoScript`, for a script-backed object.
     pub script: Option<i64>,
+    /// The file that `MonoScript` lies in: 0 for this one, else the position
+    /// of an external reference plus one (a scene's behaviours take their
+    /// scripts from its dependencies).
+    pub script_file: i32,
 }
 
 /// Reads the objects of a little-endian SerializedFile v23 with inline type
@@ -480,6 +495,7 @@ fn read_objects(file: &[u8], only: Option<i32>) -> Result<(Vec<Read>, Vec<String
             tree: tree.clone(),
             data: file[start as usize..(start + length) as usize].to_vec(),
             script: None,
+            script_file: 0,
         });
     }
     // Only the external references of a file are asked for.
@@ -495,17 +511,16 @@ fn read_objects(file: &[u8], only: Option<i32>) -> Result<(Vec<Read>, Vec<String
         if names_only {
             continue;
         }
-        if row[..4] != [0; 4] {
-            bail!("SerializedFile takes a script type from another file");
-        }
-        scripts.push(i64::from_le_bytes(row[4..].try_into().unwrap()));
+        let file_index = i32::from_le_bytes(row[..4].try_into().unwrap());
+        scripts.push((file_index, i64::from_le_bytes(row[4..].try_into().unwrap())));
     }
     for (object, index) in objects.iter_mut().zip(indices) {
         if index >= 0 {
-            let Some(script) = scripts.get(index as usize) else {
+            let Some((file_index, script)) = scripts.get(index as usize) else {
                 bail!("SerializedFile script type index is invalid");
             };
             object.script = Some(*script);
+            object.script_file = *file_index;
         }
     }
     let external_count = le32(&mut at)? as usize;
