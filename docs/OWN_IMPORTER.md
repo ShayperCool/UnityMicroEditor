@@ -165,7 +165,7 @@ The rules the engine's trees show, besides the field order:
 - The engine value types (`Vector3` as `Vector3f`, `Color32` as a 4-byte
   `ColorRGBA`, `LayerMask` as `BitField`, `AnimationCurve`, ...) and the
   header every script object starts with (`m_GameObject` to `m_Name`) are
-  templates of the release, taken today from a file the engine wrote.
+  templates of the release (below).
 
 A field an asset lacks (one the class gained after the asset was saved)
 takes what the class's parameterless constructor assigns it, the bases'
@@ -201,13 +201,31 @@ given, which for a session are those its Player runs.
 
 `player-file closure ... --layouts <layouts.json>` takes the trees, samples
 and `MonoScript`s of all scripts from the layouts instead of the worker's
-file (which still gives the classes of the engine and the templates). Main:
+file (which still gives the classes of the engine). Main:
 19666 objects equal against 19721 with the worker's script trees. All 57
 fewer are Odin's: the 26 managers that hold `serializationData` and the
 `MonoScript`s of 31 Odin classes, whose hashes follow the trees; two objects
 whose fields the worker's samples gave wrongly are now equal.
-`Quaternion`, `Matrix4x4`, `RectInt` and `GUIStyle` fields have no template
-in Main's file yet, so five scripts that hold one are not laid out.
+
+The templates of a release ship with the tool
+(`playerbake/engine/<release>/script-templates.bin`, a script type table
+entry with the header, one field per value type named after it, and the
+registry); `closure` and `script-trees ... --unity-version V` take them, and
+`script-trees` reports any that differ from a file's.
+`player-file script-templates <output> <file>...` makes them from files the
+engine wrote: the header and the values scripts hold from script trees in
+the Player's format, a value no script holds from the engine classes that
+hold it (`Quaternion` from `Transform`, `Matrix4x4`, `Bounds`, `Gradient`,
+`Hash128`, `SphericalHarmonicsL2`), without what such a field passes down
+(hidden `0x1`, `0x10`, not animated `0x800000`, aligned after on the value
+itself) and in the shape most of them give it. Where both give a value
+(`Vector2` to `Vector4`, `Color`, `Color32`, `Rect`, `LayerMask`), the two
+agree. 6000.0.71f1's come from the worker's 41 files of Bouncemasters, the
+Editor's `unity_builtin_extra` and its `unity default resources`, which
+holds the only `GUIStyle` (`GUISkin`), in the Editor's trees: that its
+layout in a Player is the same is not checked. No file of the release has
+`RectInt`, `BoundsInt`, `Vector3Int` or `PropertyName`, so a script holding
+one is not laid out (Main: `VectorImage`).
 
 ## Order of work
 

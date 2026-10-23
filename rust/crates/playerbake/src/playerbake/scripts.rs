@@ -121,18 +121,30 @@ fn subtree(nodes: &[Node], index: usize) -> Vec<Node> {
         .collect()
 }
 
+/// Meta flags an engine class's field passes down to the value it holds:
+/// hidden, not editable and not animated.
+const CONTEXT: u32 = HIDDEN | 0x10 | 0x80_0000;
+
+/// The name a pack gives the registry of objects held by managed reference.
+const REGISTRY: &str = "references";
+
 impl Templates {
-    /// Takes the templates from script type trees the engine wrote: the header
-    /// of the first, and each engine value type where a field holds one that
-    /// is not hidden.
+    /// Takes the templates from type trees the engine wrote: the header of the
+    /// first script in the Player's format, and each engine value type where a script field holds one
+    /// that is not hidden. A value type no script holds is taken from the
+    /// classes of the engine that hold it, without the flags their fields pass
+    /// down (hidden, not editable, not animated, aligned after), in the shape
+    /// most of them give it (`AnimationCurve` of floats, not of vectors).
     pub fn of_trees<'a>(trees: impl IntoIterator<Item = &'a TypeTree>) -> Self {
         let mut templates = Templates::default();
+        let mut engine: HashMap<&str, HashMap<Vec<Node>, usize>> = HashMap::new();
         for tree in trees {
-            if tree.class_id != super::typetree::SCRIPT_CLASS {
-                continue;
-            }
             let nodes = &tree.nodes;
-            if templates.header.is_empty() {
+            let script = tree.class_id == super::typetree::SCRIPT_CLASS;
+            // The Editor's own files hold its trees, whose header starts with
+            // `m_ObjectHideFlags`; a Player's starts with `m_GameObject`.
+            let player = nodes.get(1).is_some_and(|node| node.name == "m_GameObject");
+            if script && player && templates.header.is_empty() {
                 let mut index = 1;
                 while index < nodes.len() {
                     let field = subtree(nodes, index);
@@ -148,7 +160,8 @@ impl Templates {
                 }
             }
             for (index, node) in nodes.iter().enumerate().skip(1) {
-                if node.level == 1
+                if script
+                    && node.level == 1
                     && node.type_name == "ManagedReferencesRegistry"
                     && templates.registry.is_empty()
                 {
@@ -160,22 +173,107 @@ impl Templates {
                         })
                         .collect();
                 }
-                if node.meta & HIDDEN != 0 {
+                if script && node.meta & HIDDEN != 0 {
                     continue;
                 }
                 for (csharp, tree_name, size) in ENGINE_VALUES {
-                    if node.type_name == *tree_name
-                        && (*size < -1 || node.size == *size)
-                        && !templates.values.contains_key(*csharp)
-                    {
+                    if node.type_name != *tree_name || (*size >= -1 && node.size != *size) {
+                        continue;
+                    }
+                    // A template is named after its C# type; a field holding
+                    // one takes the field's name.
+                    let mut value = subtree(nodes, index);
+                    value[0].name = (*csharp).to_string();
+                    if script {
                         templates
                             .values
-                            .insert((*csharp).to_string(), subtree(nodes, index));
+                            .entry((*csharp).to_string())
+                            .or_insert(value);
+                    } else {
+                        for (at, node) in value.iter_mut().enumerate() {
+                            node.meta &= !CONTEXT;
+                            if at == 0 {
+                                node.meta &= !ALIGN;
+                            }
+                            node.align = node.meta & ALIGN != 0;
+                        }
+                        *engine.entry(csharp).or_default().entry(value).or_default() += 1;
                     }
                 }
             }
         }
+        for (csharp, shapes) in engine {
+            if templates.values.contains_key(csharp) {
+                continue;
+            }
+            let mut shapes: Vec<_> = shapes.into_iter().collect();
+            shapes.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.len().cmp(&b.0.len())));
+            templates
+                .values
+                .insert(csharp.to_string(), shapes.swap_remove(0).0);
+        }
         templates
+    }
+
+    /// The templates of a release the tool ships, written by `to_pack`.
+    pub fn of_release(unity_version: &str) -> Option<Self> {
+        let entry: &'static [u8] = match unity_version {
+            "6000.0.71f1" => include_bytes!("engine/6000.0.71f1/script-templates.bin"),
+            _ => return None,
+        };
+        let tree = TypeTree::parse(entry).expect("a shipped pack of templates parses");
+        Some(Self::of_pack(&tree))
+    }
+
+    /// Reads templates back from the tree `to_pack` made.
+    pub fn of_pack(tree: &TypeTree) -> Self {
+        let mut templates = Templates::default();
+        let nodes = &tree.nodes;
+        let mut index = 1;
+        let mut header = true;
+        while index < nodes.len() {
+            let field = subtree(nodes, index);
+            index += field.len();
+            if header {
+                header = field[0].name != "m_Name";
+                templates.header.extend(field.into_iter().map(|node| Node {
+                    level: node.level + 1,
+                    ..node
+                }));
+            } else if field[0].name == REGISTRY {
+                templates.registry = field
+                    .into_iter()
+                    .map(|node| Node {
+                        level: node.level + 1,
+                        ..node
+                    })
+                    .collect();
+            } else {
+                templates.values.insert(field[0].name.clone(), field);
+            }
+        }
+        templates
+    }
+
+    /// A script type tree that holds every template, the values as fields
+    /// named after their C# types, for a release's pack.
+    pub fn to_pack(&self) -> Result<TypeTree> {
+        let mut nodes = vec![node("MonoBehaviour", "Base", 0, -1, CHILD_ALIGNS)];
+        nodes.extend(self.header.iter().cloned());
+        for value in self.values.iter().collect::<BTreeMap<_, _>>().values() {
+            nodes.extend(value.iter().map(|template| Node {
+                level: template.level + 1,
+                ..template.clone()
+            }));
+        }
+        if let Some((first, rest)) = self.registry.split_first() {
+            nodes.push(Node {
+                name: REGISTRY.to_string(),
+                ..first.clone()
+            });
+            nodes.extend(rest.iter().cloned());
+        }
+        TypeTree::of_nodes(super::typetree::SCRIPT_CLASS, Some([0; 16]), [0; 16], nodes)
     }
 }
 
@@ -753,6 +851,58 @@ mod tests {
             hash.iter().map(|b| format!("{b:02x}")).collect::<String>(),
             "6cd18acc0b48958b0fb76543ed33208d"
         );
+    }
+
+    #[test]
+    fn takes_engine_values_from_engine_classes_without_their_context() {
+        // Transform's rotation, and a hidden one of another engine class.
+        let quaternion = |meta: u32| {
+            let mut nodes = vec![node("Quaternionf", "m_LocalRotation", 1, 16, meta)];
+            for axis in ["x", "y", "z", "w"] {
+                nodes.push(node("float", axis, 2, 4, meta & !ALIGN));
+            }
+            nodes
+        };
+        let tree = |class_id, value: Vec<Node>| {
+            let mut nodes = vec![node("Transform", "Base", 0, -1, 0)];
+            nodes.extend(value);
+            TypeTree::of_nodes(class_id, None, [0; 16], nodes).unwrap()
+        };
+        let trees = [
+            tree(4, quaternion(0x20_4000)),
+            tree(4, quaternion(0x20_0000)),
+            tree(198, quaternion(0xa0_0001)),
+        ];
+        let templates = Templates::of_trees(&trees);
+        assert_eq!(
+            show(&templates.values["Quaternion"]),
+            [
+                "Quaternionf Quaternion 16 0 0x200000",
+                "  float x 4 0 0x200000",
+                "  float y 4 0 0x200000",
+                "  float z 4 0 0x200000",
+                "  float w 4 0 0x200000",
+            ]
+        );
+    }
+
+    #[test]
+    fn reads_the_pack_of_a_release() {
+        let templates = Templates::of_release("6000.0.71f1").unwrap();
+        let back =
+            Templates::of_pack(&TypeTree::parse(templates.to_pack().unwrap().entry).unwrap());
+        assert_eq!(back.values, templates.values);
+        assert_eq!(templates.header.len(), 11);
+        assert_eq!(templates.header[0].name, "m_GameObject");
+        for value in [
+            "Vector3",
+            "Quaternion",
+            "Matrix4x4",
+            "GUIStyle",
+            "AnimationCurve",
+        ] {
+            assert!(templates.values.contains_key(value), "{value}");
+        }
     }
 
     /// Layouts as the engine wrote them for Bouncemasters' scripts (6000.0.71f1).

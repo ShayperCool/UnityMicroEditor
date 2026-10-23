@@ -7,7 +7,7 @@ use std::borrow::Cow;
 /// Unity's common type-tree string table, as stored in the pinned Player.
 static COMMON_STRINGS: &[u8] = include_bytes!("engine/common-strings.bin");
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Node {
     pub type_name: String,
     pub name: String,

@@ -265,12 +265,78 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                 }
             }
         }
-        ["script-trees", layouts, file] => {
+        ["script-templates", output, files @ ..] => {
+            use unity_micro_editor::playerbake as bake;
+            let mut trees = Vec::new();
+            for file in files {
+                let data = fs::read(file)?;
+                match bake::read_serialized_with_externals(&data) {
+                    Ok((objects, _)) => trees.extend(objects.into_iter().map(|object| object.tree)),
+                    Err(error) => eprintln!("{file} skipped: {error:#}"),
+                }
+            }
+            let templates = bake::Templates::of_trees(trees.iter().map(|tree| &**tree));
+            let scripts = bake::Templates::of_trees(
+                trees
+                    .iter()
+                    .filter(|tree| tree.class_id == 114)
+                    .map(|tree| &**tree),
+            );
+            let pack = templates.to_pack()?;
+            let back = bake::Templates::of_pack(&bake::TypeTree::parse(pack.entry.clone())?);
+            if back.header != templates.header
+                || back.registry != templates.registry
+                || back.values != templates.values
+            {
+                anyhow::bail!("the pack does not read back as its templates");
+            }
+            let mut names: Vec<_> = templates.values.keys().collect();
+            names.sort();
+            for name in names {
+                let from = match scripts.values.contains_key(name) {
+                    true => "a script",
+                    false => "the engine's classes",
+                };
+                println!(
+                    "{name}: {} nodes, from {from}",
+                    templates.values[name].len()
+                );
+            }
+            println!(
+                "header {} nodes, registry {} nodes",
+                templates.header.len(),
+                templates.registry.len()
+            );
+            fs::write(output, &pack.entry)?;
+        }
+        ["script-trees", layouts, file, rest @ ..] => {
             use unity_micro_editor::playerbake as bake;
             let layouts: bake::Layouts = serde_json::from_slice(&fs::read(layouts)?)?;
             let data = fs::read(file)?;
             let (objects, _) = bake::read_serialized_with_externals(&data)?;
-            let templates = bake::Templates::of_trees(objects.iter().map(|o| &*o.tree));
+            let mut templates = bake::Templates::of_trees(objects.iter().map(|o| &*o.tree));
+            // With a release, the layouts take its pack's templates, which must
+            // agree with those of the file.
+            if let ["--unity-version", version] = rest {
+                let Some(pack) = bake::Templates::of_release(version) else {
+                    anyhow::bail!("no templates for {version}");
+                };
+                let script_values = bake::Templates::of_trees(
+                    objects
+                        .iter()
+                        .filter(|o| o.tree.class_id == 114)
+                        .map(|o| &*o.tree),
+                );
+                for (name, value) in &script_values.values {
+                    if pack.values.get(name) != Some(value) {
+                        println!("template {name} differs from the pack's");
+                    }
+                }
+                if pack.header != templates.header {
+                    println!("the script header differs from the pack's");
+                }
+                templates = pack;
+            }
             let mut names = std::collections::HashMap::new();
             let mut assemblies = std::collections::HashMap::new();
             for object in objects.iter().filter(|o| o.tree.class_id == 115) {
@@ -414,17 +480,23 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
             );
             let mut library = Library::read(&libraries)?;
             // Script layouts from the compiled assemblies, in place of the
-            // libraries' script trees; the engine's templates from those files.
+            // libraries' script trees; the engine's templates from the
+            // release's pack, or else from those files.
             if let Some(path) = layouts_path {
                 use unity_micro_editor::playerbake as bake;
                 let layouts: bake::Layouts = serde_json::from_slice(&fs::read(path)?)?;
-                let mut trees = Vec::new();
-                for file in &libraries {
-                    let data = fs::read(file)?;
-                    let (objects, _) = bake::read_serialized_with_externals(&data)?;
-                    trees.extend(objects.into_iter().map(|object| object.tree));
-                }
-                let templates = bake::Templates::of_trees(trees.iter().map(|tree| &**tree));
+                let templates = match bake::Templates::of_release(format.unity_version) {
+                    Some(templates) => templates,
+                    None => {
+                        let mut trees = Vec::new();
+                        for file in &libraries {
+                            let data = fs::read(file)?;
+                            let (objects, _) = bake::read_serialized_with_externals(&data)?;
+                            trees.extend(objects.into_iter().map(|object| object.tree));
+                        }
+                        bake::Templates::of_trees(trees.iter().map(|tree| &**tree))
+                    }
+                };
                 let layout = bake::Layout::new(&layouts, &templates);
                 for (name, error) in library.add_scripts(&layout)? {
                     println!("script {name} not laid out: {error}");
