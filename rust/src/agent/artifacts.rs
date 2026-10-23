@@ -112,13 +112,18 @@ pub fn capture_preparation_artifacts(
         }
         Ok(Walk::Continue)
     })?;
+    // Read once: the manifest of a large game is megabytes.
+    let mut accepted_manifest = None;
     for assembly in descriptor.compiler.assemblies.iter() {
         add(&assembly.path, &assembly.sha256)?;
         if !assembly.assembly_input_hash.is_empty()
             || descriptor.compiler.backend == "authored_source"
         {
-            let (accepted, locator) = compiler_manifest(baseline)?;
-            let configuration = preparation_assembly_descriptor(&locator, assembly, &accepted)?;
+            if accepted_manifest.is_none() {
+                accepted_manifest = Some(compiler_manifest(baseline)?);
+            }
+            let (accepted, locator) = accepted_manifest.as_ref().expect("read above");
+            let configuration = preparation_assembly_descriptor(locator, assembly, accepted)?;
             add(&configuration, "")?;
         }
     }

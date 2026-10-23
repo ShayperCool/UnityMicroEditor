@@ -259,7 +259,6 @@ fn package_tree_hash(
     })?;
     names.sort();
     let mut hash = Sha256::new();
-    let mut actual_total: i64 = 0;
     for (relative, path) in &names {
         ctx.err()?;
         if normalize_manifest && relative == b"package.json" {
@@ -274,16 +273,13 @@ fn package_tree_hash(
             hash.update(b"\n");
             continue;
         }
-        let mut file = open(path)?.take((max_bytes - actual_total + 1) as u64);
-        let mut file_hash = Sha256::new();
-        let copied = io::copy(&mut file, &mut file_hash).map_err(path_error("read", path))?;
-        actual_total += copied as i64;
-        if actual_total > max_bytes {
-            bail!("package file grew beyond byte bound");
-        }
+        // Taken from the hashes kept across processes while the file's
+        // metadata is as it was: a preparation checks every package's tree
+        // several times, some 10 000 files for a large game.
+        let file_hash = crate::hashstore::file_sha256(&utf8(path)?)?;
         hash.update(relative);
         hash.update(b"\0");
-        hash.update(crate::hex(&file_hash.finalize()).as_bytes());
+        hash.update(file_hash.as_bytes());
         hash.update(b"\n");
     }
     Ok(crate::hex(&hash.finalize()))

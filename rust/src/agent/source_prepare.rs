@@ -11,7 +11,7 @@ use crate::{
     project::is_owned_cache_path,
     sourcegraph::{
         SourceGraphOptions, build_source_graph, capture_engine_profile, load_engine_profile,
-        prepare_source_compiler_graph,
+        prepare_source_compiler_graph_from,
     },
     sysutil,
     util::{agent_id, agent_immutable_json},
@@ -472,7 +472,12 @@ impl Service {
                 return Err(error);
             }
             self.stage("compile_scripts", "", "");
-            prepare_source_compiler_graph(ctx, &options, &compiler_path)?;
+            prepare_source_compiler_graph_from(ctx, &options, graph, &compiler_path)?;
+        }
+        // A catalog of package identities is made from the graph again when
+        // the preparation that made it was removed.
+        if !native.is_empty() && stat(&native).is_err_and(|error| not_exist(&error)) {
+            native.clear();
         }
         if native.is_empty() {
             // The import worker brings native content while the baseline is

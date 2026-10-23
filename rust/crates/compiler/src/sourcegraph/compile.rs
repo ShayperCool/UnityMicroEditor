@@ -30,6 +30,18 @@ pub fn prepare_source_compiler_graph(
     prepare_source_compiler_graph_with(ctx, options, output, &publish_baseline)
 }
 
+/// [`prepare_source_compiler_graph`] of a graph the caller just built with
+/// the same options; the sources are compared with it again before the
+/// baseline is published.
+pub fn prepare_source_compiler_graph_from(
+    ctx: &Context,
+    options: &SourceGraphOptions,
+    graph: CompilerGraphExport,
+    output: &str,
+) -> Result<CompilerPreparationResult> {
+    prepare(ctx, options, Some(graph), output, &publish_baseline)
+}
+
 /// `publish` is the seam for publishing the prepared baseline.
 pub fn prepare_source_compiler_graph_with(
     ctx: &Context,
@@ -37,8 +49,21 @@ pub fn prepare_source_compiler_graph_with(
     output: &str,
     publish: PublishBaseline,
 ) -> Result<CompilerPreparationResult> {
+    prepare(ctx, options, None, output, publish)
+}
+
+fn prepare(
+    ctx: &Context,
+    options: &SourceGraphOptions,
+    graph: Option<CompilerGraphExport>,
+    output: &str,
+    publish: PublishBaseline,
+) -> Result<CompilerPreparationResult> {
     validate_source_output(&options.project, output)?;
-    let graph = build_source_graph(ctx, options)?;
+    let graph = match graph {
+        Some(graph) => graph,
+        None => build_source_graph(ctx, options)?,
+    };
     agent_canonical(output)?;
     let directory = sysutil::dir(output);
     fs::DirBuilder::new()

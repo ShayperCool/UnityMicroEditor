@@ -15,7 +15,8 @@ mod tests;
 pub use cli::run_source_graph_cli;
 pub use compile::{
     SourceGraphDifference, compare_source_graphs, plugin_reference_paths,
-    prepare_source_compiler_graph, prepare_source_compiler_graph_with,
+    prepare_source_compiler_graph, prepare_source_compiler_graph_from,
+    prepare_source_compiler_graph_with,
 };
 pub use options::{
     SourcePlugin, SourceVersion, apply_response_files, compare_versions, lossy_runes,
