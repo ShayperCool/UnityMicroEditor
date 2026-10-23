@@ -13,6 +13,7 @@ serde.workspace = true
 serde_json.workspace = true
 xxhash-rust.workspace = true
 lz4-sys.workspace = true
+png.workspace = true
 
 [dev-dependencies]
 ume-base = { workspace = true, features = ["testing"] }

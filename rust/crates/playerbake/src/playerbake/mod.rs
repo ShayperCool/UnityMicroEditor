@@ -2,6 +2,8 @@
 //! file format and type trees, the shaders of a built-in render pipeline
 //! baked from their sources, and the settings managers of a Player written
 //! from the project's settings.
+mod assemble;
+mod authored;
 mod compare;
 mod managers;
 mod serialized;
@@ -9,8 +11,14 @@ mod shader;
 mod shader_names;
 mod source;
 mod text_values;
+mod texture;
 mod typetree;
 
+pub use assemble::{Assembled, write_closure};
+pub use authored::{
+    Converted, Kind, Library, MONO_SCRIPT, Reference, Resolve, Sources, Tags, Written,
+    convert as convert_authored, full_name, write_source,
+};
 pub use compare::{Difference, Inspected, compare as compare_files, inspect as inspect_file};
 pub use managers::{
     ManagerReport, PlainFile, compare_managers, manager_trees, write_project_managers,

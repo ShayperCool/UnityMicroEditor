@@ -186,7 +186,129 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                 }
             }
         }
-        _ => anyhow::bail!("player-file dump <file> | compare <ours> <theirs> [--tolerance T]"),
+        ["closure", rest @ ..] => {
+            use unity_micro_editor::playerbake::{
+                FileFormat, Library, Sources, Tags, write_closure,
+            };
+            let mut libraries = Vec::new();
+            let mut roots = Vec::new();
+            let (mut project, mut output, mut version) = (None, None, None);
+            let mut items = rest.iter();
+            while let Some(flag) = items.next() {
+                let value = items
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("{flag} needs a value"))?;
+                match *flag {
+                    "--library" => libraries.push(Path::new(*value)),
+                    "--project" => project = Some(Path::new(*value)),
+                    "--root" => roots.push(*value),
+                    "--output" => output = Some(Path::new(*value)),
+                    "--unity-version" => version = Some(value.to_string()),
+                    other => anyhow::bail!("unknown flag {other}"),
+                }
+            }
+            let (Some(project), Some(output), Some(version)) = (project, output, version) else {
+                anyhow::bail!(
+                    "player-file closure --library F... --project P --root ASSET... --output F --unity-version V"
+                );
+            };
+            let format = FileFormat {
+                version: if version.starts_with("6000.0.") {
+                    22
+                } else {
+                    23
+                },
+                unity_version: Box::leak(version.into_boxed_str()),
+            };
+            let guids: Vec<String> = roots
+                .iter()
+                .map(|root| {
+                    let meta = fs::read_to_string(project.join(format!("{root}.meta")))?;
+                    meta.lines()
+                        .find_map(|line| line.strip_prefix("guid: "))
+                        .map(|guid| guid.trim().to_string())
+                        .ok_or_else(|| anyhow::anyhow!("{root}.meta has no GUID"))
+                })
+                .collect::<Result<_>>()?;
+            let guids: Vec<&str> = guids.iter().map(String::as_str).collect();
+            let stream = format!(
+                "{}.resS",
+                output.file_name().unwrap_or_default().to_string_lossy()
+            );
+            let assembled = write_closure(
+                &Library::read(&libraries)?,
+                &Tags::of_project(project)?,
+                &Sources::of_project(project)?,
+                &guids,
+                format,
+                &stream,
+            )?;
+            fs::write(output, &assembled.file)?;
+            fs::write(output.with_file_name(&stream), &assembled.stream)?;
+            println!(
+                "sources {}, externals {}, refused {}",
+                assembled.sources,
+                assembled.externals.len(),
+                assembled.refused.len()
+            );
+            for (guid, why) in &assembled.refused {
+                println!("refused {guid}: {why}");
+            }
+        }
+        ["convert", rest @ ..] => {
+            use unity_micro_editor::playerbake::{
+                FileFormat, Library, Sources, Tags, write_source,
+            };
+            let mut libraries = Vec::new();
+            let (mut project, mut source, mut output, mut version) = (None, None, None, None);
+            let mut items = rest.iter();
+            while let Some(flag) = items.next() {
+                let value = items
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("{flag} needs a value"))?;
+                match *flag {
+                    "--library" => libraries.push(Path::new(*value)),
+                    "--project" => project = Some(Path::new(*value)),
+                    "--source" => source = Some(*value),
+                    "--output" => output = Some(Path::new(*value)),
+                    "--unity-version" => version = Some(value.to_string()),
+                    other => anyhow::bail!("unknown flag {other}"),
+                }
+            }
+            let (Some(project), Some(source), Some(output), Some(version)) =
+                (project, source, output, version)
+            else {
+                anyhow::bail!(
+                    "player-file convert --library F... --project P --source ASSET --output F --unity-version V"
+                );
+            };
+            let format = FileFormat {
+                version: if version.starts_with("6000.0.") {
+                    22
+                } else {
+                    23
+                },
+                unity_version: Box::leak(version.into_boxed_str()),
+            };
+            let library = Library::read(&libraries)?;
+            let written = write_source(
+                &library,
+                &Tags::of_project(project)?,
+                &Sources::of_project(project)?,
+                &project.join(source),
+                format,
+            )?;
+            fs::write(output, &written.file)?;
+            println!("externals: {}", written.externals.join(" "));
+            for (object, fields) in &written.derived {
+                if !fields.is_empty() {
+                    println!("{object} derived: {}", fields.join(", "));
+                }
+            }
+        }
+        _ => anyhow::bail!(
+            "player-file dump <file> | compare <ours> <theirs> [--tolerance T] | convert ..."
+        ),
     }
     Ok(())
 }

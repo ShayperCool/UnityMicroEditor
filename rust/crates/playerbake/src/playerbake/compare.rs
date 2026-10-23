@@ -318,7 +318,17 @@ fn normalize(
         Val::D(d) => json!(d),
         Val::Str(text) => json!(text),
         Val::Bytes(bytes) => match std::str::from_utf8(bytes) {
-            Ok(text) if bytes.len() <= 256 => json!(text),
+            Ok(text)
+                if bytes.len() <= 256
+                    && !text
+                        .chars()
+                        .any(|c| c.is_control() && c != '\n' && c != '\t') =>
+            {
+                json!(text)
+            }
+            _ if bytes.len() <= 128 => {
+                json!({"$hex": bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()})
+            }
             _ => {
                 json!({"$bytes": format!("{:032x}", xxhash_rust::xxh3::xxh3_128(bytes)), "size": bytes.len()})
             }

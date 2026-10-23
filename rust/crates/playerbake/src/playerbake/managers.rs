@@ -524,7 +524,7 @@ fn settle_player(
     Ok(())
 }
 
-fn guid_words(text: &str) -> Option<[u32; 4]> {
+pub(super) fn guid_words(text: &str) -> Option<[u32; 4]> {
     if text.len() != 32 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
