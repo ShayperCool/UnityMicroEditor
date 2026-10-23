@@ -15,6 +15,22 @@ use std::collections::{BTreeMap, HashMap};
 pub struct Layouts {
     pub scripts: BTreeMap<String, Script>,
     pub types: BTreeMap<String, Composite>,
+    /// The classes fields held by managed reference can hold.
+    #[serde(default)]
+    pub managed: Vec<Managed>,
+}
+
+/// A class an object holds by managed reference, as the asset names it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Managed {
+    pub assembly: String,
+    pub namespace: String,
+    /// `Outer/Inner` for a nested class.
+    pub name: String,
+    /// The name its type tree gives it.
+    pub tree_name: String,
+    pub fields: Vec<Field>,
 }
 
 #[derive(Deserialize)]
@@ -348,6 +364,41 @@ impl<'a> Layout<'a> {
             }
         }
         Ok((tree, sample))
+    }
+
+    /// The type tree of a class held by managed reference, as a file's table
+    /// of such types holds it, and an object of it as its constructor leaves
+    /// it. A class that holds objects by managed reference itself ends in a
+    /// registry, which its objects leave empty.
+    pub fn managed_kind(&self, managed: &Managed) -> Result<(TypeTree, Val)> {
+        let mut nodes = vec![node(&managed.tree_name, "Base", 0, -1, 0)];
+        for field in &managed.fields {
+            self.field(field, 1, 0, &mut nodes).with_context(|| {
+                format!(
+                    "field {} of {}.{}",
+                    field.name, managed.namespace, managed.name
+                )
+            })?;
+        }
+        if nodes.iter().any(|node| node.type_flags & 2 != 0) {
+            if self.templates.registry.is_empty() {
+                bail!("no template of the managed reference registry");
+            }
+            nodes.extend(self.templates.registry.iter().cloned());
+        }
+        settle(&mut nodes);
+        let tree = TypeTree::of_nodes(-1, None, [0; 16], nodes)?;
+        let mut sample = zero(&tree, 0);
+        for field in &managed.fields {
+            if let Some(target) = sample.field_mut(&field.name) {
+                self.apply(&field.kind, field.default.as_ref(), target);
+            }
+        }
+        Ok((tree, sample))
+    }
+
+    pub fn managed(&self) -> &'a [Managed] {
+        &self.layouts.managed
     }
 
     /// Sets what a constructor assigns, over a value of zeros.

@@ -46,6 +46,22 @@ impl ReferenceType<'_> {
             == (other.class_name, other.namespace, other.assembly)
     }
 
+    /// The entry of format 22 (6000.0): the tree's node count and string
+    /// size in place of the second hash and the size of its blob.
+    pub fn entry_in_format_22(&self, position: i16) -> Vec<u8> {
+        let mut entry = Vec::with_capacity(self.blob.len() + 80);
+        entry.extend_from_slice(&(-1i32).to_le_bytes());
+        entry.push(0);
+        entry.extend_from_slice(&position.to_le_bytes());
+        entry.extend_from_slice(&[0u8; 32]);
+        entry.extend_from_slice(self.blob.get(8..).unwrap_or_default());
+        for part in [self.class_name, self.namespace, self.assembly] {
+            entry.extend_from_slice(part.as_bytes());
+            entry.push(0);
+        }
+        entry
+    }
+
     /// The type's entry of a file's table of such types, at a position.
     pub fn entry(&self, position: i16) -> Vec<u8> {
         let mut entry = Vec::with_capacity(self.blob.len() + 96);
@@ -99,12 +115,42 @@ pub fn write(objects: &[Object<'_>], externals: &[External]) -> Result<Vec<u8>> 
 
 /// The same in another release's format. A format-22 file takes its type
 /// trees from files of that format; it holds nothing by managed reference.
+/// The GUID an external reference carries: that of a file of the engine's
+/// own (its default resources, its built-in extra resources), which the
+/// Player finds in its global table by it, in the engine's byte order (the
+/// two digits of each byte swapped); none for another file.
+fn engine_guid(guid: &str) -> [u8; 16] {
+    let mut bytes = [0u8; 16];
+    let digits: Vec<u8> = guid
+        .chars()
+        .filter_map(|c| c.to_digit(16))
+        .map(|d| d as u8)
+        .collect();
+    if digits.len() == 32 && guid.starts_with("0000000000000000") {
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = digits[2 * index] | (digits[2 * index + 1] << 4);
+        }
+    }
+    bytes
+}
+
 pub fn write_in(
     format: FileFormat,
     objects: &[Object<'_>],
     externals: &[External],
 ) -> Result<Vec<u8>> {
     write_file(format, objects, externals, &[])
+}
+
+/// `write_in` of objects that hold others by managed reference: `held`
+/// lists, per object, the types of what it holds, and may end early.
+pub fn write_in_with_references(
+    format: FileFormat,
+    objects: &[Object<'_>],
+    externals: &[External],
+    held: &[Vec<ReferenceType<'_>>],
+) -> Result<Vec<u8>> {
+    write_file(format, objects, externals, held)
 }
 
 /// Writes a file whose objects hold others by managed reference: `held`
@@ -207,9 +253,6 @@ fn write_file(
     if references.len() > i16::MAX as usize {
         bail!("a serialized file holds more managed types than its format indexes");
     }
-    if format.version == 22 && !references.is_empty() {
-        bail!("a file of format 22 that holds objects by managed reference is not written");
-    }
     let mut meta = Vec::new();
     meta.extend_from_slice(format.unity_version.as_bytes());
     meta.push(0);
@@ -276,17 +319,22 @@ fn write_file(
     meta.extend_from_slice(&(externals.len() as u32).to_le_bytes());
     // An external reference carries no GUID: the Player then takes the file
     // from the dependency list it is given, by position. With a GUID it would
-    // look the file up itself and find nothing. The path only names it.
+    // look the file up itself and find nothing. The path only names it. The
+    // engine's own files are the exception: the Player finds them in its
+    // global table, by their GUID, as the worker's files name them.
     for external in externals {
         meta.push(0);
-        meta.extend_from_slice(&[0u8; 16]);
+        meta.extend_from_slice(&engine_guid(&external.guid));
         meta.extend_from_slice(&0u32.to_le_bytes());
         meta.extend_from_slice(external.path.as_bytes());
         meta.push(0);
     }
     meta.extend_from_slice(&(references.len() as u32).to_le_bytes());
     for (position, kind) in references.iter().enumerate() {
-        meta.extend_from_slice(&kind.entry(position as i16));
+        meta.extend_from_slice(&match format.version {
+            22 => kind.entry_in_format_22(position as i16),
+            _ => kind.entry(position as i16),
+        });
     }
     meta.push(0); // User information.
     let mut data_offset = 48 + meta.len();
@@ -316,6 +364,15 @@ pub struct Read {
     /// of an external reference plus one (a scene's behaviours take their
     /// scripts from its dependencies).
     pub script_file: i32,
+    /// The trees of the types the file's objects hold by managed reference.
+    pub references: std::sync::Arc<Vec<super::typetree::ReferenceTree>>,
+}
+
+impl Read {
+    /// The object as a value, what it holds by managed reference included.
+    pub fn decode(&self) -> Result<super::typetree::Val> {
+        self.tree.decode_with(&self.data, &self.references)
+    }
 }
 
 /// Reads the objects of a little-endian SerializedFile v23 with inline type
@@ -510,6 +567,7 @@ fn read_objects(file: &[u8], only: Option<i32>) -> Result<(Vec<Read>, Vec<String
             data: file[start as usize..(start + length) as usize].to_vec(),
             script: None,
             script_file: 0,
+            references: Default::default(),
         });
     }
     // Only the external references of a file are asked for.
@@ -549,6 +607,55 @@ fn read_objects(file: &[u8], only: Option<i32>) -> Result<(Vec<Read>, Vec<String
         let start = at;
         while take(&mut at, 1)?[0] != 0 {}
         externals.push(String::from_utf8_lossy(&file[start..at - 1]).into_owned());
+    }
+    if names_only {
+        return Ok((objects, externals));
+    }
+    // The types the objects hold by managed reference: entries of the type
+    // table's shape, ending in the class name, namespace and assembly.
+    let reference_count = le32(&mut at)? as usize;
+    if reference_count > 4096 {
+        bail!("SerializedFile managed type count is invalid");
+    }
+    let mut references = Vec::with_capacity(reference_count);
+    for _ in 0..reference_count {
+        let header = take(&mut at, 7)?;
+        let hashes = take(&mut at, 32)?;
+        let entry = if version == 23 {
+            let mut entry = header.to_vec();
+            entry.extend_from_slice(&hashes[..16]);
+            entry.extend_from_slice(take(&mut at, 16)?);
+            let blob = le32(&mut at)? as usize;
+            entry.extend_from_slice(&(blob as u32).to_le_bytes());
+            entry.extend_from_slice(take(&mut at, blob)?);
+            entry.extend_from_slice(&0u32.to_le_bytes());
+            entry
+        } else {
+            let nodes = le32(&mut at)?;
+            let chars = le32(&mut at)? as usize;
+            if nodes > 1 << 20 {
+                bail!("SerializedFile managed type tree is invalid");
+            }
+            let tree = take(&mut at, nodes as usize * 32)?;
+            let strings = take(&mut at, chars)?;
+            entry_of_format_22(header, &hashes[..16], nodes, strings, tree, &[0; 4])
+        };
+        let mut name = || -> Result<String> {
+            let start = at;
+            while take(&mut at, 1)?[0] != 0 {}
+            Ok(String::from_utf8_lossy(&file[start..at - 1]).into_owned())
+        };
+        let (class, namespace, assembly) = (name()?, name()?, name()?);
+        references.push((
+            class,
+            namespace,
+            assembly,
+            std::sync::Arc::new(TypeTree::parse(entry)?),
+        ));
+    }
+    let references = std::sync::Arc::new(references);
+    for object in &mut objects {
+        object.references = references.clone();
     }
     Ok((objects, externals))
 }

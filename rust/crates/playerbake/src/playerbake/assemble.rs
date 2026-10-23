@@ -155,6 +155,8 @@ pub fn write_scene_closure(
     // Sources the tool does not write, but shaders, which the session
     // publishes: references to them are written empty.
     let mut left_out: HashSet<String> = HashSet::new();
+    // The package script of each class of the old `UnityEngine.UI.dll`.
+    let mut legacy_ui: HashMap<i64, Option<String>> = HashMap::new();
     while let Some(guid) = queue.pop_front() {
         let Some(path) = sources.path(&guid) else {
             assembled
@@ -164,7 +166,9 @@ pub fn write_scene_closure(
         };
         let source = match load(path, &guid, sources).and_then(|source| match source {
             Some(Source::Yaml(documents)) => {
-                Ok(Some(Source::Yaml(unpacked.unpack(sources, documents)?)))
+                let mut documents = unpacked.unpack(sources, documents)?;
+                legacy_ui_scripts(&mut documents, library, sources, &mut legacy_ui);
+                Ok(Some(Source::Yaml(documents)))
             }
             other => Ok(other),
         }) {
@@ -258,7 +262,13 @@ pub fn write_scene_closure(
     }
     // The script class of each (assembly, file ID) a reference names.
     let mut assembly_classes: HashMap<(String, i64), String> = HashMap::new();
-    // Local IDs: every object of every source, scripts last.
+    // Local IDs: every object of every source, the scripts' first, as the
+    // worker numbers them; the Player then has a behaviour's script loaded
+    // before the behaviour.
+    let (scripts_first, rest): (Vec<&String>, Vec<&String>) = order
+        .iter()
+        .partition(|guid| matches!(loaded[*guid], Source::Script(_) | Source::Assembly(_)));
+    let sequence: Vec<&String> = scripts_first.into_iter().chain(rest).collect();
     let mut ids: HashMap<(String, i64), i64> = HashMap::new();
     let mut next = 1i64;
     let mut images: HashMap<String, texture::Textured> = HashMap::new();
@@ -299,7 +309,7 @@ pub fn write_scene_closure(
             clips.insert((*guid).clone(), result);
         }
     }
-    for guid in &order {
+    for &guid in &sequence {
         match &loaded[guid] {
             Source::Yaml(documents) => {
                 for document in documents.iter().filter(|d| written(d)) {
@@ -369,12 +379,13 @@ pub fn write_scene_closure(
     let mut shader_textures = ShaderTextures::default();
     let mut externals: Vec<String> = Vec::new();
     let mut objects: Vec<(i64, Arc<TypeTree>, Val, Option<i64>)> = Vec::new();
+    let mut held_of: HashMap<i64, Vec<(String, String, String)>> = HashMap::new();
     let script_tree = library
         .class(MONO_SCRIPT)
         .context("no type tree of MonoScript")?
         .tree
         .clone();
-    for guid in &order {
+    for &guid in &sequence {
         match &loaded[guid] {
             Source::Script(name) => {
                 let Some(value) = library.script_object(name) else {
@@ -656,12 +667,11 @@ pub fn write_scene_closure(
                                 .and_then(Reference::from_value)
                                 .filter(|_| document.class_id == 114)
                                 .and_then(|r| ids.get(&(r.guid, r.file_id)).copied());
-                            objects.push((
-                                ids[&(guid.clone(), document.file_id.parse()?)],
-                                converted.tree,
-                                converted.value,
-                                script_id,
-                            ));
+                            let id = ids[&(guid.clone(), document.file_id.parse()?)];
+                            if !converted.held.is_empty() {
+                                held_of.insert(id, converted.held);
+                            }
+                            objects.push((id, converted.tree, converted.value, script_id));
                         }
                         Err(error) => {
                             failed.get_or_insert(format!(
@@ -733,19 +743,61 @@ pub fn write_scene_closure(
             },
         );
     }
+    // The classes each object holds by managed reference, with their trees.
+    let held_trees: HashMap<i64, Vec<super::typetree::ReferenceTree>> = held_of
+        .iter()
+        .map(|(id, held)| {
+            let trees = held
+                .iter()
+                .filter_map(|(class, namespace, assembly)| {
+                    let kind = library.managed(class, namespace, assembly)?;
+                    Some((
+                        class.clone(),
+                        namespace.clone(),
+                        assembly.clone(),
+                        kind.tree.clone(),
+                    ))
+                })
+                .collect();
+            (*id, trees)
+        })
+        .collect();
+    let no_trees = Vec::new();
+    let trees_of = |id: &i64| held_trees.get(id).unwrap_or(&no_trees);
+    let held_types = |objects: &[(i64, Arc<TypeTree>, Val, Option<i64>)]| {
+        objects
+            .iter()
+            .map(|(id, ..)| {
+                trees_of(id)
+                    .iter()
+                    .map(|(class, namespace, assembly, tree)| super::ReferenceType {
+                        class_name: class,
+                        namespace,
+                        assembly,
+                        blob: tree.blob(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
     let written: Vec<Object<'_>> = objects
         .iter()
         .map(|(local_id, tree, value, script)| {
             Ok(Object {
                 local_id: *local_id,
                 tree,
-                data: tree.encode(value)?,
+                data: tree.encode_with(value, trees_of(local_id))?,
                 script: *script,
                 script_file: 0,
             })
         })
         .collect::<Result<_>>()?;
-    assembled.file = super::write_in(format, &written, &paths(&externals))?;
+    assembled.file = super::write_in_with_references(
+        format,
+        &written,
+        &paths(&externals),
+        &held_types(&objects),
+    )?;
     assembled.objects = objects
         .iter()
         .filter_map(|(id, tree, _, script)| {
@@ -806,7 +858,7 @@ pub fn write_scene_closure(
                 Ok(Object {
                     local_id: local[id],
                     tree,
-                    data: tree.encode(value)?,
+                    data: tree.encode_with(value, trees_of(id))?,
                     script: *script,
                     script_file: script.map_or(0, |_| 1),
                 })
@@ -817,7 +869,12 @@ pub fn write_scene_closure(
             path: "ume-deps".into(),
         }];
         references.extend(paths(&scene_externals));
-        assembled.scene = Some(super::write_in(format, &written, &references)?);
+        assembled.scene = Some(super::write_in_with_references(
+            format,
+            &written,
+            &references,
+            &held_types(&scene_objects),
+        )?);
         assembled.scene_externals = scene_externals;
     }
     assembled.externals = externals;
@@ -1193,6 +1250,70 @@ fn load(path: &Path, guid: &str, sources: &Sources) -> Result<Option<Source>> {
         )));
     }
     Ok(None)
+}
+
+/// The GUID of the `UnityEngine.UI.dll` that held uGUI's scripts before uGUI
+/// was a package (Unity 2019.2), which prefabs made then still name.
+const LEGACY_UI_ASSEMBLY: &str = "f70555f144d8491a825f0804e09c671c";
+
+/// Points the references of documents to scripts of the old
+/// `UnityEngine.UI.dll` at the package's scripts of the same classes, as the
+/// Editor finds them: the class whose file ID the reference names, in the
+/// package's assembly.
+fn legacy_ui_scripts(
+    documents: &mut [Document],
+    library: &Library,
+    sources: &Sources,
+    known: &mut HashMap<i64, Option<String>>,
+) {
+    fn visit(
+        value: &mut serde_json::Value,
+        library: &Library,
+        sources: &Sources,
+        known: &mut HashMap<i64, Option<String>>,
+    ) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                if fields.get("guid").and_then(serde_json::Value::as_str)
+                    == Some(LEGACY_UI_ASSEMBLY)
+                    && let Some(file_id) = fields
+                        .get("fileID")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|id| id.parse::<i64>().ok())
+                {
+                    let script = known
+                        .entry(file_id)
+                        .or_insert_with(|| {
+                            let class = library.assembly_script("UnityEngine.UI", file_id)?;
+                            sources.script_guid(&class)
+                        })
+                        .clone();
+                    if let Some(guid) = script {
+                        fields.insert("guid".into(), serde_json::Value::String(guid));
+                        fields.insert(
+                            "fileID".into(),
+                            serde_json::Value::String("11500000".into()),
+                        );
+                    }
+                    return;
+                }
+                for field in fields.values_mut() {
+                    visit(field, library, sources, known);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    visit(item, library, sources, known);
+                }
+            }
+            _ => {}
+        }
+    }
+    for document in documents {
+        for value in document.data.values_mut() {
+            visit(value, library, sources, known);
+        }
+    }
 }
 
 fn is_shader(path: &Path) -> bool {

@@ -289,6 +289,24 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                     );
                 }
             }
+            // The types the objects hold by managed reference.
+            if let Some(object) = objects.first() {
+                for (class, namespace, assembly, tree) in object.references.iter() {
+                    println!("== managed {namespace}.{class} ({assembly})");
+                    for node in &tree.nodes {
+                        println!(
+                            "{}{} {} size={} v={} flags={} meta={:#x}",
+                            "  ".repeat(node.level as usize),
+                            node.type_name,
+                            node.name,
+                            node.size,
+                            node.version,
+                            node.type_flags,
+                            node.meta
+                        );
+                    }
+                }
+            }
         }
         ["script-layouts", project, editor, player, output] => {
             let ctx = unity_micro_editor::mcp::signal_context()?;

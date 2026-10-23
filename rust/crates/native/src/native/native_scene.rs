@@ -23,6 +23,7 @@ use anyhow::{Context as _, Result, bail};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
+    sync::Arc,
     time::Duration,
 };
 
@@ -51,12 +52,34 @@ enum Writer {
     OwnOnly,
 }
 
+/// What the tool's own writer writes depends on its code: the hash of the
+/// running program, taken once.
+fn own_writer_identity() -> &'static str {
+    static IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    IDENTITY.get_or_init(|| {
+        std::env::current_exe()
+            .and_then(std::fs::read)
+            .map(|program| sha256(&program))
+            .unwrap_or_default()
+    })
+}
+
 fn writer() -> Writer {
     match std::env::var("UME_OWN_IMPORTER").as_deref() {
         Ok("only") => Writer::OwnOnly,
         Ok("") | Ok("0") | Err(_) => Writer::Worker,
         Ok(_) => Writer::Own,
     }
+}
+
+/// Assets written on their own: the file, its streamed data by name, each
+/// object (its local ID, class, source GUID and file ID), and the sources'
+/// objects a Player asks for.
+struct WrittenAssets {
+    file: Vec<u8>,
+    resources: Vec<(String, Vec<u8>)>,
+    objects: Vec<(String, String, String, String)>,
+    wanted: BTreeSet<(String, String)>,
 }
 
 /// The scene's file, the file of what it refers to and the files of that
@@ -104,6 +127,85 @@ impl NativeProjectImporter {
         ctx: &Context,
         assets: &[String],
     ) -> Result<NativeAssets> {
+        let written = match writer() {
+            Writer::Worker => self.worker_native_assets(ctx, assets),
+            Writer::OwnOnly => self.own_native_assets(ctx, assets),
+            Writer::Own => self.own_native_assets(ctx, assets).or_else(|error| {
+                Event::new("native-assets-own-failed")
+                    .with("assets", &assets)
+                    .with("error", &format!("{error:#}"))
+                    .emit();
+                self.worker_native_assets(ctx, assets)
+            }),
+        }?;
+        self.publish_native_assets(ctx, assets, written)
+    }
+
+    /// The assets' file as the tool's own writer writes it.
+    fn own_native_assets(&self, ctx: &Context, assets: &[String]) -> Result<WrittenAssets> {
+        let Some((first, rest)) = assets.split_first() else {
+            bail!("no assets to write");
+        };
+        let (library, format) = self.own_library(ctx, first, rest)?;
+        let root = Path::new(&self.opts.project);
+        let editor = sysutil::dir(&self.opts.editor);
+        let builtin_extra = sysutil::join(&[&editor, "Data/Resources/unity_builtin_extra"]);
+        let included: Vec<String> = {
+            let mut session = self.session.lock();
+            session.index_guids()?;
+            assets
+                .iter()
+                .map(|path| session.guid_of(path).to_string())
+                .filter(|guid| !guid.is_empty())
+                .collect()
+        };
+        let roots: Vec<&str> = included.iter().map(String::as_str).collect();
+        let assembled = playerbake::write_scene_closure(
+            &library,
+            &playerbake::Tags::of_project(root)?,
+            &playerbake::Sources::of_project(root)?,
+            &roots,
+            None,
+            format,
+            DEPENDENCIES_STREAM,
+            Some(Path::new(&builtin_extra)),
+        )?;
+        // A prefab by its root, another asset by all its objects.
+        let mut wanted = BTreeSet::new();
+        for (_, class, guid, file_id) in &assembled.objects {
+            if !included.contains(guid) || class == "UnityEditor.MonoScript" {
+                continue;
+            }
+            match assembled.roots.get(guid) {
+                Some(root) if root != file_id => {}
+                _ => {
+                    wanted.insert((guid.clone(), file_id.to_string()));
+                }
+            }
+        }
+        let mut resources = Vec::new();
+        if !assembled.stream.is_empty() {
+            resources.push((DEPENDENCIES_STREAM.to_string(), assembled.stream));
+        }
+        if !assembled.resource.is_empty() {
+            resources.push((DEPENDENCIES_RESOURCE.to_string(), assembled.resource));
+        }
+        Ok(WrittenAssets {
+            file: assembled.file,
+            resources,
+            objects: assembled
+                .objects
+                .into_iter()
+                .map(|(id, class, guid, file_id)| {
+                    (id.to_string(), class, guid, file_id.to_string())
+                })
+                .collect(),
+            wanted,
+        })
+    }
+
+    /// The assets' file as the import worker writes it.
+    fn worker_native_assets(&self, ctx: &Context, assets: &[String]) -> Result<WrittenAssets> {
         let output = sysutil::join(&[&self.opts.native_dir(), "imports", &random_id()]);
         mkdir_all(&output, 0o700)?;
         let build = Build {
@@ -126,6 +228,45 @@ impl NativeProjectImporter {
         let Some(file) = written.dependencies else {
             bail!("the worker wrote nothing of {}", assets.join(", "));
         };
+        let report = &written.report;
+        let wanted: BTreeSet<(String, String)> = report
+            .include_roots
+            .iter()
+            .chain(&report.include_objects)
+            .map(|(guid, id)| (guid.clone(), id.to_string()))
+            .collect();
+        Ok(WrittenAssets {
+            file,
+            resources: written.resources,
+            objects: report
+                .dependencies
+                .iter()
+                .map(|object| {
+                    (
+                        object.index.to_string(),
+                        object.class_name.clone(),
+                        object.guid.clone(),
+                        object.local_id.to_string(),
+                    )
+                })
+                .collect(),
+            wanted,
+        })
+    }
+
+    /// Stores the assets' file and gives what a Player loads of it.
+    fn publish_native_assets(
+        &mut self,
+        ctx: &Context,
+        assets: &[String],
+        written: WrittenAssets,
+    ) -> Result<NativeAssets> {
+        let WrittenAssets {
+            file,
+            resources,
+            objects,
+            wanted,
+        } = written;
         let file_sha = sha256(&file);
         let guid = sha256(format!("ume-native-assets\0{file_sha}").as_bytes())[..32].to_string();
         let directory = sysutil::join(&[
@@ -134,7 +275,7 @@ impl NativeProjectImporter {
             &format!("{guid}-{file_sha}"),
         ]);
         mkdir_all(&directory, 0o700)?;
-        for (name, data) in &written.resources {
+        for (name, data) in &resources {
             let path = sysutil::join(&[&directory, name]);
             if std::fs::metadata(&path).is_err() {
                 super::support::write_immutable_file(&path, data)?;
@@ -150,28 +291,21 @@ impl NativeProjectImporter {
             sha256: file_sha,
             ..Default::default()
         };
-        let report = &written.report;
-        let wanted: BTreeSet<(String, String)> = report
-            .include_roots
-            .iter()
-            .chain(&report.include_objects)
-            .map(|(guid, id)| (guid.clone(), id.to_string()))
-            .collect();
         let mut aliases = Vec::new();
-        for object in &report.dependencies {
-            let source = (object.guid.clone(), object.local_id.to_string());
-            if object.class_name == "UnityEditor.MonoScript" || !wanted.contains(&source) {
+        for (index, class_name, source_guid, local_id) in objects {
+            let source = (source_guid, local_id);
+            if class_name == "UnityEditor.MonoScript" || !wanted.contains(&source) {
                 continue;
             }
             content.objects.push(NativeContentObject {
-                file_id: object.index.to_string(),
-                type_name: object.class_name.clone(),
+                file_id: index.clone(),
+                type_name: class_name,
             });
             aliases.push(NativeSceneAlias {
                 guid: source.0,
                 file_id: source.1,
                 file: guid.clone(),
-                local_id: object.index.to_string(),
+                local_id: index,
             });
         }
         if aliases.is_empty() {
@@ -241,8 +375,10 @@ impl NativeProjectImporter {
         );
         // The writers' files differ: each keeps its own.
         let version = match writer() {
-            Writer::Worker => "native-scene-v4",
-            Writer::Own | Writer::OwnOnly => "native-scene-own-v1",
+            Writer::Worker => "native-scene-v4".to_string(),
+            Writer::Own | Writer::OwnOnly => {
+                format!("native-scene-own-v1\0{}", own_writer_identity())
+            }
         };
         let key = sha256(
             format!(
@@ -447,21 +583,72 @@ impl NativeProjectImporter {
     ) -> Result<WrittenNativeScene> {
         let started = std::time::Instant::now();
         let project = self.opts.project.clone();
+        let (library, format) = self.own_library(ctx, scene, includes)?;
+        let root = Path::new(&project);
+        let editor = sysutil::dir(&self.opts.editor);
+        let builtin_extra = sysutil::join(&[&editor, "Data/Resources/unity_builtin_extra"]);
+        let (scene_guid, included) = {
+            let mut session = self.session.lock();
+            session.index_guids()?;
+            let included: Vec<String> = includes
+                .iter()
+                .map(|path| session.guid_of(path).to_string())
+                .collect();
+            (session.guid_of(scene).to_string(), included)
+        };
+        if scene_guid.is_empty() {
+            bail!("{scene} has no GUID");
+        }
+        let mut roots: Vec<&str> = vec![&scene_guid];
+        roots.extend(
+            included
+                .iter()
+                .map(String::as_str)
+                .filter(|g| !g.is_empty()),
+        );
+        let assembled = playerbake::write_scene_closure(
+            &library,
+            &playerbake::Tags::of_project(root)?,
+            &playerbake::Sources::of_project(root)?,
+            &roots,
+            Some(&scene_guid),
+            format,
+            DEPENDENCIES_STREAM,
+            Some(Path::new(&builtin_extra)),
+        )?;
+        self.finish_own_native_scene(scene, &included, assembled, started)
+    }
+
+    /// The engine's classes of the project's release and its scripts laid
+    /// out as the worker would lay them out (the Editor compilation's
+    /// assemblies and the plugins it names, against the session's Player),
+    /// made once for what those assemblies hold.
+    fn own_library(
+        &self,
+        ctx: &Context,
+        scene: &str,
+        includes: &[String],
+    ) -> Result<(Arc<playerbake::Library>, playerbake::FileFormat)> {
+        let project = self.opts.project.clone();
         if self.opts.player.is_empty() {
             bail!("the tool's own writer lays scripts out against a Player, and there is none");
         }
         let version = crate::engine::project_version(&project)?;
         let format = playerbake::FileFormat::of_release(&version)
             .with_context(|| format!("the tool writes no files of {version}"))?;
+        let sources = super::player_objects::open_sources(&project)?;
+        let environment = super::player_objects::scene_closure(&sources, scene, includes)?
+            .environment(&project)?;
+        let identity = format!("{version}\0{}", environment.sha256);
+        if let Some((known, library)) = self.own_library.lock().unwrap().as_ref()
+            && *known == identity
+        {
+            return Ok((library.clone(), format));
+        }
         let mut library = playerbake::Library::of_release(&version)
             .with_context(|| format!("no pack of the engine classes of {version}"))??;
         let templates = playerbake::Templates::of_release(&version)
             .with_context(|| format!("no script templates of {version}"))?;
-        // The scripts as the worker would lay them out: the Editor
-        // compilation's assemblies and the plugins it names.
-        let sources = super::player_objects::open_sources(&project)?;
-        let environment = super::player_objects::scene_closure(&sources, scene, includes)?
-            .environment(&project)?;
         let mut assemblies = BTreeMap::new();
         for name in &environment.assemblies {
             assemblies.insert(name.clone(), environment.assembly_path(name));
@@ -493,36 +680,19 @@ impl NativeProjectImporter {
         let editor = sysutil::dir(&self.opts.editor);
         playerbake::texcomp::use_editor(Path::new(&editor));
         playerbake::audio::use_editor(Path::new(&editor));
-        let builtin_extra = sysutil::join(&[&editor, "Data/Resources/unity_builtin_extra"]);
-        let (scene_guid, included) = {
-            let mut session = self.session.lock();
-            session.index_guids()?;
-            let included: Vec<String> = includes
-                .iter()
-                .map(|path| session.guid_of(path).to_string())
-                .collect();
-            (session.guid_of(scene).to_string(), included)
-        };
-        if scene_guid.is_empty() {
-            bail!("{scene} has no GUID");
-        }
-        let mut roots: Vec<&str> = vec![&scene_guid];
-        roots.extend(
-            included
-                .iter()
-                .map(String::as_str)
-                .filter(|g| !g.is_empty()),
-        );
-        let assembled = playerbake::write_scene_closure(
-            &library,
-            &playerbake::Tags::of_project(root)?,
-            &playerbake::Sources::of_project(root)?,
-            &roots,
-            Some(&scene_guid),
-            format,
-            DEPENDENCIES_STREAM,
-            Some(Path::new(&builtin_extra)),
-        )?;
+        let library = Arc::new(library);
+        *self.own_library.lock().unwrap() = Some((identity, library.clone()));
+        Ok((library, format))
+    }
+
+    /// The scene's file and its closure's, out of what the writer wrote.
+    fn finish_own_native_scene(
+        &self,
+        scene: &str,
+        included: &[String],
+        assembled: playerbake::Assembled,
+        started: std::time::Instant,
+    ) -> Result<WrittenNativeScene> {
         let Some(scene_file) = assembled.scene else {
             bail!("the tool wrote no file of {scene}");
         };

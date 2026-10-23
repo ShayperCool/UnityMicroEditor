@@ -116,7 +116,7 @@ impl Unpacked {
             }
         }
         if !stand_ins.is_empty() {
-            for document in &mut own {
+            for document in own.iter_mut().chain(instances.iter_mut()) {
                 for value in document.data.values_mut() {
                     redirect(value, &stand_ins);
                 }
@@ -221,6 +221,40 @@ impl Unpacked {
             }
         }
         own.extend(merged);
+        // A transform is among the children of its parent: an instance put
+        // under an object of another instance (in a variant) is listed by
+        // neither file, and goes at the end.
+        let positions: HashMap<i64, usize> = own
+            .iter()
+            .enumerate()
+            .filter_map(|(position, document)| Some((id_of(document).ok()?, position)))
+            .collect();
+        let mut missing: Vec<(usize, i64)> = Vec::new();
+        for document in own.iter().filter(|d| d.class_id == 4 || d.class_id == 224) {
+            let Some(father) = reference(&document.data, "m_Father").filter(|f| f.file_id != 0)
+            else {
+                continue;
+            };
+            let Some(&position) = positions.get(&father.file_id) else {
+                continue;
+            };
+            let id = id_of(document)?;
+            let listed = match own[position].data.get("m_Children") {
+                Some(Value::Array(children)) => children
+                    .iter()
+                    .filter_map(Reference::from_value)
+                    .any(|child| child.file_id == id),
+                _ => true,
+            };
+            if !listed {
+                missing.push((position, id));
+            }
+        }
+        for (position, id) in missing {
+            if let Some(Value::Array(children)) = own[position].data.get_mut("m_Children") {
+                children.push(local(id));
+            }
+        }
         Ok(own)
     }
 

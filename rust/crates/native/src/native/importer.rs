@@ -86,6 +86,9 @@ pub struct NativeProjectImporter {
     /// The worker that writes assets on their own
     /// (`write_native_assets`), so that the scene worker keeps its scenes.
     pub(crate) asset_worker: std::sync::OnceLock<super::scene_worker::SceneWorker>,
+    /// The engine's classes and the scripts' layouts the tool's own writer
+    /// writes with, by what the scripts' assemblies hold.
+    pub(crate) own_library: std::sync::Mutex<Option<(String, Arc<crate::playerbake::Library>)>>,
 }
 
 /// What a published revision was made of; see `unchanged_revision`.
@@ -131,6 +134,7 @@ impl NativeProjectImporter {
             prepared_once: false,
             scene_worker: std::sync::OnceLock::new(),
             asset_worker: std::sync::OnceLock::new(),
+            own_library: std::sync::Mutex::new(None),
         };
         let read_index = |index: &str| -> Result<Option<Option<Vec<NativeReplacement>>>> {
             match read_json_verbatim(index) {

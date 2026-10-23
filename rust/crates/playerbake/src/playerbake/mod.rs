@@ -37,7 +37,8 @@ pub use scripts::{
 pub use serialized::{
     External, FileFormat, Object, Read, ReferenceType, VERIFIED_FORMAT, external_paths,
     local_ids_of_class, read as read_serialized, read_of_class as read_serialized_of_class,
-    read_with_externals as read_serialized_with_externals, write, write_in, write_with_references,
+    read_with_externals as read_serialized_with_externals, write, write_in,
+    write_in_with_references, write_with_references,
 };
 pub use shader::{
     COMPUTE_SHADER_CLASS, COMPUTE_SHADER_LOCAL_ID, FogKeep, LightmapKeep, NoShaders,

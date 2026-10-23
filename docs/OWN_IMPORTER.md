@@ -337,6 +337,29 @@ importers' 6 certificates, and 2 project settings objects
 (`LocalizationSettings`, `UIParticleProjectSettings`), with their 4
 `MonoScript`s.
 
+### Objects held by managed reference
+
+A `[SerializeReference]` field holds the ID of an object (`rid`, or `id` in
+a source of format 1) in the registry `references` at the end of its
+object. The tool writes the registry as the worker does, of format 2: the
+objects by ID in increasing order (a source of format 1 names them by
+hexadecimal keys), each with its class (`class`, `ns`, `asm`, a nested
+class as `Outer/Inner`) and its fields laid out by the class's tree, and,
+when a field holds no object (`-2`, which a field the source lacks holds
+too), a first entry of ID -2 and no class. The file's table of such types
+follows its external references (format 22: the class -1, the index, 32
+zero bytes, the tree's node count, string size, nodes and strings, and the
+three names); a type's tree ends in a registry of its own when it holds
+such fields, which its objects leave out. `ScriptLayouts` lists every
+`[Serializable]` class a field of that kind can hold (assignable to the
+field's declared type, the classes those hold in turn) under `managed`.
+Localization's settings and three locales against the worker's: equal.
+
+A reference to a script of the `UnityEngine.UI.dll` uGUI was before it was
+a package (`f70555f144d8491a825f0804e09c671c`, a prefab of then) names the
+class by its file ID; it is pointed at the package's script of that class
+(`Image.cs`, ...), as the Editor finds it.
+
 ### In a session
 
 `UME_OWN_IMPORTER=1` has a session write its native scenes with the tool's
@@ -345,15 +368,34 @@ starts the worker for them. The engine's classes come from the release's
 pack, the scripts' layouts from the Editor compilation the worker would
 load (its assemblies and plugins over the session Player's `Managed`), the
 texture compressor and `FSBTool` from the installation; the scene and its
-closure are stored under a key of their own (`native-scene-own-v1`).
+closure are stored under a key of their own (`native-scene-own-v1` and
+the hash of the running program, so a rebuilt tool writes them again).
 Shaders stay external and are published by the session as for the worker's
 files; references to other sources the tool does not write yet (models,
 animator controllers, ...) are written empty and reported in
 `native-scene-written`'s `refused`, and an addressed asset of which nothing
-was written is given up with all the others in one pass. Limitations: a
-session still needs the Editor installation (its compressor, `FSBTool`,
-`unity_builtin_extra` and shader compiler), and a scene whose models or
-animations matter plays without them.
+was written is given up with all the others in one pass. The assets Play
+mode code asks for by path are written the same way, with the engine's
+classes and layouts kept for the session.
+
+Two things a Player needs of such files that a comparison of objects does
+not show: the `MonoScript`s come first (local IDs from 1, as the worker
+numbers them), else the Player loads behaviours before their scripts and
+finds them missing; and an external reference to the engine's own files
+(`Library/unity default resources`, `Resources/unity_builtin_extra`)
+carries their GUID, by which the Player finds them in its global table.
+A transform that an instance places under an object of another instance
+(in a variant) is added to its parent's children.
+
+Bouncemasters with `UME_OWN_IMPORTER=only` (2026-10-23): no worker
+started for Loading and Main (3 s and 15 s to write them), the session
+reaches `ready` and Main draws its screen. Limitations: a session still
+needs the Editor installation (its texture compressor, `FSBTool`,
+`unity_builtin_extra` and shader compiler) and the shaders a preparation
+published; sources a `ScriptedImporter` imports (C# of the game's Editor
+code: Bouncemasters' certificates, so its profile client throws), models,
+animator controllers and the scene's lighting data are not written, and
+what refers to them finds nothing.
 
 ### Script type trees
 

@@ -230,17 +230,40 @@ impl TypeTree {
         (parts.len() == 2).then(|| (array, parts[1]))
     }
 
+    /// The tree as a blob of format 23, as its entry holds it.
+    pub fn blob(&self) -> &[u8] {
+        let at = if self.class_id == SCRIPT_CLASS {
+            55
+        } else {
+            39
+        };
+        let size = le32(&self.entry, at) as usize;
+        &self.entry[at + 4..at + 4 + size]
+    }
+
     pub fn encode(&self, value: &Val) -> Result<Vec<u8>> {
+        self.encode_with(value, &[])
+    }
+
+    /// Writes an object whose objects held by managed reference are laid out
+    /// by `references`.
+    pub fn encode_with(&self, value: &Val, references: &ReferenceTrees) -> Result<Vec<u8>> {
         let mut out = Vec::new();
-        self.write(0, value, &mut out)?;
+        self.write(0, value, &mut out, references)?;
         Ok(out)
     }
 
     /// Reads an object written with this tree back into a value. Scalars come
     /// back as `U`, `I`, `F`, `D` or `Bool` by their declared type.
     pub fn decode(&self, data: &[u8]) -> Result<Val> {
+        self.decode_with(data, &[])
+    }
+
+    /// Reads an object whose objects held by managed reference are laid out
+    /// by `references`, the trees of the file's table of such types.
+    pub fn decode_with(&self, data: &[u8], references: &ReferenceTrees) -> Result<Val> {
         let mut at = 0;
-        let value = self.read(0, data, &mut at)?;
+        let value = self.read(0, data, &mut at, references)?;
         if at != data.len() {
             bail!(
                 "object has {} bytes its type tree does not describe",
@@ -257,12 +280,18 @@ impl TypeTree {
         let mut values = Vec::new();
         for child in self.children(0).into_iter().take(fields) {
             let name = Cow::Owned(self.nodes[child].name.clone());
-            values.push((name, self.read(child, data, &mut at)?));
+            values.push((name, self.read(child, data, &mut at, &[])?));
         }
         Ok(Val::Map(values))
     }
 
-    fn read(&self, index: usize, data: &[u8], at: &mut usize) -> Result<Val> {
+    fn read(
+        &self,
+        index: usize,
+        data: &[u8],
+        at: &mut usize,
+        references: &ReferenceTrees,
+    ) -> Result<Val> {
         let node = &self.nodes[index];
         let mut take = |size: usize| -> Result<&[u8]> {
             let Some(bytes) = data.get(*at..*at + size) else {
@@ -272,8 +301,9 @@ impl TypeTree {
             Ok(bytes)
         };
         let children = self.children(index);
-        let value = if children.is_empty() && node.size == 0 {
-            // A structure without fields.
+        let value = if children.is_empty() && node.size <= 0 {
+            // A structure without fields (of a variable size when it is a
+            // class held by managed reference).
             Val::Zero
         } else if children.is_empty() {
             match node.type_name.as_str() {
@@ -314,7 +344,7 @@ impl TypeTree {
                 }
                 let mut items = Vec::with_capacity(count);
                 for _ in 0..count {
-                    items.push(self.read(element, data, at)?);
+                    items.push(self.read(element, data, at, references)?);
                 }
                 Val::Seq(items)
             };
@@ -323,14 +353,33 @@ impl TypeTree {
             }
             value
         } else if node.type_name == "OffsetPtr" && children.len() == 1 {
-            self.read(children[0], data, at)?
+            self.read(children[0], data, at, references)?
         } else {
-            let mut fields = Vec::with_capacity(children.len());
+            let mut fields: Vec<(Cow<'static, str>, Val)> = Vec::with_capacity(children.len());
             for &child in &children {
-                fields.push((
-                    Cow::Owned(self.nodes[child].name.clone()),
-                    self.read(child, data, at)?,
-                ));
+                if self.nested_registry(index, child) {
+                    continue;
+                }
+                let value = match self.nodes[child].type_name.as_str() {
+                    // The object a managed reference holds, laid out by the
+                    // tree of the type named before it.
+                    REFERENCED_DATA => {
+                        let held = fields
+                            .iter()
+                            .find(|(name, _)| name == "type")
+                            .and_then(|(_, kind)| referenced(kind, references));
+                        let value = match held {
+                            Some(tree) => tree.read(0, data, at, references)?,
+                            None => Val::Zero,
+                        };
+                        if self.nodes[child].align {
+                            *at = (*at + 3) & !3;
+                        }
+                        value
+                    }
+                    _ => self.read(child, data, at, references)?,
+                };
+                fields.push((Cow::Owned(self.nodes[child].name.clone()), value));
             }
             Val::Map(fields)
         };
@@ -340,7 +389,13 @@ impl TypeTree {
         Ok(value)
     }
 
-    fn write(&self, index: usize, value: &Val, out: &mut Vec<u8>) -> Result<()> {
+    fn write(
+        &self,
+        index: usize,
+        value: &Val,
+        out: &mut Vec<u8>,
+        references: &ReferenceTrees,
+    ) -> Result<()> {
         let node = &self.nodes[index];
         let fail = |what: &str| -> anyhow::Error {
             anyhow::anyhow!(
@@ -351,7 +406,7 @@ impl TypeTree {
             )
         };
         let children = self.children(index);
-        if children.is_empty() && node.size == 0 {
+        if children.is_empty() && node.size <= 0 {
             // A structure without fields takes no bytes.
         } else if children.is_empty() {
             scalar(&node.type_name, value, out).map_err(|error| fail(&error.to_string()))?;
@@ -374,7 +429,7 @@ impl TypeTree {
                 Val::Seq(items) if node.type_name != "string" => {
                     out.extend_from_slice(&(items.len() as u32).to_le_bytes());
                     for item in items {
-                        self.write(element, item, out)?;
+                        self.write(element, item, out, references)?;
                     }
                 }
                 // Bytes stand for a string that need not be text and for a
@@ -392,7 +447,7 @@ impl TypeTree {
             }
         } else if node.type_name == "OffsetPtr" && children.len() == 1 {
             // A pointer in memory; serialized as the pointee itself.
-            self.write(children[0], value, out)?;
+            self.write(children[0], value, out, references)?;
         } else {
             let fields: &[(Cow<'static, str>, Val)] = match value {
                 Val::Zero => &[],
@@ -408,18 +463,71 @@ impl TypeTree {
                 }
             }
             for &child in &children {
+                if self.nested_registry(index, child) {
+                    continue;
+                }
                 let name = &self.nodes[child].name;
                 let field = fields
                     .iter()
                     .find(|(key, _)| key == name)
                     .map_or(&Val::Zero, |(_, value)| value);
-                self.write(child, field, out)?;
+                if self.nodes[child].type_name == REFERENCED_DATA {
+                    let held = fields
+                        .iter()
+                        .find(|(key, _)| key == "type")
+                        .and_then(|(_, kind)| referenced(kind, references));
+                    match held {
+                        Some(tree) => tree.write(0, field, out, references)?,
+                        None if matches!(field, Val::Zero) => {}
+                        None => return Err(fail("an object held by a type without a tree")),
+                    }
+                    if self.nodes[child].align {
+                        align(out);
+                    }
+                    continue;
+                }
+                self.write(child, field, out, references)?;
             }
         }
         if node.align {
             align(out);
         }
         Ok(())
+    }
+}
+
+/// The node of an object held by managed reference, whose layout is its
+/// type's.
+const REFERENCED_DATA: &str = "ReferencedObjectData";
+
+/// The tree of a type objects hold by managed reference, with its class
+/// name, namespace and assembly.
+pub type ReferenceTree = (String, String, String, std::sync::Arc<TypeTree>);
+
+/// The trees of the types a file's objects hold by managed reference.
+pub type ReferenceTrees = [ReferenceTree];
+
+/// The tree of the type a `ReferencedManagedType` value names.
+fn referenced<'a>(kind: &Val, references: &'a ReferenceTrees) -> Option<&'a TypeTree> {
+    let part = |name: &str| match kind.field(name) {
+        Some(Val::Str(text)) => text.as_str(),
+        _ => "",
+    };
+    let (class, namespace, assembly) = (part("class"), part("ns"), part("asm"));
+    references
+        .iter()
+        .find(|(c, n, a, _)| (c.as_str(), n.as_str(), a.as_str()) == (class, namespace, assembly))
+        .map(|(.., tree)| &**tree)
+}
+
+impl TypeTree {
+    /// Whether a field is the registry of a type held by managed reference:
+    /// its tree ends in one, but what it holds lies in the registry of the
+    /// object that holds it, and the field is not written.
+    fn nested_registry(&self, index: usize, child: usize) -> bool {
+        self.class_id == -1
+            && index == 0
+            && self.nodes[child].type_name == "ManagedReferencesRegistry"
     }
 }
 

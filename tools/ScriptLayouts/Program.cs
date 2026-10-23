@@ -10,7 +10,9 @@
 // its underlying type), a string, an engine object (by reference), an engine
 // value type with a native layout (Vector3, AnimationCurve, ...), a
 // [Serializable] class or struct of the game, or an array or List<T> of one
-// of those. [SerializeReference] holds any class by managed reference.
+// of those. [SerializeReference] holds any class by managed reference: every
+// [Serializable] class of the assemblies a field of that kind can hold is
+// described as well, since the asset names the one it holds.
 //
 // A field's default is what the parameterless constructor of its class
 // assigns it, as far as constants, empty collections, engine values and new
@@ -47,6 +49,7 @@ static class Program
             }
         }
         var layouts = new Layouts();
+        var types = new List<TypeDefinition>();
         foreach (var path in paths)
         {
             AssemblyDefinition assembly;
@@ -58,8 +61,13 @@ static class Program
             {
                 continue;
             }
-            foreach (var type in assembly.MainModule.GetTypes()) layouts.AddScript(type, assembly.Name.Name);
+            foreach (var type in assembly.MainModule.GetTypes())
+            {
+                layouts.AddScript(type, assembly.Name.Name);
+                types.Add(type);
+            }
         }
+        layouts.AddManaged(types);
         Console.WriteLine(JsonSerializer.Serialize(layouts.Output, new JsonSerializerOptions
         {
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -76,6 +84,19 @@ sealed class Output
     public SortedDictionary<string, Script> Scripts { get; } = new(StringComparer.Ordinal);
     /// <summary>The [Serializable] classes and structs scripts hold, by their key.</summary>
     public SortedDictionary<string, Composite> Types { get; } = new(StringComparer.Ordinal);
+    /// <summary>The classes fields held by managed reference can hold, by assembly, namespace and name.</summary>
+    public List<Managed> Managed { get; } = new();
+}
+
+sealed class Managed
+{
+    public string Assembly { get; set; } = "";
+    public string Namespace { get; set; } = "";
+    /// <summary>The class's name as an asset names it, <c>Outer/Inner</c> for a nested one.</summary>
+    public string Name { get; set; } = "";
+    /// <summary>The name its type tree gives it.</summary>
+    public string TreeName { get; set; } = "";
+    public List<Field> Fields { get; set; } = new();
 }
 
 sealed class Script
@@ -139,6 +160,55 @@ sealed class Layouts
         ["System.Int32"] = "int", ["System.UInt32"] = "uint", ["System.Int64"] = "long",
         ["System.UInt64"] = "ulong", ["System.Single"] = "float", ["System.Double"] = "double",
     };
+
+    /// <summary>The declared types of the fields held by managed reference, by full name.</summary>
+    readonly HashSet<string> referenced = new(StringComparer.Ordinal);
+    readonly HashSet<TypeDefinition> managed = new();
+
+    /// <summary>Describes the classes of <paramref name="types"/> that a field held by managed
+    /// reference can hold, and then those their own such fields can.</summary>
+    public void AddManaged(List<TypeDefinition> types)
+    {
+        for (var known = -1; known != referenced.Count;)
+        {
+            known = referenced.Count;
+            foreach (var type in types)
+            {
+                if (!type.IsClass || type.IsValueType || type.IsAbstract || type.IsInterface || type.HasGenericParameters) continue;
+                if (!type.IsSerializable || managed.Contains(type) || DerivesFrom(type, "UnityEngine.Object")) continue;
+                if (!Assignable(type)) continue;
+                managed.Add(type);
+                var outer = Outermost(type);
+                Output.Managed.Add(new Managed
+                {
+                    Assembly = type.Module.Assembly.Name.Name,
+                    Namespace = outer.Namespace,
+                    Name = UnityName(type)[(outer.Namespace.Length > 0 ? outer.Namespace.Length + 1 : 0)..],
+                    TreeName = type.Name,
+                    Fields = FieldsOf(type, null),
+                });
+            }
+        }
+        Output.Managed.Sort((a, b) => string.CompareOrdinal($"{a.Assembly}|{a.Namespace}|{a.Name}", $"{b.Assembly}|{b.Namespace}|{b.Name}"));
+    }
+
+    /// <summary>Whether a field held by managed reference can hold an object of <paramref name="type"/>.</summary>
+    bool Assignable(TypeDefinition type)
+    {
+        for (var current = type; current != null; current = current.BaseType is { } next ? Resolve(next) : null)
+        {
+            if (referenced.Contains(current.FullName)) return true;
+            if (current.Interfaces.Any(implemented => Implements(implemented.InterfaceType))) return true;
+        }
+        return referenced.Contains("System.Object");
+    }
+
+    bool Implements(TypeReference implemented)
+    {
+        var definition = Resolve(implemented);
+        if (referenced.Contains(definition?.FullName ?? implemented.FullName)) return true;
+        return definition != null && definition.Interfaces.Any(inner => Implements(inner.InterfaceType));
+    }
 
     public void AddScript(TypeDefinition type, string assembly)
     {
@@ -270,6 +340,7 @@ sealed class Layouts
                 ? new Kind { Of = "array", Element = element, List = true } : null;
         }
         if (type.IsValueType || type.IsGenericParameter) return null;
+        referenced.Add(Resolve(type)?.FullName ?? type.FullName);
         return new Kind { Of = "reference", Name = type.Name };
     }
 

@@ -32,7 +32,7 @@ fn keys(path: &Path) -> Result<HashMap<i64, String>> {
     let (objects, _) = read_with_externals(&file)?;
     let values: HashMap<i64, Val> = objects
         .iter()
-        .filter_map(|o| Some((o.local_id, o.tree.decode(&o.data).ok()?)))
+        .filter_map(|o| Some((o.local_id, o.decode().ok()?)))
         .collect();
     let names = Names::new(&objects, &values);
     Ok(objects
@@ -71,12 +71,15 @@ pub fn inspect_linked(path: &Path, linked: &HashMap<String, PathBuf>) -> Result<
     let mut values = HashMap::new();
     let mut failures = HashMap::new();
     for object in &objects {
-        match object.tree.decode(&object.data) {
+        match object.decode() {
             Ok(value) => {
                 values.insert(object.local_id, value);
             }
             Err(error) => {
-                failures.insert(object.local_id, error.to_string());
+                failures.insert(
+                    object.local_id,
+                    format!("{error} (managed types {})", object.references.len()),
+                );
             }
         }
     }

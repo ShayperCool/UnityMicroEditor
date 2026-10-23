@@ -40,6 +40,9 @@ pub struct Library {
     scripts: HashMap<String, Kind>,
     /// The `MonoScript` object of each script class.
     script_objects: HashMap<String, Val>,
+    /// Classes held by managed reference, by class name, namespace and
+    /// assembly.
+    managed: HashMap<(String, String, String), Kind>,
 }
 
 impl Library {
@@ -220,7 +223,39 @@ impl Library {
                 },
             );
         }
+        for managed in layout.managed() {
+            let key = (
+                managed.name.clone(),
+                managed.namespace.clone(),
+                managed.assembly.clone(),
+            );
+            match layout.managed_kind(managed) {
+                Ok((tree, sample)) => {
+                    self.managed.insert(
+                        key,
+                        Kind {
+                            tree: Arc::new(tree),
+                            sample,
+                        },
+                    );
+                }
+                Err(error) => failed.push((
+                    full_name(&managed.namespace, &managed.name),
+                    format!("{error:#}"),
+                )),
+            }
+        }
         Ok(failed)
+    }
+
+    /// The tree and sample of a class held by managed reference, by the
+    /// class name, namespace and assembly an asset names it by.
+    pub fn managed(&self, class: &str, namespace: &str, assembly: &str) -> Option<&Kind> {
+        self.managed.get(&(
+            class.to_string(),
+            namespace.to_string(),
+            assembly.to_string(),
+        ))
     }
 
     pub fn class(&self, class_id: i32) -> Option<&Kind> {
@@ -450,6 +485,9 @@ pub struct Converted {
     pub value: Val,
     /// Fields the source lacks, taken from the engine's sample object.
     pub derived: Vec<String>,
+    /// The classes the object holds by managed reference, by class name,
+    /// namespace and assembly, in order of first use.
+    pub held: Vec<(String, String, String)>,
 }
 
 /// Where a reference leads in the written files: the file index of the
@@ -483,15 +521,19 @@ pub fn convert(
         } else {
             None
         },
+        library,
+        held: Vec::new(),
+        nulls: false,
     };
     let source = Value::Object(document.data.clone());
     let mut value = walk.value(0, kind.sample.clone(), &source, "")?;
-    let derived = walk.derived;
+    let (derived, held) = (walk.derived, walk.held);
     settle(document, tags, &mut value)?;
     Ok(Converted {
         tree: kind.tree.clone(),
         value,
         derived,
+        held,
     })
 }
 
@@ -626,6 +668,26 @@ struct Walk<'t, 'r, 'a> {
     derived: Vec<String>,
     /// Former names of script fields, for a script's object.
     renames: Option<&'t Renames>,
+    library: &'t Library,
+    /// The classes held by managed reference, in order of first use.
+    held: Vec<(String, String, String)>,
+    /// Whether a field held by managed reference holds no object.
+    nulls: bool,
+}
+
+/// The ID of a field held by managed reference that holds no object.
+const NO_REFERENCE: i64 = -2;
+
+/// Whether a value holds a field held by managed reference without an object.
+fn holds_null_reference(value: &Val) -> bool {
+    match value {
+        Val::Map(fields) if fields.len() == 1 && fields[0].0 == "rid" => {
+            fields[0].1 == Val::I(NO_REFERENCE)
+        }
+        Val::Map(fields) => fields.iter().any(|(_, field)| holds_null_reference(field)),
+        Val::Seq(items) => items.iter().any(holds_null_reference),
+        _ => false,
+    }
 }
 
 impl Walk<'_, '_, '_> {
@@ -634,12 +696,113 @@ impl Walk<'_, '_, '_> {
     fn derive(&mut self, mut sample: Val, path: &str) -> Val {
         self.derived.push(path.to_string());
         clear_pointers(&mut sample);
+        self.nulls |= holds_null_reference(&sample);
         sample
+    }
+
+    /// The registry of the objects held by managed reference, of format 2:
+    /// each object by its ID (in a source of format 1, the hexadecimal key
+    /// of its entry), its class and its fields laid out by the class's
+    /// tree, in order of ID; with an empty first entry for "no object"
+    /// when a field holds none.
+    fn registry(&mut self, source: &Value, path: &str) -> Result<Val> {
+        let mut entries: Vec<(i64, &Value, &Value)> = Vec::new();
+        if let Value::Object(fields) = source {
+            if let Some(Value::Array(ids)) = fields.get("RefIds") {
+                for entry in ids {
+                    let rid = entry
+                        .get("rid")
+                        .and_then(Value::as_str)
+                        .and_then(|rid| rid.parse().ok())
+                        .with_context(|| format!("{path}: an object without an ID"))?;
+                    entries.push((
+                        rid,
+                        entry.get("type").unwrap_or(&Value::Null),
+                        entry.get("data").unwrap_or(&Value::Null),
+                    ));
+                }
+            } else {
+                for (key, entry) in fields.iter().filter(|(key, _)| *key != "version") {
+                    let rid = i64::from_str_radix(key, 16)
+                        .with_context(|| format!("{path}: object key {key} is not an ID"))?;
+                    entries.push((
+                        rid,
+                        entry.get("type").unwrap_or(&Value::Null),
+                        entry.get("data").unwrap_or(&Value::Null),
+                    ));
+                }
+            }
+        }
+        entries.sort_by_key(|(rid, ..)| *rid);
+        let mut objects = Vec::with_capacity(entries.len() + 1);
+        for (rid, kind, data) in entries {
+            let part = |name: &str| {
+                kind.get(name)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            let (class, namespace, assembly) = (part("class"), part("ns"), part("asm"));
+            let held = self.library.managed(&class, &namespace, &assembly).with_context(|| {
+                format!("{path}: no layout of the class {namespace}.{class} ({assembly}) held by managed reference")
+            })?;
+            let object_path = format!("{path}[{rid}]");
+            let mut walk = Walk {
+                tree: &held.tree,
+                resolve: &mut *self.resolve,
+                derived: Vec::new(),
+                renames: self.renames,
+                library: self.library,
+                held: Vec::new(),
+                nulls: false,
+            };
+            let value = walk.value(0, held.sample.clone(), data, &object_path)?;
+            self.derived.append(&mut walk.derived);
+            self.nulls |= walk.nulls;
+            for inner in walk.held {
+                if !self.held.contains(&inner) {
+                    self.held.push(inner);
+                }
+            }
+            let key = (class.clone(), namespace.clone(), assembly.clone());
+            if !self.held.contains(&key) {
+                self.held.push(key);
+            }
+            objects.push(reference_object(rid, &class, &namespace, &assembly, value));
+        }
+        if self.nulls {
+            objects.insert(0, reference_object(NO_REFERENCE, "", "", "", Val::Zero));
+        }
+        Ok(Val::Map(vec![
+            (Cow::Borrowed("version"), Val::I(2)),
+            (Cow::Borrowed("RefIds"), Val::Seq(objects)),
+        ]))
     }
 
     fn value(&mut self, index: usize, sample: Val, source: &Value, path: &str) -> Result<Val> {
         let node = &self.tree.nodes[index];
         let children = self.tree.children(index);
+        // A field held by managed reference: the ID of its object, `rid` in a
+        // source of format 2 and `id` in one of format 1.
+        if matches!(
+            node.type_name.as_str(),
+            "managedReference" | "managedRefArrayItem"
+        ) {
+            let rid = match source {
+                Value::Object(fields) => fields
+                    .get("rid")
+                    .or_else(|| fields.get("id"))
+                    .and_then(Value::as_str)
+                    .and_then(|rid| rid.parse().ok()),
+                _ => None,
+            }
+            .unwrap_or(NO_REFERENCE);
+            self.nulls |= rid == NO_REFERENCE;
+            return Ok(Val::Map(vec![(Cow::Borrowed("rid"), Val::I(rid))]));
+        }
+        if node.type_name == "ManagedReferencesRegistry" {
+            return self.registry(source, path);
+        }
         if children.is_empty() {
             if node.size == 0 {
                 return Ok(sample);
@@ -785,12 +948,34 @@ impl Walk<'_, '_, '_> {
                     )
                 }
                 Some(field) => self.value(child, sample, field, &child_path)?,
+                // A registry follows the fields whose objects it holds.
+                None if self.tree.nodes[child].type_name == "ManagedReferencesRegistry"
+                    && !(self.tree.class_id == -1 && index == 0) =>
+                {
+                    self.registry(&Value::Null, &child_path)?
+                }
                 None => self.derive(sample, &child_path),
             };
             values.push((Cow::Owned(name), value));
         }
         Ok(Val::Map(values))
     }
+}
+
+/// One entry of a managed reference registry.
+fn reference_object(rid: i64, class: &str, namespace: &str, assembly: &str, data: Val) -> Val {
+    Val::Map(vec![
+        (Cow::Borrowed("rid"), Val::I(rid)),
+        (
+            Cow::Borrowed("type"),
+            Val::Map(vec![
+                (Cow::Borrowed("class"), Val::Str(class.to_string())),
+                (Cow::Borrowed("ns"), Val::Str(namespace.to_string())),
+                (Cow::Borrowed("asm"), Val::Str(assembly.to_string())),
+            ]),
+        ),
+        (Cow::Borrowed("data"), data),
+    ])
 }
 
 /// The source files of a project by GUID, from their `.meta` files under
@@ -866,6 +1051,24 @@ impl Sources {
             })
             .unwrap_or_default();
         Some(full_name(&namespace, &class))
+    }
+
+    /// The GUID of the script file of a class (`Namespace.Class`): a `.cs`
+    /// of the class's name that declares its namespace.
+    pub fn script_guid(&self, class: &str) -> Option<String> {
+        let short = class.rsplit('.').next()?;
+        let mut found: Vec<&String> = self
+            .paths
+            .iter()
+            .filter(|(_, path)| {
+                path.extension().is_some_and(|e| e == "cs")
+                    && path.file_stem().is_some_and(|stem| stem == short)
+            })
+            .map(|(guid, _)| guid)
+            .filter(|guid| self.script_class(guid).as_deref() == Some(class))
+            .collect();
+        found.sort();
+        found.first().map(|guid| guid.to_string())
     }
 }
 
