@@ -523,3 +523,30 @@ fallback until the comparison holds.
 
 Steps 2–4 cover most of a 2D game like Bouncemasters. Full parity with the
 worker, including the Editor C# that packages run, has no estimate.
+
+### Shaders without the Editor
+
+The Editor imports a `.shader` in two halves. `UnityShaderCompiler`, the
+program beside it, preprocesses the source (`c:preprocess`): it cuts each
+program out into a snippet (`snip:` with its ID, platform mask, hardware
+tier mask, types mask, language, a flag, the hash of the included files as
+four 32-bit words, the start line and two flags, then the code), lists its
+keyword sets per kind and program type (`keywordsUserGlobal: <id> <type>
+<count>` and the sets), ends them (`keywordsEnd:`, three texts, the base
+requirements and each keyword with its requirements), names the included
+files and the paths tried (`includes:`, `filepaths:`), its messages (`err:`,
+-1 for none) and answers `shader: <ok> ...` with the ShaderLab whose
+programs became `GpuProgramID <id>`. The request is the source, its
+directory and file name, whether only surface shaders are wanted, the build
+platform (24), the graphics API mask (0x48000, OpenGL Core and Vulkan) and
+two keyword lists. The Editor parses the rest of the ShaderLab itself and
+generates the programs of fixed-function passes (`SetTexture`, ...).
+
+`player-file shader-preprocess --editor E --project P <asset>[=<file>]...`
+makes the request. 6000.0's compiler reports 28 graphics APIs (6000.6: 29),
+takes no environment in `initializeCompiler` and keeps its includes in
+`Data/CGIncludes`. The 77 shaders of Bouncemasters against the replies a
+6000.0 worker got (its conversation read off with `strace`): all equal. A
+worker resolves no `Packages/...` include, since it passes no redirected
+include folders; the package shaders that include a file of their package
+fail there as here.

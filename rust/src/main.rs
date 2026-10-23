@@ -308,6 +308,37 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                 }
             }
         }
+        [
+            "shader-preprocess",
+            "--editor",
+            editor,
+            "--project",
+            project,
+            assets @ ..,
+        ] => {
+            // Each source as the compiler preprocesses it for an import, as
+            // one JSON line.
+            let ctx = unity_micro_editor::cancel::Context::background();
+            let logs = std::env::temp_dir().join(format!("ume-preprocess-{}", std::process::id()));
+            let mut compiler = unity_micro_editor::native::ShaderCompiler::start(
+                &ctx,
+                editor,
+                project,
+                &logs.to_string_lossy(),
+            )?;
+            // `logical=physical` reads a source from elsewhere than the
+            // project's path of its name.
+            for item in assets {
+                let (asset, physical) = item.split_once('=').unwrap_or((item, item));
+                let source = fs::read_to_string(Path::new(project).join(physical))?;
+                let request =
+                    unity_micro_editor::playerbake::shaderlab::PreprocessRequest::standalone(
+                        asset, source,
+                    );
+                let reply = compiler.preprocess(&request)?;
+                println!("{}", serde_json::to_string(&reply)?);
+            }
+        }
         ["script-layouts", project, editor, player, output] => {
             let ctx = unity_micro_editor::mcp::signal_context()?;
             let layouts =

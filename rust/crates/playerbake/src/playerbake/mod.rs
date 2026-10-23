@@ -13,6 +13,7 @@ mod scripts;
 mod serialized;
 mod shader;
 mod shader_names;
+pub mod shaderlab;
 mod source;
 pub mod spritemesh;
 pub mod texcomp;

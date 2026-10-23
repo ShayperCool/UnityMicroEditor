@@ -13,7 +13,7 @@ use crate::{
     playerbake::{SnippetCompiler, SnippetReply, SnippetRequest, WIRE_MARKER as MARKER},
     sysutil,
 };
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use std::{
     io::{Read, Write},
     os::unix::{
@@ -27,12 +27,20 @@ use std::{
 /// The protocol revision the pinned compiler answers `initializeCompiler`
 /// with. Another revision may frame requests differently.
 const PROTOCOL: u32 = 0xf404_c210;
-/// The graphics APIs the compiler reports capabilities for.
-const PLATFORMS: usize = 29;
+/// The graphics APIs the compiler reports capabilities for, by release.
+fn platforms(version: &str) -> usize {
+    if version.starts_with("6000.0.") {
+        28
+    } else {
+        29
+    }
+}
 /// A reflection line or program beyond this is not a compiler reply.
 const ITEM_LIMIT: u64 = 256 << 20;
 
 pub struct ShaderCompiler {
+    /// The release of the installation.
+    version: String,
     child: Child,
     stream: UnixStream,
     ctx: Context,
@@ -53,6 +61,8 @@ impl ShaderCompiler {
             sysutil::dir(&editor)
         };
         let data = sysutil::join(&[&installation, "Data"]);
+        let version = crate::engine::editor_version(&sysutil::join(&[&installation, "Unity"]))
+            .unwrap_or_default();
         let executable = sysutil::join(&[&data, "Tools", "UnityShaderCompiler"]);
         let info = stat(&executable).map_err(|e| wrap("UnityShaderCompiler executable", e))?;
         if !info.is_regular() || info.mode & 0o111 == 0 {
@@ -67,11 +77,21 @@ impl ShaderCompiler {
         );
         let socket = format!("/tmp/Unity-{name}.sock");
         let listener = UnixListener::bind(&socket).map_err(|e| os_error("bind", &socket, &e))?;
-        let result = Self::launch(ctx, &listener, &executable, &data, project, &logs, &name);
+        let result = Self::launch(
+            ctx,
+            &listener,
+            &executable,
+            &data,
+            project,
+            &logs,
+            &name,
+            version,
+        );
         let _ = std::fs::remove_file(&socket);
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn launch(
         ctx: &Context,
         listener: &UnixListener,
@@ -80,6 +100,7 @@ impl ShaderCompiler {
         project: &str,
         logs: &str,
         name: &str,
+        version: String,
     ) -> Result<Self> {
         let mut command = Command::new(executable);
         command
@@ -137,6 +158,7 @@ impl ShaderCompiler {
         };
         stream.set_nonblocking(false)?;
         let mut compiler = Self {
+            version,
             child,
             stream,
             ctx: ctx.clone(),
@@ -155,10 +177,19 @@ impl ShaderCompiler {
         // The include roots: the project, then the engine's includes.
         self.put_int(2)?;
         self.put_text(b".")?;
-        self.put_text(sysutil::join(&[data, "Resources", "CGIncludes"]).as_bytes())?;
+        // 6000.0 keeps them at the top of `Data`.
+        let includes = match self.version.starts_with("6000.0.") {
+            true => sysutil::join(&[data, "CGIncludes"]),
+            false => sysutil::join(&[data, "Resources", "CGIncludes"]),
+        };
+        self.put_text(includes.as_bytes())?;
         // No redirected include folders.
         self.put_int(0)?;
-        self.put_text(br#"{"globalenvvar":{}}"#)?;
+        // 6000.0 sends no environment.
+        match self.version.starts_with("6000.0.") {
+            true => self.put_text(b"")?,
+            false => self.put_text(br#"{"globalenvvar":{}}"#)?,
+        }
         self.stream.flush()?;
         let protocol = self.int()? as u32;
         if protocol != PROTOCOL {
@@ -166,7 +197,7 @@ impl ShaderCompiler {
                 "UnityShaderCompiler speaks protocol {protocol:#x}, not the pinned {PROTOCOL:#x}"
             );
         }
-        for _ in 0..PLATFORMS {
+        for _ in 0..platforms(&self.version) {
             let capabilities = self.long()?;
             self.int()?;
             self.capabilities.push(capabilities);
@@ -253,6 +284,109 @@ impl ShaderCompiler {
             program_type,
             program,
         })
+    }
+}
+
+impl ShaderCompiler {
+    /// Preprocesses a `.shader` as the Editor's import does (`c:preprocess`).
+    pub fn preprocess(
+        &mut self,
+        request: &crate::playerbake::shaderlab::PreprocessRequest,
+    ) -> Result<crate::playerbake::shaderlab::PreprocessReply> {
+        use crate::playerbake::shaderlab::{
+            PreprocessMessage, PreprocessReply, PreprocessedSnippet, line_numbers,
+        };
+        self.put_text(b"c:preprocess")?;
+        self.put_text(request.source.as_bytes())?;
+        self.put_text(request.directory.as_bytes())?;
+        self.put_text(request.file.as_bytes())?;
+        self.put_int(request.surface_only as i32)?;
+        self.put_int(request.platform)?;
+        self.put_int(request.api_mask)?;
+        for list in [&request.platform_keywords, &request.defines] {
+            self.put_int(list.len() as i32)?;
+            for keyword in list {
+                self.put_text(keyword.as_bytes())?;
+            }
+        }
+        self.stream.flush()?;
+        let mut reply = PreprocessReply::default();
+        let text = |bytes: Vec<u8>| String::from_utf8_lossy(&bytes).into_owned();
+        let count = |line: &str| -> Result<usize> {
+            let n = line_numbers(line).last().copied().unwrap_or(0);
+            usize::try_from(n)
+                .ok()
+                .filter(|n| *n < 1 << 20)
+                .ok_or_else(|| anyhow!("UnityShaderCompiler line {line} counts no items"))
+        };
+        for _ in 0..1 << 22 {
+            let line = text(self.text()?);
+            if line.starts_with("snip:") {
+                reply.snippets.push(PreprocessedSnippet {
+                    header: line_numbers(&line),
+                    code: text(self.text()?),
+                    ..Default::default()
+                });
+            } else if line.starts_with("keywordsEnd:") {
+                let snippet = reply
+                    .snippets
+                    .last_mut()
+                    .context("UnityShaderCompiler ends the keywords of no program")?;
+                for slot in &mut snippet.keyword_texts {
+                    *slot = text(self.text()?);
+                }
+                snippet.base_requirements = self.long()?;
+                let targets = self.int()?;
+                for _ in 0..targets.clamp(0, 1 << 16) {
+                    let name = text(self.text()?);
+                    snippet.targets.push((name, self.long()?));
+                }
+            } else if line.starts_with("keywords") {
+                let (kind, _) = line.split_once(':').unwrap_or_default();
+                let numbers = line_numbers(&line);
+                let mut sets = Vec::new();
+                for _ in 0..count(&line)? {
+                    sets.push(text(self.text()?));
+                }
+                let snippet = reply
+                    .snippets
+                    .last_mut()
+                    .context("UnityShaderCompiler names keywords of no program")?;
+                let program_type = numbers.get(1).copied().unwrap_or(0) as u32;
+                snippet
+                    .keywords
+                    .push((kind.to_string(), program_type, sets));
+            } else if line.starts_with("includes:") || line.starts_with("filepaths:") {
+                let mut items = Vec::new();
+                for _ in 0..count(&line)? {
+                    items.push(text(self.text()?));
+                }
+                match line.starts_with("includes:") {
+                    true => reply.includes = items,
+                    false => reply.filepaths = items,
+                }
+            } else if line.starts_with("err:") {
+                let header = line_numbers(&line);
+                // A line of -1 ends the program messages.
+                if header.get(1) == Some(&-1) {
+                    self.long()?;
+                    continue;
+                }
+                let file = text(self.text()?);
+                let message = text(self.text()?);
+                reply.messages.push(PreprocessMessage {
+                    header,
+                    file,
+                    message,
+                });
+            } else if line.starts_with("shader:") {
+                reply.ok = line_numbers(&line).first() == Some(&1);
+                reply.shader_line = line;
+                reply.shader = text(self.text()?);
+                return Ok(reply);
+            }
+        }
+        bail!("UnityShaderCompiler preprocessed without end")
     }
 }
 
