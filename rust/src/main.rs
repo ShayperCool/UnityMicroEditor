@@ -203,7 +203,7 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                 }
             }
             let mut ranked: Vec<_> = fields.into_iter().collect();
-            ranked.sort_by(|a, b| b.1.cmp(&a.1));
+            ranked.sort_by_key(|entry| std::cmp::Reverse(entry.1));
             for ((class, path), count) in ranked.iter().take(60) {
                 println!("field {count:6} {class} {path}");
             }
