@@ -1,6 +1,6 @@
 # Toward imports without a Unity licence
 
-Status, 2026-10-23: research. Branch `feat/own-importer`.
+Status, 2026-10-23: a first writer, checked against the worker. Branch `feat/own-importer`.
 
 The goal is a session that needs no activated Unity licence. Two parts of the
 tool start Unity's own executable today, and only those check the licence:
@@ -75,6 +75,56 @@ Libraries the importers link and their public equivalents:
   into the native Editor.
 - The Player's built-in resources (`unity_builtin_extra`), which the
   Editor-free host prototype still had the worker write.
+
+## The tool's own writer
+
+`rust/crates/playerbake/src/playerbake/`:
+
+- `authored.rs` converts a YAML document by the Player type tree of its
+  class or script. A field the source lacks takes the value of an engine
+  sample object of the class (without its references); what a build changes
+  on the way is settled per class: tags become indices, a renderer's cached
+  sorting layer is cleared, dangling components are dropped, unread particle
+  curves and gradients are reset, a script field is read under its
+  `[FormerlySerializedAs]` name.
+- `prefab.rs` unpacks prefab instances, nested ones included: an object of
+  an instance takes the file ID `(instance ^ source) & 2^63-1`, the
+  modifications set fields by property path, removed objects are left out,
+  added components and children are listed by their owners.
+- `texture.rs` writes PNG sources kept uncompressed (RGBA32, RGB24, Alpha8)
+  and their sprites with a full-rect mesh.
+- `assemble.rs` writes the closure of root sources into one file with its
+  streamed data, like the worker's `ume-deps`: text assets, textures held in
+  `.asset` files, the objects of the Editor's `unity_builtin_extra` the
+  sources name (but shaders), and a material's textures kept only where its
+  shader declares them.
+- `compare.rs` pairs the objects of two Player files by what they are
+  (hierarchy path, component class and position, asset name), follows
+  references by those keys and compares streamed data by its bytes.
+
+```
+unity-micro-editor player-file closure --library <worker file> --project P \
+  --root Assets/Scenes/Main.unity --output F --unity-version 6000.0.71f1 \
+  --builtin-extra <Editor>/Data/Resources/unity_builtin_extra
+unity-micro-editor player-file compare F <worker's ume-deps>
+```
+
+Main of Bouncemasters, against the dependencies file the worker wrote: 1734
+sources, 21185 objects paired (226 of the worker's unpaired), 19721 equal
+field by field. The type trees and samples still come from a worker file
+(`--library`); a release's trees and default objects are to be captured
+once and shipped, so that a user needs no licence.
+
+What differs, by count of objects:
+
+| What | Objects | Needs |
+|---|---|---|
+| Sprites with a tight mesh: vertices, indices and the rect of their bounds | ~420 | the engine's outline and triangulation (Ghidra) |
+| Transparent pixels of textures with *Alpha Is Transparency* | ~400 | the engine's dilation: one neighbour's colour per pass, horizontal before vertical, at most ~31 pixels; a model of it matched 306 of 594 textures exactly |
+| Compressed (DXT) and scaled textures | ~90 | a BC compressor and the engine's resampling |
+| Shaders (project and built-in) | all materials | built by the worker today; `playerbake`'s own baker serves 6000.6 only |
+| Fields a newer engine added to an older source | few | per-class default objects instead of samples |
+| Animator controllers, models, audio | few | not written yet |
 
 ## Order of work
 
