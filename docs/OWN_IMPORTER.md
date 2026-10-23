@@ -252,7 +252,11 @@ and short lists of them (up to 32, without strings or references; byte
 strings up to 64), the defaults of the fields a source lacks
 (`m_CallbackLayers`, `m_TrailVertexStreams`, ...), and loses strings,
 references and longer lists. A `MonoScript` takes its execution order from
-its `.cs.meta` (`MonoImporter.executionOrder`, by the file's name).
+its `.cs.meta` (`MonoImporter.executionOrder`, by the file's name). A script
+class of a plugin's assembly (a `.dll` with a `PluginImporter`) is named by
+the file ID `MD4("s\0\0\0" + namespace + name)`'s first four bytes as a
+little-endian integer, with the DLL's GUID: its `MonoScript` is written for
+each file ID the sources name (Main: Gadsme's 24 behaviours, all equal).
 
 6000.0.71f1's pack comes from the worker's files of Bouncemasters and the
 Editor's `unity_builtin_extra`: 41 classes, those the game uses; a project

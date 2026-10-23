@@ -38,6 +38,9 @@ enum Source {
     Text(PathBuf),
     Image(PathBuf, Vec<u8>),
     Script(String),
+    /// A plugin's compiled assembly, by its name: the script classes
+    /// references name in it by their file IDs.
+    Assembly(String),
 }
 
 /// GUIDs of the engine's own resource files, which stay external.
@@ -130,6 +133,24 @@ pub fn write_closure(
             }
         }
     }
+    // The file IDs references name in each plugin assembly.
+    let mut assembly_ids: HashMap<String, std::collections::BTreeSet<i64>> = HashMap::new();
+    for source in loaded.values() {
+        if let Source::Yaml(documents) = source {
+            for document in documents {
+                for reference in references(&serde_json::Value::Object(document.data.clone())) {
+                    if matches!(loaded.get(&reference.guid), Some(Source::Assembly(_))) {
+                        assembly_ids
+                            .entry(reference.guid.clone())
+                            .or_default()
+                            .insert(reference.file_id);
+                    }
+                }
+            }
+        }
+    }
+    // The script class of each (assembly, file ID) a reference names.
+    let mut assembly_classes: HashMap<(String, i64), String> = HashMap::new();
     // Local IDs: every object of every source, scripts last.
     let mut ids: HashMap<(String, i64), i64> = HashMap::new();
     let mut next = 1i64;
@@ -174,6 +195,21 @@ pub fn write_closure(
                 ids.insert((guid.clone(), 11500000), next);
                 next += 1;
             }
+            Source::Assembly(assembly) => {
+                for file_id in assembly_ids.get(guid).into_iter().flatten() {
+                    match library.assembly_script(assembly, *file_id) {
+                        Some(name) => {
+                            ids.insert((guid.clone(), *file_id), next);
+                            next += 1;
+                            assembly_classes.insert((guid.clone(), *file_id), name);
+                        }
+                        None => assembled.refused.push((
+                            guid.clone(),
+                            format!("no script class of {assembly} has file ID {file_id}"),
+                        )),
+                    }
+                }
+            }
             Source::Text(_) => {
                 ids.insert((guid.clone(), TEXT_FILE_ID), next);
                 next += 1;
@@ -204,6 +240,28 @@ pub fn write_closure(
                     value.clone(),
                     None,
                 ));
+            }
+            Source::Assembly(_) => {
+                let mut classes: Vec<(&i64, &String)> = assembly_classes
+                    .iter()
+                    .filter(|((owner, _), _)| owner == guid)
+                    .map(|((_, file_id), name)| (file_id, name))
+                    .collect();
+                classes.sort();
+                for (file_id, name) in classes {
+                    let Some(value) = library.script_object(name) else {
+                        assembled
+                            .refused
+                            .push((guid.clone(), format!("no MonoScript of {name}")));
+                        continue;
+                    };
+                    objects.push((
+                        ids[&(guid.clone(), *file_id)],
+                        script_tree.clone(),
+                        value.clone(),
+                        None,
+                    ));
+                }
             }
             Source::Text(path) => {
                 let Some(kind) = library.class(TEXT_ASSET) else {
@@ -269,7 +327,12 @@ pub fn write_closure(
                             .data
                             .get("m_Script")
                             .and_then(Reference::from_value)
-                            .and_then(|r| sources.script_class(&r.guid))
+                            .and_then(|r| {
+                                assembly_classes
+                                    .get(&(r.guid.clone(), r.file_id))
+                                    .cloned()
+                                    .or_else(|| sources.script_class(&r.guid))
+                            })
                     } else {
                         None
                     };
@@ -376,7 +439,7 @@ pub fn write_closure(
                                 .get("m_Script")
                                 .and_then(Reference::from_value)
                                 .filter(|_| document.class_id == 114)
-                                .and_then(|r| ids.get(&(r.guid, 11500000)).copied());
+                                .and_then(|r| ids.get(&(r.guid, r.file_id)).copied());
                             objects.push((
                                 ids[&(guid.clone(), document.file_id.parse()?)],
                                 converted.tree,
@@ -738,6 +801,10 @@ fn load(path: &Path, guid: &str, sources: &Sources) -> Result<Option<Source>> {
         return Ok(sources.script_class(guid).map(Source::Script));
     }
     let meta = std::fs::read(format!("{}.meta", path.display()))?;
+    if extension == "dll" && meta.windows(15).any(|w| w == b"PluginImporter:") {
+        let name = path.file_stem().map(|n| n.to_string_lossy().into_owned());
+        return Ok(name.map(Source::Assembly));
+    }
     if meta.windows(19).any(|w| w == b"TextScriptImporter:") {
         return Ok(Some(Source::Text(path.to_path_buf())));
     }

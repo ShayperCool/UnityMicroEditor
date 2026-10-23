@@ -224,6 +224,20 @@ impl Library {
     pub fn script_object(&self, full_name: &str) -> Option<&Val> {
         self.script_objects.get(full_name)
     }
+
+    /// The script class of the assembly `assembly` that a reference names by
+    /// `file_id` (a plugin's classes have no source of their own).
+    pub fn assembly_script(&self, assembly: &str, file_id: i64) -> Option<String> {
+        self.script_objects.iter().find_map(|(name, object)| {
+            let text = |field: &str| text_of(object.field(field));
+            (text("m_AssemblyName") == assembly
+                && super::scripts::assembly_script_file_id(
+                    &text("m_Namespace"),
+                    &text("m_ClassName"),
+                ) == file_id)
+                .then(|| name.clone())
+        })
+    }
 }
 
 /// The execution order each script's `.cs.meta` sets (`MonoImporter`), by

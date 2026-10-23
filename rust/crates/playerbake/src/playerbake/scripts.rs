@@ -640,6 +640,17 @@ pub fn properties_hash(class: &str, namespace: &str, assembly: &str, nodes: &[No
     md4(&message)
 }
 
+/// The file ID a reference gives a script class of a compiled assembly (a
+/// plugin DLL): the first four bytes of MD4 of `s\0\0\0`, its namespace and
+/// its name, as a little-endian integer.
+pub fn assembly_script_file_id(namespace: &str, class: &str) -> i64 {
+    let mut message = b"s\0\0\0".to_vec();
+    message.extend_from_slice(namespace.as_bytes());
+    message.extend_from_slice(class.as_bytes());
+    let hash = md4(&message);
+    i32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]) as i64
+}
+
 /// One round of MD4: its function, constant, word order and shifts.
 type Round = (fn(u32, u32, u32) -> u32, u32, [usize; 16], [u32; 4]);
 
@@ -825,6 +836,19 @@ mod tests {
         assert_eq!(
             hash.iter().map(|b| format!("{b:02x}")).collect::<String>(),
             "76750b3b885cd805542d4471b739f45c"
+        );
+    }
+
+    #[test]
+    fn names_the_scripts_of_an_assembly_as_the_engine() {
+        // Gadsme.dll's classes, as Bouncemasters' prefabs refer to them.
+        assert_eq!(
+            assembly_script_file_id("Gadsme", "GadsmePlacementBanner"),
+            -2040588403
+        );
+        assert_eq!(
+            assembly_script_file_id("Gadsme", "GadsmeMeshSerializer"),
+            -126867728
         );
     }
 
