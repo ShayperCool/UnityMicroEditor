@@ -336,6 +336,15 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                         asset, source,
                     );
                 let reply = compiler.preprocess(&request)?;
+                if std::env::var_os("UME_PARSED_FORM").is_some() {
+                    let form =
+                        unity_micro_editor::playerbake::shaderlab::parsed_form(&reply.shader)
+                            .unwrap_or_else(
+                                |error| serde_json::json!({"error": format!("{error:#}")}),
+                            );
+                    println!("{}", serde_json::json!({"file": asset, "form": form}));
+                    continue;
+                }
                 println!("{}", serde_json::to_string(&reply)?);
             }
         }

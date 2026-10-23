@@ -12,6 +12,15 @@
 //! some followed by items of their own, ending in `shader: <ok> ...` and the
 //! ShaderLab.
 
+pub mod form;
+pub mod parse;
+
+/// The parsed form of a preprocessed shader's ShaderLab.
+pub fn parsed_form(shader: &str) -> anyhow::Result<serde_json::Value> {
+    let (name, commands) = parse::shader(shader)?;
+    form::parsed_form(&name, &commands)
+}
+
 /// What `c:preprocess` is asked with.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PreprocessRequest {
