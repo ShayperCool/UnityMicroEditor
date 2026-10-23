@@ -182,13 +182,16 @@ default one. Main takes such defaults for 162 fields of scripts, 3398 times
 
 In a type table, a script's hash is MD4 of its class name, namespace and
 assembly name, concatenated (all 265 scripts of Main). Its type hash is the
-`m_PropertiesHash` of its `MonoScript`, which is not a hash of the tree alone:
-four scripts with the same tree (only the header) have four hashes. How the
-engine makes it is open.
+`m_PropertiesHash` of its `MonoScript`: MD4 of the same three names followed
+by each node of the tree in order, its type and name and then its byte size,
+type flags, version and `meta & 0x4000` as four-byte little-endian integers
+(read from the 6000.0.71f1 Editor; `player-file script-trees` checks it on a
+file: 81808 script objects in the worker's 41 files of Bouncemasters, all
+equal).
 
-Main of Bouncemasters, against the 265 script trees of the worker's file
+Main of Bouncemasters, against the 272 script trees of the worker's file
 (the host Player's managed directory and the game's Player compile, with
-the Editor's compile of Addressables): 239 equal. The other 26 derive from Odin's `SerializedMonoBehaviour`, whose
+the Editor's compile of Addressables): 246 equal. The other 26 derive from Odin's `SerializedMonoBehaviour`, whose
 `serializationData` the worker leaves out although the Editor writes it into
 the scenes and prefabs (`Main.unity`, the managers' prefabs): the worker's
 files lose what Odin serialized there. The worker lays scripts out by the
@@ -199,10 +202,10 @@ given, which for a session are those its Player runs.
 `player-file closure ... --layouts <layouts.json>` takes the trees, samples
 and `MonoScript`s of all scripts from the layouts instead of the worker's
 file (which still gives the classes of the engine and the templates). Main:
-19412 objects equal against 19721 with the worker's script trees; the 309
-are the `m_PropertiesHash` of the 285 `MonoScript`s, whose engine formula is
-open (the tool writes MD4 of the tree), and Odin's `serializationData` in 26
-objects. Six fields that the worker's samples gave wrongly are now equal.
+19666 objects equal against 19721 with the worker's script trees. All 57
+fewer are Odin's: the 26 managers that hold `serializationData` and the
+`MonoScript`s of 31 Odin classes, whose hashes follow the trees; two objects
+whose fields the worker's samples gave wrongly are now equal.
 `Quaternion`, `Matrix4x4`, `RectInt` and `GUIStyle` fields have no template
 in Main's file yet, so five scripts that hold one are not laid out.
 

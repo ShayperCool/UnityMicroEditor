@@ -26,7 +26,7 @@ pub use managers::{
     ManagerReport, PlainFile, compare_managers, manager_trees, write_project_managers,
 };
 pub use prefab::Unpacked;
-pub use scripts::{Layout, Layouts, Templates, first_difference};
+pub use scripts::{Layout, Layouts, Templates, first_difference, properties_hash};
 pub use serialized::{
     External, FileFormat, Object, Read, ReferenceType, VERIFIED_FORMAT, external_paths,
     local_ids_of_class, read as read_serialized, read_of_class as read_serialized_of_class,

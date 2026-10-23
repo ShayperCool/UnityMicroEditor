@@ -229,20 +229,12 @@ impl<'a> Layout<'a> {
         let script = &self.layouts.scripts[name];
         let nodes = self.script(name)?;
         let script_hash = script_hash(&script.name, &script.namespace, &script.assembly);
-        // How the engine hashes a script's layout is not known; the tool's
-        // hash differs from the engine's but tells layouts apart alike.
-        let mut tree = TypeTree::of_nodes(
-            super::typetree::SCRIPT_CLASS,
-            Some(script_hash),
-            [0; 16],
-            nodes,
-        )?;
-        let type_hash = md4(&tree.entry[7 + 48 + 4..tree.entry.len() - 4]);
-        tree = TypeTree::of_nodes(
+        let type_hash = properties_hash(&script.name, &script.namespace, &script.assembly, &nodes);
+        let tree = TypeTree::of_nodes(
             super::typetree::SCRIPT_CLASS,
             Some(script_hash),
             type_hash,
-            tree.nodes,
+            nodes,
         )?;
         let mut sample = zero(&tree, 0);
         for field in &script.fields {
@@ -533,6 +525,23 @@ pub fn script_hash(class: &str, namespace: &str, assembly: &str) -> [u8; 16] {
     md4(format!("{class}{namespace}{assembly}").as_bytes())
 }
 
+/// The hash of a script's layout, which a type table states and its
+/// MonoScript keeps as `m_PropertiesHash`: MD4 of the class name, namespace
+/// and assembly name followed by each node of the type tree in order, its
+/// type, name, size, type flags, version and alignment as four-byte integers.
+pub fn properties_hash(class: &str, namespace: &str, assembly: &str, nodes: &[Node]) -> [u8; 16] {
+    let mut message = format!("{class}{namespace}{assembly}").into_bytes();
+    for node in nodes {
+        message.extend_from_slice(node.type_name.as_bytes());
+        message.extend_from_slice(node.name.as_bytes());
+        message.extend_from_slice(&node.size.to_le_bytes());
+        message.extend_from_slice(&u32::from(node.type_flags).to_le_bytes());
+        message.extend_from_slice(&u32::from(node.version).to_le_bytes());
+        message.extend_from_slice(&(node.meta & ALIGN).to_le_bytes());
+    }
+    md4(&message)
+}
+
 /// One round of MD4: its function, constant, word order and shifts.
 type Round = (fn(u32, u32, u32) -> u32, u32, [usize; 16], [u32; 4]);
 
@@ -718,6 +727,31 @@ mod tests {
         assert_eq!(
             hash.iter().map(|b| format!("{b:02x}")).collect::<String>(),
             "76750b3b885cd805542d4471b739f45c"
+        );
+    }
+
+    #[test]
+    fn hashes_layouts_as_the_engine() {
+        // SocialManager of Bouncemasters, which has no fields of its own.
+        let mut nodes = vec![
+            node("MonoBehaviour", "Base", 0, -1, 0x8000),
+            node("PPtr<GameObject>", "m_GameObject", 1, 12, 0x41),
+            node("int", "m_FileID", 2, 4, 0x41),
+            node("SInt64", "m_PathID", 2, 8, 0x41),
+            node("UInt8", "m_Enabled", 1, 1, 0x4101),
+            node("PPtr<MonoScript>", "m_Script", 1, 12, 0),
+            node("int", "m_FileID", 2, 4, 0x80_0001),
+            node("SInt64", "m_PathID", 2, 8, 0x80_0001),
+            node("string", "m_Name", 1, -1, 0x8_8001),
+            node("Array", "Array", 2, -1, 0x8_4001),
+            node("int", "size", 3, 4, 0x8_0001),
+            node("char", "data", 3, 1, 0x8_0001),
+        ];
+        nodes[9].type_flags = 1;
+        let hash = properties_hash("SocialManager", "", "Sportmasters", &nodes);
+        assert_eq!(
+            hash.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            "6cd18acc0b48958b0fb76543ed33208d"
         );
     }
 

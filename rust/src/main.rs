@@ -272,6 +272,7 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
             let (objects, _) = bake::read_serialized_with_externals(&data)?;
             let templates = bake::Templates::of_trees(objects.iter().map(|o| &*o.tree));
             let mut names = std::collections::HashMap::new();
+            let mut assemblies = std::collections::HashMap::new();
             for object in objects.iter().filter(|o| o.tree.class_id == 115) {
                 let value = object.tree.decode(&object.data)?;
                 let text = |name: &str| match value.field(name) {
@@ -280,15 +281,15 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                 };
                 let namespace = text("m_Namespace");
                 let class = text("m_ClassName");
-                names.insert(
-                    object.local_id,
-                    match namespace.is_empty() {
-                        true => class,
-                        false => format!("{namespace}.{class}"),
-                    },
-                );
+                let full = match namespace.is_empty() {
+                    true => class.clone(),
+                    false => format!("{namespace}.{class}"),
+                };
+                names.insert(object.local_id, full);
+                assemblies.insert(object.local_id, (class, namespace, text("m_AssemblyName")));
             }
-            // The entries the tool encodes from the engine's nodes are the engine's.
+            // The entries the tool encodes from the engine's nodes are the engine's,
+            // save the types their objects hold, which a file lists at their end.
             let mut encoded = 0;
             for object in &objects {
                 let tree = &object.tree;
@@ -298,13 +299,40 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                 let hash = <[u8; 16]>::try_from(&tree.entry[at..at + 16]).unwrap();
                 let ours =
                     bake::TypeTree::of_nodes(tree.class_id, script, hash, tree.nodes.clone())?;
+                let body = ours.entry.len() - 4;
+                let held = tree
+                    .entry
+                    .get(body..body + 4)
+                    .map(|count| 4 + 4 * u32::from_le_bytes(count.try_into().unwrap()) as usize);
                 let skip = at + 32;
-                if ours.entry[skip..] != tree.entry[skip..] || ours.entry[..5] != tree.entry[..5] {
-                    anyhow::bail!("entry of class {} is encoded otherwise", tree.class_id);
+                if tree.entry.len() != body + held.unwrap_or(0)
+                    || ours.entry[skip..body] != tree.entry[skip..body]
+                    || ours.entry[..5] != tree.entry[..5]
+                {
+                    anyhow::bail!(
+                        "entry of class {} (local id {}) is encoded otherwise",
+                        tree.class_id,
+                        object.local_id
+                    );
                 }
                 encoded += 1;
             }
             println!("{encoded} entries encoded as the engine wrote them");
+            // The hashes of the engine's script layouts are the tool's.
+            let (mut hashed, mut misshashed) = (0, 0);
+            for object in objects.iter().filter(|o| o.tree.class_id == 114) {
+                let Some((class, namespace, assembly)) =
+                    object.script.and_then(|script| assemblies.get(&script))
+                else {
+                    continue;
+                };
+                let hash = bake::properties_hash(class, namespace, assembly, &object.tree.nodes);
+                match hash[..] == object.tree.entry[23..39] {
+                    true => hashed += 1,
+                    false => misshashed += 1,
+                }
+            }
+            println!("{hashed} script layouts hashed as the engine, {misshashed} otherwise");
             let layout = bake::Layout::new(&layouts, &templates);
             let (mut equal, mut differ, mut missing) = (0, 0, 0);
             let mut seen = std::collections::HashSet::new();
