@@ -12,9 +12,15 @@
 // [Serializable] class or struct of the game, or an array or List<T> of one
 // of those. [SerializeReference] holds any class by managed reference.
 //
+// A field's default is what the parameterless constructor of its class
+// assigns it, as far as constants, empty collections, engine values and new
+// serializable objects show it; Unity takes it for a field an asset lacks.
+//
 // Usage: ScriptLayouts <directory or assembly>...; prints the description as JSON.
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Mono.Cecil;
+using Mono.Cecil.Cil;
 
 static class Program
 {
@@ -96,6 +102,8 @@ sealed class Field
     public Kind Type { get; set; } = new();
     public bool? Hidden { get; set; }
     public List<string>? Formerly { get; set; }
+    /// <summary>What the constructor assigns the field: a number, a string, an empty array, or the fields of a structure.</summary>
+    public JsonNode? Default { get; set; }
 }
 
 sealed class Kind
@@ -188,6 +196,7 @@ sealed class Layouts
     List<Field> FieldsOf(TypeDefinition type, Dictionary<string, TypeReference>? arguments)
     {
         var fields = new List<Field>();
+        var defaults = Defaults.Of(type);
         if (type.BaseType != null && !IsEngineBase(type.BaseType.FullName) && Resolve(type.BaseType) is { } baseType)
         {
             fields.AddRange(FieldsOf(baseType, Bind(type.BaseType, baseType, arguments)));
@@ -210,6 +219,7 @@ sealed class Layouts
                 Type = kind,
                 Hidden = Has(field, "UnityEngine.HideInInspector") ? true : null,
                 Formerly = formerly.Count > 0 ? formerly : null,
+                Default = defaults.TryGetValue(field.Name, out var value) ? value?.DeepClone() : null,
             });
         }
         return fields;
@@ -305,4 +315,194 @@ sealed class Layouts
         }
         return new Kind { Of = "composite", Name = key };
     }
+}
+
+/// <summary>The values a class's parameterless constructor assigns its fields, read from its IL.</summary>
+static class Defaults
+{
+    static readonly Dictionary<TypeDefinition, Dictionary<string, JsonNode?>> Known = new();
+
+    /// <summary>A value the IL shows nothing of.</summary>
+    sealed class Unknown { public static readonly Unknown Value = new(); }
+    sealed class This { public static readonly This Value = new(); }
+
+    static readonly Dictionary<string, string[]> EngineFields = new(StringComparer.Ordinal)
+    {
+        ["UnityEngine.Vector2"] = new[] { "x", "y" },
+        ["UnityEngine.Vector3"] = new[] { "x", "y", "z" },
+        ["UnityEngine.Vector4"] = new[] { "x", "y", "z", "w" },
+        ["UnityEngine.Quaternion"] = new[] { "x", "y", "z", "w" },
+        ["UnityEngine.Color"] = new[] { "r", "g", "b", "a" },
+        ["UnityEngine.Color32"] = new[] { "r", "g", "b", "a" },
+        ["UnityEngine.Rect"] = new[] { "x", "y", "width", "height" },
+        ["UnityEngine.Vector2Int"] = new[] { "x", "y" },
+        ["UnityEngine.Vector3Int"] = new[] { "x", "y", "z" },
+    };
+
+    static readonly Dictionary<string, double[]> EngineConstants = new(StringComparer.Ordinal)
+    {
+        ["UnityEngine.Color::get_white"] = new[] { 1.0, 1, 1, 1 },
+        ["UnityEngine.Color::get_black"] = new[] { 0.0, 0, 0, 1 },
+        ["UnityEngine.Color::get_clear"] = new[] { 0.0, 0, 0, 0 },
+        ["UnityEngine.Color::get_red"] = new[] { 1.0, 0, 0, 1 },
+        ["UnityEngine.Color::get_green"] = new[] { 0.0, 1, 0, 1 },
+        ["UnityEngine.Color::get_blue"] = new[] { 0.0, 0, 1, 1 },
+        ["UnityEngine.Color::get_yellow"] = new[] { 1.0, 0.92156863, 0.015686275, 1 },
+        ["UnityEngine.Color::get_gray"] = new[] { 0.5, 0.5, 0.5, 1 },
+        ["UnityEngine.Color::get_grey"] = new[] { 0.5, 0.5, 0.5, 1 },
+        ["UnityEngine.Vector2::get_zero"] = new[] { 0.0, 0 },
+        ["UnityEngine.Vector2::get_one"] = new[] { 1.0, 1 },
+        ["UnityEngine.Vector2::get_up"] = new[] { 0.0, 1 },
+        ["UnityEngine.Vector2::get_right"] = new[] { 1.0, 0 },
+        ["UnityEngine.Vector3::get_zero"] = new[] { 0.0, 0, 0 },
+        ["UnityEngine.Vector3::get_one"] = new[] { 1.0, 1, 1 },
+        ["UnityEngine.Vector3::get_up"] = new[] { 0.0, 1, 0 },
+        ["UnityEngine.Vector3::get_right"] = new[] { 1.0, 0, 0 },
+        ["UnityEngine.Vector3::get_forward"] = new[] { 0.0, 0, 1 },
+        ["UnityEngine.Vector4::get_zero"] = new[] { 0.0, 0, 0, 0 },
+        ["UnityEngine.Vector4::get_one"] = new[] { 1.0, 1, 1, 1 },
+        ["UnityEngine.Quaternion::get_identity"] = new[] { 0.0, 0, 0, 1 },
+        ["UnityEngine.Vector2Int::get_zero"] = new[] { 0.0, 0 },
+        ["UnityEngine.Vector2Int::get_one"] = new[] { 1.0, 1 },
+        ["UnityEngine.Vector3Int::get_zero"] = new[] { 0.0, 0, 0 },
+        ["UnityEngine.Vector3Int::get_one"] = new[] { 1.0, 1, 1 },
+    };
+
+    static JsonObject Engine(string type, IReadOnlyList<double> values)
+    {
+        var result = new JsonObject();
+        var names = EngineFields[type];
+        for (var index = 0; index < names.Length; index++) result[names[index]] = index < values.Count ? values[index] : 0.0;
+        return result;
+    }
+
+    /// <summary>The defaults the type's own constructor and its bases' assign, by field name.</summary>
+    public static Dictionary<string, JsonNode?> Of(TypeDefinition type)
+    {
+        if (Known.TryGetValue(type, out var known)) return known;
+        var defaults = new Dictionary<string, JsonNode?>(StringComparer.Ordinal);
+        Known[type] = defaults;
+        // The base's constructor runs first.
+        TypeDefinition? baseType = null;
+        try { baseType = type.BaseType?.Resolve(); }
+        catch (AssemblyResolutionException) { }
+        if (baseType != null && baseType.Module.Assembly.Name.Name is not ("mscorlib" or "netstandard"))
+        {
+            foreach (var (field, value) in Of(baseType)) defaults[field] = value?.DeepClone();
+        }
+        var constructor = type.Methods.FirstOrDefault(method => method.IsConstructor && !method.IsStatic
+            && method.Parameters.Count == 0 && method.HasBody);
+        if (constructor != null) Run(constructor, defaults);
+        return defaults;
+    }
+
+    static void Run(MethodDefinition method, Dictionary<string, JsonNode?> defaults)
+    {
+        var stack = new Stack<object?>();
+        object? Pop() => stack.Count > 0 ? stack.Pop() : Unknown.Value;
+        foreach (var instruction in method.Body.Instructions)
+        {
+            var code = instruction.OpCode.Code;
+            switch (code)
+            {
+                case Code.Nop: break;
+                case Code.Ldarg_0: stack.Push(This.Value); break;
+                case Code.Ldc_I4_M1: stack.Push(-1.0); break;
+                case >= Code.Ldc_I4_0 and <= Code.Ldc_I4_8: stack.Push((double)(code - Code.Ldc_I4_0)); break;
+                case Code.Ldc_I4_S: stack.Push((double)(sbyte)instruction.Operand); break;
+                case Code.Ldc_I4: stack.Push((double)(int)instruction.Operand); break;
+                case Code.Ldc_I8: stack.Push((double)(long)instruction.Operand); break;
+                case Code.Ldc_R4: stack.Push((double)(float)instruction.Operand); break;
+                case Code.Ldc_R8: stack.Push((double)instruction.Operand); break;
+                case Code.Ldstr: stack.Push((string)instruction.Operand); break;
+                case Code.Ldnull: stack.Push(null); break;
+                case Code.Conv_R4 or Code.Conv_R8 or Code.Conv_I4 or Code.Conv_I8 or Code.Conv_U1 or Code.Conv_U2
+                    or Code.Conv_U4 or Code.Conv_U8 or Code.Conv_I1 or Code.Conv_I2:
+                    break;
+                case Code.Dup: { var top = Pop(); stack.Push(top); stack.Push(top); break; }
+                case Code.Pop: Pop(); break;
+                case Code.Newarr:
+                    stack.Push(Pop() is 0.0 ? new JsonArray() : Unknown.Value);
+                    break;
+                case Code.Newobj:
+                {
+                    var called = (MethodReference)instruction.Operand;
+                    var arguments = new object?[called.Parameters.Count];
+                    for (var index = arguments.Length - 1; index >= 0; index--) arguments[index] = Pop();
+                    stack.Push(Construct(called, arguments));
+                    break;
+                }
+                case Code.Call or Code.Callvirt:
+                {
+                    var called = (MethodReference)instruction.Operand;
+                    var arguments = new object?[called.Parameters.Count];
+                    for (var index = arguments.Length - 1; index >= 0; index--) arguments[index] = Pop();
+                    var target = called.HasThis ? Pop() : null;
+                    // A collection initializer.
+                    if (target is JsonArray items && called.Name == "Add" && arguments.Length == 1)
+                    {
+                        if (arguments[0] is Unknown) items.Add(null);
+                        else items.Add(Node(arguments[0]));
+                    }
+                    var name = called.DeclaringType.FullName + "::" + called.Name;
+                    if (EngineConstants.TryGetValue(name, out var values))
+                        stack.Push(Engine(called.DeclaringType.FullName, values));
+                    else if (called.ReturnType.FullName != "System.Void")
+                        stack.Push(Unknown.Value);
+                    break;
+                }
+                case Code.Stfld:
+                {
+                    var field = (FieldReference)instruction.Operand;
+                    var value = Pop();
+                    var target = Pop();
+                    var node = Node(value);
+                    if (target is This)
+                    {
+                        if (value is Unknown) defaults.Remove(field.Name);
+                        else defaults[field.Name] = node;
+                    }
+                    else if (target is JsonObject composite && value is not Unknown)
+                    {
+                        composite[field.Name] = node;
+                    }
+                    break;
+                }
+                case Code.Ret: return;
+                default:
+                    // What the stack holds is no longer known.
+                    stack.Clear();
+                    break;
+            }
+        }
+    }
+
+    static object? Construct(MethodReference constructor, object?[] arguments)
+    {
+        var type = constructor.DeclaringType;
+        var name = type is GenericInstanceType generic ? generic.ElementType.FullName : type.FullName;
+        if (name is "System.Collections.Generic.List`1" && arguments.All(argument => argument is double)) return new JsonArray();
+        if (EngineFields.ContainsKey(name))
+        {
+            return arguments.All(argument => argument is double)
+                ? Engine(name, arguments.Cast<double>().ToList())
+                : Unknown.Value;
+        }
+        if (arguments.Length != 0) return Unknown.Value;
+        TypeDefinition? definition;
+        try { definition = type.Resolve(); }
+        catch (AssemblyResolutionException) { return Unknown.Value; }
+        if (definition == null || !definition.IsSerializable) return Unknown.Value;
+        var result = new JsonObject();
+        foreach (var (field, value) in Of(definition)) result[field] = value?.DeepClone();
+        return result;
+    }
+
+    static JsonNode? Node(object? value) => value switch
+    {
+        double number => JsonValue.Create(number),
+        string text => JsonValue.Create(text),
+        JsonNode node => node,
+        _ => null,
+    };
 }

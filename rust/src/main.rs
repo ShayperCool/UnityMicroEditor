@@ -339,6 +339,7 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
             let mut roots = Vec::new();
             let (mut project, mut output, mut version) = (None, None, None);
             let mut builtin: Option<std::path::PathBuf> = None;
+            let mut layouts_path: Option<&Path> = None;
             let mut items = rest.iter();
             while let Some(flag) = items.next() {
                 let value = items
@@ -351,6 +352,7 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                     "--builtin-extra" => builtin = Some(Path::new(*value).to_path_buf()),
                     "--output" => output = Some(Path::new(*value)),
                     "--unity-version" => version = Some(value.to_string()),
+                    "--layouts" => layouts_path = Some(Path::new(*value)),
                     other => anyhow::bail!("unknown flag {other}"),
                 }
             }
@@ -382,8 +384,26 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                 "{}.resS",
                 output.file_name().unwrap_or_default().to_string_lossy()
             );
+            let mut library = Library::read(&libraries)?;
+            // Script layouts from the compiled assemblies, in place of the
+            // libraries' script trees; the engine's templates from those files.
+            if let Some(path) = layouts_path {
+                use unity_micro_editor::playerbake as bake;
+                let layouts: bake::Layouts = serde_json::from_slice(&fs::read(path)?)?;
+                let mut trees = Vec::new();
+                for file in &libraries {
+                    let data = fs::read(file)?;
+                    let (objects, _) = bake::read_serialized_with_externals(&data)?;
+                    trees.extend(objects.into_iter().map(|object| object.tree));
+                }
+                let templates = bake::Templates::of_trees(trees.iter().map(|tree| &**tree));
+                let layout = bake::Layout::new(&layouts, &templates);
+                for (name, error) in library.add_scripts(&layout)? {
+                    println!("script {name} not laid out: {error}");
+                }
+            }
             let assembled = write_closure(
-                &Library::read(&libraries)?,
+                &library,
                 &Tags::of_project(project)?,
                 &Sources::of_project(project)?,
                 &guids,

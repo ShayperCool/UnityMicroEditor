@@ -167,6 +167,19 @@ The rules the engine's trees show, besides the field order:
   header every script object starts with (`m_GameObject` to `m_Name`) are
   templates of the release, taken today from a file the engine wrote.
 
+A field an asset lacks (one the class gained after the asset was saved)
+takes what the class's parameterless constructor assigns it, the bases'
+first: `ScriptLayouts` reads it from the IL as far as it shows constants,
+strings, `new List<T>` with the elements a collection initializer adds,
+engine values made by their constructors or by `Color.white`,
+`Vector3.one` and the like, and new serializable objects with their own
+defaults. A curve the script leaves null is an empty curve with clamped ends
+(`m_PreInfinity`/`m_PostInfinity` 2, `m_RotationOrder` 4), a gradient the
+default one. Main takes such defaults for 162 fields of scripts, 3398 times
+(`closure` prints them as `derived`), most of them TextMesh Pro's
+(`m_characterHorizontalScale`, `m_EmojiFallbackSupport`,
+`m_ActiveFontFeatures`).
+
 In a type table, a script's hash is MD4 of its class name, namespace and
 assembly name, concatenated (all 265 scripts of Main). Its type hash is the
 `m_PropertiesHash` of its `MonoScript`, which is not a hash of the tree alone:
@@ -182,6 +195,16 @@ files lose what Odin serialized there. The worker lays scripts out by the
 Editor's compile, with fields under `UNITY_EDITOR`
 (`AssetReference.m_SubObjectGUID`); the layout is that of the assemblies
 given, which for a session are those its Player runs.
+
+`player-file closure ... --layouts <layouts.json>` takes the trees, samples
+and `MonoScript`s of all scripts from the layouts instead of the worker's
+file (which still gives the classes of the engine and the templates). Main:
+19412 objects equal against 19721 with the worker's script trees; the 309
+are the `m_PropertiesHash` of the 285 `MonoScript`s, whose engine formula is
+open (the tool writes MD4 of the tree), and Odin's `serializationData` in 26
+objects. Six fields that the worker's samples gave wrongly are now equal.
+`Quaternion`, `Matrix4x4`, `RectInt` and `GUIStyle` fields have no template
+in Main's file yet, so five scripts that hold one are not laid out.
 
 ## Order of work
 

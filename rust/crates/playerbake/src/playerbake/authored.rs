@@ -79,6 +79,64 @@ impl Library {
         Ok(())
     }
 
+    /// Takes the trees and samples of script classes from their layouts, and
+    /// makes their `MonoScript`s. The execution order is that of a
+    /// `MonoScript` read before, or zero.
+    pub fn add_scripts(
+        &mut self,
+        layout: &super::scripts::Layout,
+    ) -> Result<Vec<(String, String)>> {
+        let mono_script = self
+            .classes
+            .get(&MONO_SCRIPT)
+            .context("no type tree of MonoScript")?
+            .sample
+            .clone();
+        let mut failed = Vec::new();
+        for (name, script) in layout.scripts() {
+            if script.generic {
+                continue;
+            }
+            let (tree, sample) = match layout.script_kind(name) {
+                Ok(kind) => kind,
+                Err(error) => {
+                    failed.push((name.clone(), format!("{error:#}")));
+                    continue;
+                }
+            };
+            let type_hash: Vec<u8> = tree.entry[23..39].to_vec();
+            let mut object = self
+                .script_objects
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| mono_script.clone());
+            for (field, value) in [
+                ("m_Name", &script.name),
+                ("m_ClassName", &script.name),
+                ("m_Namespace", &script.namespace),
+                ("m_AssemblyName", &script.assembly),
+            ] {
+                if let Some(target) = object.field_mut(field) {
+                    *target = Val::Str(value.clone());
+                }
+            }
+            if let Some(Val::Map(bytes)) = object.field_mut("m_PropertiesHash") {
+                for (index, (_, byte)) in bytes.iter_mut().enumerate() {
+                    *byte = Val::U(type_hash[index] as u64);
+                }
+            }
+            self.script_objects.insert(name.clone(), object);
+            self.scripts.insert(
+                name.clone(),
+                Kind {
+                    tree: Arc::new(tree),
+                    sample,
+                },
+            );
+        }
+        Ok(failed)
+    }
+
     pub fn class(&self, class_id: i32) -> Option<&Kind> {
         self.classes.get(&class_id)
     }
@@ -363,7 +421,7 @@ fn strip_unused_curves(value: &mut Val) {
 }
 
 /// Two white keys at the ends, as a new gradient has.
-fn reset_gradient(gradient: &mut Val) {
+pub(super) fn reset_gradient(gradient: &mut Val) {
     let Val::Map(fields) = gradient else { return };
     for (name, field) in fields.iter_mut() {
         *field = match name.as_ref() {

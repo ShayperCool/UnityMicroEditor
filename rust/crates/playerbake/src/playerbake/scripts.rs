@@ -4,9 +4,10 @@
 //! engine defines natively (the header every script object starts with, the
 //! layout of `Vector3`, `AnimationCurve` and the like) comes from templates of the
 //! release, taken from type trees the engine wrote.
-use super::typetree::{Node, TypeTree};
+use super::typetree::{Node, TypeTree, Val};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 
 /// What `ScriptLayouts` prints.
@@ -44,6 +45,9 @@ pub struct Field {
     pub hidden: Option<bool>,
     #[serde(default)]
     pub formerly: Option<Vec<String>>,
+    /// What the class's constructor assigns the field, as far as its IL shows.
+    #[serde(default)]
+    pub default: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -189,6 +193,10 @@ impl<'a> Layout<'a> {
         Self { layouts, templates }
     }
 
+    pub fn scripts(&self) -> impl Iterator<Item = (&'a String, &'a Script)> {
+        self.layouts.scripts.iter()
+    }
+
     /// The nodes of the type tree of the script class `name`
     /// (`Namespace.Class`, or `Class` without a namespace).
     pub fn script(&self, name: &str) -> Result<Vec<Node>> {
@@ -213,6 +221,139 @@ impl<'a> Layout<'a> {
         }
         settle(&mut nodes);
         Ok(nodes)
+    }
+
+    /// The type tree of a script class and an object of it as its constructor
+    /// leaves it, for the fields an asset lacks.
+    pub fn script_kind(&self, name: &str) -> Result<(TypeTree, Val)> {
+        let script = &self.layouts.scripts[name];
+        let nodes = self.script(name)?;
+        let script_hash = script_hash(&script.name, &script.namespace, &script.assembly);
+        // How the engine hashes a script's layout is not known; the tool's
+        // hash differs from the engine's but tells layouts apart alike.
+        let mut tree = TypeTree::of_nodes(
+            super::typetree::SCRIPT_CLASS,
+            Some(script_hash),
+            [0; 16],
+            nodes,
+        )?;
+        let type_hash = md4(&tree.entry[7 + 48 + 4..tree.entry.len() - 4]);
+        tree = TypeTree::of_nodes(
+            super::typetree::SCRIPT_CLASS,
+            Some(script_hash),
+            type_hash,
+            tree.nodes,
+        )?;
+        let mut sample = zero(&tree, 0);
+        for field in &script.fields {
+            if let Some(target) = sample.field_mut(&field.name) {
+                self.apply(&field.kind, field.default.as_ref(), target);
+            }
+        }
+        if let Some(Val::Map(fields)) = sample.field_mut("references") {
+            for (name, value) in fields {
+                if name == "version" {
+                    *value = Val::I(2);
+                }
+            }
+        }
+        Ok((tree, sample))
+    }
+
+    /// Sets what a constructor assigns, over a value of zeros.
+    fn apply(&self, kind: &Kind, default: Option<&serde_json::Value>, target: &mut Val) {
+        let named = kind.name.as_deref().unwrap_or_default();
+        match kind.of.as_str() {
+            "primitive" => {
+                if let Some(number) = default.and_then(serde_json::Value::as_f64) {
+                    *target = primitive(named, number);
+                }
+            }
+            // The elements a collection initializer adds, of values only.
+            "array" => {
+                let (Some(items), Some(element)) =
+                    (default.and_then(serde_json::Value::as_array), &kind.element)
+                else {
+                    return;
+                };
+                let element_name = element.name.as_deref().unwrap_or_default();
+                let values: Option<Vec<Val>> = items
+                    .iter()
+                    .map(|item| match element.of.as_str() {
+                        "primitive" => item.as_f64().map(|n| primitive(element_name, n)),
+                        "string" => item.as_str().map(|text| Val::Str(text.to_string())),
+                        _ => None,
+                    })
+                    .collect();
+                if let Some(values) = values {
+                    *target = Val::Seq(values);
+                }
+            }
+            "string" => {
+                if let Some(text) = default.and_then(serde_json::Value::as_str) {
+                    *target = Val::Str(text.to_string());
+                }
+            }
+            "engine" => {
+                // A curve or gradient is made by its constructor even where
+                // the script's leaves it null.
+                match named {
+                    "AnimationCurve" => {
+                        for (field, value) in [
+                            ("m_PreInfinity", 2),
+                            ("m_PostInfinity", 2),
+                            ("m_RotationOrder", 4),
+                        ] {
+                            if let Some(target) = target.field_mut(field) {
+                                *target = Val::I(value);
+                            }
+                        }
+                    }
+                    "Gradient" => super::authored::reset_gradient(target),
+                    _ => {}
+                }
+                let Some(values) = default.and_then(serde_json::Value::as_object) else {
+                    return;
+                };
+                let number = |name: &str| values.get(name).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                if named == "Color32" {
+                    let packed = ["r", "g", "b", "a"]
+                        .iter()
+                        .enumerate()
+                        .map(|(index, name)| (number(name) as u64 & 0xff) << (8 * index))
+                        .sum();
+                    if let Some(field) = target.field_mut("rgba") {
+                        *field = Val::U(packed);
+                    }
+                    return;
+                }
+                for (name, value) in values {
+                    if let (Some(field), Some(value)) = (target.field_mut(name), value.as_f64()) {
+                        *field = Val::F(value as f32);
+                    }
+                }
+            }
+            "composite" => {
+                let Some(composite) = self.layouts.types.get(named) else {
+                    return;
+                };
+                for field in &composite.fields {
+                    let value = default
+                        .and_then(|values| values.get(&field.name))
+                        .or(field.default.as_ref());
+                    if let Some(target) = target.field_mut(&field.name) {
+                        self.apply(&field.kind, value, target);
+                    }
+                }
+            }
+            "reference" => {
+                if let Some(rid) = target.field_mut("rid") {
+                    // No object.
+                    *rid = Val::I(-2);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn field(&self, field: &Field, level: u8, depth: usize, nodes: &mut Vec<Node>) -> Result<()> {
@@ -350,6 +491,107 @@ impl<'a> Layout<'a> {
     }
 }
 
+fn primitive(name: &str, number: f64) -> Val {
+    match name {
+        "float" => Val::F(number as f32),
+        "double" => Val::D(number),
+        "bool" => Val::Bool(number != 0.0),
+        "ulong" | "uint" | "ushort" | "byte" | "char" => Val::U(number as u64),
+        _ => Val::I(number as i64),
+    }
+}
+
+/// A value of zeros, empty strings and empty arrays.
+fn zero(tree: &TypeTree, index: usize) -> Val {
+    let node = &tree.nodes[index];
+    if node.type_name == "string" {
+        return Val::Str(String::new());
+    }
+    if tree.element(index).is_some() {
+        return Val::Seq(Vec::new());
+    }
+    let children = tree.children(index);
+    if children.is_empty() {
+        return Val::Zero;
+    }
+    Val::Map(
+        children
+            .into_iter()
+            .map(|child| {
+                (
+                    Cow::Owned(tree.nodes[child].name.clone()),
+                    zero(tree, child),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// The hash of a script in a type table: MD4 of its class name, namespace
+/// and assembly name.
+pub fn script_hash(class: &str, namespace: &str, assembly: &str) -> [u8; 16] {
+    md4(format!("{class}{namespace}{assembly}").as_bytes())
+}
+
+/// One round of MD4: its function, constant, word order and shifts.
+type Round = (fn(u32, u32, u32) -> u32, u32, [usize; 16], [u32; 4]);
+
+/// MD4 (RFC 1320).
+fn md4(message: &[u8]) -> [u8; 16] {
+    let mut data = message.to_vec();
+    data.push(0x80);
+    while data.len() % 64 != 56 {
+        data.push(0);
+    }
+    data.extend_from_slice(&((message.len() as u64) * 8).to_le_bytes());
+    let mut state: [u32; 4] = [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476];
+    for block in data.chunks(64) {
+        let x: Vec<u32> = block
+            .chunks(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect();
+        let [mut a, mut b, mut c, mut d] = state;
+        let rounds: [Round; 3] = [
+            (
+                |x, y, z| (x & y) | (!x & z),
+                0,
+                [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+                [3, 7, 11, 19],
+            ),
+            (
+                |x, y, z| (x & y) | (x & z) | (y & z),
+                0x5a82_7999,
+                [0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15],
+                [3, 5, 9, 13],
+            ),
+            (
+                |x, y, z| x ^ y ^ z,
+                0x6ed9_eba1,
+                [0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15],
+                [3, 9, 11, 15],
+            ),
+        ];
+        for (f, constant, order, shifts) in rounds {
+            for (step, &index) in order.iter().enumerate() {
+                let value = a
+                    .wrapping_add(f(b, c, d))
+                    .wrapping_add(x[index])
+                    .wrapping_add(constant)
+                    .rotate_left(shifts[step % 4]);
+                (a, b, c, d) = (d, value, b, c);
+            }
+        }
+        for (word, add) in state.iter_mut().zip([a, b, c, d]) {
+            *word = word.wrapping_add(add);
+        }
+    }
+    let mut out = [0; 16];
+    for (chunk, word) in out.chunks_mut(4).zip(state) {
+        chunk.copy_from_slice(&word.to_le_bytes());
+    }
+    out
+}
+
 fn node(type_name: &str, name: &str, level: u8, size: i32, meta: u32) -> Node {
     Node {
         type_name: type_name.to_string(),
@@ -463,6 +705,20 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn hashes_scripts_as_the_engine() {
+        assert_eq!(
+            md4(b"abc"),
+            *b"\xa4\x48\x01\x7a\xaf\x21\xd8\x52\x5f\xc1\x0a\xe8\x7a\xa6\x72\x9d"
+        );
+        // UnityEngine.UI.Image in a file the worker wrote.
+        let hash = script_hash("Image", "UnityEngine.UI", "UnityEngine.UI");
+        assert_eq!(
+            hash.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            "76750b3b885cd805542d4471b739f45c"
+        );
     }
 
     /// Layouts as the engine wrote them for Bouncemasters' scripts (6000.0.71f1).
