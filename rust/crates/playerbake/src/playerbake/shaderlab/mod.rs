@@ -12,15 +12,39 @@
 //! some followed by items of their own, ending in `shader: <ok> ...` and the
 //! ShaderLab.
 
+pub mod fixed;
 pub mod form;
 pub mod parse;
 
-/// The parsed form of a shader the compiler preprocessed.
-pub fn parsed_form(reply: &PreprocessReply) -> anyhow::Result<serde_json::Value> {
+/// A shader as the Editor's import makes it of what the compiler
+/// preprocessed: its parsed form and all its snippets, the generated ones of
+/// fixed-function passes included.
+pub struct Imported {
+    pub form: serde_json::Value,
+    pub snippets: Vec<PreprocessedSnippet>,
+    pub fixed: bool,
+    /// What generating fixed-function programs warned of, by line.
+    pub warnings: Vec<(usize, String)>,
+}
+
+pub fn import(reply: &PreprocessReply) -> anyhow::Result<Imported> {
     let (name, commands) = parse::shader(&reply.shader)?;
     let mut form = form::parsed_form(&name, &commands)?;
-    form::complete(&mut form, &reply.snippets);
-    Ok(form)
+    let mut snippets = reply.snippets.clone();
+    let mut warnings = Vec::new();
+    let fixed = form::generate_fixed(&mut form, &mut snippets, &mut warnings)?;
+    form::complete(&mut form, &snippets);
+    Ok(Imported {
+        form,
+        snippets,
+        fixed,
+        warnings,
+    })
+}
+
+/// The parsed form of a shader the compiler preprocessed.
+pub fn parsed_form(reply: &PreprocessReply) -> anyhow::Result<serde_json::Value> {
+    Ok(import(reply)?.form)
 }
 
 /// What `c:preprocess` is asked with.
@@ -58,6 +82,8 @@ pub struct PreprocessedSnippet {
     pub base_requirements: u64,
     /// Each keyword with the requirements it brings.
     pub targets: Vec<(String, u64)>,
+    /// Generated for a fixed-function pass rather than cut out of the source.
+    pub generated: bool,
 }
 
 /// A message of the compiler about the source.
@@ -153,13 +179,13 @@ impl PreprocessRequest {
 /// compiler cut out, by its ID, with the keyword sets, requirements and
 /// hashes it reported.
 pub fn compile_info(
-    reply: &PreprocessReply,
+    imported: &Imported,
     directory: &str,
     file: &str,
     source: &str,
 ) -> serde_json::Value {
     use serde_json::json;
-    let mut snippets: Vec<&PreprocessedSnippet> = reply.snippets.iter().collect();
+    let mut snippets: Vec<&PreprocessedSnippet> = imported.snippets.iter().collect();
     snippets.sort_by_key(|s| s.header.first().copied().unwrap_or(0));
     let entries: Vec<serde_json::Value> = snippets
         .iter()
@@ -191,6 +217,10 @@ pub fn compile_info(
                     second.insert(format!("{field}{program_type}"), json!(sets));
                 }
             }
+            let (file, directory) = match snippet.generated {
+                true => ("", ""),
+                false => (file, directory),
+            };
             let fields = [
                 ("m_AssetName", json!(file)),
                 ("m_AssetPath", json!(directory)),
@@ -233,7 +263,7 @@ pub fn compile_info(
         "m_Snippets": entries,
         "m_MeshComponentsFromSnippets": 0,
         "m_HasSurfaceShaders": has_surface_shaders(source),
-        "m_HasFixedFunctionShaders": false,
+        "m_HasFixedFunctionShaders": imported.fixed,
     })
 }
 
@@ -275,14 +305,31 @@ pub fn editor_object(
     meta: &[u8],
 ) -> anyhow::Result<serde_json::Value> {
     use serde_json::json;
-    let form = parsed_form(reply)?;
-    let info = compile_info(reply, &request.directory, &request.file, &request.source);
+    let imported = import(reply)?;
+    let info = compile_info(
+        &imported,
+        &request.directory,
+        &request.file,
+        &request.source,
+    );
+    let form = imported.form;
     let words =
         super::managers::guid_words(guid).ok_or_else(|| anyhow::anyhow!("{guid} is not a GUID"))?;
     let mut guid_value = serde_json::Map::new();
     for (index, word) in words.iter().enumerate() {
         guid_value.insert(format!("data[{index}]"), json!(word));
     }
+    let generated = imported.warnings.iter().map(|(line, message)| {
+        json!({
+            "compilerPlatform": -1,
+            "file": "",
+            "line": line,
+            "message": message,
+            "messageDetails": "",
+            "runtimeError": false,
+            "warning": true,
+        })
+    });
     let errors: Vec<serde_json::Value> = reply
         .messages
         .iter()
@@ -298,6 +345,7 @@ pub fn editor_object(
                 "warning": number(0) == 1,
             })
         })
+        .chain(generated)
         .collect();
     let properties: Vec<String> = form["m_PropInfo"]["m_Props"]
         .as_array()
@@ -328,14 +376,15 @@ pub fn editor_object(
     }
     defaults.sort_by(|a, b| a["first"].as_str().cmp(&b["first"].as_str()));
     // The Editor compiles a shader once after importing it unless it failed
-    // or takes passes of other shaders.
+    // (a warning does not count) or takes passes of other shaders.
     let use_pass = form["m_SubShaders"]
         .as_array()
         .into_iter()
         .flatten()
         .flat_map(|s| s["m_Passes"].as_array().into_iter().flatten())
         .any(|p| p["m_Type"] == 1);
-    let smoke_test = errors.is_empty() && !use_pass;
+    let failed = errors.iter().any(|e| e["warning"] == false);
+    let smoke_test = !failed && !use_pass;
     Ok(json!({
         "m_ObjectHideFlags": 8,
         "m_CorrespondingSourceObject": null,

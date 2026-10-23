@@ -5,7 +5,7 @@
 //! grammars of their own.
 use anyhow::{Result, bail};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Token {
     Ident(String),
     Str(String),
@@ -30,13 +30,21 @@ impl Token {
     }
 }
 
-pub fn tokens(text: &str) -> Result<Vec<Token>> {
+/// The tokens of a text with the line each begins on. `#LINE n` names the
+/// line that follows it, where the compiler cut a program out.
+pub fn tokens(text: &str) -> Result<Vec<(Token, usize)>> {
     let chars: Vec<char> = text.chars().collect();
-    let mut out = Vec::new();
+    let mut out: Vec<(Token, usize)> = Vec::new();
     let mut at = 0;
+    let mut line = 1usize;
     while at < chars.len() {
         let c = chars[at];
-        if c.is_whitespace() || c == '\u{feff}' {
+        let start_line = line;
+        let push = |token: Token, out: &mut Vec<(Token, usize)>| out.push((token, start_line));
+        if c == '\n' {
+            line += 1;
+            at += 1;
+        } else if c.is_whitespace() || c == '\u{feff}' {
             at += 1;
         } else if c == '/' && chars.get(at + 1) == Some(&'/') {
             while at < chars.len() && chars[at] != '\n' {
@@ -45,13 +53,25 @@ pub fn tokens(text: &str) -> Result<Vec<Token>> {
         } else if c == '/' && chars.get(at + 1) == Some(&'*') {
             at += 2;
             while at + 1 < chars.len() && !(chars[at] == '*' && chars[at + 1] == '/') {
+                if chars[at] == '\n' {
+                    line += 1;
+                }
                 at += 1;
             }
             at += 2;
         } else if c == '#' {
             // `#LINE n`, which the compiler leaves where a program was.
+            let start = at;
             while at < chars.len() && chars[at] != '\n' {
                 at += 1;
+            }
+            let directive: String = chars[start..at].iter().collect();
+            if let Some(n) = directive
+                .strip_prefix("#LINE")
+                .and_then(|n| n.trim().parse::<usize>().ok())
+            {
+                // The newline that ends the directive leads to line n.
+                line = n.saturating_sub(1);
             }
         } else if c == '"' {
             let start = at + 1;
@@ -59,9 +79,10 @@ pub fn tokens(text: &str) -> Result<Vec<Token>> {
             while at < chars.len() && chars[at] != '"' {
                 at += 1;
             }
-            out.push(Token::Str(
-                chars[start..at.min(chars.len())].iter().collect(),
-            ));
+            push(
+                Token::Str(chars[start..at.min(chars.len())].iter().collect()),
+                &mut out,
+            );
             at += 1;
         } else if c == '[' {
             let start = at + 1;
@@ -75,13 +96,16 @@ pub fn tokens(text: &str) -> Result<Vec<Token>> {
                 }
                 at += 1;
             }
-            out.push(Token::Bracket(
-                chars[start..at.saturating_sub(1)]
-                    .iter()
-                    .collect::<String>()
-                    .trim()
-                    .to_string(),
-            ));
+            push(
+                Token::Bracket(
+                    chars[start..at.saturating_sub(1)]
+                        .iter()
+                        .collect::<String>()
+                        .trim()
+                        .to_string(),
+                ),
+                &mut out,
+            );
         } else if c.is_ascii_digit()
             || ((c == '-' || c == '+' || c == '.')
                 && chars
@@ -99,15 +123,15 @@ pub fn tokens(text: &str) -> Result<Vec<Token>> {
                     break;
                 }
             }
-            out.push(Token::Num(chars[start..at].iter().collect()));
+            push(Token::Num(chars[start..at].iter().collect()), &mut out);
         } else if c.is_alphabetic() || c == '_' {
             let start = at;
             while at < chars.len() && (chars[at].is_alphanumeric() || chars[at] == '_') {
                 at += 1;
             }
-            out.push(Token::Ident(chars[start..at].iter().collect()));
+            push(Token::Ident(chars[start..at].iter().collect()), &mut out);
         } else {
-            out.push(Token::Punct(c));
+            push(Token::Punct(c), &mut out);
             at += 1;
         }
     }
@@ -115,9 +139,11 @@ pub fn tokens(text: &str) -> Result<Vec<Token>> {
 }
 
 /// A command: its keyword as written, its values and its block.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Command {
     pub name: String,
+    /// The line the command begins on.
+    pub line: usize,
     pub args: Vec<Token>,
     pub block: Option<Vec<Command>>,
     /// A property, for a command of `Properties`.
@@ -130,7 +156,7 @@ impl Command {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Property {
     pub attributes: Vec<String>,
     pub name: String,
@@ -241,6 +267,7 @@ fn keywords(block: &str) -> &'static [&'static str] {
 
 struct Parser {
     tokens: Vec<Token>,
+    lines: Vec<usize>,
     at: usize,
 }
 
@@ -287,6 +314,7 @@ impl Parser {
                 commands.push(self.pair()?);
                 continue;
             }
+            let line = self.lines.get(self.at).copied().unwrap_or(0);
             let Some(Token::Ident(name)) = self.next() else {
                 bail!(
                     "ShaderLab: a command of {kind} begins with {:?}",
@@ -295,6 +323,7 @@ impl Parser {
             };
             let mut command = Command {
                 name: name.clone(),
+                line,
                 ..Default::default()
             };
             // A block keyword names the grammar of its own block.
@@ -420,8 +449,10 @@ fn takes_keyword_value(name: &str) -> bool {
 
 /// The shader: its name and its commands.
 pub fn shader(text: &str) -> Result<(String, Vec<Command>)> {
+    let (tokens, lines) = tokens(text)?.into_iter().unzip();
     let mut parser = Parser {
-        tokens: tokens(text)?,
+        tokens,
+        lines,
         at: 0,
     };
     if !parser.next().is_some_and(|t| t.is_ident("Shader")) {

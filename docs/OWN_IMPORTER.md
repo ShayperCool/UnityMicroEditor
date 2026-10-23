@@ -566,11 +566,24 @@ compiles the shader once afterwards (`m_CompileSmokeTestAfterImport`)
 unless it failed or takes passes of other shaders; the default textures of
 the `.meta` that name a texture property are kept, in order of name.
 
+A pass without a program (fixed function: `SetTexture`, `Lighting`,
+`Material`, `ColorMaterial`, `Color`, `AlphaTest`, `Fog`, ...) gets the
+program the Editor generates for it (`playerbake::shaderlab::fixed`, the
+text read off the Editor's imports of 24 probes of each kind): its
+combiners noted as `//! TexEnvN: <color> <alpha> [texture] [constant]`,
+four bytes each (the scale, the first source, the operation and the second
+source; sources previous 0, texture 1, constant 2, primary 3, +4 for alpha,
++8 for `one -`; replace 0, multiply 1, add 2, subtract 3, lerp 0x80 with
+its source; `dot3`, which 6000.0 no longer supports, adds and warns). The
+snippet's ID is the low 16 bits of XXH32 of its code with the seed
+`0x8f37154b`, with the count of the shader's snippets before it above
+them; its pass's fog and lighting state move into the program, and a lit
+pass becomes a vertex-lit one (`LIGHTMODE` `Vertex`).
+
 `player-file shader-import --editor E --project P --reference DIR
 <asset>[=<file>]...` builds the Editor's `Shader` object and compares it
-with `DIR/<guid>-0000.bin`. Bouncemasters' 77 shaders against the 6000.0
-worker's artifacts: 73 equal to the byte. The other four have
-fixed-function passes, for which the Editor generates programs
-(`GenerateFixedFunctionPassCode`); a generated snippet's ID is the low 16
-bits of XXH32 of its code with the seed `0x8f37154b`, with the count of the
-shader's snippets before it above them.
+with `DIR/<guid>-0000.bin`. Bouncemasters' 77 shaders and the 24
+fixed-function probes against the 6000.0 worker's artifacts: all equal to
+the byte. Not covered by a probe yet: texture matrices (refused), alpha
+scales, `SetTexture` with `Matrix`, `GrabPass`, `PackageRequirements` and
+`Dependency`.

@@ -544,6 +544,101 @@ fn property(property: &Property) -> Value {
     })
 }
 
+/// The commands a fixed-function pass's generated program follows.
+fn is_fixed(command: &Command) -> bool {
+    [
+        "Lighting",
+        "SeparateSpecular",
+        "ColorMaterial",
+        "Color",
+        "AlphaTest",
+        "Fog",
+        "Material",
+        "SetTexture",
+        "BindChannels",
+    ]
+    .iter()
+    .any(|name| command.is(name))
+}
+
+/// Gives each pass without a program the program the Editor generates for
+/// its fixed-function commands, as a snippet after the compiler's: its ID is
+/// the low 16 bits of XXH32 of the code (seed `0x8f37154b`) with the count
+/// of snippets before it above them. The pass's fog and lighting state then
+/// lie in the program, and its state forgets them.
+pub fn generate_fixed(
+    form: &mut Value,
+    snippets: &mut Vec<super::PreprocessedSnippet>,
+    warnings: &mut Vec<(usize, String)>,
+) -> Result<bool> {
+    let cubes: Vec<String> = form["m_PropInfo"]["m_Props"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["m_DefTexture"]["m_TexDim"] == 4)
+        .filter_map(|p| p["m_Name"].as_str().map(String::from))
+        .collect();
+    let mut generated = false;
+    let passes = form["m_SubShaders"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+        .flat_map(|subshader| subshader["m_Passes"].as_array_mut().into_iter().flatten());
+    for pass in passes {
+        let Some(fixed) = pass.as_object_mut().and_then(|p| p.remove("__fixed")) else {
+            continue;
+        };
+        if fixed.is_null() {
+            continue;
+        }
+        let commands: Vec<Command> = serde_json::from_value(fixed)?;
+        let program =
+            super::fixed::FixedPass::read(&commands, &|name| cubes.iter().any(|c| c == name))?;
+        let code = program.code()?;
+        warnings.extend(program.warnings().iter().cloned());
+        let hash = xxhash_rust::xxh32::xxh32(code.as_bytes(), 0x8f37_154b);
+        let id = (hash & 0xffff) as i64 | (snippets.len() as i64) << 16;
+        let sets: Vec<String> = program.keywords().iter().map(|set| set.join(" ")).collect();
+        let user: Vec<String> = program
+            .keywords()
+            .iter()
+            .flat_map(|set| set.iter().skip(1).cloned())
+            .collect();
+        snippets.push(super::PreprocessedSnippet {
+            header: vec![id, -1, 0, 3, 0, 0, 0, 0, 0, 0, 1, 0, 0],
+            code,
+            keywords: (0..2)
+                .map(|t| ("keywordsUserGlobal".to_string(), t, sets.clone()))
+                .collect(),
+            keyword_texts: [user.join(" "), String::new(), String::new()],
+            base_requirements: 1,
+            targets: Vec::new(),
+            generated: true,
+        });
+        let state = &mut pass["m_State"];
+        // A lit fixed-function pass is a vertex-lit one.
+        if program.lit() {
+            let tags = state["m_Tags"]["tags"].as_array_mut();
+            if let Some(tags) = tags {
+                tags.retain(|t| t["first"] != "LIGHTMODE");
+                tags.push(json!({"first": "LIGHTMODE", "second": "Vertex"}));
+                tags.sort_by(|a, b| a["first"].as_str().cmp(&b["first"].as_str()));
+            }
+        }
+        state["gpuProgramID"] = json!(id);
+        state["fogMode"] = json!(0);
+        state["lighting"] = json!(false);
+        let noninit = Float::of(0.0).json();
+        for field in ["fogStart", "fogEnd", "fogDensity"] {
+            state[field] = noninit.clone();
+        }
+        state["fogColor"] =
+            json!({"name": "<noninit>", "x": noninit, "y": noninit, "z": noninit, "w": noninit});
+        generated = true;
+    }
+    Ok(generated)
+}
+
 /// The commands of a block that set state, of its passes' inheritance.
 fn is_state(command: &Command) -> bool {
     !(command.is("Pass")
@@ -650,6 +745,9 @@ fn collect(
 fn subshader(commands: &[Command], inherited: &State) -> Result<Value> {
     let mut state = inherited.clone();
     let mut current_name = String::new();
+    // The fixed-function commands met so far, which a pass without a
+    // program takes along with its own.
+    let mut fixed: Vec<Command> = Vec::new();
     let lod = commands
         .iter()
         .find(|c| c.is("LOD"))
@@ -660,6 +758,9 @@ fn subshader(commands: &[Command], inherited: &State) -> Result<Value> {
     for command in commands {
         if is_state(command) {
             state.apply(std::slice::from_ref(command))?;
+            if is_fixed(command) {
+                fixed.push(command.clone());
+            }
         } else if command.is("Name") {
             current_name = command.args.first().map(|t| t.text()).unwrap_or_default();
         }
@@ -679,7 +780,10 @@ fn subshader(commands: &[Command], inherited: &State) -> Result<Value> {
                 .and_then(|c| c.args.first())
                 .and_then(|t| t.text().parse().ok())
                 .unwrap_or(0i64);
+            let mut pass_fixed = fixed.clone();
+            pass_fixed.extend(block.iter().filter(|c| is_fixed(c)).cloned());
             passes.push(json!({
+                "__fixed": if gpu == 0 { serde_json::to_value(&pass_fixed)? } else { Value::Null },
                 "m_Type": 0,
                 "m_State": pass_state.json(&name, lod, gpu),
                 "m_Tags": tags(&[]),
@@ -812,6 +916,9 @@ pub fn complete(form: &mut Value, snippets: &[super::PreprocessedSnippet]) {
             subshader["m_Passes"].as_array_mut().into_iter().flatten()
         });
     for pass in passes {
+        if let Some(fields) = pass.as_object_mut() {
+            fields.remove("__fixed");
+        }
         let use_pass = pass["m_Type"] == 1;
         if use_pass {
             pass["m_State"] = empty_state();

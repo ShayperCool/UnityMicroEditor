@@ -81,6 +81,7 @@ fn execute() -> Result<()> {
         "run" => unity_micro_editor::runner::run_cli(&args.collect::<Vec<_>>())?,
         "game-managers" => run_game_managers(args.collect())?,
         "scene-objects" => run_scene_objects(args.collect())?,
+        "player-objects" => run_player_objects(args.collect())?,
         "player-file" => run_player_file(args.collect())?,
         "debug-build-environment" => {
             let args: Vec<String> = args.collect();
@@ -349,8 +350,9 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                 if std::env::var_os("UME_PARSED_FORM").is_some() {
                     let form = unity_micro_editor::playerbake::shaderlab::parsed_form(&reply)
                         .unwrap_or_else(|error| serde_json::json!({"error": format!("{error:#}")}));
+                    let imported = unity_micro_editor::playerbake::shaderlab::import(&reply)?;
                     let info = unity_micro_editor::playerbake::shaderlab::compile_info(
-                        &reply,
+                        &imported,
                         &request.directory,
                         &request.file,
                         &request.source,
@@ -865,6 +867,65 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
 /// Player's `globalgamemanagers` (experimental, see `playerbake::managers`).
 /// Has a standalone import worker write a scene as a build writes it, and
 /// lists what the file holds and refers to.
+/// Has a standalone import worker build one asset as a build writes it (a
+/// shader with its programs), for a reference of the tool's own writer:
+/// `player-objects --project P --editor E --output DIR --target ASSET
+/// [--users MATERIAL,...] [--shader-cache DIR]` writes `DIR/objects`.
+fn run_player_objects(args: Vec<String>) -> Result<()> {
+    let mut flags = std::collections::BTreeMap::new();
+    let mut args = args.into_iter();
+    while let Some(flag) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("{flag} requires a value"))?;
+        flags.insert(flag, value);
+    }
+    let flag = |name: &str| {
+        flags
+            .get(name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("player-objects requires {name}"))
+    };
+    use unity_micro_editor::{native, playerbake};
+    let build = native::PlayerBuild {
+        project: flag("--project")?,
+        editor: flag("--editor")?,
+        output: flag("--output")?,
+        target: flag("--target")?,
+        users: flags
+            .get("--users")
+            .map(|users| users.split(',').map(String::from).collect())
+            .unwrap_or_default(),
+        timeout: std::time::Duration::from_secs(1800),
+        reload_list: String::new(),
+        shader_cache: flags.get("--shader-cache").cloned().unwrap_or_default(),
+    };
+    let written =
+        native::write_player_objects(&unity_micro_editor::cancel::Context::background(), &build)?;
+    let objects: Vec<playerbake::Object<'_>> = written
+        .objects
+        .iter()
+        .map(|object| playerbake::Object {
+            local_id: object.local_id,
+            tree: &object.tree,
+            data: object.data.clone(),
+            script: object.script,
+            script_file: object.script_file,
+        })
+        .collect();
+    let format = playerbake::FileFormat::of_release("6000.0.71f1").unwrap();
+    let file = playerbake::write_in(format, &objects, &[])?;
+    fs::write(format!("{}/objects", flag("--output")?), file)?;
+    println!(
+        "objects {} externals {} imports {} seconds {:.1}",
+        written.objects.len(),
+        written.externals.len(),
+        written.imports,
+        written.seconds
+    );
+    Ok(())
+}
+
 fn run_scene_objects(args: Vec<String>) -> Result<()> {
     let mut flags = std::collections::BTreeMap::new();
     let mut args = args.into_iter();
