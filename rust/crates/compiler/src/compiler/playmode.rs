@@ -346,6 +346,13 @@ impl Compiler {
 
     /// Links one compiled Play mode assembly `input` into `output` for the
     /// Player `self.player`, aligned with the host's build of it.
+    ///
+    /// A link is a function of the linker, the host's build it is aligned
+    /// with, the Editor and the input, and the store keeps each by them: a
+    /// preparation or session links each assembly once, and the same input
+    /// gives the same bytes wherever it is linked (the keys of the game's
+    /// assemblies hold the hashes of their references). The linker writes
+    /// into the store's entry, whose path the assembly names for its symbols.
     pub(crate) fn link_play_mode_assembly(
         &self,
         ctx: &Context,
@@ -354,21 +361,69 @@ impl Compiler {
         input: &str,
         output: &str,
     ) -> Result<LinkReport> {
-        let layout = host_layout(&self.player, name).unwrap_or_default();
-        let report = self.run_linker(
-            ctx,
-            folder,
-            &Request {
-                mode: "link",
-                engine: engine_modules(&self.editor),
-                managed: &super::player_managed(&self.player),
-                input,
-                output,
-                layout: &layout,
-                editor_directories: editor_directories(&self.editor),
-                support: "",
-            },
-        )?;
+        let symbols = |dll: &str| format!("{}.pdb", dll.strip_suffix(".dll").unwrap_or(dll));
+        let key = sha256(
+            format!(
+                "play-mode-link-v1\0{}\0{}\0{name}\0{}\0{}",
+                self.play_mode_link_identity(ctx, name)?,
+                self.editor,
+                file_hash(input)?,
+                file_hash(&symbols(input)).unwrap_or_default(),
+            )
+            .as_bytes(),
+        );
+        let store = self.stored("play-mode-links");
+        let entry = sysutil::join(&[&store, &key]);
+        let file = sysutil::base(output);
+        let linked = sysutil::join(&[&entry, &file]);
+        let report =
+            match read_json_file::<Option<LinkReport>>(&sysutil::join(&[&entry, "report.json"])) {
+                Ok(Some(report)) if std::fs::metadata(&linked).is_ok() => report,
+                _ => {
+                    // Linked beside the store's entries and moved in whole: a
+                    // preparation and a session may link the same input at once.
+                    sys::mkdir_all(&store)?;
+                    let staging = sys::mkdir_temp(&store, &format!(".{key}-"))?;
+                    let layout = host_layout(&self.player, name).unwrap_or_default();
+                    let linking = self
+                        .run_linker(
+                            ctx,
+                            folder,
+                            &Request {
+                                mode: "link",
+                                engine: engine_modules(&self.editor),
+                                managed: &super::player_managed(&self.player),
+                                input,
+                                output: &sysutil::join(&[&staging, &file]),
+                                layout: &layout,
+                                editor_directories: editor_directories(&self.editor),
+                                support: "",
+                            },
+                        )
+                        .and_then(|report| {
+                            atomic_json(&sysutil::join(&[&staging, "report.json"]), &report)?;
+                            Ok(report)
+                        });
+                    let report = match linking {
+                        Ok(report) => report,
+                        Err(error) => {
+                            let _ = std::fs::remove_dir_all(&staging);
+                            return Err(error);
+                        }
+                    };
+                    let _ = std::fs::remove_dir_all(&entry);
+                    if std::fs::rename(&staging, &entry).is_err() {
+                        // Another process published the same link first.
+                        let _ = std::fs::remove_dir_all(&staging);
+                    }
+                    report
+                }
+            };
+        std::fs::copy(&linked, output).map_err(|error| anyhow!("copy {linked}: {error}"))?;
+        if std::fs::metadata(symbols(&linked)).is_ok() {
+            std::fs::copy(symbols(&linked), symbols(output))
+                .map_err(|error| anyhow!("copy the symbols of {linked}: {error}"))?;
+        }
         for difference in &report.layout_differences {
             eprintln!("[unity-micro-editor] Play mode layout of {name}: {difference}");
         }
