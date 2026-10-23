@@ -192,11 +192,14 @@ pub fn convert(
             "a texture of a size not a power of two is scaled",
         ));
     }
+    // An image with no pixel less than opaque keeps its alpha channel only
+    // where a format asks for one.
+    let opaque = image.rgba.chunks(4).all(|pixel| pixel[3] == 255);
     let format = match settings.platform_int("textureFormat", -1) {
         -1 if settings.platform_int("textureCompression", 1) == 0 => {
             if texture_type == 10 {
                 ALPHA8
-            } else if image.alpha && settings.int("alphaUsage", 1) != 0 {
+            } else if image.alpha && !opaque && settings.int("alphaUsage", 1) != 0 {
                 RGBA32
             } else {
                 RGB24
@@ -249,6 +252,7 @@ pub fn convert(
     set(&mut value, "m_Height", Val::I(height as i64));
     set(&mut value, "m_CompleteImageSize", Val::U(data.len() as u64));
     set(&mut value, "m_MipsStripped", Val::I(0));
+    set(&mut value, "m_IsAlphaChannelOptional", Val::Bool(opaque));
     set(&mut value, "m_TextureFormat", Val::I(format));
     set(&mut value, "m_MipCount", Val::I(1));
     set(
