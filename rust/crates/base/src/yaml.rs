@@ -87,6 +87,10 @@ fn parse_documents(
         } else {
             Cow::Borrowed(&text[start..end])
         };
+        let body = match indent_quoted_lines(&body) {
+            Some(indented) => Cow::Owned(indented),
+            None => body,
+        };
         let value = match parse_yaml(&body, lexical) {
             Err(error) if error.is::<EmptyDocument>() => bail!("fileID {id} requires one object"),
             other => other.with_context(|| format!("fileID {id}"))?,
@@ -192,6 +196,54 @@ fn keep_hash_marks(text: &str) -> Result<Cow<'_, str>> {
     Ok(Cow::Owned(result))
 }
 
+/// Unity writes the lines of a quoted value that spans lines from the start
+/// of the line (`m_Text: 'a` and then `'` alone) and reads it back; YAML
+/// wants them indented below their key. Such lines are indented here, which
+/// leaves the value as it is: a quoted value's line breaks fold the blanks
+/// around them. `None` when nothing needs it.
+fn indent_quoted_lines(text: &str) -> Option<String> {
+    let mut result = String::new();
+    let mut changed = false;
+    // The quote left open and the column its lines must pass.
+    let mut open: Option<(char, usize)> = None;
+    for line in text.split_inclusive('\n') {
+        let content = line.trim_end_matches(['\n', '\r']);
+        let indent = content.len() - content.trim_start_matches(' ').len();
+        if let Some((quote, column)) = open {
+            if quoted_end(content, quote).is_some() {
+                open = None;
+            }
+            if !content.trim().is_empty() && indent <= column {
+                result.push_str(&" ".repeat(column + 1 - indent));
+                changed = true;
+            }
+            result.push_str(line);
+            continue;
+        }
+        let mut rest = &content[indent..];
+        let mut column = indent;
+        while let Some(item) = rest.strip_prefix("- ") {
+            let trimmed = item.trim_start_matches(' ');
+            column += rest.len() - trimmed.len();
+            rest = trimmed;
+        }
+        if !rest.starts_with(['"', '\'']) {
+            if let Some(at) = rest.find(": ") {
+                rest = rest[at + 2..].trim_start_matches(' ');
+            } else {
+                rest = "";
+            }
+        }
+        if let Some(quote @ ('"' | '\'')) = rest.chars().next()
+            && quoted_end(&rest[1..], quote).is_none()
+        {
+            open = Some((quote, column));
+        }
+        result.push_str(line);
+    }
+    changed.then_some(result)
+}
+
 /// Where a quoted scalar closes within a line, if it does.
 fn quoted_end(text: &str, quote: char) -> Option<usize> {
     let bytes = text.as_bytes();
@@ -223,6 +275,8 @@ struct Receiver {
     root: Option<Value>,
     /// Keep every scalar as the text Unity wrote.
     lexical: bool,
+    /// Keys met more than once in a mapping, whose values became a sequence.
+    repeated: HashSet<String>,
 }
 impl Receiver {
     fn insert(&mut self, value: Value) -> Result<()> {
@@ -232,8 +286,24 @@ impl Receiver {
                 let Some(key) = pending.take() else {
                     bail!("non-scalar YAML key")
                 };
-                ensure!(!map.contains_key(&key), "duplicate YAML key {key:?}");
-                map.insert(key, value);
+                // A map of Unity 5 lists its pairs under one key repeated
+                // (`data:`); a lexical reading keeps the values as a
+                // sequence, a strict one refuses them.
+                ensure!(
+                    self.lexical || !map.contains_key(&key),
+                    "duplicate YAML key {key:?}"
+                );
+                match map.get_mut(&key) {
+                    None => {
+                        map.insert(key, value);
+                    }
+                    Some(Value::Array(items)) if self.repeated.contains(&key) => items.push(value),
+                    Some(existing) => {
+                        let first = std::mem::take(existing);
+                        *existing = Value::Array(vec![first, value]);
+                        self.repeated.insert(key);
+                    }
+                }
             }
             None => {
                 ensure!(self.root.is_none(), "requires one YAML object");
@@ -458,5 +528,33 @@ fn scalar(text: &str, key: &str, style: TScalarStyle, tag: Option<Tag>) -> Resul
                 .and_then(Number::from_f64)
                 .with_context(|| format!("non-finite or invalid float {text:?}"))?,
         )),
+    }
+}
+
+#[cfg(test)]
+mod unity_quirks {
+    use super::*;
+
+    #[test]
+    fn quoted_lines_from_the_start_of_the_line_are_read() {
+        let text = b"--- !u!114 &1\nMonoBehaviour:\n  m_Text: 'No options.\n\n\n    View ReadMe.\n\n'\n  m_Other: 1\n";
+        let documents = parse_unity_yaml_lexical(text).unwrap();
+        assert_eq!(
+            documents[0].data.get("m_Text"),
+            Some(&Value::String("No options.\n\nView ReadMe.\n".into()))
+        );
+        assert_eq!(
+            documents[0].data.get("m_Other"),
+            Some(&Value::String("1".into()))
+        );
+    }
+
+    #[test]
+    fn a_repeated_key_reads_as_a_sequence_when_lexical() {
+        let text = b"--- !u!1107 &1\nStateMachine:\n  m_Ordered:\n    data:\n      first: 1\n    data:\n      first: 2\n    data:\n      first: 3\n";
+        let documents = parse_unity_yaml_lexical(text).unwrap();
+        let data = documents[0].data["m_Ordered"]["data"].as_array().unwrap();
+        assert_eq!(data.len(), 3);
+        assert!(parse_unity_yaml(text).is_err());
     }
 }
