@@ -215,6 +215,12 @@ models are refused until models are imported. A behaviour's class overrides
 `OnStateMachineEnter` or `OnStateMachineExit` when its source declares such
 an override; one inherited from another class of the project is not seen.
 
+An audio mixer is derived the same way (`mixer.rs`, from the same
+history, 272 objects of 6000.6 fixtures equal): the mixer, its groups and
+its snapshots, the effects and every snapshot value moved into the mixer's
+`AudioMixerConstant`. Main's mixer, three groups and snapshot for 6000.0
+equal the worker's, so the pack's sample constant no longer stands in.
+
 ### Audio
 
 An `AudioImporter` source becomes an `AudioClip` whose samples the
@@ -323,10 +329,8 @@ scene file, for the scene's settings managers) and the Editor's
 `unity_builtin_extra`: the classes the game uses; a project with others
 (`Light`, `Rigidbody`, `MeshCollider`, ...) needs them captured too. Main without the worker's file:
 20574 objects equal, as with it; with the compressed and scaled textures
-written too, 21320 paired and 20844 equal. What a sample still carries of the game:
-the short lists of the one `AudioMixerController` (`m_MixerConstant`, which
-a build derives from the mixer's groups and snapshots and the tool does not
-yet), so another project's mixer would take wrong ones.
+written too, 21320 paired and 20844 equal. A sample still carries the short lists of the one `AudioMixerController`
+(`m_MixerConstant`), which the tool now derives from the mixer's source.
 
 What differs, by count of objects:
 

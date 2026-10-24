@@ -1,7 +1,7 @@
-//! Animation sources in a closure: `.anim`, `.controller`,
-//! `.overrideController` and `.mask`. The Editor objects of these sources
-//! are not what a Player holds; a build derives its objects from them
-//! (`clip`, `controller`, `mask`, `override_controller`). Here each Player
+//! Animation and audio mixer sources in a closure: `.anim`, `.controller`,
+//! `.overrideController`, `.mask` and `.mixer`. The Editor objects of these
+//! sources are not what a Player holds; a build derives its objects from
+//! them (`clip`, `controller`, `mask`, `override_controller`, `mixer`). Here each Player
 //! object stands in the source's documents as a document of its class and
 //! file ID without fields, with the object made beside it; what stays an
 //! object of its own (a controller's state machine behaviours) keeps its
@@ -12,7 +12,7 @@ use super::{
     clip::{self, ClipSources},
     controller::{self, BehaviourScript, ClipFacts, ControllerSources},
     mask::{self, Mask},
-    override_controller,
+    mixer, override_controller,
     typetree::Val,
 };
 use crate::yaml::Document;
@@ -67,7 +67,7 @@ pub(super) fn load(path: &Path, sources: &Sources) -> Result<Option<Animation>> 
         .unwrap_or_default();
     if !matches!(
         extension.as_str(),
-        "anim" | "controller" | "overrideController" | "mask"
+        "anim" | "controller" | "overrideController" | "mask" | "mixer"
     ) {
         return Ok(None);
     }
@@ -135,6 +135,31 @@ pub(super) fn load(path: &Path, sources: &Sources) -> Result<Option<Animation>> 
                         },
                     ));
                 }
+            }
+        }
+        "mixer" => {
+            // The mixer, its groups and its snapshots; the effects live on
+            // in the mixer's constant.
+            let (objects, externals) = mixer::mixer_objects(&documents)?;
+            for object in objects {
+                let Some(document) = documents
+                    .iter()
+                    .find(|d| d.file_id == object.file_id.to_string())
+                else {
+                    continue;
+                };
+                animation.documents.push(standing(
+                    object.class_id,
+                    &document.file_id,
+                    &document.type_name,
+                ));
+                animation.prebuilt.push((
+                    object.file_id,
+                    Prebuilt {
+                        value: object.value,
+                        externals: externals.clone(),
+                    },
+                ));
             }
         }
         "overrideController" => {

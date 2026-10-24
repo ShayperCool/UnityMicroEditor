@@ -490,3 +490,97 @@ fn freeform_tables_match_the_engine_build() {
         assert_eq!(table.neighbors, case.neighbors, "case {index}");
     }
 }
+
+/// Bakes the mixers of a directory and compares their objects with the
+/// engine's (`<name>.mixer.bin`: per object its ID, class, length and data).
+/// A value a build leaves undefined is taken from the bake on both sides.
+fn compare_mixers(root: &Path) -> (usize, Vec<String>, usize) {
+    fn value(mixer: &mut Val, snapshot: usize, index: usize) -> &mut Val {
+        let snapshots = mixer
+            .field_mut("m_MixerConstant")
+            .and_then(|constant| constant.field_mut("snapshots"));
+        let Some(Val::Seq(snapshots)) = snapshots else {
+            panic!("the mixer has no snapshots");
+        };
+        match snapshots[snapshot].field_mut("values") {
+            Some(Val::Seq(values)) => &mut values[index],
+            _ => panic!("the snapshot has no values"),
+        }
+    }
+    let (mut matched, mut differing, mut passed_over) = (0, Vec::new(), 0);
+    let mut sources: Vec<PathBuf> = fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "mixer")
+        })
+        .collect();
+    sources.sort();
+    for source in sources {
+        let name = source.file_name().unwrap().to_string_lossy().into_owned();
+        let packed = fs::read(root.join(format!("{name}.bin"))).unwrap();
+        let mut expected = Vec::new();
+        let mut at = 0;
+        while at < packed.len() {
+            let id = i64::from_le_bytes(packed[at..at + 8].try_into().unwrap());
+            let class = i32::from_le_bytes(packed[at + 8..at + 12].try_into().unwrap());
+            let length = u32::from_le_bytes(packed[at + 12..at + 16].try_into().unwrap()) as usize;
+            expected.push((id, class as i64, packed[at + 16..at + 16 + length].to_vec()));
+            at += 16 + length;
+        }
+        let text = fs::read(&source).unwrap();
+        let mut objects = playerbake::bake_mixer_objects(&text)
+            .unwrap_or_else(|error| panic!("{name}: {error:#}"));
+        objects.sort_by_key(|object| object.0);
+        let undefined = playerbake::mixer_undefined_values(&text).unwrap();
+        if !undefined.is_empty() {
+            let layout = playerbake::mixer_tree(241).unwrap();
+            let baked = objects.iter().find(|object| object.1 == 241).unwrap();
+            let mut baked = layout.decode(&baked.2).unwrap();
+            let built = expected.iter_mut().find(|object| object.1 == 241).unwrap();
+            let mut decoded = layout.decode(&built.2).unwrap();
+            assert_eq!(layout.encode(&decoded).unwrap(), built.2, "{name}");
+            for &(snapshot, index) in &undefined {
+                *value(&mut decoded, snapshot, index) = value(&mut baked, snapshot, index).clone();
+            }
+            built.2 = layout.encode(&decoded).unwrap();
+            passed_over += undefined.len();
+        }
+        if objects == expected {
+            matched += objects.len();
+            continue;
+        }
+        let mut found = Vec::new();
+        for (object, expected) in objects.iter().zip(&expected) {
+            if object.1 == expected.1 && object.2 != expected.2 {
+                let layout = playerbake::mixer_tree(object.1).unwrap();
+                differences(
+                    &object.0.to_string(),
+                    &layout.decode(&object.2).unwrap(),
+                    &layout.decode(&expected.2).unwrap(),
+                    &mut found,
+                );
+            }
+        }
+        differing.push(format!(
+            "{name}: {} objects for {} {found:?}",
+            objects.len(),
+            expected.len()
+        ));
+    }
+    (matched, differing, passed_over)
+}
+
+/// Mixers authored through the Editor (groups several deep, every built-in
+/// effect, sends and ducking, snapshots, transitions, exposed parameters, a
+/// mixer playing into another) and hand-written ones the Editor would not
+/// author, each with the objects of an engine build.
+#[test]
+fn mixers_match_the_engine_build() {
+    let (matched, differing, passed_over) = compare_mixers(&fixture("mixers"));
+    assert!(differing.is_empty(), "{differing:?}");
+    assert!(matched >= 272, "mixer fixtures are missing: {matched}");
+    // Three of them hold a chorus with its feedback left to the default.
+    assert_eq!(passed_over, 5);
+}

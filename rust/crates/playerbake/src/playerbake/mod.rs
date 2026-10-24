@@ -16,6 +16,7 @@ mod game_files;
 mod humanoid;
 mod managers;
 mod mask;
+mod mixer;
 mod override_controller;
 mod prefab;
 mod scripts;
@@ -59,6 +60,9 @@ pub use managers::{
     ManagerReport, PlainFile, PointerOf, compare_managers, manager_trees, write_project_managers,
 };
 pub use mask::{Mask, bake_mask_object, mask_value, read_mask};
+pub use mixer::{
+    MixerObject, bake_mixer_objects, mixer_objects, mixer_tree, mixer_undefined_values,
+};
 pub use override_controller::{bake_override_object, override_value};
 pub use prefab::Unpacked;
 pub use scripts::{
