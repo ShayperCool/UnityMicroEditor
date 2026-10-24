@@ -221,6 +221,49 @@ its snapshots, the effects and every snapshot value moved into the mixer's
 `AudioMixerConstant`. Main's mixer, three groups and snapshot for 6000.0
 equal the worker's, so the pack's sample constant no longer stands in.
 
+### Models
+
+`model/` reads an `.fbx` through `ufbx` (vendored C, MIT) and makes the
+meshes the Editor's model importer makes (`player-file fbx <file> [--write
+F <release>]` prints the file and what the tool imports of it):
+
+- Unity's space: X mirrored (triangles turned the other way), lengths times
+  `globalScale` and, with `useFileScale`, the file's unit in metres. A
+  node's origin moves to its pivot and its geometry the other way (`ufbx`'s
+  `AdjustToPivot`): Bouncemasters' background models keep their meshes
+  centred on pivots 7.33 units off their parent's origin.
+- The model's root is the scene's single top node if it has one, named
+  after the file; names met again are told apart by a number in order of
+  the hierarchy (`eye_l 1`). A mesh is named after its node; the root's
+  after the file's node, not the file.
+- Normals imported or calculated (smoothing angle, weighed by area and
+  angle), tangents by MikkTSpace (`bevy_mikktspace`) over the first UV set,
+  colours to bytes, up to eight UV sets; corners welded on all their
+  attributes; one submesh per material slot; 16-bit indices up to 65535
+  vertices.
+- A skinned mesh: up to four weights per vertex, heaviest first; bones in
+  the skin's order, each named by the CRC-32 of its path below the root;
+  bind poses from the mesh's node into the bone's; a bone box per bone; the
+  root bone the one above all others. Its positions stay in the first
+  stream, colours and UVs in the second, the skin in the third (indices
+  alone with one bone per vertex).
+- File IDs from the `.meta`'s `fileIDToRecycleName` (before 2019.3) or
+  `internalIDToNameTable` by class and name, new ones as the format before
+  2019.3 numbers them.
+
+Main of Bouncemasters: the 33 meshes it uses have the worker's vertices and
+triangles (positions within float rounding), the skinned ones their bind
+poses and bone hashes. What still differs: the order of vertices and
+triangles (the Editor's own vertex cache optimizer, in jobs), the UV
+distribution metric by up to 1% (the rule is followed, see `uv_metric`),
+the channels a build strips because no shader of the mesh's materials
+reads them (`StripUnusedMeshComponents`: the worker's meshes keep positions
+and colours only), and which meshes a build keeps readable for dynamic
+batching (taken as up to 300 vertices). Not imported yet: the model's
+hierarchy as objects (for prefab instances of a model), its animation
+takes and avatar, embedded materials, blend shapes, the new-style file IDs
+of models without a recorded table.
+
 ### Baked lighting
 
 A scene's `LightingData.asset` is a binary file of Editor objects: the

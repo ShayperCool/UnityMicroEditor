@@ -65,6 +65,9 @@ pub(super) fn load(path: &Path, sources: &Sources) -> Result<Option<Animation>> 
         .extension()
         .map(|e| e.to_string_lossy().into_owned())
         .unwrap_or_default();
+    if extension.eq_ignore_ascii_case("fbx") {
+        return model(path).map(Some);
+    }
     if !matches!(
         extension.as_str(),
         "anim" | "controller" | "overrideController" | "mask" | "mixer"
@@ -201,6 +204,37 @@ pub(super) fn load(path: &Path, sources: &Sources) -> Result<Option<Animation>> 
         }
     }
     Ok(Some(animation))
+}
+
+/// The objects of a model the tool imports: its meshes.
+fn model(path: &Path) -> Result<Animation> {
+    let meta = std::fs::read_to_string(format!("{}.meta", path.display()))?;
+    let settings = super::model::Settings::read(&meta)?;
+    let imported = super::model::import(path, &settings)?;
+    let mut animation = Animation {
+        documents: Vec::new(),
+        prebuilt: Vec::new(),
+    };
+    for (file_id, class_id, value) in imported.objects {
+        animation.documents.push(standing(
+            class_id,
+            &file_id.to_string(),
+            match class_id {
+                43 => "Mesh",
+                74 => "AnimationClip",
+                90 => "Avatar",
+                _ => "Object",
+            },
+        ));
+        animation.prebuilt.push((
+            file_id,
+            Prebuilt {
+                value,
+                externals: Vec::new(),
+            },
+        ));
+    }
+    Ok(animation)
 }
 
 /// The project's path of a source, as the Editor names it: under `Assets`,

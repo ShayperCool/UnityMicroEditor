@@ -443,6 +443,56 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                 }
             }
         }
+        ["fbx", file, rest @ ..] => {
+            use unity_micro_editor::playerbake::model;
+            print!("{}", model::inspect(Path::new(file))?);
+            let meta = fs::read_to_string(format!("{file}.meta"))?;
+            let imported = model::import(Path::new(file), &model::Settings::read(&meta)?)?;
+            for (id, class, value) in &imported.objects {
+                let name = match value.field("m_Name") {
+                    Some(unity_micro_editor::playerbake::Val::Str(name)) => name.clone(),
+                    _ => String::new(),
+                };
+                println!("object {id} class {class} {name:?}");
+            }
+            for refusal in &imported.refused {
+                println!("refused {refusal}");
+            }
+            // `--write F`: the objects into a Player file, to compare.
+            if let ["--write", output, version] = rest {
+                let library = unity_micro_editor::playerbake::Library::of_release(version)
+                    .ok_or_else(|| anyhow::anyhow!("no pack for {version}"))??;
+                let mut objects = Vec::new();
+                let mut data = Vec::new();
+                for (id, class, value) in &imported.objects {
+                    let kind = library
+                        .class(*class as i32)
+                        .ok_or_else(|| anyhow::anyhow!("no tree of class {class}"))?;
+                    data.push((*id, kind.tree.clone(), kind.tree.encode(value)?));
+                }
+                for (id, tree, bytes) in &data {
+                    objects.push(unity_micro_editor::playerbake::Object {
+                        local_id: *id,
+                        tree,
+                        data: bytes.clone(),
+                        script: None,
+                        script_file: 0,
+                    });
+                }
+                let format = unity_micro_editor::playerbake::FileFormat {
+                    version: if version.starts_with("6000.0.") {
+                        22
+                    } else {
+                        23
+                    },
+                    unity_version: Box::leak(version.to_string().into_boxed_str()),
+                };
+                fs::write(
+                    output,
+                    unity_micro_editor::playerbake::write_in(format, &objects, &[])?,
+                )?;
+            }
+        }
         // A type tree as the engine's own files store one (`engine/type-*.bin`).
         ["tree", file] => {
             let data: &'static [u8] = Box::leak(fs::read(file)?.into_boxed_slice());

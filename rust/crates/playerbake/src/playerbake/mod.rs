@@ -18,6 +18,7 @@ mod lighting;
 mod managers;
 mod mask;
 mod mixer;
+pub mod model;
 mod override_controller;
 mod prefab;
 mod scripts;

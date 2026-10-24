@@ -245,6 +245,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bevy_mikktspace"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bff34eb29ff4b8a8688bc7299f14fb6b597461ca80fec03ed7d22939ab33e48f"
+
+[[package]]
 name = "bit-vec"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2559,6 +2565,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
+name = "ufbx"
+version = "0.11.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "260522f1eb74139f0e78b29dd82a58e5437d728c5498024a39e5af7282694240"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "ume-agentcontrol"
 version = "0.1.0"
 dependencies = [
@@ -2683,6 +2698,7 @@ name = "ume-playerbake"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bevy_mikktspace",
  "cc",
  "libc",
  "lz4-sys",
@@ -2691,6 +2707,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "ufbx",
  "ume-base",
  "xxhash-rust",
 ]

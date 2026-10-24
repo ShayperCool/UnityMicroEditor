@@ -43,6 +43,8 @@ sha1 = "0.10"
 lz4-sys = "1.11.1"
 str0m = { version = "0.24.1", default-features = false, features = ["rust-crypto"] }
 cc = "1"
+ufbx = "0.11"
+bevy_mikktspace = "1"
 
 [package]
 name = "unity-micro-editor"

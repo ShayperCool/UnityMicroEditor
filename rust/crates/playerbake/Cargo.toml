@@ -16,6 +16,8 @@ lz4-sys.workspace = true
 png.workspace = true
 libc.workspace = true
 tempfile.workspace = true
+ufbx.workspace = true
+bevy_mikktspace.workspace = true
 
 [build-dependencies]
 cc.workspace = true
