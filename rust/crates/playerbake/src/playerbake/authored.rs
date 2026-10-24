@@ -18,7 +18,7 @@ use anyhow::{Context as _, Result, bail};
 use serde_json::Value;
 use std::{
     borrow::Cow,
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::Path,
     sync::Arc,
 };
@@ -268,6 +268,14 @@ impl Library {
 
     pub fn script_object(&self, full_name: &str) -> Option<&Val> {
         self.script_objects.get(full_name)
+    }
+
+    /// The `MonoScript` of every script class laid out, by full name.
+    pub fn script_objects(&self) -> BTreeMap<&str, &Val> {
+        self.script_objects
+            .iter()
+            .map(|(name, object)| (name.as_str(), object))
+            .collect()
     }
 
     /// The script class of the assembly `assembly` that a reference names by
@@ -1033,6 +1041,17 @@ impl Sources {
 
     pub fn path(&self, guid: &str) -> Option<&Path> {
         self.paths.get(guid).map(std::path::PathBuf::as_path)
+    }
+
+    /// Every source with its GUID, in the order of their paths.
+    pub fn all(&self) -> Vec<(&str, &Path)> {
+        let mut all: Vec<(&str, &Path)> = self
+            .paths
+            .iter()
+            .map(|(guid, path)| (guid.as_str(), path.as_path()))
+            .collect();
+        all.sort_by(|a, b| a.1.cmp(b.1));
+        all
     }
 
     /// The full class name of the script a `.cs` file defines: the class

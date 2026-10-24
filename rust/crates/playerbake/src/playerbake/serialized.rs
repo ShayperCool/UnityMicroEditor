@@ -119,7 +119,7 @@ pub fn write(objects: &[Object<'_>], externals: &[External]) -> Result<Vec<u8>> 
 /// own (its default resources, its built-in extra resources), which the
 /// Player finds in its global table by it, in the engine's byte order (the
 /// two digits of each byte swapped); none for another file.
-fn engine_guid(guid: &str) -> [u8; 16] {
+pub(super) fn engine_guid(guid: &str) -> [u8; 16] {
     let mut bytes = [0u8; 16];
     let digits: Vec<u8> = guid
         .chars()

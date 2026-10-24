@@ -22,6 +22,8 @@ use std::{borrow::Cow, collections::BTreeMap, path::Path, sync::Arc};
 /// Player build writes it. The metadata is kept as it is; only object data
 /// and its table rows change.
 pub struct PlainFile {
+    /// The format, 22 (6000.0) or 23.
+    version: u32,
     meta: Vec<u8>,
     /// Class ID per type table entry.
     types: Vec<i32>,
@@ -114,6 +116,7 @@ impl PlainFile {
             });
         }
         Ok(Self {
+            version,
             meta: meta.to_vec(),
             types,
             objects,
@@ -137,7 +140,7 @@ impl PlainFile {
             data_offset += 1;
         }
         let mut out = vec![0u8; HEADER];
-        out[8..12].copy_from_slice(&23u32.to_be_bytes());
+        out[8..12].copy_from_slice(&self.version.to_be_bytes());
         out[20..24].copy_from_slice(&(meta.len() as u32).to_be_bytes());
         out[24..32].copy_from_slice(&((data_offset + data.len()) as u64).to_be_bytes());
         out[32..40].copy_from_slice(&(data_offset as u64).to_be_bytes());
@@ -247,6 +250,8 @@ pub fn write_project_managers(
             let value = Overlay {
                 tree,
                 report: &mut report,
+                pointers: None,
+                upgrade: false,
             }
             .value(0, base_value, &source, "")?;
             object.data = tree.encode(&value)?;
@@ -257,9 +262,20 @@ pub fn write_project_managers(
     Ok((file.write(), reports))
 }
 
-struct Overlay<'a> {
-    tree: &'a TypeTree,
-    report: &'a mut ManagerReport,
+/// Where an authored reference (`{fileID, guid, type}`) leads in the
+/// written file: its file and path ID, or `None` for an asset the file does
+/// not reach.
+pub type PointerOf<'a> = &'a dyn Fn(&Value) -> Option<(i64, i64)>;
+
+pub(super) struct Overlay<'a> {
+    pub(super) tree: &'a TypeTree,
+    pub(super) report: &'a mut ManagerReport,
+    /// Without it, references keep the base's pointers.
+    pub(super) pointers: Option<PointerOf<'a>>,
+    /// Whether a structure the source wrote at another serialized version
+    /// takes its fields by name (with the upgrades `upgraded` knows) instead
+    /// of keeping the base: a base of defaults has no value worth keeping.
+    pub(super) upgrade: bool,
 }
 
 impl Overlay<'_> {
@@ -268,9 +284,20 @@ impl Overlay<'_> {
         Ok(base)
     }
 
-    fn value(&mut self, index: usize, base: Val, source: &Value, path: &str) -> Result<Val> {
+    pub(super) fn value(
+        &mut self,
+        index: usize,
+        base: Val,
+        source: &Value,
+        path: &str,
+    ) -> Result<Val> {
         let node = &self.tree.nodes[index];
         let children = self.tree.children(index);
+        if let Some(value) = self.upgraded(index, &base, source) {
+            self.report.written += 1;
+            self.report.kept.push(format!("{path}: upgraded"));
+            return Ok(value);
+        }
         if children.is_empty() {
             if node.size == 0 {
                 return Ok(base);
@@ -315,12 +342,39 @@ impl Overlay<'_> {
         }
         if node.type_name.starts_with("PPtr<") {
             // An asset reference needs the Player file of its asset.
-            return self.keep(base, path, "object reference");
+            let Some(pointers) = self.pointers else {
+                return self.keep(base, path, "object reference");
+            };
+            let empty = source
+                .get("fileID")
+                .and_then(|id| text(id).ok())
+                .is_none_or(|id| id == "0");
+            let (file, path_id) = match empty {
+                true => (0, 0),
+                false => match pointers(source) {
+                    Some(pointer) => pointer,
+                    None => {
+                        self.report
+                            .kept
+                            .push(format!("{path}: an asset the Player lacks"));
+                        (0, 0)
+                    }
+                },
+            };
+            self.report.written += 1;
+            let names: Vec<String> = children
+                .iter()
+                .map(|&child| self.tree.nodes[child].name.clone())
+                .collect();
+            return Ok(Val::Map(vec![
+                (Cow::Owned(names[0].clone()), Val::I(file)),
+                (Cow::Owned(names[1].clone()), Val::I(path_id)),
+            ]));
         }
         if let Some((_, element)) = self.tree.element(index) {
             // A build lists the objects it holds itself: it drops missing
             // ones and adds what the render pipeline needs.
-            if self.tree.nodes[element].type_name.starts_with("PPtr<") {
+            if self.tree.nodes[element].type_name.starts_with("PPtr<") && self.pointers.is_none() {
                 return self.keep(base, path, "sequence of object references");
             }
             if node.type_name != "vector" {
@@ -361,14 +415,16 @@ impl Overlay<'_> {
             Some(version) => text(version)?.parse::<u16>().unwrap_or(0),
         };
         if version != node.version {
-            return self.keep(
-                base,
-                path,
-                &format!(
-                    "serialized version {version}, the engine writes {}",
-                    node.version
-                ),
+            let why = format!(
+                "serialized version {version}, the engine writes {}",
+                node.version
             );
+            if !self.upgrade {
+                return self.keep(base, path, &why);
+            }
+            self.report
+                .kept
+                .push(format!("{path}: {why}, taken by name"));
         }
         let mut base_fields = match base {
             Val::Map(fields) => fields,
@@ -394,6 +450,27 @@ impl Overlay<'_> {
             values.push((Cow::Owned(name), value));
         }
         Ok(Val::Map(values))
+    }
+}
+
+impl Overlay<'_> {
+    /// A field a source of an older serialized version wrote in another
+    /// form, as the engine upgrades it: `TimeManager`'s fixed timestep, a
+    /// float of seconds before it became a count of 1/141120000ths of a
+    /// second (the single's value, rounded down).
+    fn upgraded(&self, index: usize, base: &Val, source: &Value) -> Option<Val> {
+        let node = &self.tree.nodes[index];
+        if node.type_name != "RationalTime" {
+            return None;
+        }
+        let seconds: f32 = source.as_str()?.parse().ok()?;
+        const RATE: u64 = 141_120_000;
+        let mut value = base.clone();
+        *value.field_mut("m_Count")? = Val::I((seconds as f64 * RATE as f64).floor() as i64);
+        let rate = value.field_mut("m_Rate")?;
+        *rate.field_mut("m_Denominator")? = Val::U(1);
+        *rate.field_mut("m_Numerator")? = Val::U(RATE);
+        Some(value)
     }
 }
 
@@ -443,10 +520,10 @@ pub fn compare_managers(
 /// levels in PlayerSettings. The source is narrowed before it is written, so
 /// the kept levels line up with those of a base built the same way.
 const STANDALONE: &str = "Standalone";
-const QUALITY: i32 = 47;
-const PLAYER: i32 = 129;
+pub(super) const QUALITY: i32 = 47;
+pub(super) const PLAYER: i32 = 129;
 
-fn standalone_quality(source: &mut Value) -> Result<Vec<Val>> {
+pub(super) fn standalone_quality(source: &mut Value) -> Result<Vec<Val>> {
     let Some(levels) = source.get("m_QualitySettings").and_then(Value::as_array) else {
         bail!("QualitySettings has no levels");
     };
@@ -509,6 +586,12 @@ fn settle_player(
         return Ok(());
     };
     let mut value = tree.decode(&player.data)?;
+    settle_player_value(&mut value, quality_names);
+    player.data = tree.encode(&value)?;
+    Ok(())
+}
+
+pub(super) fn settle_player_value(value: &mut Val, quality_names: Option<Vec<Val>>) {
     if let (Some(names), Some(field)) = (quality_names, value.field_mut("qualitySettingsNames")) {
         *field = Val::Seq(names);
     }
@@ -520,8 +603,6 @@ fn settle_player(
     {
         *field = Val::I(30);
     }
-    player.data = tree.encode(&value)?;
-    Ok(())
 }
 
 pub(super) fn guid_words(text: &str) -> Option<[u32; 4]> {

@@ -32,7 +32,7 @@ pub use compile::{
     editor_source, equal_strings, lifecycle_sources_match, read_assembly_configuration,
     source_dirty_assemblies, valid_lifecycle_proof, verify_cache_files,
 };
-pub use host::{player_assembly_paths, stage_host};
+pub use host::{compile_bridge, player_assembly_paths, stage_host};
 pub use metadata::{
     METADATA_GUID_BUFFER_SIZE, METADATA_GUID_MAXIMUM, MetadataGuidIdentity, MetadataGuidIndex,
     assembly_references,
@@ -700,6 +700,30 @@ pub fn requires_new_graph(message: &str) -> bool {
     ]
     .iter()
     .any(|text| message.contains(text))
+}
+
+/// What completes a staged Player once a preparation has compiled the
+/// project into it (project, Editor, Player): the files of a host the tool
+/// assembled that name the project's scripts and resources, which the
+/// layer that writes them registers (`set_player_completion`).
+pub type PlayerCompletion = fn(&crate::cancel::Context, &str, &str, &str) -> anyhow::Result<()>;
+
+static PLAYER_COMPLETION: std::sync::OnceLock<PlayerCompletion> = std::sync::OnceLock::new();
+
+pub fn set_player_completion(completion: PlayerCompletion) {
+    let _ = PLAYER_COMPLETION.set(completion);
+}
+
+pub(crate) fn complete_player(
+    ctx: &crate::cancel::Context,
+    project: &str,
+    editor: &str,
+    player: &str,
+) -> anyhow::Result<()> {
+    match PLAYER_COMPLETION.get() {
+        Some(completion) => completion(ctx, project, editor, player),
+        None => Ok(()),
+    }
 }
 
 pub fn player_data(player: &str) -> String {

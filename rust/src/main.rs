@@ -80,6 +80,39 @@ fn execute() -> Result<()> {
         }
         "run" => unity_micro_editor::runner::run_cli(&args.collect::<Vec<_>>())?,
         "game-managers" => run_game_managers(args.collect())?,
+        "complete-player" => {
+            // `complete-player <project> <editor> <player>`: the files of an
+            // assembled host that name the project's scripts and resources.
+            let args: Vec<String> = args.collect();
+            let [project, editor, player] = args.as_slice() else {
+                anyhow::bail!("complete-player <project> <editor> <player>");
+            };
+            let ctx = unity_micro_editor::cancel::Context::background();
+            let completed = unity_micro_editor::native::host_assembly::complete_player(
+                &ctx, project, editor, player,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&completed)?);
+        }
+        "assemble-host" => {
+            // `assemble-host <project> <editor> <output>`: a host Player
+            // assembled by the tool, with no Editor build.
+            let args: Vec<String> = args.collect();
+            let [project, editor, output] = args.as_slice() else {
+                anyhow::bail!("assemble-host <project> <editor> <output>");
+            };
+            let ctx = unity_micro_editor::cancel::Context::background();
+            let resolved =
+                unity_micro_editor::packages::resolve(&ctx, project, editor, Default::default())?;
+            let roots: Vec<String> = resolved
+                .packages
+                .iter()
+                .map(|package| package.path.clone())
+                .collect();
+            let assembled = unity_micro_editor::native::host_assembly::assemble_host(
+                &ctx, project, editor, output, &roots,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&assembled)?);
+        }
         "scene-objects" => run_scene_objects(args.collect())?,
         "player-objects" => run_player_objects(args.collect())?,
         "player-file" => run_player_file(args.collect())?,
@@ -260,6 +293,155 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                 .first()
                 .ok_or_else(|| anyhow::anyhow!("{file} holds no object of class {class}"))?;
             fs::write(output, &object.tree.entry[..])?;
+        }
+        ["game-managers", project, version, output, rest @ ..] => {
+            // `globalgamemanagers` written from the release's pack and the
+            // project's settings; `--compare F` lists the fields that differ
+            // from another build's.
+            use unity_micro_editor::playerbake;
+            let pack = playerbake::ManagerPack::of_release(version)?
+                .ok_or_else(|| anyhow::anyhow!("no manager pack of {version}"))?;
+            let pointers = |source: &serde_json::Value| -> Option<(i64, i64)> {
+                let file_id: i64 = source.get("fileID")?.as_str()?.parse().ok()?;
+                match source.get("guid")?.as_str()? {
+                    "0000000000000000f000000000000000" => {
+                        Some((playerbake::BUILTIN_EXTRA_FILE, file_id))
+                    }
+                    "0000000000000000e000000000000000" => {
+                        Some((playerbake::DEFAULT_RESOURCES_FILE, file_id))
+                    }
+                    _ => None,
+                }
+            };
+            let read =
+                |name: &str| fs::read_to_string(Path::new(project).join(name)).unwrap_or_default();
+            let settings = playerbake::ShaderSettings::read(
+                &read("ProjectSettings/ProjectSettings.asset"),
+                &read("ProjectSettings/GraphicsSettings.asset"),
+                &read("ProjectSettings/QualitySettings.asset"),
+                &read("Packages/manifest.json"),
+            )
+            .ok();
+            let derived = playerbake::DerivedManagers {
+                scenes: vec!["Assets/Bootstrap.unity".into()],
+                graphics_apis: vec![17],
+                scripts: Vec::new(),
+                resources: Vec::new(),
+                shaders: Vec::new(),
+                builtin_shaders: Vec::new(),
+                shader_settings: settings.as_ref(),
+                pointers: &pointers,
+            };
+            let (file, reports) =
+                playerbake::write_game_managers(Path::new(project), &pack, &derived)?;
+            fs::write(output, &file)?;
+            for report in &reports {
+                for kept in &report.kept {
+                    eprintln!("kept {} {kept}", report.class_id);
+                }
+            }
+            if let ["--compare", other] = rest {
+                for line in playerbake::compare_managers(&file, &fs::read(other)?, &pack.trees())? {
+                    println!(
+                        "{}",
+                        line.chars()
+                            .take(
+                                std::env::var("UME_FIELDS_LIMIT")
+                                    .ok()
+                                    .and_then(|v| v.parse().ok())
+                                    .unwrap_or(400)
+                            )
+                            .collect::<String>()
+                    );
+                }
+            }
+        }
+        ["managers-check", pack, others @ ..] => {
+            // Decodes the managers of each Player file with the trees of a
+            // capture, and re-encodes them, byte for byte.
+            let data = fs::read(pack)?;
+            let objects = unity_micro_editor::playerbake::read_serialized(&data)?;
+            let mut trees = std::collections::BTreeMap::new();
+            for object in &objects {
+                let outcome = object
+                    .tree
+                    .decode(&object.data)
+                    .and_then(|value| Ok(object.tree.encode(&value)? == object.data));
+                println!(
+                    "pack {} {:?}",
+                    object.tree.class_id,
+                    outcome.map_err(|e| e.to_string())
+                );
+                if std::env::var("UME_FIELDS")
+                    .is_ok_and(|class| class == object.tree.class_id.to_string())
+                {
+                    let count = object.tree.children(0).len();
+                    for fields in 1..=count {
+                        match object.tree.decode_leading(&object.data, fields) {
+                            Ok(unity_micro_editor::playerbake::Val::Map(values)) => {
+                                let (name, value) = values.last().unwrap();
+                                println!(
+                                    "  {name} = {}",
+                                    format!("{value:?}").chars().take(160).collect::<String>()
+                                );
+                            }
+                            other => {
+                                println!("  stop {:?}", other.err());
+                                break;
+                            }
+                        }
+                    }
+                }
+                trees.insert(object.tree.class_id, object.tree.clone());
+            }
+            for other in others {
+                let file = unity_micro_editor::playerbake::PlainFile::parse(&fs::read(other)?)?;
+                for object in &file.objects {
+                    let Some(tree) = trees.get(&object.class_id) else {
+                        println!(
+                            "{other} {} no tree, {} bytes",
+                            object.class_id,
+                            object.data.len()
+                        );
+                        continue;
+                    };
+                    let outcome = tree
+                        .decode(&object.data)
+                        .and_then(|value| Ok(tree.encode(&value)? == object.data));
+                    println!(
+                        "{other} {} {:?}",
+                        object.class_id,
+                        outcome.map_err(|e| e.to_string())
+                    );
+                    if std::env::var("UME_FIELDS")
+                        .is_ok_and(|class| class == object.class_id.to_string())
+                    {
+                        for fields in 1..=tree.children(0).len() {
+                            match tree.decode_leading(&object.data, fields) {
+                                Ok(unity_micro_editor::playerbake::Val::Map(values)) => {
+                                    let (name, value) = values.last().unwrap();
+                                    println!(
+                                        "  {name} = {}",
+                                        format!("{value:?}")
+                                            .chars()
+                                            .take(
+                                                std::env::var("UME_FIELDS_LIMIT")
+                                                    .ok()
+                                                    .and_then(|v| v.parse().ok())
+                                                    .unwrap_or(300)
+                                            )
+                                            .collect::<String>()
+                                    );
+                                }
+                                other => {
+                                    println!("  stop {:?}", other.err());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         ["trees", file] => {
             let data = fs::read(file)?;

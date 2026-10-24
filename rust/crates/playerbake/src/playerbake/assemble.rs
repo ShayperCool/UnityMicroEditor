@@ -120,6 +120,8 @@ enum Source {
     Audio(PathBuf, super::audio::Settings),
     Image(PathBuf, Vec<u8>),
     Script(String),
+    /// A shader baked for the Player, with the sources it refers to.
+    Shader(Vec<u8>, Vec<super::External>),
     /// A plugin's compiled assembly, by its name: the script classes
     /// references name in it by their file IDs.
     Assembly(String),
@@ -129,6 +131,10 @@ enum Source {
 fn engine_resource(guid: &str) -> bool {
     guid.starts_with("0000000000000000")
 }
+
+/// Bakes the shader of a GUID: its Player object and the sources it refers
+/// to, in the order its pointers name them.
+pub type ShaderBaker<'a> = &'a dyn Fn(&str) -> Result<(Vec<u8>, Vec<super::External>)>;
 
 /// Writes the closure of `roots`; with `scene`, one of them, the scene's own
 /// objects (and its lighting settings) go to a file of their own that refers
@@ -143,6 +149,33 @@ pub fn write_scene_closure(
     format: FileFormat,
     stream_name: &str,
     builtin_extra: Option<&Path>,
+) -> Result<Assembled> {
+    write_closure_baking(
+        library,
+        tags,
+        sources,
+        roots,
+        scene,
+        format,
+        stream_name,
+        builtin_extra,
+        None,
+    )
+}
+
+/// The same, with the shaders the sources name baked into the file by
+/// `shaders`, as a build holds them, where a session publishes them apart.
+#[allow(clippy::too_many_arguments)]
+pub fn write_closure_baking(
+    library: &Library,
+    tags: &Tags,
+    sources: &Sources,
+    roots: &[&str],
+    scene: Option<&str>,
+    format: FileFormat,
+    stream_name: &str,
+    builtin_extra: Option<&Path>,
+    shaders: Option<ShaderBaker<'_>>,
 ) -> Result<Assembled> {
     let mut assembled = Assembled::default();
     // Sources by GUID, in the order they are reached.
@@ -164,6 +197,28 @@ pub fn write_scene_closure(
                 .push((guid, "no source with this GUID".into()));
             continue;
         };
+        let baked = match (shaders, is_shader(path)) {
+            (Some(bake), true) => Some(bake(&guid)),
+            _ => None,
+        };
+        if let Some(baked) = baked {
+            match baked {
+                Ok((data, externals)) => {
+                    for external in &externals {
+                        if !engine_resource(&external.guid) && seen.insert(external.guid.clone()) {
+                            queue.push_back(external.guid.clone());
+                        }
+                    }
+                    order.push(guid.clone());
+                    loaded.insert(guid, Source::Shader(data, externals));
+                }
+                Err(error) => {
+                    left_out.insert(guid.clone());
+                    assembled.refused.push((guid, format!("{error:#}")));
+                }
+            }
+            continue;
+        }
         let source = match load(path, &guid, sources).and_then(|source| match source {
             Some(Source::Yaml(documents)) => {
                 let mut documents = unpacked.unpack(sources, documents)?;
@@ -366,6 +421,10 @@ pub fn write_scene_closure(
                 ids.insert((guid.clone(), TEXT_FILE_ID), next);
                 next += 1;
             }
+            Source::Shader(..) => {
+                ids.insert((guid.clone(), SHADER_FILE_ID), next);
+                next += 1;
+            }
             Source::Audio(..) => match clips.get(guid) {
                 Some(Ok(_)) => {
                     ids.insert((guid.clone(), super::audio::AUDIO_CLIP_FILE_ID), next);
@@ -475,6 +534,52 @@ pub fn write_scene_closure(
                 }
                 objects.push((
                     ids[&(guid.clone(), super::audio::AUDIO_CLIP_FILE_ID)],
+                    kind.tree.clone(),
+                    value,
+                    None,
+                ));
+            }
+            Source::Shader(data, shader_externals) => {
+                let Some(kind) = library.class(SHADER) else {
+                    assembled
+                        .refused
+                        .push((guid.clone(), "no type tree of Shader".into()));
+                    continue;
+                };
+                let mut value = kind.tree.decode(data)?;
+                // What the shader names lies in this file, or in another.
+                let mut failed = None;
+                map_pointers(&mut value, &mut |file, path| {
+                    if file == 0 {
+                        return (0, path);
+                    }
+                    let Some(external) = shader_externals.get(file as usize - 1) else {
+                        failed = Some(format!(
+                            "a pointer into file {file}, which it does not name"
+                        ));
+                        return (0, 0);
+                    };
+                    if let Some(id) = ids.get(&(external.guid.clone(), path)) {
+                        return (0, *id);
+                    }
+                    if !engine_resource(&external.guid) {
+                        return (0, 0);
+                    }
+                    let position = match externals.iter().position(|g| *g == external.guid) {
+                        Some(position) => position,
+                        None => {
+                            externals.push(external.guid.clone());
+                            externals.len() - 1
+                        }
+                    };
+                    (position as i64 + 1, path)
+                });
+                if let Some(why) = failed {
+                    assembled.refused.push((guid.clone(), why));
+                    continue;
+                }
+                objects.push((
+                    ids[&(guid.clone(), SHADER_FILE_ID)],
                     kind.tree.clone(),
                     value,
                     None,
@@ -1019,6 +1124,8 @@ fn shader_source_textures(source: &str) -> HashSet<String> {
 pub const BUILTIN_EXTRA: &str = "0000000000000000f000000000000000";
 const DEFAULT_RESOURCES: &str = "0000000000000000e000000000000000";
 const SHADER: i32 = 48;
+/// The file ID of the `Shader` of a `.shader` source.
+const SHADER_FILE_ID: i64 = 4_800_000;
 
 /// The wanted objects of the Editor's `unity_builtin_extra` and those they
 /// refer to in it, but shaders, as documents in the form of authored YAML.

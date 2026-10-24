@@ -301,6 +301,42 @@ impl Service {
         }
     }
 
+    /// The host of the project, assembled by the tool from the installation
+    /// in the preparation's directory (`native::host_assembly`).
+    fn assemble_host(
+        &self,
+        ctx: &Context,
+        directory: &str,
+        resolved: &crate::packages::Snapshot,
+    ) -> Result<String> {
+        let output = join(&[directory, "assembled-host"]);
+        let player = join(&[&output, crate::native::host_assembly::HOST_EXECUTABLE]);
+        if super::regular(&player) {
+            return Ok(player);
+        }
+        self.stage(
+            "assemble_host",
+            "assembling the host Player from the installation, with no Editor",
+            "",
+        );
+        let roots: Vec<String> = resolved
+            .packages
+            .iter()
+            .map(|package| package.path.clone())
+            .collect();
+        let assembled = crate::native::host_assembly::assemble_host(
+            ctx,
+            &self.0.project,
+            &self.0.editor,
+            &output,
+            &roots,
+        )?;
+        for (id, why) in &assembled.refused_shaders {
+            eprintln!("[unity-micro-editor] built-in shader {id} is not in the host: {why}");
+        }
+        Ok(assembled.player)
+    }
+
     fn prepare_seeded(
         &self,
         ctx: &Context,
@@ -333,8 +369,16 @@ impl Service {
             Err(error) if !not_exist(&error) => return Err(error),
             Err(_) => {}
         }
+        // A host the tool can assemble needs no Editor build (and no
+        // licence); `UME_EDITOR_HOST=1` keeps the Editor's.
+        let assemble = host.is_empty()
+            && std::env::var_os("UME_EDITOR_HOST").is_none_or(|value| value != "1")
+            && crate::playerbake::ManagerPack::of_release(crate::release::project_release(
+                project,
+            )?)?
+            .is_some();
         // Fail on what needs no work to detect before anything is resolved or built.
-        if host.is_empty() && self.0.no_editor {
+        if host.is_empty() && !assemble && self.0.no_editor {
             return Err(fail(
                 "native_host_missing",
                 "no matching reusable Mono host was supplied; main Editor execution is disabled",
@@ -364,6 +408,9 @@ impl Service {
             )
         };
         let mut resolved = resolve()?;
+        if assemble {
+            host = self.assemble_host(ctx, &directory, &resolved)?;
+        }
         let bootstrap_id = phase_id(&id, "engine-profile-bootstrap");
         // A pinned native engine/host profile is bootstrapped once through the
         // explicit Editor backend. Subsequent target graphs never come from Editor.
@@ -398,7 +445,9 @@ impl Service {
                     seed.reference_graph.clone()
                 };
                 if reference.is_empty() {
-                    if self.0.no_editor {
+                    // A supplied host's graph is read from its build proof,
+                    // with no Editor.
+                    if self.0.no_editor && seed.host_player.is_empty() && !assemble {
                         return Err(fail(
                             "engine_profile_missing",
                             "capture the pinned engine/native host facts once before source-only preparation",
@@ -459,6 +508,8 @@ impl Service {
             packages: Some(resolved),
             editor_domain: false,
         };
+        // A host the tool assembled is completed once the project compiled.
+        crate::native::host_assembly::register();
         self.stage("build_source_graph", "", "");
         let graph = build_source_graph(ctx, &options)?;
         let graph_path = join(&[&directory, "graph.json"]);

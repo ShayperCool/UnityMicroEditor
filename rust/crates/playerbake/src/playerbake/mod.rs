@@ -7,6 +7,7 @@ pub mod audio;
 mod authored;
 mod compare;
 mod font;
+mod game_files;
 mod managers;
 mod prefab;
 mod scripts;
@@ -22,14 +23,20 @@ mod texture;
 pub use texture::decode_png;
 mod typetree;
 
-pub use assemble::{Assembled, external_path, write_closure, write_scene_closure};
+pub use assemble::{
+    Assembled, ShaderBaker, external_path, write_closure, write_closure_baking, write_scene_closure,
+};
 pub use authored::{
     Converted, Kind, Library, MONO_SCRIPT, Reference, Renames, Resolve, Sources, Tags, Written,
     convert as convert_authored, full_name, script_execution_orders, write_source,
 };
 pub use compare::{Difference, Inspected, compare as compare_files, inspect as inspect_file};
+pub use game_files::{
+    BUILTIN_EXTRA_FILE, DEFAULT_RESOURCES_FILE, DerivedManagers, GLOBAL_ASSETS_FILE,
+    MANAGER_EXTERNALS, ManagerPack, RESOURCES_FILE, plain_file, write_game_managers,
+};
 pub use managers::{
-    ManagerReport, PlainFile, compare_managers, manager_trees, write_project_managers,
+    ManagerReport, PlainFile, PointerOf, compare_managers, manager_trees, write_project_managers,
 };
 pub use prefab::Unpacked;
 pub use scripts::{

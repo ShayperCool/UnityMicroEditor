@@ -1,5 +1,131 @@
 # Toward a Player without a host build
 
+## A host assembled without the Editor (2026-10-24, 6000.0)
+
+A preparation of a 6000.0.71f1 project no longer builds its host with the
+Editor: it assembles one from the installation (`native::host_assembly`,
+stage `assemble_host`), so preparing a project needs no Unity licence.
+`UME_EDITOR_HOST=1` keeps the Editor build; `--host-player` still takes a
+given host. `unity-micro-editor assemble-host <project> <editor> <output>`
+assembles one alone, and `complete-player <project> <editor> <player>`
+writes what a preparation adds to it.
+
+What the host is made of:
+
+- **Engine.** The `linux64_player_development_mono` template (launcher,
+  `UnityPlayer.so`, `libdecor`, Mono, the engine's modules and default
+  resources), copied, and the class library a Mono build copies (20 assemblies
+  of `unityjit-linux` and 4 facades, with what the engine's modules refer to).
+- **Registrations.** `ScriptingAssemblies.json` lists the engine's modules
+  (`UnityEngine.dll` first, the modules by name without `Module`) and the
+  tool's bridge, compiled against them; `RuntimeInitializeOnLoads.json`
+  starts empty. A preparation registers what it compiles, as before, and
+  compiles the bridge again after the packages it builds, so that the bridge
+  serves Addressables where a package build brought them.
+- **Build proof.** `UnityMicroEditorSourceProfile.json` holds the bridge
+  alone, with the symbols and references every Player assembly of the
+  project compiles with, which the engine profile is read from: 80 symbols of
+  a 6000.0 Linux Mono development Player (an Editor build of Bouncemasters'
+  bridge less the project's own symbols), the release's version symbols, the
+  API level's (.NET Framework only) and the input handler's; the 17 class
+  library assemblies of `unity-4.8-api` with all its facades, and the engine
+  modules no built-in package controls with those of the module packages the
+  project resolves. Every package assembly is then built from source.
+- **Plugins.** The native libraries of the project and its packages whose
+  importer enables them for the Linux Player, by the rules of managed plugins
+  (both forms of `.meta`).
+- **Streaming assets.** `Assets/StreamingAssets`, and an Addressables runtime
+  with an empty catalog (`aa/settings.json`, `aa/catalog.json`) where the
+  project has the package: the session serves addressable assets from their
+  sources, and the package only has to initialize.
+- **`globalgamemanagers`** (`playerbake::write_game_managers`), from the
+  release's manager pack and the project's `ProjectSettings`.
+- **`Resources/unity_builtin_extra`**: the built-in shaders the build needs,
+  baked by the tool from the Editor's `unity_builtin_extra`, at their path
+  IDs there.
+- **`level0`**, a scene of its settings alone, and `globalgamemanagers.assets`
+  with what the Player preloads (the default resources' scripts).
+
+Once the preparation has compiled the project into its copy of the host, it
+completes it (`complete_player`, a hook of `compiler::prepare`):
+
+- every script class of the Player's assemblies gets its `MonoScript` in
+  `globalgamemanagers.assets`, which `MonoManager.m_Scripts` lists after the
+  default resources' scripts. The Player loads them at its start on its main
+  thread, so content that names a script of any compiled assembly loads on a
+  load thread without the crash described in
+  [UNITY_RELEASES.md](UNITY_RELEASES.md);
+- the sources in `Resources` folders (not below an `Editor` folder) are
+  written into `resources.assets` with what they refer to, by the tool's
+  writer, and `ResourceManager` names each object by its path below the last
+  `Resources` folder, without extension, in lower case (a prefab by its root);
+- the shaders they use are imported and baked by the tool into that file
+  (`native::project_shaders`), as a build holds them, and `ScriptMapper`
+  names them.
+
+### The manager pack
+
+The layouts and defaults of the managers come from a reference capture,
+`tools/ReferenceCapture/ManagerCapture.cs`, run once per release by the
+tool's developers with a licensed Editor in an empty project: it writes the
+objects of `ProjectSettings/*.asset` and of `Library/BuildSettings.asset`,
+`MonoManager.asset` and `ScriptMapper` with `ContentBuildInterface.WriteSerializedFile`
+for `StandaloneLinux64`, with their type trees. The file is shipped as
+`playerbake/engine/<release>/managers.bin`. Two of its trees do not describe
+the bytes the Player writes, and are corrected when read: 6000.0's
+`UnityConnectSettings` has no `InsightsSettings`, and its `PlayerSettings`
+ends in four more bytes (zero in every build seen; named
+`m_UnnamedPlayerTail`). The managers that hold nothing (`DelayedCallManager`,
+`RuntimeInitializeOnLoadManager`, class 1403656975) and `ResourceManager`
+are written without a tree, with the type hashes an Editor build gives them.
+
+The project's settings are written over the pack's defaults field by field,
+by name, also where a file is of an older serialized version than the
+engine's (Bouncemasters' `DynamicsManager` is version 3, the engine writes
+23), with what the engine does when it upgrades such a file:
+
+- `TimeManager`'s fixed timestep of version 1, a float of seconds, becomes
+  a count of 1/141120000 s, the single's value rounded down;
+- `DynamicsManager` below its version takes `m_AutoSyncTransforms` 1 and
+  `m_DefaultMaxAngularSpeed` 7 where it lacks them, `Physics2DSettings`
+  `m_AutoSyncTransforms` 1;
+- numbers written `.001`, as older Editors wrote them, are read.
+
+References to the engine's own objects are kept (`m_AlwaysIncludedShaders`);
+references to project assets are written empty for now (see below). What a
+build derives: `BuildSettings` names the bootstrap scene and OpenGL Core;
+`GraphicsSettings.m_ShaderDefinesPerShaderCompiler` holds, for OpenGL Core,
+each tier's platform defines as the baker computes them; `ScriptMapper`
+keeps every name of the engine's registry, pointing where the build holds
+its shader or nowhere, and adds the shaders the build holds. Against an
+Editor build of Bouncemasters, field by field, the managers differ in:
+
+- the references to project assets (splash logos and backgrounds,
+  `preloadedAssets`, the default 2D physics material,
+  `m_SpritesDefaultMaterial`, the invalidated pattern texture);
+- the splash backgrounds' aspects, which a build computes from them;
+- `PlayerSettings.AID`, which is not the project's (two Editor builds of
+  Bouncemasters have two values, one of them the empty project's);
+- `useHDR` of the tiers (an upgrade of `m_TierSettings: []` gives `false`
+  in the Editor build);
+- `MonoManager.m_ScriptHashes`, left empty.
+
+### Built-in shaders
+
+`unity_builtin_extra` of a build holds the shaders the project always
+includes, those a 6000.0 build adds to them (28 path IDs, shipped as a
+table: the engine's stencil and blit shaders, UI Toolkit's, the video
+decoders'), what they take passes of or fall back on, and those the
+project's materials name. Each is baked from the Editor's object with the
+variants the project's materials use. Against the Editor build of
+Bouncemasters: all 40 shaders both hold are equal to the byte;
+`Hidden/VideoDecodeOSX` is refused (its programs warn, and what a warning
+leaves in the object is not reproduced). `Legacy Shaders/Diffuse` showed a
+rule of the keyword table: the keywords of the snippets of a shader's own
+passes come first, by snippet ID, then those of the snippets its fallback
+brings (`Legacy Shaders/VertexLit`'s, of lower IDs here), by ID.
+
+
 Status, 2026-10-16. Three steps are live:
 
 - **Settings.** Preparation and watched sessions write the Player's settings

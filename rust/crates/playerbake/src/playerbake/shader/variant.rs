@@ -351,9 +351,20 @@ impl Shader<'_> {
 
     /// The keyword list the importer builds: the engine's stereo keywords,
     /// then per snippet and stage every keyword of its groups, once.
-    fn space(&self) -> Vec<String> {
+    /// The keywords the passes declare: the engine's stereo ones, then those
+    /// of each snippet by ID, the shader's own passes' (`first`) before the
+    /// others (its fallback's, which a 6000.0 import holds too).
+    fn space(&self, first: &[i64]) -> Vec<String> {
         let mut out: Vec<String> = STEREO.iter().map(|name| name.to_string()).collect();
-        for snippet in self.snippets.values() {
+        let mut own: Vec<i64> = first.to_vec();
+        own.sort_unstable();
+        let mut ids: Vec<i64> = Vec::new();
+        for id in own.iter().chain(self.snippets.keys()) {
+            if self.snippets.contains_key(id) && !ids.contains(id) {
+                ids.push(*id);
+            }
+        }
+        for snippet in ids.iter().map(|id| &self.snippets[id]) {
             for stage in 0..STAGES {
                 for groups in [
                     &snippet.global[stage],
@@ -730,6 +741,13 @@ impl Usage {
     }
 }
 
+/// The platform defines a build records per hardware tier in
+/// `GraphicsSettings.m_ShaderDefinesPerShaderCompiler`: those its programs
+/// are compiled with.
+pub(crate) fn recorded_defines(settings: &ShaderSettings) -> [u64; 3] {
+    [0, 1, 2].map(|tier| platform_defines(settings, tier))
+}
+
 /// The platform defines that are on for a hardware tier of the standalone
 /// target, one bit each.
 fn platform_defines(settings: &ShaderSettings, tier: usize) -> u64 {
@@ -1050,7 +1068,17 @@ pub(super) fn plan(artifact: &Val, project: &ShaderProject) -> Result<Vec<PassPl
         snippets,
         dynamic,
     };
-    if shader.space() != shader.keywords {
+    let mut pass_snippets = Vec::new();
+    for subshader in sequence(parsed, "m_SubShaders")? {
+        for pass in sequence(subshader, "m_Passes")? {
+            if let Some(state) = pass.field("m_State")
+                && number(pass, "m_Type")? == 0
+            {
+                pass_snippets.push(number(state, "gpuProgramID")?);
+            }
+        }
+    }
+    if shader.space(&pass_snippets) != shader.keywords {
         return Err(unsupported(
             "a shader whose keyword list is not the one its passes declare",
         ));

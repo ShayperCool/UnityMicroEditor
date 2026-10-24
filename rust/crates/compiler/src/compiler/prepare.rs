@@ -479,7 +479,6 @@ pub fn prepare_compiler_graph_with(
     // compiled against it.
     let helper = compiler.prepare_lifecycle_helper(ctx)?;
     if own_graph {
-        refresh_bridge(ctx, &compiler, &helper, &managed)?;
         build_package_assemblies(
             ctx,
             &mut compiler,
@@ -489,6 +488,9 @@ pub fn prepare_compiler_graph_with(
             &managed,
             &slots_file,
         )?;
+        // After the packages: the bridge serves what the host's packages
+        // hold (Addressables), which a host without them gets built here.
+        refresh_bridge(ctx, &compiler, &helper, &managed)?;
     }
     let mut ordered = order_compiler_assemblies(&compiler.manifest.assemblies)?;
     compiler.manifest.assemblies = ordered.clone();
@@ -779,6 +781,7 @@ pub fn prepare_compiler_graph_with(
     // with; what each manager kept of the host is recorded beside it.
     let managers = super::settings::prepare_managers(&project, &staged_player)?;
     atomic_json(&join(&[&staging_path, "settings-managers.json"]), &managers)?;
+    super::complete_player(ctx, &project, editor, &staged_player)?;
     if own_graph {
         remove_source_native_initializers(
             &join(&[&sysutil::dir(&managed), "RuntimeInitializeOnLoads.json"]),

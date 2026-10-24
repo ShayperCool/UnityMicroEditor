@@ -29,6 +29,7 @@ mod object;
 mod variant;
 
 pub use check::verify_shader_programs;
+pub(crate) use variant::recorded_defines;
 /// The class of a `ComputeShader` and the local file ID of the one object
 /// of a `.compute` asset.
 pub const COMPUTE_SHADER_CLASS: i32 = 72;

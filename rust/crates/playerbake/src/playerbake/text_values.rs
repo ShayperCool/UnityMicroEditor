@@ -15,7 +15,9 @@ pub(super) fn decimal(text: &str, fraction: bool) -> bool {
         Some((mantissa, exponent)) => (mantissa, Some(exponent)),
         None => (text, None),
     };
+    // Older Editors wrote a fraction below one without its zero (`.001`).
     let whole = match mantissa.split_once('.') {
+        Some(("", part)) => digits(part).then_some("0"),
         Some((whole, part)) => digits(part).then_some(whole),
         None => Some(mantissa),
     };
