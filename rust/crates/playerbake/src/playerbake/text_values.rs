@@ -30,8 +30,8 @@ pub(super) fn scalar(type_name: &str, source: &str, path: &str) -> Result<Val> {
     let refused = || unsupported(format!("{path} is not a plain number: {source:?}"));
     Ok(match type_name {
         // The Editor writes an infinite single as a word.
-        "float" if source == "Infinity" => Val::F(f32::INFINITY),
-        "float" if source == "-Infinity" => Val::F(f32::NEG_INFINITY),
+        "float" if source == "Infinity" || source == "inf" => Val::F(f32::INFINITY),
+        "float" if source == "-Infinity" || source == "-inf" => Val::F(f32::NEG_INFINITY),
         "float" => {
             let number = source
                 .parse::<f32>()

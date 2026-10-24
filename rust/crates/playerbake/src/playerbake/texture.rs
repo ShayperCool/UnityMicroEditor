@@ -104,6 +104,123 @@ pub struct Image {
     pub alpha: bool,
 }
 
+unsafe extern "C" {
+    fn stbi_load_from_memory(
+        buffer: *const u8,
+        len: i32,
+        x: *mut i32,
+        y: *mut i32,
+        channels_in_file: *mut i32,
+        desired_channels: i32,
+    ) -> *mut u8;
+    fn stbi_image_free(data: *mut std::ffi::c_void);
+}
+
+/// An image of any format the importer reads: PNG through `png`, the others
+/// (JPEG, Photoshop's composite image, TGA, BMP, GIF, and a `.png` that is
+/// not one) through stb_image.
+pub fn decode_image(data: &[u8], extension: &str) -> Result<Image> {
+    if extension == "png" && data.starts_with(b"\x89PNG") {
+        return decode_png(data);
+    }
+    let (mut width, mut height, mut channels) = (0i32, 0i32, 0i32);
+    let len = i32::try_from(data.len()).context("image too large")?;
+    // SAFETY: the buffer outlives the call; stb_image returns its own
+    // allocation of width * height * 4 bytes, freed below.
+    let pixels = unsafe {
+        stbi_load_from_memory(
+            data.as_ptr(),
+            len,
+            &mut width,
+            &mut height,
+            &mut channels,
+            4,
+        )
+    };
+    if pixels.is_null() {
+        bail!("the {extension} image does not decode");
+    }
+    let count = width as usize * height as usize * 4;
+    // SAFETY: stb_image wrote `count` bytes at `pixels`.
+    let rgba = unsafe { std::slice::from_raw_parts(pixels, count) }.to_vec();
+    // SAFETY: the allocation is stb_image's.
+    unsafe { stbi_image_free(pixels.cast()) };
+    Ok(Image {
+        width: width as u32,
+        height: height as u32,
+        rgba,
+        alpha: matches!(channels, 2 | 4),
+    })
+}
+
+/// The next mipmap level: each pixel the mean of the up to four it covers.
+fn box_filter(rgba: &[u8], width: usize, height: usize, linear: bool) -> (Vec<u8>, usize, usize) {
+    let (w, h) = ((width / 2).max(1), (height / 2).max(1));
+    let to_linear = |c: u8| {
+        let c = c as f32 / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let to_srgb = |c: f32| {
+        let c = if c <= 0.003_130_8 {
+            c * 12.92
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        };
+        (c * 255.0).round().clamp(0.0, 255.0) as u8
+    };
+    let mut out = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let mut sum = [0f32; 4];
+            let mut count = 0.0;
+            for sy in [y * 2, y * 2 + 1] {
+                for sx in [x * 2, x * 2 + 1] {
+                    if sx >= width || sy >= height {
+                        continue;
+                    }
+                    let p = &rgba[(sy * width + sx) * 4..][..4];
+                    for k in 0..3 {
+                        sum[k] += if linear { to_linear(p[k]) } else { p[k] as f32 };
+                    }
+                    sum[3] += p[3] as f32;
+                    count += 1.0;
+                }
+            }
+            let at = (y * w + x) * 4;
+            for k in 0..3 {
+                let mean = sum[k] / count;
+                out[at + k] = if linear {
+                    to_srgb(mean)
+                } else {
+                    mean.round().clamp(0.0, 255.0) as u8
+                };
+            }
+            out[at + 3] = (sum[3] / count).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    (out, w, h)
+}
+
+/// An image grown to whole 4x4 blocks by repeating its last row and column.
+fn pad_to_blocks(rgba: &[u8], width: usize, height: usize) -> (Vec<u8>, usize, usize) {
+    let (w, h) = (width.next_multiple_of(4), height.next_multiple_of(4));
+    if (w, h) == (width, height) {
+        return (rgba.to_vec(), w, h);
+    }
+    let mut out = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let from = (y.min(height - 1) * width + x.min(width - 1)) * 4;
+            out[(y * w + x) * 4..][..4].copy_from_slice(&rgba[from..from + 4]);
+        }
+    }
+    (out, w, h)
+}
+
 pub fn decode_png(data: &[u8]) -> Result<Image> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(data));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
@@ -174,37 +291,50 @@ pub fn convert(
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
-    if extension != "png" {
-        return Err(unsupported(format!(
-            "{extension} images are left to the worker"
-        )));
-    }
-    let image = decode_png(&std::fs::read(path)?)?;
-    // A texture larger than its maximum size is scaled down to it, keeping
-    // its proportions.
-    let max = settings.platform_int("maxTextureSize", 2048).max(1) as f64;
-    let larger = image.width.max(image.height) as f64;
-    let (width, height) = if larger > max {
-        let side = |v: u32| ((v as f64 * max / larger).round() as usize).max(1);
-        (side(image.width), side(image.height))
-    } else {
-        (image.width as usize, image.height as usize)
-    };
-    if settings.int("mipmaps.enableMipMap", 1) != 0 {
-        return Err(unsupported("mipmaps"));
-    }
-    let texture_type = settings.int("textureType", 0);
+    let image = decode_image(&std::fs::read(path)?, &extension)?;
     // Default, Sprite and Single Channel; a normal map or a lightmap takes a
-    // usage mode of its own.
+    // usage mode of its own. The Advanced (-1) and GUI (2) types of older
+    // Editors are Default textures with their own settings.
+    let texture_type = match settings.int("textureType", 0) {
+        -1 | 2 => 0,
+        other => other,
+    };
     if ![0, 8, 10].contains(&texture_type) {
         return Err(unsupported(format!("texture type {texture_type}")));
     }
+    // A texture whose sides are not powers of two is scaled to powers of
+    // two (`nPOTScale`: 1 the nearest, 2 the next larger, 3 the next
+    // smaller), but a sprite.
+    let pot = |side: u32| -> u32 {
+        let next = side.next_power_of_two();
+        let previous = (next / 2).max(1);
+        match settings.int("nPOTScale", 1) {
+            2 => next,
+            3 if next == side => side,
+            3 => previous,
+            _ if next == side => side,
+            _ if side - previous < next - side => previous,
+            _ => next,
+        }
+    };
     let npot = !(image.width.is_power_of_two() && image.height.is_power_of_two());
-    if npot && settings.int("nPOTScale", 1) != 0 && texture_type != 8 {
-        return Err(unsupported(
-            "a texture of a size not a power of two is scaled",
-        ));
-    }
+    let (scaled_width, scaled_height) =
+        if npot && settings.int("nPOTScale", 1) != 0 && texture_type != 8 {
+            (pot(image.width), pot(image.height))
+        } else {
+            (image.width, image.height)
+        };
+    // A texture larger than its maximum size is scaled down to it, keeping
+    // its proportions.
+    let max = settings.platform_int("maxTextureSize", 2048).max(1) as f64;
+    let larger = scaled_width.max(scaled_height) as f64;
+    let (width, height) = if larger > max {
+        let side = |v: u32| ((v as f64 * max / larger).round() as usize).max(1);
+        (side(scaled_width), side(scaled_height))
+    } else {
+        (scaled_width as usize, scaled_height as usize)
+    };
+    let mipmaps = settings.int("mipmaps.enableMipMap", 1) != 0;
     // An image with no pixel less than opaque keeps its alpha channel only
     // where a format asks for one.
     let opaque = image.rgba.chunks(4).all(|pixel| pixel[3] == 255);
@@ -256,15 +386,29 @@ pub fn convert(
     ];
     // What a tight sprite mesh is traced from: the alpha the texture keeps.
     let alpha: Vec<u8> = bottom_up.chunks(4).map(|p| p[3]).collect();
-    let data = match format {
-        DXT1 | DXT5 => super::texcomp::compress(&bottom_up, width, height, format == DXT5)?,
-        RGBA32 => bottom_up,
-        RGB24 => bottom_up
-            .chunks(4)
-            .flat_map(|p| [p[0], p[1], p[2]])
-            .collect(),
-        _ => bottom_up.chunks(4).map(|p| p[3]).collect(),
-    };
+    // The mipmap chain down to one pixel, each level the box filter of the
+    // one above (in linear space for an sRGB texture).
+    let mut levels = vec![(bottom_up, width, height)];
+    if mipmaps {
+        let linear = settings.int("mipmaps.sRGBTexture", 1) != 0;
+        while let Some((above, w, h)) = levels.last().filter(|(_, w, h)| *w > 1 || *h > 1) {
+            let level = box_filter(above, *w, *h, linear);
+            levels.push(level);
+        }
+    }
+    let mip_count = levels.len();
+    let mut data = Vec::new();
+    for (rgba, w, h) in levels {
+        match format {
+            DXT1 | DXT5 => {
+                let (padded, pw, ph) = pad_to_blocks(&rgba, w, h);
+                data.extend(super::texcomp::compress(&padded, pw, ph, format == DXT5)?)
+            }
+            RGBA32 => data.extend(rgba),
+            RGB24 => data.extend(rgba.chunks(4).flat_map(|p| [p[0], p[1], p[2]])),
+            _ => data.extend(rgba.chunks(4).map(|p| p[3])),
+        }
+    }
     let filter = match settings.int("textureSettings.filterMode", -1) {
         -1 => 1,
         mode => mode,
@@ -293,7 +437,7 @@ pub fn convert(
     set(&mut value, "m_MipsStripped", Val::I(0));
     set(&mut value, "m_IsAlphaChannelOptional", Val::Bool(opaque));
     set(&mut value, "m_TextureFormat", Val::I(format));
-    set(&mut value, "m_MipCount", Val::I(1));
+    set(&mut value, "m_MipCount", Val::I(mip_count as i64));
     set(
         &mut value,
         "m_IsReadable",

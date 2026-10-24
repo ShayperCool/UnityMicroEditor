@@ -171,6 +171,23 @@ Main without the worker's file: the 49 compressed and 38 scaled textures are
 written too (refused sources 155 to 63); 584 of 588 textures equal, the other
 four images of the same name paired the other way.
 
+### Other images, power-of-two scaling and mipmaps
+
+A PNG is read with `png`; the other formats the importer takes (JPEG,
+Photoshop's composite image, TGA, BMP, GIF, and a `.png` that is not one)
+with stb_image (vendored, `vendor/stb/stb_image.c`). A texture whose sides
+are not powers of two is scaled before the maximum size applies
+(`nPOTScale` 1 to the nearest, a tie going up; 2 to the next larger; 3 to
+the next smaller; never a sprite) with the resizer above. Mipmaps go down
+to one pixel, each level the mean of the up to four pixels above it, the
+colour in linear space for an sRGB texture; a block-compressed level
+smaller than a block is padded by repeating its edge. The Advanced (-1)
+and GUI (2) types of older Editors are written as Default textures.
+Bouncemasters' resources: 413 written (388 before), none refused for its
+format, size or mipmaps. Not reproduced: the importer's own mipmap filters
+(Kaiser, coverage preservation, fading), so mipmapped textures are not
+byte-equal; high quality compression (BC7); lightmap textures.
+
 ### Fonts
 
 `font.rs` makes a TrueType or OpenType font a dynamic `Font` as the

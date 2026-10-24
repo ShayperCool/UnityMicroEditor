@@ -239,7 +239,76 @@ impl Templates {
             _ => return None,
         };
         let tree = TypeTree::parse(entry).expect("a shipped pack of templates parses");
-        Some(Self::of_pack(&tree))
+        let mut templates = Self::of_pack(&tree);
+        templates.complete();
+        Some(templates)
+    }
+
+    /// Fills in the value types a release's captures did not meet, whose
+    /// layout every release shares: the integer vectors and rectangles, the
+    /// bounds and the bounds of integers.
+    fn complete(&mut self) {
+        let leaf = |type_name: &str, name: &str, level: u8, size: i32| {
+            node(type_name, name, level, size, 0)
+        };
+        let int3 = |name: &str, level: u8, meta: u32| {
+            vec![
+                node("int3_storage", name, level, 12, meta),
+                leaf("int", "x", level + 1, 4),
+                leaf("int", "y", level + 1, 4),
+                leaf("int", "z", level + 1, 4),
+            ]
+        };
+        let vector3 = |name: &str, level: u8| {
+            vec![
+                node("Vector3f", name, level, 12, 0x20_0000),
+                leaf("float", "x", level + 1, 4),
+                leaf("float", "y", level + 1, 4),
+                leaf("float", "z", level + 1, 4),
+            ]
+        };
+        let shared: [(&str, Vec<Node>); 5] = [
+            (
+                "Vector2Int",
+                vec![
+                    node("int2_storage", "Vector2Int", 0, 8, 0x20_0000),
+                    leaf("int", "x", 1, 4),
+                    leaf("int", "y", 1, 4),
+                ],
+            ),
+            ("Vector3Int", int3("Vector3Int", 0, 0x20_0000)),
+            (
+                "RectInt",
+                vec![
+                    node("RectInt", "RectInt", 0, 16, 0),
+                    leaf("int", "x", 1, 4),
+                    leaf("int", "y", 1, 4),
+                    leaf("int", "width", 1, 4),
+                    leaf("int", "height", 1, 4),
+                ],
+            ),
+            (
+                "Bounds",
+                [
+                    vec![node("AABB", "Bounds", 0, 24, 0)],
+                    vector3("m_Center", 1),
+                    vector3("m_Extent", 1),
+                ]
+                .concat(),
+            ),
+            (
+                "BoundsInt",
+                [
+                    vec![node("BoundsInt", "BoundsInt", 0, 24, 0)],
+                    int3("m_Position", 1, 0),
+                    int3("m_Size", 1, 0),
+                ]
+                .concat(),
+            ),
+        ];
+        for (name, nodes) in shared {
+            self.values.entry(name.to_string()).or_insert(nodes);
+        }
     }
 
     /// Reads templates back from the tree `to_pack` made.
