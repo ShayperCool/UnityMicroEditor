@@ -6,7 +6,7 @@ use std::{
 };
 use unity_micro_editor::{ENGINE_PROFILE, graph::SourceProject, yaml};
 
-const USAGE: &str = "usage: unity-micro-editor <run|mcp|auto-prepare|build-project|resolve-packages|cache-component-defaults|project-import|native-environment|source-graph|compiler-source-prepare|compiler-prepare|prepare-project|engine-profile-capture|version> [flags]";
+const USAGE: &str = "usage: unity-micro-editor <cache-prune|run|mcp|auto-prepare|build-project|resolve-packages|cache-component-defaults|project-import|native-environment|source-graph|compiler-source-prepare|compiler-prepare|prepare-project|engine-profile-capture|version> [flags]";
 
 fn execute() -> Result<()> {
     let mut args = env::args().skip(1);
@@ -15,6 +15,7 @@ fn execute() -> Result<()> {
         "version" | "profile" if env::args().len() == 2 => {
             print!("{ENGINE_PROFILE}");
         }
+        "cache-prune" => unity_micro_editor::cache_prune::cli(args.collect())?,
         "mcp" => unity_micro_editor::agent::run_mcp_cli(args.collect())?,
         "auto-prepare" => unity_micro_editor::agent::run_auto_prepare_cli(args.collect())?,
         "build-project" => unity_micro_editor::agent::run_build_project_cli(args.collect())?,
