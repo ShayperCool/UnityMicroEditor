@@ -3,6 +3,7 @@
 mod mesh;
 mod settings;
 mod space;
+mod take;
 
 pub use settings::Settings;
 
@@ -11,6 +12,7 @@ use anyhow::{Result, anyhow, bail};
 use std::{collections::HashMap, fmt::Write as _, path::Path};
 
 const MESH: i64 = 43;
+const CLIP: i64 = 74;
 
 /// How the file is read: as the Editor's importer has it, a node's origin
 /// moves to its pivot and its geometry the other way.
@@ -212,7 +214,67 @@ pub fn import(path: &Path, settings: &Settings) -> Result<Imported> {
                 .push(format!("mesh {}: {error:#}", node.name)),
         }
     }
+    if settings.import_animation && settings.animation_type != 0 {
+        let animated: Vec<take::Animated<'_>> = nodes
+            .iter()
+            .map(|node| take::Animated {
+                node: node.fbx,
+                path: &node.path,
+            })
+            .collect();
+        for clip in take::clip_settings(&scene, settings) {
+            if clip.extras {
+                imported
+                    .refused
+                    .push(format!("clip {}: events or curves of its own", clip.name));
+                continue;
+            }
+            let Some(fields) = take::clip(&scene, &animated, &clip, &space) else {
+                imported
+                    .refused
+                    .push(format!("clip {}: no take {}", clip.name, clip.take));
+                continue;
+            };
+            match crate::playerbake::clip::bake_clip_parts(
+                &fields,
+                &crate::playerbake::clip::NoScripts,
+            ) {
+                Ok(baked) => {
+                    let id = ids.of(CLIP, &clip.name)?;
+                    imported.objects.push((id, CLIP, baked.value));
+                }
+                Err(error) => imported
+                    .refused
+                    .push(format!("clip {}: {error:#}", clip.name)),
+            }
+        }
+    }
     Ok(imported)
+}
+
+/// The clips a model's import makes, by file ID, with their names and
+/// whether they loop, as a controller that plays them needs to know.
+pub fn clips(path: &Path, settings: &Settings) -> Result<Vec<(i64, String, bool)>> {
+    if !settings.import_animation || settings.animation_type == 0 {
+        return Ok(Vec::new());
+    }
+    let listed = match settings.clips.is_empty() {
+        false => settings.clips.clone(),
+        true => {
+            let scene = ufbx::load_file(&path.to_string_lossy(), load_options())
+                .map_err(|error| anyhow!("{}: {}", path.display(), error.description))?;
+            take::clip_settings(&scene, settings)
+        }
+    };
+    let mut ids = Ids {
+        settings,
+        used: Default::default(),
+    };
+    let mut out = Vec::new();
+    for clip in listed {
+        out.push((ids.of(CLIP, &clip.name)?, clip.name, clip.loop_time));
+    }
+    Ok(out)
 }
 
 /// A description of a model file: its settings, nodes, meshes and takes.

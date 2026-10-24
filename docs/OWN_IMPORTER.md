@@ -259,10 +259,19 @@ distribution metric by up to 1% (the rule is followed, see `uv_metric`),
 the channels a build strips because no shader of the mesh's materials
 reads them (`StripUnusedMeshComponents`: the worker's meshes keep positions
 and colours only), and which meshes a build keeps readable for dynamic
-batching (taken as up to 300 vertices). Not imported yet: the model's
-hierarchy as objects (for prefab instances of a model), its animation
-takes and avatar, embedded materials, blend shapes, the new-style file IDs
-of models without a recorded table.
+batching (taken as up to 300 vertices). A take becomes the Editor's form of a clip
+(`model/take.rs`): the local position, rotation and scale of each node the
+take animates, sampled at every frame of the file's rate in Unity's space
+over the clip's frames (`clipAnimations`, or the take's range), each key
+sloped through its neighbours; the clip baker makes the Player's clip of
+it, and a controller that plays it takes its name and loop from the
+`.meta`. The importer reduces those keys (`animationCompression`), which
+the tool does not: Main's two takes play as the worker's do within 0.003
+(its reduction's tolerance) at every frame, with about twice the keys. Not
+imported yet: the model's hierarchy as objects (for prefab instances of a
+model), its avatar (an `Animator` of a generic rig plays without one),
+clips with events or curves of their own, embedded materials, blend
+shapes, the new-style file IDs of models without a recorded table.
 
 ### Baked lighting
 

@@ -23,7 +23,6 @@ impl Space {
     }
 
     /// A rotation `(x, y, z, w)` of the file as Unity holds it.
-    #[allow(dead_code)]
     pub fn rotation(&self, q: [f32; 4]) -> [f32; 4] {
         [q[0], -q[1], -q[2], q[3]]
     }

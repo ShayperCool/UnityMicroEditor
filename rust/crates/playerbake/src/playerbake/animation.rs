@@ -284,6 +284,29 @@ impl ClipSources for Closure<'_> {
 impl ControllerSources for Closure<'_> {
     fn clip(&self, guid: &str, file_id: &str) -> Result<ClipFacts> {
         let (path, text) = self.source(guid)?;
+        if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("fbx"))
+        {
+            let meta = std::fs::read_to_string(format!("{}.meta", path.display()))?;
+            let settings = super::model::Settings::read(&meta)?;
+            let wanted: i64 = file_id.parse().unwrap_or(0);
+            let Some((_, name, looping)) = super::model::clips(path, &settings)?
+                .into_iter()
+                .find(|(id, ..)| *id == wanted)
+            else {
+                return Err(Unsupported(format!(
+                    "no clip of {} has file ID {file_id}",
+                    path.display()
+                ))
+                .into());
+            };
+            return Ok(ClipFacts {
+                looping,
+                path: project_path(path),
+                name,
+            });
+        }
         if path.extension().is_none_or(|e| e != "anim") || file_id != "7400000" {
             return Err(Unsupported(format!(
                 "a clip the tool does not import ({}, file ID {file_id})",

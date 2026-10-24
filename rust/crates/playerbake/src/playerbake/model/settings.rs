@@ -11,6 +11,32 @@ pub enum Source {
     None,
 }
 
+/// A clip the import makes of a take (`clipAnimations`).
+#[derive(Debug, Clone, Default)]
+pub struct ClipSettings {
+    pub name: String,
+    pub take: String,
+    /// First and last frame at the file's rate; `None` for the take's range.
+    pub frames: Option<(f64, f64)>,
+    pub loop_time: bool,
+    pub loop_blend: bool,
+    pub loop_blend_orientation: bool,
+    pub loop_blend_position_y: bool,
+    pub loop_blend_position_xz: bool,
+    pub keep_original_orientation: bool,
+    pub keep_original_position_y: bool,
+    pub keep_original_position_xz: bool,
+    pub height_from_feet: bool,
+    pub mirror: bool,
+    pub cycle_offset: f32,
+    pub level: f32,
+    pub orientation_offset_y: f32,
+    pub wrap_mode: i64,
+    /// Whether the clip has events or extra curves, which the tool does not
+    /// import yet.
+    pub extras: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct Settings {
     /// `globalScale`, the scale factor of the import.
@@ -33,6 +59,10 @@ pub struct Settings {
     /// `animationType`: 0 none, 1 legacy, 2 generic, 3 humanoid.
     pub animation_type: i64,
     pub import_animation: bool,
+    /// The clips of the takes; empty for one clip per take.
+    pub clips: Vec<ClipSettings>,
+    /// `animationCompression`: 0 off, 1 keyframe reduction, 2 and 3 more.
+    pub animation_compression: i64,
     /// The file IDs the `.meta` records for objects, by class ID and name:
     /// `fileIDToRecycleName` of the format before Unity 2019.3, or
     /// `internalIDToNameTable`.
@@ -105,7 +135,43 @@ impl Settings {
                 }
             }
         }
+        let mut clips = Vec::new();
+        if let Some(Value::Array(list)) = find(importer, &["animations", "clipAnimations"]) {
+            for clip in list {
+                let get = |key: &str| number(clip.get(key));
+                let flag = |key: &str| get(key).is_some_and(|n| n != 0.0);
+                let text = |key: &str| match clip.get(key) {
+                    Some(Value::String(text)) => text.clone(),
+                    Some(Value::Null) | None => String::new(),
+                    Some(other) => other.to_string(),
+                };
+                let listed = |key: &str| matches!(clip.get(key), Some(Value::Array(items)) if !items.is_empty());
+                clips.push(ClipSettings {
+                    name: text("name"),
+                    take: text("takeName"),
+                    frames: get("firstFrame").zip(get("lastFrame")),
+                    loop_time: flag("loopTime"),
+                    loop_blend: flag("loopBlend"),
+                    loop_blend_orientation: flag("loopBlendOrientation"),
+                    loop_blend_position_y: flag("loopBlendPositionY"),
+                    loop_blend_position_xz: flag("loopBlendPositionXZ"),
+                    keep_original_orientation: flag("keepOriginalOrientation"),
+                    keep_original_position_y: flag("keepOriginalPositionY"),
+                    keep_original_position_xz: flag("keepOriginalPositionXZ"),
+                    height_from_feet: flag("heightFromFeet"),
+                    mirror: flag("mirror"),
+                    cycle_offset: get("cycleOffset").unwrap_or(0.0) as f32,
+                    level: get("level").unwrap_or(0.0) as f32,
+                    orientation_offset_y: get("orientationOffsetY").unwrap_or(0.0) as f32,
+                    wrap_mode: get("wrapMode").unwrap_or(0.0) as i64,
+                    extras: listed("events") || listed("curves"),
+                });
+            }
+        }
         Ok(Self {
+            clips,
+            animation_compression: get(&["animations", "animationCompression"]).unwrap_or(1.0)
+                as i64,
             global_scale: get(&["meshes", "globalScale"]).unwrap_or(1.0) as f32,
             use_file_scale: flag(&["meshes", "useFileScale"], true),
             weld_vertices: flag(&["meshes", "weldVertices"], true),
