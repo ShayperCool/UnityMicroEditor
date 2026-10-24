@@ -49,6 +49,13 @@ pub struct Settings {
     /// Whether the import makes materials of the file's own
     /// (`materialImportMode`, before it `importMaterials`).
     pub import_materials: bool,
+    /// The format before material descriptions (no `materialImportMode`)
+    /// with materials kept as assets (`materialLocation` 0): the import
+    /// finds `.mat` assets in `Materials` folders, named by `materialName`
+    /// (0 the diffuse texture's name, 1 the material's, 2 the model's and
+    /// the material's) and searched by `materialSearch` (0 beside the model,
+    /// 1 up to `Assets`, 2 everywhere).
+    pub legacy_materials: Option<(i64, i64)>,
     /// `globalScale`, the scale factor of the import.
     pub global_scale: f32,
     /// `useFileScale`: the file's unit converted to metres.
@@ -234,6 +241,15 @@ impl Settings {
                 }
             }
         }
+        let legacy_materials = (get(&["materials", "materialImportMode"]).is_none()
+            && flag(&["materials", "importMaterials"], true)
+            && get(&["materials", "materialLocation"]).unwrap_or(0.0) == 0.0)
+            .then(|| {
+                (
+                    get(&["materials", "materialName"]).unwrap_or(0.0) as i64,
+                    get(&["materials", "materialSearch"]).unwrap_or(1.0) as i64,
+                )
+            });
         let import_materials = match get(&["materials", "materialImportMode"]) {
             Some(mode) => mode != 0.0,
             None => flag(&["materials", "importMaterials"], true),
@@ -262,6 +278,7 @@ impl Settings {
                 .unwrap_or_default(),
             external_materials,
             import_materials,
+            legacy_materials,
             create_avatar,
             human,
             clips,
@@ -297,6 +314,7 @@ impl Settings {
         node: &ufbx::Node,
         slot: usize,
         embedded: &HashMap<String, i64>,
+        found: &HashMap<String, Value>,
     ) -> Value {
         let name = node
             .materials
@@ -309,6 +327,9 @@ impl Settings {
             })
             .unwrap_or_default();
         if let Some(reference) = self.external_materials.get(&name) {
+            return reference.clone();
+        }
+        if let Some(reference) = found.get(&name) {
             return reference.clone();
         }
         match embedded.get(&name) {

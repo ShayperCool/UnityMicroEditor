@@ -326,7 +326,13 @@ emission (its keyword and realtime emissive flag with a factor above
 zero), the smoothness from the shininess; a texture is the source of its
 file name beside the model or in a `Textures` folder on the way up to
 `Assets`; the material's file ID hashes its name. A built-in pipeline
-project's are not made yet (its renderers take the default material). Not
+project's are made as the engine's preprocessor makes them (Standard,
+`_Color`, `_MainTex`, `_Glossiness`, the diffuse factor applied to a plain
+colour too). A `.meta` of the format before material descriptions keeps
+materials as assets: the import finds `Materials/<name>.mat` (named by the
+diffuse texture, the material, or the model and the material) beside the
+model, on the way up to `Assets` or anywhere, as `materialSearch` says; a
+renderer whose material is found nowhere takes the default material. Not
 imported yet: clips with events or curves of their own, blend shapes,
 humanoid avatars and clips, lights and cameras of a model.
 

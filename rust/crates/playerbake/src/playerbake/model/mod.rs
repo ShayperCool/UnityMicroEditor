@@ -465,9 +465,18 @@ pub fn import(path: &Path, settings: &Settings) -> Result<Imported> {
     } else if settings.animation_type == 3 && settings.create_avatar {
         imported.refused.push("avatar: a humanoid rig".to_string());
     }
-    // The materials the import makes of the file's own, by name.
+    // The materials the import makes of the file's own, by name, or the
+    // assets a model of the format before finds.
     let mut embedded: HashMap<String, i64> = HashMap::new();
-    if settings.import_materials {
+    let mut found: HashMap<String, serde_json::Value> = HashMap::new();
+    if let Some((naming, search)) = settings.legacy_materials {
+        for fbx_material in scene.materials.iter() {
+            let name = sanitize(&fbx_material.element.name);
+            if let Some(reference) = material::legacy_asset(fbx_material, path, naming, search) {
+                found.insert(name, reference);
+            }
+        }
+    } else if settings.import_materials {
         let project = path
             .ancestors()
             .find(|dir| dir.join("Assets").is_dir() && dir.join("ProjectSettings").is_dir())
@@ -479,14 +488,9 @@ pub fn import(path: &Path, settings: &Settings) -> Result<Imported> {
                 continue;
             }
             let id = ids.of(21, "Material", &name, &name);
-            match material::document(fbx_material, id, &context) {
-                Some(document) => {
-                    imported.documents.push(document);
-                    embedded.insert(name, id);
-                }
-                None => imported.refused.push(format!(
-                    "material {name}: the materials a model makes in a project without URP"
-                )),
+            if let Some(document) = material::document(fbx_material, id, &context) {
+                imported.documents.push(document);
+                embedded.insert(name, id);
             }
         }
     }
@@ -534,7 +538,7 @@ pub fn import(path: &Path, settings: &Settings) -> Result<Imported> {
                     .as_ref()
                     .map_or(1, |m| m.materials.len().max(1));
                 let materials = (0..slots)
-                    .map(|slot| settings.material(node.fbx, slot, &embedded))
+                    .map(|slot| settings.material(node.fbx, slot, &embedded, &found))
                     .collect();
                 Some(match skin {
                     None => hierarchy::Renderer {
