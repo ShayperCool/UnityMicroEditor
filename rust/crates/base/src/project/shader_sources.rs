@@ -110,9 +110,13 @@ fn read_shader_source(physical: &str) -> Result<Vec<u8>> {
 }
 
 /// Removes comments while preserving line boundaries and quoted paths; `//`
-/// inside a quoted string is not a comment.
+/// inside a quoted string is not a comment. A leading byte order mark is
+/// blanked too, as the Editor reads past it.
 pub fn shader_without_comments(input: &[u8]) -> Result<Vec<u8>> {
     let mut out = input.to_vec();
+    if out.starts_with(b"\xEF\xBB\xBF") {
+        out[..3].fill(b' ');
+    }
     let (mut quoted, mut block, mut line) = (false, false, false);
     let mut i = 0;
     while i < out.len() {
@@ -209,7 +213,21 @@ impl Closure<'_> {
             }
             let mut included = lexpath::clean(&name);
             if !included.starts_with("Assets/") && !included.starts_with("Packages/") {
-                included = lexpath::clean(&format!("{}/{name}", lexpath::dir(logical)));
+                // The compiler looks beside the including file, then beside
+                // the shader it compiles.
+                let beside = |file: &str| lexpath::clean(&format!("{}/{name}", lexpath::dir(file)));
+                included = beside(logical);
+                let in_shader_folder = beside(self.source);
+                if in_shader_folder != included
+                    && valid_shader_source(&in_shader_folder)
+                    && matches!(
+                        shader_source_path(self.project, &included),
+                        Err(SourceError::NotExist(_))
+                    )
+                    && shader_source_path(self.project, &in_shader_folder).is_ok()
+                {
+                    included = in_shader_folder;
+                }
             }
             if !valid_shader_source(&included) {
                 bail!("Shader include escapes source roots in {logical}: {name}");
@@ -268,4 +286,40 @@ pub fn validate_shader_source_requirements(
         bail!("compiled Shader snapshot optional include availability changed");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{collect_shader_source_requirements, shader_without_comments};
+
+    #[test]
+    fn an_include_is_found_beside_the_shader_when_not_beside_the_includer() {
+        let project = tempfile::tempdir().unwrap();
+        let shaders = project.path().join("Assets/Shaders");
+        std::fs::create_dir_all(shaders.join("Inc")).unwrap();
+        std::fs::write(shaders.join("A.shader"), "#include \"Inc/B.cginc\"\n").unwrap();
+        std::fs::write(shaders.join("Inc/B.cginc"), "#include \"Inc/C.cginc\"\n").unwrap();
+        std::fs::write(shaders.join("Inc/C.cginc"), "").unwrap();
+        let project = project.path().to_str().unwrap();
+        let (files, missing) =
+            collect_shader_source_requirements(project, "Assets/Shaders/A.shader").unwrap();
+        let paths: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "Assets/Shaders/A.shader",
+                "Assets/Shaders/Inc/B.cginc",
+                "Assets/Shaders/Inc/C.cginc"
+            ]
+        );
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn a_byte_order_mark_and_comments_are_blanked() {
+        let source = b"\xEF\xBB\xBF// note\nShader \"A//B\" { /* x */ }";
+        let cleaned = shader_without_comments(source).unwrap();
+        assert_eq!(cleaned.len(), source.len());
+        assert_eq!(&cleaned[..], b"          \nShader \"A//B\" {         }");
+    }
 }
