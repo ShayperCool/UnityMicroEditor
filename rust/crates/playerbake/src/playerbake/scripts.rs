@@ -235,6 +235,7 @@ impl Templates {
     pub fn of_release(unity_version: &str) -> Option<Self> {
         let entry: &'static [u8] = match unity_version {
             "6000.0.71f1" => include_bytes!("engine/6000.0.71f1/script-templates.bin"),
+            "6000.6.3f1" => include_bytes!("engine/6000.6.3f1/script-templates.bin"),
             _ => return None,
         };
         let tree = TypeTree::parse(entry).expect("a shipped pack of templates parses");

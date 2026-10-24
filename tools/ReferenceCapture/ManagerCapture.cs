@@ -44,6 +44,9 @@ namespace UnityMicroEditor.ReferenceCapture
                 {
                     var type = ContentBuildInterface.GetTypeForObject(id);
                     log.Append("object ").Append(file).Append(' ').Append(id.localIdentifierInFile).Append(' ').Append(type == null ? "?" : type.FullName).Append('\n');
+                    // A package's settings asset (6000.6's ProjectAuditorSettings) is a
+                    // script object no Player holds; writing it fails the file.
+                    if (type == typeof(MonoBehaviour) || (type != null && type.IsSubclassOf(typeof(ScriptableObject)))) continue;
                     ids.Add(id);
                 }
             }

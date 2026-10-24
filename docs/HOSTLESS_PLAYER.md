@@ -733,3 +733,41 @@ first frame, one phase at a time: cold (wiped `Library`, preparation and run)
   builds. A host without URP therefore runs a URP project. Shaders of a
   package that only a script finds by name (`Shader.Find`) stay those of the
   host, and a host without the pipeline has none of them.
+
+
+### Unity 6000.6 (2026-10-24)
+
+The release's packs come from the same reference captures:
+`engine/6000.6.3f1/managers.bin` (`ManagerCapture.cs` in an empty 6000.6
+project; it now leaves out script objects, such as 6000.6's
+`ProjectAuditorSettings`, which fail the write), `library.bin` and
+`script-templates.bin` (the import worker's dependency files of Dungeon and
+the Editor's `unity_builtin_extra`), `editor-type-48.bin` (the shader
+fixtures' Editor tree). What an Editor build of Dungeon shows of 6000.6:
+
+- the managers in another order: the cluster input manager is written (ID
+  16), IDs 17 and 19 are not given, and `UnityConnectSettings` is not
+  written; its capture's tree, like 6000.0's, names an `InsightsSettings`
+  the bytes lack; the managers of no tree and `PreloadData` have 6000.0's
+  type hashes;
+- the engine's assemblies are not in the variation's `Data/Managed` but
+  beside the variations, in `Variations/mono/Managed`;
+- 85 engine symbols (`PLAYER_DEFINES_6000_6`), and for API compatibility
+  level 6 (.NET Standard 2.1) `NETSTANDARD`, `NETSTANDARD2_1`,
+  `NET_STANDARD`, `NET_STANDARD_2_0`, `NET_STANDARD_2_1` and the references
+  `NetStandard/ref/2.1.0/netstandard.dll`, its `shims/netstandard` and
+  `shims/netfx`, `Extensions/2.0.0` and
+  `BCLExtensions/TargetingPacks/netstandard2.1/ref`;
+- 32 built-in shaders the engine adds to those always included, five of
+  them new (20500-20507);
+- `Object.GetInstanceID` is an error to compile; the bridge takes an
+  object's identity through `EngineCompat.Identity`.
+
+The settings' references to the project's assets (the render pipeline
+asset, its global settings, preloaded assets, in the files of the Player's
+managers) become roots of `resources.assets`, and the managers point at
+them there.
+
+A project with a scriptable render pipeline is not assembled yet: the
+built-in shaders are baked with the variants a build keeps, which for a
+pipeline its Editor scripts and keyword filters decide.

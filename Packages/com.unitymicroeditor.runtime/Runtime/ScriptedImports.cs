@@ -109,8 +109,8 @@ namespace UnityMicroEditor.PlayModeEditor
                 MethodInfo import = importerType.GetMethod("OnImportAsset", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
                 if (import == null) throw new InvalidOperationException(importerType.FullName + " has no OnImportAsset");
                 import.Invoke(importer, new[] { context });
-                var identifiers = new Dictionary<int, string>();
-                foreach (var added in state.Objects) identifiers[added.Value.GetInstanceID()] = added.Key;
+                var identifiers = new Dictionary<string, string>();
+                foreach (var added in state.Objects) identifiers[EngineCompat.Identity(added.Value)] = added.Key;
                 var objects = new List<object>();
                 foreach (var added in state.Objects)
                 {
@@ -128,7 +128,7 @@ namespace UnityMicroEditor.PlayModeEditor
                     });
                 }
                 var references = new Dictionary<string, object>();
-                foreach (var pair in identifiers) references[pair.Key.ToString(System.Globalization.CultureInfo.InvariantCulture)] = pair.Value;
+                foreach (var pair in identifiers) references[pair.Key] = pair.Value;
                 answer["objects"] = objects;
                 answer["references"] = references;
             }

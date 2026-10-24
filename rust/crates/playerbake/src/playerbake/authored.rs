@@ -122,6 +122,7 @@ impl Library {
     pub fn of_release(unity_version: &str) -> Option<Result<Self>> {
         let pack: &'static [u8] = match unity_version {
             "6000.0.71f1" => include_bytes!("engine/6000.0.71f1/library.bin"),
+            "6000.6.3f1" => include_bytes!("engine/6000.6.3f1/library.bin"),
             _ => return None,
         };
         let mut library = Library::default();

@@ -416,6 +416,10 @@ pub fn editor_shader_tree(unity_version: &str) -> Option<super::TypeTree> {
             super::TypeTree::parse(&include_bytes!("../engine/6000.0.71f1/editor-type-48.bin")[..])
                 .ok()
         }
+        "6000.6.3f1" => {
+            super::TypeTree::parse(&include_bytes!("../engine/6000.6.3f1/editor-type-48.bin")[..])
+                .ok()
+        }
         _ => None,
     }
 }

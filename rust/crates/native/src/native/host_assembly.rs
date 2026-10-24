@@ -66,11 +66,15 @@ const CLASS_LIBRARY: [&str; 20] = [
     "System.Xml",
     "System.Xml.Linq",
 ];
-const CLASS_LIBRARY_FACADES: [&str; 4] = [
+/// The facades of 6000.0's and 6000.6's builds; an assembly a build does
+/// not need is never loaded.
+const CLASS_LIBRARY_FACADES: [&str; 6] = [
     "netstandard",
     "System.Buffers",
     "System.Memory",
     "System.Runtime",
+    "System.Text.Encoding.CodePages",
+    "System.Threading.Tasks.Extensions",
 ];
 
 /// The built-in shaders a 6000.0 build adds to those the project always
@@ -83,7 +87,20 @@ const ENGINE_ALWAYS_INCLUDED: [i64; 28] = [
     10757, 15309, 15308, 19011, 15304, 15312, 113, 16000, 16001, 17000,
 ];
 
-/// The type hash of `PreloadData` in a 6000.0 build.
+/// The same in 6000.6, as an Editor build of Dungeon lists them.
+const ENGINE_ALWAYS_INCLUDED_6000_6: [i64; 32] = [
+    19, 65, 66, 67, 109, 110, 107, 111, 9000, 9001, 9002, 9003, 9004, 9007, 9100, 9101, 68, 10757,
+    20500, 20501, 20502, 20506, 20507, 15309, 15308, 19011, 15304, 15312, 113, 16000, 16001, 17000,
+];
+
+fn engine_always_included(version: &str) -> &'static [i64] {
+    match version {
+        "6000.6.3f1" => &ENGINE_ALWAYS_INCLUDED_6000_6,
+        _ => &ENGINE_ALWAYS_INCLUDED,
+    }
+}
+
+/// The type hash of `PreloadData` in a 6000.0 build (and 6000.6's).
 const PRELOAD_DATA_HASH: &str = "857195b5935cf8fb7c0b98cba9717eac";
 
 /// Built-in shaders the baker refused, by path ID, with the reason.
@@ -189,11 +206,13 @@ pub fn assemble_host(
             &sysutil::join(&[&data, "Resources/unity default resources"]),
         )?;
         let managed = sysutil::join(&[&data, "Managed"]);
-        copy_tree(
-            &sysutil::join(&[&template_data, "Managed"]),
-            &managed,
-            &|_| false,
-        )?;
+        // 6000.6 keeps the engine's assemblies beside the variations, in
+        // `Variations/mono/Managed`, shared by every Mono Player.
+        let mut engine_managed = sysutil::join(&[&template_data, "Managed"]);
+        if sysutil::lstat(&engine_managed).is_err() {
+            engine_managed = sysutil::join(&[&sysutil::dir(&template), "mono/Managed"]);
+        }
+        copy_tree(&engine_managed, &managed, &|_| false)?;
         copy_class_library(&data_root, &managed)?;
         let bridge = crate::compiler::compile_bridge(
             ctx,
@@ -610,6 +629,9 @@ fn shader_settings(project: &str) -> Option<playerbake::ShaderSettings> {
 /// project: the scripts and resources it wrote, and the shaders among them.
 #[derive(Default)]
 struct Completed {
+    /// Where the project's assets the settings name lie, by GUID and file
+    /// ID (the render pipeline, its global settings, preloaded assets).
+    settings_assets: HashMap<(String, i64), (i64, i64)>,
     scripts: Vec<(i64, i64)>,
     resources: Vec<(String, (i64, i64))>,
     shaders: Vec<((i64, i64), String)>,
@@ -637,7 +659,13 @@ fn write_managers(
         shaders: completed.shaders.clone(),
         builtin_shaders: builtin_shaders.to_vec(),
         shader_settings: settings.as_ref(),
-        pointers: &engine_pointer,
+        pointers: &|source: &serde_json::Value| {
+            engine_pointer(source).or_else(|| {
+                let file_id: i64 = source.get("fileID")?.as_str()?.parse().ok()?;
+                let guid = source.get("guid")?.as_str()?.to_ascii_lowercase();
+                completed.settings_assets.get(&(guid, file_id)).copied()
+            })
+        },
     };
     let (file, _) = playerbake::write_game_managers(Path::new(project), pack, &derived)?;
     let path = sysutil::join(&[data, "globalgamemanagers"]);
@@ -836,8 +864,16 @@ pub fn complete_player(
             named.push((guid.to_string(), name));
         }
     }
-    if !named.is_empty() {
-        let roots: Vec<&str> = named.iter().map(|(guid, _)| guid.as_str()).collect();
+    // The project's assets the settings name, which a build holds beside
+    // the resources.
+    let settings_assets = settings_references(root, &sources);
+    if !named.is_empty() || !settings_assets.is_empty() {
+        let mut roots: Vec<&str> = named.iter().map(|(guid, _)| guid.as_str()).collect();
+        for (guid, _) in &settings_assets {
+            if !roots.contains(&guid.as_str()) {
+                roots.push(guid);
+            }
+        }
         let builtin_extra = sysutil::join(&[&editor_data(editor), "Resources/unity_builtin_extra"]);
         playerbake::texcomp::use_editor(Path::new(&sysutil::dir(editor)));
         playerbake::audio::use_editor(Path::new(&sysutil::dir(editor)));
@@ -888,6 +924,14 @@ pub fn complete_player(
                 &assembled.resource,
             )?;
         }
+        for (local_id, _, guid, file_id) in &assembled.objects {
+            if settings_assets.contains(&(guid.clone(), *file_id)) {
+                written.settings_assets.insert(
+                    (guid.clone(), *file_id),
+                    (playerbake::RESOURCES_FILE, *local_id),
+                );
+            }
+        }
         let names: HashMap<&str, &str> = named
             .iter()
             .map(|(guid, name)| (guid.as_str(), name.as_str()))
@@ -925,6 +969,75 @@ pub fn complete_player(
         serde_json::to_vec_pretty(&completed)?,
     )?;
     Ok(Some(completed))
+}
+
+/// The project's assets the settings files refer to, by GUID and file ID:
+/// what a build writes beside the managers that name them.
+fn settings_references(project: &Path, sources: &playerbake::Sources) -> Vec<(String, i64)> {
+    let mut found: Vec<(String, i64)> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(project.join("ProjectSettings")) else {
+        return found;
+    };
+    let mut files: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+    files.sort();
+    for file in files {
+        // The files of the Player's managers; Build Settings and the
+        // Editor's own settings name what a build does not hold.
+        let name = file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if !matches!(
+            name.as_str(),
+            "GraphicsSettings.asset"
+                | "QualitySettings.asset"
+                | "ProjectSettings.asset"
+                | "AudioManager.asset"
+                | "DynamicsManager.asset"
+                | "Physics2DSettings.asset"
+                | "VFXManager.asset"
+        ) {
+            continue;
+        }
+        let Ok(data) = std::fs::read(&file) else {
+            continue;
+        };
+        let Ok(documents) = crate::yaml::parse_unity_yaml_lexical(&data) else {
+            continue;
+        };
+        let mut pending: Vec<&serde_json::Value> = Vec::new();
+        let values: Vec<serde_json::Value> = documents
+            .into_iter()
+            .map(|d| serde_json::Value::Object(d.data))
+            .collect();
+        pending.extend(values.iter());
+        while let Some(value) = pending.pop() {
+            match value {
+                serde_json::Value::Object(map) => {
+                    if let (
+                        Some(serde_json::Value::String(id)),
+                        Some(serde_json::Value::String(guid)),
+                    ) = (map.get("fileID"), map.get("guid"))
+                        && let Ok(id) = id.parse::<i64>()
+                    {
+                        let guid = guid.to_ascii_lowercase();
+                        if id != 0
+                            && !guid.starts_with("0000000000000000")
+                            && sources.path(&guid).is_some()
+                            && !found.contains(&(guid.clone(), id))
+                        {
+                            found.push((guid, id));
+                        }
+                        continue;
+                    }
+                    pending.extend(map.values());
+                }
+                serde_json::Value::Array(items) => pending.extend(items.iter()),
+                _ => {}
+            }
+        }
+    }
+    found
 }
 
 /// The scenes of a host's build: its bootstrap scene, then for each enabled
@@ -1055,6 +1168,96 @@ fn clear_pointers(value: &mut Val) {
         _ => {}
     }
 }
+
+/// The same of a 6000.6 Player, from an Editor build of Dungeon's bridge
+/// less its version's, API level's and input handler's symbols.
+const PLAYER_DEFINES_6000_6: [&str; 85] = [
+    "CSHARP_7_3_OR_NEWER",
+    "CSHARP_7_OR_LATER",
+    "DEBUG",
+    "DEVELOPMENT_BUILD",
+    "EDITOR_ONLY_NAVMESH_BUILDER_DEPRECATED",
+    "ENABLE_ACCELERATOR_CLIENT_DEBUGGING",
+    "ENABLE_AUDIO",
+    "ENABLE_AUDIO_SCRIPTABLE_PIPELINE",
+    "ENABLE_BURST",
+    "ENABLE_CACHING",
+    "ENABLE_CLOTH",
+    "ENABLE_CLOUD_LICENSE",
+    "ENABLE_CLOUD_SERVICES",
+    "ENABLE_CLOUD_SERVICES_ADS",
+    "ENABLE_CLOUD_SERVICES_ANALYTICS",
+    "ENABLE_CLOUD_SERVICES_BUILD",
+    "ENABLE_CLOUD_SERVICES_CRASH_REPORTING",
+    "ENABLE_CLOUD_SERVICES_PURCHASING",
+    "ENABLE_CLOUD_SERVICES_USE_WEBREQUEST",
+    "ENABLE_CLUSTERINPUT",
+    "ENABLE_CLUSTER_SYNC",
+    "ENABLE_CRUNCH_TEXTURE_COMPRESSION",
+    "ENABLE_CUSTOM_RENDER_TEXTURE",
+    "ENABLE_DIRECTOR",
+    "ENABLE_DIRECTOR_AUDIO",
+    "ENABLE_DIRECTOR_TEXTURE",
+    "ENABLE_EDITOR_GAME_SERVICES",
+    "ENABLE_EDITOR_HUB_LICENSE",
+    "ENABLE_GENERATE_NATIVE_PLUGINS_FOR_ASSEMBLIES_API",
+    "ENABLE_LOCALIZATION",
+    "ENABLE_LZMA",
+    "ENABLE_MANAGED_ANIMATION_JOBS",
+    "ENABLE_MANAGED_AUDIO_JOBS",
+    "ENABLE_MANAGED_JOBS",
+    "ENABLE_MANAGED_TRANSFORM_JOBS",
+    "ENABLE_MANAGED_UNITYTLS",
+    "ENABLE_MARSHALLING_TESTS",
+    "ENABLE_MICROPHONE",
+    "ENABLE_MODULAR_UNITYENGINE_ASSEMBLIES",
+    "ENABLE_MONO",
+    "ENABLE_MOVIES",
+    "ENABLE_MULTIPLE_DISPLAYS",
+    "ENABLE_NAVIGATION_OFFMESHLINK_TO_NAVMESHLINK",
+    "ENABLE_NETWORK",
+    "ENABLE_PHYSICS",
+    "ENABLE_PROFILER",
+    "ENABLE_RUNTIME_GI",
+    "ENABLE_SCRIPTING_GC_WBARRIERS",
+    "ENABLE_SPATIALTRACKING",
+    "ENABLE_SPRITES",
+    "ENABLE_TERRAIN",
+    "ENABLE_TEXTURE_STREAMING",
+    "ENABLE_TILEMAP",
+    "ENABLE_TIMELINE",
+    "ENABLE_UNITYEVENTS",
+    "ENABLE_UNITYWEBREQUEST",
+    "ENABLE_UNITY_CLOUD_IDENTIFIERS",
+    "ENABLE_UNITY_CONSENT",
+    "ENABLE_UNITY_GAME_SERVICES_ANALYTICS_SUPPORT",
+    "ENABLE_VIDEO",
+    "ENABLE_VIRTUALTEXTURING",
+    "ENABLE_VR",
+    "ENABLE_WEBCAM",
+    "ENABLE_WEBSOCKET_CLIENT",
+    "ENABLE_WWW",
+    "INCLUDE_DYNAMIC_GI",
+    "INCLUDE_UNIFIED_RAYTRACING_COMPUTE_BACKEND",
+    "INCLUDE_UNIFIED_RAYTRACING_HARDWARE_BACKEND",
+    "PLATFORM_ARCH_64",
+    "PLATFORM_STANDALONE",
+    "PLATFORM_STANDALONE_LINUX",
+    "PLATFORM_SUPPORTS_DISPLAYINFO_API",
+    "PLATFORM_SUPPORTS_MONO",
+    "PLATFORM_SUPPORTS_SPLIT_GRAPHICS_JOBS",
+    "PLATFORM_USES_EXPLICIT_MEMORY_MANAGER_INITIALIZER",
+    "RENDER_SOFTWARE_CURSOR",
+    "TEXTCORE_1_0_OR_NEWER",
+    "TEXTCORE_FONT_ENGINE_1_5_OR_NEWER",
+    "TEXTCORE_FONT_ENGINE_1_6_OR_NEWER",
+    "TEXTCORE_TEXT_ENGINE_1_5_OR_NEWER",
+    "TRACE",
+    "UNITY_ASSERTIONS",
+    "UNITY_STANDALONE",
+    "UNITY_STANDALONE_LINUX",
+    "UNITY_STANDALONE_LINUX_API",
+];
 
 /// The symbols a 6000.0 development Player of Linux Mono is compiled with
 /// whatever the project: an Editor build of Bouncemasters' bridge less the
@@ -1218,11 +1421,13 @@ fn write_proof(
     data: &str,
     packages: &[String],
 ) -> Result<()> {
-    if version != "6000.0.71f1" {
-        bail!(Unsupported(format!(
+    let engine: &[&str] = match version {
+        "6000.0.71f1" => &PLAYER_DEFINES_6000_0,
+        "6000.6.3f1" => &PLAYER_DEFINES_6000_6,
+        _ => bail!(Unsupported(format!(
             "the compile symbols of a Unity {version} Player, which the tool has no table of"
-        )));
-    }
+        ))),
+    };
     let settings = std::fs::read_to_string(sysutil::join(&[
         project,
         "ProjectSettings/ProjectSettings.asset",
@@ -1234,13 +1439,21 @@ fn write_proof(
             .find_map(|line| line.trim().strip_prefix(&format!("{name}: ")))
             .and_then(|value| value.trim().parse::<i64>().ok())
     };
-    let mut defines: Vec<String> = PLAYER_DEFINES_6000_0
-        .iter()
-        .map(|d| d.to_string())
-        .collect();
+    let mut defines: Vec<String> = engine.iter().map(|d| d.to_string()).collect();
     defines.extend(crate::release::version_defines(version)?);
-    match number("apiCompatibilityLevel").unwrap_or(6) {
+    let level = number("apiCompatibilityLevel").unwrap_or(6);
+    match level {
         3 => defines.extend(["NET_4_6", "NET_UNITY_4_8"].map(String::from)),
+        6 => defines.extend(
+            [
+                "NETSTANDARD",
+                "NETSTANDARD2_1",
+                "NET_STANDARD",
+                "NET_STANDARD_2_0",
+                "NET_STANDARD_2_1",
+            ]
+            .map(String::from),
+        ),
         level => bail!(Unsupported(format!(
             "a Player of API compatibility level {level}, whose class library the tool has no table of"
         ))),
@@ -1254,20 +1467,46 @@ fn write_proof(
     }
     defines.sort();
     defines.dedup();
-    let api = sysutil::join(&[
-        &editor_data(editor),
-        "UnityReferenceAssemblies/unity-4.8-api",
-    ]);
-    let mut references: Vec<String> = FRAMEWORK_REFERENCES
-        .iter()
-        .map(|name| sysutil::join(&[&api, &format!("{name}.dll")]))
-        .collect();
-    let facades = sysutil::join(&[&api, "Facades"]);
-    for entry in std::fs::read_dir(&facades)? {
-        let name = entry?.file_name().to_string_lossy().into_owned();
-        if name.ends_with(".dll") {
-            references.push(sysutil::join(&[&facades, &name]));
+    let data_root = editor_data(editor);
+    let dlls_of = |directory: &str| -> Result<Vec<String>> {
+        let mut found = Vec::new();
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return Ok(found);
+        };
+        for entry in entries {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".dll") {
+                found.push(sysutil::join(&[directory, &name]));
+            }
         }
+        found.sort();
+        Ok(found)
+    };
+    let mut references: Vec<String> = Vec::new();
+    if level == 3 {
+        let api = sysutil::join(&[&data_root, "UnityReferenceAssemblies/unity-4.8-api"]);
+        references.extend(
+            FRAMEWORK_REFERENCES
+                .iter()
+                .map(|name| sysutil::join(&[&api, &format!("{name}.dll")])),
+        );
+        references.extend(dlls_of(&sysutil::join(&[&api, "Facades"]))?);
+    } else {
+        // .NET Standard 2.1: the reference assembly, its shims of both
+        // kinds, its extensions and the release's targeting pack.
+        let standard = sysutil::join(&[&data_root, "NetStandard"]);
+        references.push(sysutil::join(&[&standard, "ref/2.1.0/netstandard.dll"]));
+        for directory in [
+            "compat/2.1.0/shims/netstandard",
+            "Extensions/2.0.0",
+            "compat/2.1.0/shims/netfx",
+        ] {
+            references.extend(dlls_of(&sysutil::join(&[&standard, directory]))?);
+        }
+        references.extend(dlls_of(&sysutil::join(&[
+            &data_root,
+            "BCLExtensions/TargetingPacks/netstandard2.1/ref",
+        ]))?);
     }
     references.extend(engine_module_references(editor, packages)?);
     let mut hashed = serde_json::Map::new();
@@ -1542,7 +1781,7 @@ fn write_builtin_extra(
     };
     let materials = builtin_shader_users(project, packages, &builtins);
     let mut wanted: Vec<i64> = authored_always_included(project);
-    wanted.extend(ENGINE_ALWAYS_INCLUDED);
+    wanted.extend(engine_always_included(version));
     wanted.extend(materials.keys().copied());
     let logs = sysutil::join(&[data, "..", "builtin-shader-logs"]);
     let bakery = BuiltinShaders {

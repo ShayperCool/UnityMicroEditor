@@ -61,6 +61,38 @@ const MANAGER_ORDER: [(i32, i64); 20] = [
     (937_362_698, 20),
     (655_991_488, 21),
 ];
+/// The same of 6000.6, as an Editor build of Dungeon has them: the cluster
+/// input manager is written, IDs 17 and 19 are not given.
+const MANAGER_ORDER_6000_6: [(i32, i64); 20] = [
+    (129, 1),
+    (13, 2),
+    (78, 3),
+    (11, 4),
+    (SCRIPT_MAPPER, 5),
+    (MONO_MANAGER, 6),
+    (GRAPHICS, 7),
+    (5, 8),
+    (98, 9),
+    (55, 10),
+    (BUILD_SETTINGS, 11),
+    (managers::QUALITY, 12),
+    (RESOURCE_MANAGER, 13),
+    (126, 14),
+    (19, 15),
+    (176_606_843, 16),
+    (300, 18),
+    (1_403_656_975, 20),
+    (937_362_698, 21),
+    (655_991_488, 22),
+];
+
+/// The managers of a release's build, in order, with their local IDs.
+fn manager_order(release: &str) -> &'static [(i32, i64)] {
+    match release {
+        "6000.6.3f1" => &MANAGER_ORDER_6000_6,
+        _ => &MANAGER_ORDER,
+    }
+}
 const SCRIPT_MAPPER: i32 = 94;
 const MONO_MANAGER: i32 = 116;
 const GRAPHICS: i32 = 30;
@@ -71,7 +103,12 @@ const RESOURCE_MANAGER: i32 = 147;
 /// (the delayed call manager, the runtime initializer manager and class
 /// 1403656975, all of no bytes) or that only a build makes (the resource
 /// manager), as an Editor build of the release writes them.
+/// The same in 6000.0 and 6000.6.
 fn fixed_hash(release: &str, class_id: i32) -> Option<&'static str> {
+    let release = match release {
+        "6000.6.3f1" => "6000.0.71f1",
+        other => other,
+    };
     match (release, class_id) {
         ("6000.0.71f1", 98) => Some("643e11867d6e720ee84a107eb84644bd"),
         ("6000.0.71f1", RESOURCE_MANAGER) => Some("0d9d880e077f33c76fc2c99bd629a50a"),
@@ -103,6 +140,10 @@ fn pack_bytes(release: &str) -> Option<(&'static str, &'static [u8])> {
             "6000.0.71f1",
             include_bytes!("engine/6000.0.71f1/managers.bin"),
         )),
+        "6000.6.3f1" => Some((
+            "6000.6.3f1",
+            include_bytes!("engine/6000.6.3f1/managers.bin"),
+        )),
         _ => None,
     }
 }
@@ -113,7 +154,11 @@ fn pack_bytes(release: &str) -> Option<(&'static str, &'static [u8])> {
 /// every build seen). The trees are corrected so that they describe the
 /// bytes.
 fn corrected(release: &str, tree: Arc<TypeTree>) -> Result<Arc<TypeTree>> {
-    if release != "6000.0.71f1" {
+    // 6000.6 also writes no `InsightsSettings`; its `PlayerSettings` ends
+    // where the tree does.
+    if !matches!(release, "6000.0.71f1" | "6000.6.3f1")
+        || (release != "6000.0.71f1" && tree.class_id == 129)
+    {
         return Ok(tree);
     }
     let mut nodes = tree.nodes.clone();
@@ -388,7 +433,7 @@ pub fn write_game_managers(
     }
     let mut types: Vec<(i32, [u8; 16])> = Vec::new();
     let mut objects: Vec<(i64, usize, Vec<u8>)> = Vec::new();
-    for (class_id, local_id) in MANAGER_ORDER {
+    for &(class_id, local_id) in manager_order(pack.release) {
         let (hash, data) = match pack.manager(class_id) {
             Some(manager) => {
                 let value = values.get(&class_id).unwrap_or(&manager.value);
@@ -616,7 +661,17 @@ mod tests {
         }
         let connect = pack.manager(310).unwrap();
         assert!(connect.value.field("InsightsSettings").is_none());
-        assert!(ManagerPack::of_release("6000.6.3f1").unwrap().is_none());
+        assert!(ManagerPack::of_release("6000.1.0f1").unwrap().is_none());
+    }
+
+    #[test]
+    fn the_capture_of_6000_6_decodes_with_its_corrected_trees() {
+        let pack = ManagerPack::of_release("6000.6.3f1").unwrap().unwrap();
+        for class_id in [129, 310, 30, 141, 116, 94, 176_606_843] {
+            let manager = pack.manager(class_id).unwrap();
+            let data = manager.tree.encode(&manager.value).unwrap();
+            assert_eq!(manager.tree.decode(&data).unwrap(), manager.value);
+        }
     }
 
     #[test]
