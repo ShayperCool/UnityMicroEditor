@@ -33,7 +33,13 @@ What the host is made of:
   project resolves. Every package assembly is then built from source.
 - **Plugins.** The native libraries of the project and its packages whose
   importer enables them for the Linux Player, by the rules of managed plugins
-  (both forms of `.meta`).
+  (both forms of `.meta`), into `Plugins`; the managed ones into `Managed`,
+  registered as the build's assemblies. A preparation then keeps them: Odin
+  Inspector ships a Player build of its serializer (`NoEditor`) beside the
+  Editor's, and the Editor's, which a Player of Play mode code otherwise
+  links, throws while `Instantiate` serializes a dictionary
+  (`Was not in array when exiting array`), which left Bouncemasters' pool
+  manager without its pools.
 - **Streaming assets.** `Assets/StreamingAssets`, and an Addressables runtime
   with an empty catalog where the project has the package: the session serves
   addressable assets from their sources, and the package only has to
@@ -78,6 +84,32 @@ completes it (`complete_player`, a hook of `compiler::prepare`):
   build's other file holds is not found by the Player, whose behaviours
   then have none.
 
+- the sources of the project's scripted importers (`ScriptedImporter`, the
+  game's Editor code) are imported by that code, which the Player of Play
+  mode code runs (`native::scripted_imports`, `Runtime/ScriptedImports.cs`):
+  started with `UME_SCRIPTED_IMPORTS`, the Player makes each importer
+  (with its settings from the `.meta`), calls `OnImportAsset` with a stand-in
+  import context, and answers with the objects added, as `JsonUtility`
+  writes their fields. A stand-in `SerializedObject` made of an object in
+  memory reads and writes its fields (the linker has a stand-in constructor
+  call the bridge's `Construct`). The tool writes those objects under the
+  file IDs the Editor gives an importer's objects: XXH64 (seed 0) of
+  `Type:<class>-><identifier><n>`, the class `MonoBehaviour` for a script's
+  object and `n` the first from 0 the asset does not use yet (read from the
+  6000.0 Editor; Bouncemasters' assets name its certificates by
+  `Type:MonoBehaviour->certificate0`). The documents are kept in
+  `Library/UnityMicroEditor/scripted-imports`, by the source's and its
+  `.meta`'s hashes, for the sessions' writer. Only objects of scripts are
+  answered; an importer that adds an engine object (a texture, a mesh) is
+  refused.
+
+The host's Build Settings name, after the bootstrap scene, an empty scene of
+the same name at the build index of each enabled scene of the project
+(`Assets/UnityMicroEditorGenerated/BuildScenes/<index>/<name>.unity`,
+`level1`...), into which the session builds the authored scene when the game
+loads it, as the Editor-built host does; the preloaded assets are cleared, as
+the Editor's host build clears them.
+
 What writing `resources.assets` brought up in Bouncemasters:
 
 - `ProjectContext.prefab` holds an instance of a prefab the project lacks
@@ -85,9 +117,27 @@ What writing `resources.assets` brought up in Bouncemasters:
   rest; references to its objects are empty, and a transform lists no child
   that was not written (the Player follows every entry of `m_Children` and
   crashed in `Transform::SetSiblingIndexInternal`).
+- A material's script object whose script the project lacks (URP's
+  Editor-only `AssetVersion`) is left out, as a build leaves it out, instead
+  of the material.
 - SRDebugger's prefabs name uGUI's scripts by the GUID of Unity 5's
   `GUISystem/UnityEngine.UI.dll` (`f5f67c52d1564df4a8936ccd202a3bd8`),
   pointed at the package's scripts as the later one is.
+
+### Verified on 2026-10-24
+
+Bouncemasters (a copy of the project, `--compile-for Android`, `--play-mode`,
+`UME_OWN_IMPORTER=only`): `assemble-host` in 21 s (41 built-in shaders baked,
+`Hidden/VideoDecodeOSX` refused), then a preparation with it in 236 s
+(completing the Player: 1157 scripts, 388 resources, 9 sources of scripted
+importers, 79 sources refused) and `run --frames 2400`: the game loads,
+draws its main screen with the penguin and its offline earnings, and logs
+no exception; its errors are the game's own failing gRPC calls, which a
+Player of an Editor-built host logs as well. No Editor and no import worker
+ran. What the Player still logs: `AsyncResourceUpload failed` for textures
+the session's own writer writes (as with an Editor-built host), and what
+the writer refuses (textures with mipmaps, PSD and JPG images, scaled ones;
+animator controllers; the classes the release's engine pack lacks).
 
 ### The manager pack
 

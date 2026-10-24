@@ -202,9 +202,14 @@ pub fn assemble_host(
             &managed,
         )?;
         copy(&bridge, &sysutil::join(&[&managed, "UnityMicroEditor.dll"]))?;
-        write_registrations(&data, &managed)?;
+        let (plugins, assemblies) = copy_plugins(
+            project,
+            packages,
+            &sysutil::join(&[&data, "Plugins"]),
+            &managed,
+        )?;
+        write_registrations(&data, &managed, &assemblies)?;
         write_identity(project, &data)?;
-        let plugins = copy_plugins(project, packages, &sysutil::join(&[&data, "Plugins"]))?;
         copy_streaming_assets(project, &sysutil::join(&[&data, "StreamingAssets"]))?;
         // The built-in shaders, then the managers that name them.
         let (builtin_shaders, refused_shaders) =
@@ -302,7 +307,7 @@ fn references_of(path: &str) -> Vec<String> {
 /// `ScriptingAssemblies.json`: the engine's assemblies (type 2), the main
 /// one first and the modules by name, then the bridge (16); and no
 /// initializers, which a preparation adds with what it compiles.
-fn write_registrations(data: &str, managed: &str) -> Result<()> {
+fn write_registrations(data: &str, managed: &str, plugins: &[String]) -> Result<()> {
     let mut modules: Vec<String> = std::fs::read_dir(managed)?
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
@@ -318,6 +323,10 @@ fn write_registrations(data: &str, managed: &str) -> Result<()> {
     let mut types = vec![2; names.len()];
     names.push("UnityMicroEditor.dll".into());
     types.push(16);
+    for plugin in plugins {
+        names.push(plugin.clone());
+        types.push(16);
+    }
     std::fs::write(
         sysutil::join(&[data, "ScriptingAssemblies.json"]),
         serde_json::to_vec(&serde_json::json!({"names": names, "types": types}))?,
@@ -361,10 +370,16 @@ fn write_identity(project: &str, data: &str) -> Result<()> {
 
 /// The native libraries of the project and its packages a Linux build
 /// copies into `Plugins`.
-fn copy_plugins(project: &str, packages: &[String], plugins: &str) -> Result<Vec<String>> {
+fn copy_plugins(
+    project: &str,
+    packages: &[String],
+    plugins: &str,
+    managed: &str,
+) -> Result<(Vec<String>, Vec<String>)> {
     let mut roots = vec![sysutil::join(&[project, "Assets"])];
     roots.extend(packages.iter().cloned());
     let mut copied = Vec::new();
+    let mut assemblies = Vec::new();
     for root in roots {
         let mut found = Vec::new();
         let _ = crate::compiler::walk_dir(&root, &mut |entry| {
@@ -372,7 +387,7 @@ fn copy_plugins(project: &str, packages: &[String], plugins: &str) -> Result<Vec
             if entry.is_dir() && (name.starts_with('.') || name.ends_with('~')) {
                 return Ok(crate::compiler::Walk::SkipDir);
             }
-            if !entry.is_dir() && name.ends_with(".so") {
+            if !entry.is_dir() && (name.ends_with(".so") || name.ends_with(".dll")) {
                 found.push(entry.path.to_string());
             }
             Ok(crate::compiler::Walk::Continue)
@@ -388,6 +403,21 @@ fn copy_plugins(project: &str, packages: &[String], plugins: &str) -> Result<Vec
                 continue;
             }
             let name = sysutil::base(&path);
+            // A managed plugin the Player takes is an assembly of the build
+            // (Odin's `NoEditor` builds beside the Editor's), which the
+            // preparation then keeps.
+            if name.ends_with(".dll") {
+                if !crate::compiler::managed_plugin(&path) {
+                    continue;
+                }
+                let destination = sysutil::join(&[managed, &name]);
+                if sysutil::lstat(&destination).is_ok() {
+                    continue;
+                }
+                copy(&path, &destination)?;
+                assemblies.push(name);
+                continue;
+            }
             let destination = sysutil::join(&[plugins, &name]);
             if sysutil::lstat(&destination).is_ok() {
                 continue;
@@ -397,7 +427,8 @@ fn copy_plugins(project: &str, packages: &[String], plugins: &str) -> Result<Vec
         }
     }
     copied.sort();
-    Ok(copied)
+    assemblies.sort();
+    Ok((copied, assemblies))
 }
 
 /// `Assets/StreamingAssets` as it is, without `.meta` files, and an
