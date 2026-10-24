@@ -25,6 +25,10 @@ pub struct ShaderPass {
     /// The keywords its programs tell apart, as positions in the shader's
     /// keyword list.
     pub keywords: Vec<u16>,
+    /// The snippet its programs were compiled from (`gpuProgramID`).
+    pub snippet: u32,
+    /// The pass of another shader it is (`Shader/PASS`), or nothing.
+    pub used: String,
 }
 
 /// What a shader that refers to another takes from it.
@@ -35,6 +39,8 @@ pub struct ShaderLinks {
     pub keywords: Vec<(String, u8)>,
     pub fallback: String,
     pub passes: Vec<ShaderPass>,
+    /// The shaders the object lists in turn.
+    pub dependencies: Vec<ShaderPointer>,
 }
 
 /// A shader another one takes passes from or falls back on.
@@ -121,6 +127,8 @@ fn passes(parsed: &Val) -> Result<Vec<ShaderPass>> {
                 name: text(state, "m_Name")?.to_string(),
                 compiled: number(pass, "m_Type")? == 0,
                 keywords,
+                snippet: number(state, "gpuProgramID")? as u32,
+                used: text(pass, "m_UseName")?.to_string(),
             });
         }
     }
@@ -135,15 +143,40 @@ pub fn read_shader_links(object: &[u8]) -> Result<ShaderLinks> {
 
 /// The same of an object baked for a release.
 pub fn read_shader_links_of(release: super::ShaderRelease, object: &[u8]) -> Result<ShaderLinks> {
+    read_shader_links_with(release, object, &[])
+}
+
+/// The same of an object whose file refers to `externals`, by which the
+/// shaders it lists are told.
+pub fn read_shader_links_with(
+    release: super::ShaderRelease,
+    object: &[u8],
+    externals: &[External],
+) -> Result<ShaderLinks> {
     let _ = shader_tree;
     let value = release.tree()?.decode(object)?;
     let parsed = value
         .field("m_ParsedForm")
         .ok_or_else(|| anyhow!("Shader object lacks its parsed form"))?;
+    let mut dependencies = Vec::new();
+    for dependency in sequence(&value, "m_Dependencies")? {
+        let file_id = number(dependency, "m_FileID")?;
+        let path_id = number(dependency, "m_PathID")?;
+        dependencies.push(match externals.get((file_id as usize).wrapping_sub(1)) {
+            Some(external) if file_id > 0 => ShaderPointer::External {
+                guid: external.guid.clone(),
+            },
+            _ => ShaderPointer::Raw {
+                file_id: file_id as i32,
+                path_id,
+            },
+        });
+    }
     Ok(ShaderLinks {
         keywords: keyword_table(parsed)?,
         fallback: text(parsed, "m_FallbackName")?.to_string(),
         passes: passes(parsed)?,
+        dependencies,
     })
 }
 
@@ -155,6 +188,59 @@ pub(super) struct Links {
     /// The shaders the object lists.
     pub(super) dependencies: Vec<Val>,
     pub(super) externals: Vec<External>,
+}
+
+/// A snippet a shader holds, by its ID, with the keywords its programs tell
+/// apart.
+type Snippet = (u32, Vec<(String, u8)>);
+
+/// The keywords of a pass of a shader, in the order the shader lists them.
+fn pass_keywords(links: &ShaderLinks, pass: &ShaderPass) -> Result<Vec<(String, u8)>> {
+    pass.keywords
+        .iter()
+        .map(|index| {
+            links
+                .keywords
+                .get(*index as usize)
+                .cloned()
+                .ok_or_else(|| anyhow!("shader pass refers to a keyword its shader does not list"))
+        })
+        .collect()
+}
+
+/// The snippets a loaded shader holds in 6000.0: those of its own passes,
+/// of the passes it uses and, in turn, of its fallback
+/// (`ShaderCompilationInfo::AddSnippetsFromPass` and `AddSnippetsFromShader`).
+fn held_snippets(
+    links: &ShaderLinks,
+    sources: &dyn ShaderSources,
+    depth: usize,
+    out: &mut Vec<Snippet>,
+) -> Result<()> {
+    if depth > 8 {
+        return Err(unsupported(
+            "shaders that fall back on each other too deeply",
+        ));
+    }
+    for pass in &links.passes {
+        if pass.compiled {
+            out.push((pass.snippet, pass_keywords(links, pass)?));
+        } else if let Some((shader, name)) = pass.used.rsplit_once('/')
+            && let Some(other) = sources.shader(shader)?
+        {
+            for taken in &other.links.passes {
+                if taken.compiled && taken.name.eq_ignore_ascii_case(name) {
+                    out.push((taken.snippet, pass_keywords(&other.links, taken)?));
+                }
+            }
+        }
+    }
+    if !links.fallback.is_empty()
+        && let Some(fallback) = sources.shader(&links.fallback)?
+    {
+        held_snippets(&fallback.links, sources, depth + 1, out)?;
+    }
+    Ok(())
 }
 
 /// Resolves the fallback and the used passes of a parsed shader.
@@ -175,8 +261,9 @@ pub(super) fn resolve(
     // fallback, then the fallbacks of the fallback.
     let mut names: Vec<String> = Vec::new();
     let mut found: Vec<ShaderDependency> = Vec::new();
-    // What each of them adds to the keywords.
+    // What each of them adds to the keywords; a used pass with its snippet.
     let mut additions: Vec<Vec<(String, u8)>> = Vec::new();
+    let mut taken: Vec<Snippet> = Vec::new();
     for subshader in sequence(parsed, "m_SubShaders")? {
         for pass in sequence(subshader, "m_Passes")? {
             if number(pass, "m_Type")? != 1 {
@@ -220,9 +307,12 @@ pub(super) fn resolve(
                 };
                 addition.push(keyword.clone());
             }
-            additions.push(addition);
+            let snippet = matching.iter().map(|pass| pass.snippet).min().unwrap_or(0);
+            taken.push((snippet, addition));
         }
     }
+    // What the fallback adds beyond the snippets it holds.
+    let mut rest: Vec<Vec<(String, u8)>> = Vec::new();
     let mut fallback = text(parsed, "m_FallbackName")?.to_string();
     let mut first = true;
     while !fallback.is_empty() && !names.contains(&fallback) {
@@ -237,8 +327,12 @@ pub(super) fn resolve(
         };
         if first {
             // The fallback brings all its keywords, its own fallbacks'
-            // among them.
-            additions.push(dependency.links.keywords.clone());
+            // among them; 6000.0 takes those of the snippets it holds with
+            // the used passes'.
+            if release == super::ShaderRelease::Unity6000_0 {
+                held_snippets(&dependency.links, sources, 0, &mut taken)?;
+            }
+            rest.push(dependency.links.keywords.clone());
         }
         first = false;
         names.push(fallback);
@@ -250,8 +344,18 @@ pub(super) fn resolve(
         && let Some(index) = names.iter().position(|name| *name == fallback)
     {
         // The fallback is also a shader of a used pass.
-        additions.push(found[index].links.keywords.clone());
+        if release == super::ShaderRelease::Unity6000_0 {
+            held_snippets(&found[index].links, sources, 0, &mut taken)?;
+        }
+        rest.push(found[index].links.keywords.clone());
     }
+    // 6000.0 adds the snippets of used passes and of the fallback to the
+    // shader's own and takes their keywords in the order of their IDs.
+    if release == super::ShaderRelease::Unity6000_0 {
+        taken.sort_by_key(|(snippet, _)| *snippet);
+    }
+    additions.extend(taken.into_iter().map(|(_, addition)| addition));
+    additions.extend(rest);
     // In which order several shaders add their keywords was not established.
     let adding = additions
         .iter()
@@ -271,10 +375,23 @@ pub(super) fn resolve(
             keywords.push((name, flag));
         }
     }
+    // 6000.0 also lists what each of them lists.
+    let mut pointers: Vec<ShaderPointer> = Vec::new();
+    for dependency in &found {
+        let listed = match release {
+            super::ShaderRelease::Unity6000_0 => &dependency.links.dependencies[..],
+            super::ShaderRelease::Unity6000_6 => &[],
+        };
+        for pointer in std::iter::once(&dependency.pointer).chain(listed) {
+            if !pointers.contains(pointer) {
+                pointers.push(pointer.clone());
+            }
+        }
+    }
     let mut externals: Vec<External> = Vec::new();
     let mut dependencies = Vec::new();
-    for dependency in &found {
-        let (file_id, path_id) = match &dependency.pointer {
+    for pointer in &pointers {
+        let (file_id, path_id) = match pointer {
             ShaderPointer::Raw { file_id, path_id } => (*file_id as i64, *path_id),
             ShaderPointer::External { guid } => {
                 let position = match externals.iter().position(|known| known.guid == *guid) {

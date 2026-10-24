@@ -178,6 +178,14 @@ impl Sources {
             .map(String::as_str)
     }
 
+    /// Each package's logical folder with the directory it lies in.
+    pub fn folders(&self) -> Vec<(String, String)> {
+        self.directories
+            .iter()
+            .map(|(root, directory)| (root.clone(), directory.clone()))
+            .collect()
+    }
+
     /// Where a logical path lies.
     pub fn physical(&self, logical: &str) -> Option<String> {
         if logical.starts_with("Assets/") || logical.starts_with("ProjectSettings/") {
@@ -473,18 +481,21 @@ pub fn build_settings(sources: &Sources, reloaded: &[String]) -> Result<BuildSet
 
 /// The files the given shader texts include, directly or through other
 /// files, as logical paths in path order. `from` names the file each text
-/// stands for, which relative includes start from. Every branch of a
+/// stands for, which relative includes start from, and then the folder of
+/// that file, as the compiler looks for them. Every branch of a
 /// conditional is followed. A name no source has (a file of the engine's
 /// own include directory) and an include that is not a literal are left to
 /// the compiler, which fails on a file it needs and does not find.
 pub fn include_closure(sources: &Sources, texts: &[(&str, &[u8])]) -> Result<Vec<String>> {
     let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut pending: Vec<(String, Vec<u8>)> = texts
+    let mut pending: Vec<(String, Vec<u8>, String)> = texts
         .iter()
-        .map(|(from, text)| (from.to_string(), text.to_vec()))
+        .map(|(from, text)| (from.to_string(), text.to_vec(), from.to_string()))
         .collect();
     let given: BTreeSet<&str> = texts.iter().map(|(from, _)| *from).collect();
-    while let Some((from, text)) = pending.pop() {
+    let regular =
+        |physical: &str| stat(physical).is_ok_and(|info| info.is_regular() && info.size <= 4 << 20);
+    while let Some((from, text, root)) = pending.pop() {
         let Ok(text) = crate::project::shader_without_comments(&text) else {
             continue;
         };
@@ -500,7 +511,19 @@ pub fn include_closure(sources: &Sources, texts: &[(&str, &[u8])]) -> Result<Vec
             let logical = if name.starts_with("Assets/") || name.starts_with("Packages/") {
                 sysutil::clean(&name)
             } else {
-                sysutil::clean(&format!("{}/{name}", sysutil::dir(&from)))
+                let beside = |file: &str| sysutil::clean(&format!("{}/{name}", sysutil::dir(file)));
+                let near = beside(&from);
+                let in_root_folder = beside(&root);
+                match sources.physical(&near) {
+                    Some(physical) if regular(&physical) => near,
+                    _ if sources
+                        .physical(&in_root_folder)
+                        .is_some_and(|physical| regular(&physical)) =>
+                    {
+                        in_root_folder
+                    }
+                    _ => near,
+                }
             };
             if !(logical.starts_with("Assets/") || logical.starts_with("Packages/"))
                 || seen.contains(&logical)
@@ -510,7 +533,7 @@ pub fn include_closure(sources: &Sources, texts: &[(&str, &[u8])]) -> Result<Vec
             let Some(physical) = sources.physical(&logical) else {
                 continue;
             };
-            if !stat(&physical).is_ok_and(|info| info.is_regular() && info.size <= 4 << 20) {
+            if !regular(&physical) {
                 continue;
             }
             if seen.len() >= 2048 {
@@ -519,7 +542,7 @@ pub fn include_closure(sources: &Sources, texts: &[(&str, &[u8])]) -> Result<Vec
                 ));
             }
             seen.insert(logical.clone());
-            pending.push((logical, read_file(&physical)?));
+            pending.push((logical, read_file(&physical)?, root.clone()));
         }
     }
     Ok(seen

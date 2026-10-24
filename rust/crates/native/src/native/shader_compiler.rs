@@ -53,6 +53,19 @@ impl ShaderCompiler {
     /// resolved against it and then against the engine's own include folder.
     /// `logs` receives the compiler's log.
     pub fn start(ctx: &Context, editor: &str, project: &str, logs: &str) -> Result<Self> {
+        Self::start_with_folders(ctx, editor, project, logs, &[])
+    }
+
+    /// Starts a compiler that also finds each of `folders`, a logical
+    /// folder such as `Packages/<name>` with the directory it lies in, the
+    /// way the Editor tells it where the project's packages lie.
+    pub fn start_with_folders(
+        ctx: &Context,
+        editor: &str,
+        project: &str,
+        logs: &str,
+        folders: &[(String, String)],
+    ) -> Result<Self> {
         let editor = abs(editor)?;
         let info = stat(&editor).map_err(|e| wrap("Unity installation", e))?;
         let installation = if info.is_dir() {
@@ -86,6 +99,7 @@ impl ShaderCompiler {
             &logs,
             &name,
             version,
+            folders,
         );
         let _ = std::fs::remove_file(&socket);
         result
@@ -101,6 +115,7 @@ impl ShaderCompiler {
         logs: &str,
         name: &str,
         version: String,
+        folders: &[(String, String)],
     ) -> Result<Self> {
         let mut command = Command::new(executable);
         command
@@ -168,11 +183,11 @@ impl ShaderCompiler {
         if !compiler.text()?.is_empty() {
             bail!("UnityShaderCompiler greeting is not the pinned protocol's");
         }
-        compiler.initialize(data)?;
+        compiler.initialize(data, folders)?;
         Ok(compiler)
     }
 
-    fn initialize(&mut self, data: &str) -> Result<()> {
+    fn initialize(&mut self, data: &str, folders: &[(String, String)]) -> Result<()> {
         self.put_text(b"c:initializeCompiler")?;
         // The include roots: the project, then the engine's includes.
         self.put_int(2)?;
@@ -183,8 +198,12 @@ impl ShaderCompiler {
             false => sysutil::join(&[data, "Resources", "CGIncludes"]),
         };
         self.put_text(includes.as_bytes())?;
-        // No redirected include folders.
-        self.put_int(0)?;
+        // The redirected folders, each logical then physical.
+        self.put_int(folders.len() as i32)?;
+        for (logical, physical) in folders {
+            self.put_text(logical.as_bytes())?;
+            self.put_text(physical.as_bytes())?;
+        }
         // 6000.0 sends no environment.
         match self.version.starts_with("6000.0.") {
             true => self.put_text(b"")?,

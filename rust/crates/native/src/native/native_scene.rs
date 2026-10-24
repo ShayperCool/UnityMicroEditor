@@ -46,7 +46,7 @@ const DEPENDENCIES_RESOURCE: &str = "ume-deps.resource";
 /// (unset or `0`), the tool's own writer with the worker when it fails
 /// (`1`), or the tool's own writer alone (`only`).
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Writer {
+pub(super) enum Writer {
     Worker,
     Own,
     OwnOnly,
@@ -64,7 +64,7 @@ fn own_writer_identity() -> &'static str {
     })
 }
 
-fn writer() -> Writer {
+pub(super) fn writer() -> Writer {
     match std::env::var("UME_OWN_IMPORTER").as_deref() {
         Ok("only") => Writer::OwnOnly,
         Ok("") | Ok("0") | Err(_) => Writer::Worker,

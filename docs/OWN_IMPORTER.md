@@ -301,7 +301,7 @@ What differs, by count of objects:
 
 | What | Objects | Needs |
 |---|---|---|
-| Shaders (project and built-in) | all materials | built by the worker today; `playerbake`'s own baker serves 6000.6 only |
+| Shaders (project and built-in) | all materials | imported and baked by the tool for 6000.0 with `UME_OWN_IMPORTER` (below); otherwise the worker |
 | Fields a newer engine added to an older source | few | per-class default objects instead of samples |
 | Animator controllers, models, audio | few | not written yet |
 
@@ -546,10 +546,15 @@ generates the programs of fixed-function passes (`SetTexture`, ...).
 makes the request. 6000.0's compiler reports 28 graphics APIs (6000.6: 29),
 takes no environment in `initializeCompiler` and keeps its includes in
 `Data/CGIncludes`. The 77 shaders of Bouncemasters against the replies a
-6000.0 worker got (its conversation read off with `strace`): all equal. A
-worker resolves no `Packages/...` include, since it passes no redirected
-include folders; the package shaders that include a file of their package
-fail there as here.
+6000.0 worker got (its conversation read off with `strace`): all equal.
+`initializeCompiler` also takes the redirected folders, a count and then
+each logical folder with its directory (`Packages/<name>` and where the
+package lies, as `AssetDatabase::GetRedirectedAssetFolders` gives the
+Editor); the tool sends the packages of the project, so a shader that
+includes a file of its package compiles. An include is looked for beside
+the including file and then beside the shader compiled; the tool's include
+closures look in the same places. A source may start with a byte order
+mark, which the tool's scans of shader names and links skip.
 
 The Editor's half is the tool's (`playerbake::shaderlab`): the ShaderLab
 is parsed into commands, each block knowing its keywords; a subshader's or
@@ -587,3 +592,29 @@ fixed-function probes against the 6000.0 worker's artifacts: all equal to
 the byte. Not covered by a probe yet: texture matrices (refused), alpha
 scales, `SetTexture` with `Matrix`, `GrabPass`, `PackageRequirements` and
 `Dependency`.
+
+The Player half (`playerbake::shader`) bakes 6000.0's `Shader` with that
+release's tree, compile request and reflection (`ShaderRelease`). What a
+shader takes from others differs from 6000.6. Its dependencies are those of
+its used passes and its fallback, and what each of those lists in turn. Its
+keywords are its own, then those of the snippets it holds by then, in the
+order of their IDs: the snippet of each used pass and every snippet its
+fallback holds, the fallback's fallback's among them
+(`ShaderCompilationInfo::AddSnippetsFromPass` and `AddSnippetsFromShader`);
+a pass's `gpuProgramID` names its snippet in the Player object as well.
+6000.0 lists no fallback it finds no shader of.
+
+`player-file shader-bake --editor E --project P --source S --reference DIR
+<asset>[=<file>]...` imports and bakes each source with the tool alone and
+compares it with the worker's Player object (`DIR/<name>.objects`, built by
+`player-objects`, the materials that use it in `DIR/<name>.users`).
+Bouncemasters' 77 shaders: all equal to the byte. The comparison shows no
+dependency's file (the worker's objects refer to themselves), so the order
+of a shader's dependencies is the tool's: each found shader followed by
+those it lists.
+
+In a session, `UME_OWN_IMPORTER` (`1` or `only`) has the tool import a
+6000.0 shader itself before baking it, so no worker starts for shaders; with
+`only` a release whose Editor `Shader` tree the tool lacks is refused.
+Shaders of a scriptable render pipeline, shader graphs and compute shaders
+are still built by the Editor's code in a worker.

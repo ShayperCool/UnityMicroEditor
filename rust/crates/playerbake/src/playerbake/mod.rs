@@ -47,7 +47,7 @@ pub use shader::{
     ShaderProject, ShaderRelease, ShaderSettings, ShaderSources, ShaderTier, SnippetCompiler,
     SnippetReply, SnippetRequest, WIRE_MARKER, bake_shader, bake_shader_object,
     names_render_pipeline, read_shader_artifact, read_shader_links, read_shader_links_of,
-    shader_platforms, shader_tree, verify_shader_programs,
+    read_shader_links_with, shader_platforms, shader_tree, verify_shader_programs,
 };
 pub use shader_names::read_shader_names;
 pub use typetree::{TypeTree, Val};

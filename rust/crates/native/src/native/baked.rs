@@ -273,6 +273,7 @@ pub(super) fn linked_shader_links(source: &[u8]) -> Vec<(String, bool)> {
 /// Finds the shaders a shader names among the baked shaders of the session.
 struct PublishedShaders<'a> {
     importer: &'a NativeProjectImporter,
+    release: playerbake::ShaderRelease,
 }
 
 impl playerbake::ShaderSources for PublishedShaders<'_> {
@@ -305,9 +306,20 @@ impl playerbake::ShaderSources for PublishedShaders<'_> {
         else {
             bail!("baked file of {path} holds no Shader");
         };
+        // The file names the sources it refers to in the order the entry
+        // lists them.
+        let externals: Vec<playerbake::External> = entry
+            .content
+            .dependencies
+            .iter()
+            .map(|dependency| playerbake::External {
+                guid: dependency.guid.clone(),
+                path: String::new(),
+            })
+            .collect();
         Ok(Some(playerbake::ShaderDependency {
             pointer: playerbake::ShaderPointer::External { guid: guid.clone() },
-            links: playerbake::read_shader_links(&object.data)?,
+            links: playerbake::read_shader_links_with(self.release, &object.data, &externals)?,
         }))
     }
 }
@@ -393,11 +405,15 @@ impl NativeProjectImporter {
             }
         }
         // The worker's project holds no packages, so a file of one would be
-        // missing where the shader is parsed.
-        if let Some(package) = ingredients
-            .keys()
-            .find(|path| path.starts_with("Packages/"))
-        {
+        // missing where the shader is parsed. The compiler the tool runs
+        // itself is told where they lie.
+        let own = super::native_scene::writer() != super::native_scene::Writer::Worker;
+        if let (false, Some(package)) = (
+            own,
+            ingredients
+                .keys()
+                .find(|path| path.starts_with("Packages/")),
+        ) {
             return Err(
                 Unsupported(format!("a shader that includes the package file {package}")).into(),
             );
@@ -437,8 +453,11 @@ impl NativeProjectImporter {
             }
         };
         let player = settings("ProjectSettings/ProjectSettings.asset")?;
+        let version = crate::release::project_release(&self.opts.project)?;
+        let release = playerbake::ShaderRelease::of(version)
+            .ok_or_else(|| Unsupported(format!("baking the shaders of Unity {version}")))?;
         let project = playerbake::ShaderProject {
-            release: Default::default(),
+            release,
             platforms: playerbake::shader_platforms(&player)?,
             settings: playerbake::ShaderSettings::read(
                 &player,
@@ -450,6 +469,45 @@ impl NativeProjectImporter {
         };
         let imports = sysutil::join(&[&self.opts.native_dir(), "imports"]);
         mkdir_all(&imports, 0o700)?;
+        let compile_context = ctx.with_timeout(Duration::from_secs(300));
+        let start_compiler = |root: &str| {
+            super::ShaderCompiler::start_with_folders(
+                &compile_context,
+                &self.opts.editor,
+                &self.opts.project,
+                &sysutil::join(&[root, "logs"]),
+                &self.project_sources()?.folders(),
+            )
+        };
+        // The tool imports the source itself where it has the Editor's
+        // layout of a shader: the compiler parses it, as it does for the
+        // Editor, and no worker is started.
+        let own = super::native_scene::writer() != super::native_scene::Writer::Worker;
+        if let (true, Some(tree)) = (own, playerbake::shaderlab::editor_shader_tree(version)) {
+            let root = sysutil::join(&[&imports, &random_id()]);
+            let mut compiler = start_compiler(&root)?;
+            let artifact = self.own_shader_artifact(logical, guid, &tree, version, &mut compiler);
+            let baked = artifact.and_then(|artifact| {
+                playerbake::bake_shader(
+                    &artifact,
+                    &project,
+                    &PublishedShaders {
+                        importer: self,
+                        release,
+                    },
+                    &mut compiler,
+                )
+            });
+            drop(compiler);
+            compile_context.cancel();
+            let _ = std::fs::remove_dir_all(&root);
+            return baked;
+        }
+        if super::native_scene::writer() == super::native_scene::Writer::OwnOnly {
+            bail!(Unsupported(format!(
+                "importing {logical} without the worker in Unity {version}"
+            )));
+        }
         let mut root = String::new();
         let (report, error) = run_bounded_import(
             ctx,
@@ -490,17 +548,14 @@ impl NativeProjectImporter {
             Ok(data) if sha256(&data) == primary.sha256 => data,
             _ => bail!("native artifact of {logical} changed"),
         };
-        let compile_context = ctx.with_timeout(Duration::from_secs(300));
-        let mut compiler = super::ShaderCompiler::start(
-            &compile_context,
-            &self.opts.editor,
-            &self.opts.project,
-            &sysutil::join(&[&root, "logs"]),
-        )?;
+        let mut compiler = start_compiler(&root)?;
         let baked = playerbake::bake_shader(
             &artifact,
             &project,
-            &PublishedShaders { importer: self },
+            &PublishedShaders {
+                importer: self,
+                release,
+            },
             &mut compiler,
         );
         drop(compiler);
@@ -510,6 +565,39 @@ impl NativeProjectImporter {
 }
 
 impl NativeProjectImporter {
+    /// The file the Editor imports a shader source into, written by the
+    /// tool: the compiler preprocesses the source and the tool lays its
+    /// reply out as the Editor's `Shader`.
+    fn own_shader_artifact(
+        &self,
+        logical: &str,
+        guid: &str,
+        tree: &playerbake::TypeTree,
+        version: &str,
+        compiler: &mut super::ShaderCompiler,
+    ) -> Result<Vec<u8>> {
+        use playerbake::shaderlab;
+        let source = self.baked_source(logical)?;
+        let text = String::from_utf8_lossy(&read_file(&source)?).into_owned();
+        let meta = read_file(&format!("{source}.meta"))?;
+        let request = shaderlab::PreprocessRequest::standalone(logical, text);
+        let reply = compiler.preprocess(&request)?;
+        let value = tree.val_of_json(&shaderlab::editor_object(&reply, &request, guid, &meta)?)?;
+        let format = playerbake::FileFormat::of_release(version)
+            .ok_or_else(|| Unsupported(format!("the files of Unity {version}")))?;
+        playerbake::write_in(
+            format,
+            &[playerbake::Object {
+                local_id: playerbake::SHADER_LOCAL_ID,
+                tree,
+                data: tree.encode(&value)?,
+                script: None,
+                script_file: 0,
+            }],
+            &[],
+        )
+    }
+
     /// Where a baked source lies. A package lies where the Editor
     /// compilation of the project says, which need not be the project's own
     /// `Library`.
@@ -557,12 +645,19 @@ impl NativeProjectImporter {
     /// verified one, whose shader programs and Player type trees the tool's
     /// own baker (`playerbake::shader`) was not compared with.
     fn editor_builds_shaders(&self) -> Result<bool> {
-        if crate::release::project_release(&self.opts.project)?
-            != crate::release::verified().version
-        {
+        if self.pipeline_project()? {
             return Ok(true);
         }
-        self.pipeline_project()
+        let version = crate::release::project_release(&self.opts.project)?;
+        if version == crate::release::verified().version {
+            return Ok(false);
+        }
+        // Another release the tool bakes its shaders of when it imports
+        // them itself.
+        let own = super::native_scene::writer() != super::native_scene::Writer::Worker;
+        Ok(!(own
+            && playerbake::ShaderRelease::of(version).is_some()
+            && playerbake::shaderlab::editor_shader_tree(version).is_some()))
     }
 
     /// The assets the pipeline's objects were found to load by path, kept

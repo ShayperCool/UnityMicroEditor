@@ -35,7 +35,7 @@ pub const COMPUTE_SHADER_CLASS: i32 = 72;
 pub const COMPUTE_SHADER_LOCAL_ID: i64 = 7_200_000;
 pub use link::{
     NoShaders, ShaderDependency, ShaderLinks, ShaderPass, ShaderPointer, ShaderSources,
-    read_shader_links, read_shader_links_of,
+    read_shader_links, read_shader_links_of, read_shader_links_with,
 };
 
 /// The local file ID of the `Shader` object of a `.shader` asset.

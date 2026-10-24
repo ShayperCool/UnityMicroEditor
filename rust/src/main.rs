@@ -453,11 +453,13 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
             use unity_micro_editor::playerbake::{self as bake, shaderlab};
             let ctx = unity_micro_editor::cancel::Context::background();
             let logs = std::env::temp_dir().join(format!("ume-shader-bake-{}", std::process::id()));
-            let mut compiler = unity_micro_editor::native::ShaderCompiler::start(
+            let folders = unity_micro_editor::native::open_build_sources(source)?.folders();
+            let mut compiler = unity_micro_editor::native::ShaderCompiler::start_with_folders(
                 &ctx,
                 editor,
                 project,
                 &logs.to_string_lossy(),
+                &folders,
             )?;
             let editor_tree = shaderlab::editor_shader_tree("6000.0.71f1")
                 .ok_or_else(|| anyhow::anyhow!("no Editor Shader tree"))?;
@@ -539,6 +541,7 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                             ..shader_project.clone()
                         },
                         tree: &editor_tree,
+                        folders: folders.clone(),
                         found: Default::default(),
                         depth: Default::default(),
                     };
@@ -1180,6 +1183,8 @@ struct ProjectShaders<'a> {
     directory: String,
     project: unity_micro_editor::playerbake::ShaderProject,
     tree: &'a unity_micro_editor::playerbake::TypeTree,
+    /// Where the project's packages lie, for the compilers.
+    folders: Vec<(String, String)>,
     found: std::cell::RefCell<
         std::collections::HashMap<String, Option<unity_micro_editor::playerbake::ShaderDependency>>,
     >,
@@ -1188,7 +1193,15 @@ struct ProjectShaders<'a> {
 
 impl ProjectShaders<'_> {
     /// The shader's Player object, baked.
-    fn bake(&self, logical: &str, physical: &std::path::Path) -> Result<(Vec<u8>, String)> {
+    fn bake(
+        &self,
+        logical: &str,
+        physical: &std::path::Path,
+    ) -> Result<(
+        Vec<u8>,
+        Vec<unity_micro_editor::playerbake::External>,
+        String,
+    )> {
         use unity_micro_editor::playerbake::{self as bake, shaderlab};
         let text = fs::read_to_string(physical)?;
         let meta = fs::read(format!("{}.meta", physical.display()))?;
@@ -1199,11 +1212,12 @@ impl ProjectShaders<'_> {
         let request = shaderlab::PreprocessRequest::standalone(logical, text);
         // Each bake has a compiler of its own: it may bake what it refers to.
         let logs = std::env::temp_dir().join(format!("ume-shader-bake-{}", std::process::id()));
-        let mut compiler = unity_micro_editor::native::ShaderCompiler::start(
+        let mut compiler = unity_micro_editor::native::ShaderCompiler::start_with_folders(
             &unity_micro_editor::cancel::Context::background(),
             &self.editor,
             &self.directory,
             &logs.to_string_lossy(),
+            &self.folders,
         )?;
         let reply = compiler.preprocess(&request)?;
         let value = self
@@ -1220,8 +1234,9 @@ impl ProjectShaders<'_> {
             }],
             &[],
         )?;
-        let (data, _) = bake::bake_shader_object(&artifact, &self.project, self, &mut compiler)?;
-        Ok((data, guid))
+        let (data, externals) =
+            bake::bake_shader_object(&artifact, &self.project, self, &mut compiler)?;
+        Ok((data, externals, guid))
     }
 }
 
@@ -1243,10 +1258,14 @@ impl unity_micro_editor::playerbake::ShaderSources for ProjectShaders<'_> {
         self.depth.set(self.depth.get() + 1);
         let baked = self.bake(&logical, &physical);
         self.depth.set(self.depth.get() - 1);
-        let (data, guid) = baked?;
+        let (data, externals, guid) = baked?;
         let dependency = bake::ShaderDependency {
             pointer: bake::ShaderPointer::External { guid },
-            links: bake::read_shader_links_of(bake::ShaderRelease::Unity6000_0, &data)?,
+            links: bake::read_shader_links_with(
+                bake::ShaderRelease::Unity6000_0,
+                &data,
+                &externals,
+            )?,
         };
         self.found
             .borrow_mut()
