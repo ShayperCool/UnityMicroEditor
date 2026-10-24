@@ -215,7 +215,7 @@ fn strings(value: &Value, found: &mut BTreeSet<PathBuf>) {
     }
 }
 
-fn references(directory: &Path) -> Result<BTreeSet<PathBuf>> {
+fn references(directory: &Path, root: &Path) -> Result<BTreeSet<PathBuf>> {
     let mut found = BTreeSet::new();
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
@@ -223,26 +223,21 @@ fn references(directory: &Path) -> Result<BTreeSet<PathBuf>> {
             strings(&read_json(&entry.path())?, &mut found);
         }
     }
-    let root = directory
-        .ancestors()
-        .find(|p| p.file_name().is_some_and(|n| n == "UnityMicroEditor"));
-    if let Some(root) = root {
-        let mut visited = BTreeSet::new();
-        loop {
-            let pending: Vec<_> = found
-                .difference(&visited)
-                .filter(|p| {
-                    p.starts_with(root) && p.extension().is_some_and(|e| e == "json") && p.exists()
-                })
-                .cloned()
-                .collect();
-            if pending.is_empty() {
-                break;
-            }
-            for path in pending {
-                strings(&read_json(&path)?, &mut found);
-                visited.insert(path);
-            }
+    let mut visited = BTreeSet::new();
+    loop {
+        let pending: Vec<_> = found
+            .difference(&visited)
+            .filter(|p| {
+                p.starts_with(root) && p.extension().is_some_and(|e| e == "json") && p.exists()
+            })
+            .cloned()
+            .collect();
+        if pending.is_empty() {
+            break;
+        }
+        for path in pending {
+            strings(&read_json(&path)?, &mut found);
+            visited.insert(path);
         }
     }
     Ok(found)
@@ -352,7 +347,7 @@ fn plan(root: &Path, now: SystemTime, age: Duration) -> Result<Vec<PathBuf>> {
         // Prepared launches and session-level state can refer to an old preparation or run.
         for record_dir in [session.clone(), session.join("prepared")] {
             if record_dir.is_dir() {
-                for r in references(&record_dir)? {
+                for r in references(&record_dir, root)? {
                     protect(&r, &preparations, &runs, &mut kept);
                 }
             }
@@ -376,7 +371,7 @@ fn plan(root: &Path, now: SystemTime, age: Duration) -> Result<Vec<PathBuf>> {
             protect(&r, &preparations, &runs, &mut kept);
         }
     }
-    for r in references(root)? {
+    for r in references(root, root)? {
         protect(&r, &preparations, &runs, &mut kept);
     }
     let mut visited = BTreeSet::new();
@@ -386,11 +381,11 @@ fn plan(root: &Path, now: SystemTime, age: Duration) -> Result<Vec<PathBuf>> {
             break;
         }
         for path in unread {
-            let mut refs = references(&path)?;
+            let mut refs = references(&path, root)?;
             for child in directories(&path)? {
                 let name = child.file_name().unwrap().to_string_lossy();
                 if name == "warm" || name.starts_with("build-") || name.starts_with("graph-") {
-                    refs.extend(references(&child)?);
+                    refs.extend(references(&child, root)?);
                 }
             }
             for r in refs {
@@ -598,6 +593,27 @@ mod tests {
         remove_candidates(&root, &candidates).unwrap();
         assert_eq!(fs::read_to_string(outside).unwrap(), "authored source");
         assert!(candidates.iter().all(|p| !p.exists()));
+    }
+    #[test]
+    fn named_preparation_cannot_change_the_reference_root() {
+        let f = fixture();
+        let root = f.path().join("UnityMicroEditor");
+        fs::create_dir(&root).unwrap();
+        let dependency = prep(&root, "a", "A", "");
+        let stale = prep(&root, "b", "A", "");
+        prep(&root, "c", "A", "");
+        let metadata = root.join("built-sources/index.json");
+        fs::create_dir_all(metadata.parent().unwrap()).unwrap();
+        fs::write(
+            &metadata,
+            json!({"dependency":dependency.join("result.json")}).to_string(),
+        )
+        .unwrap();
+        prep(&root, "UnityMicroEditor", "A", metadata.to_str().unwrap());
+        assert_eq!(
+            plan(&root, SystemTime::now(), Duration::from_secs(14 * 86400)).unwrap(),
+            vec![stale]
+        );
     }
     #[test]
     fn project_action_lock_is_shared_with_preparation() {
