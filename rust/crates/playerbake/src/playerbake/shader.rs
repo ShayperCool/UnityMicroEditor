@@ -573,6 +573,15 @@ impl ShaderRelease {
         }
     }
 
+    /// The format of the release's files.
+    pub fn format(self) -> serialized::FileFormat {
+        match self {
+            ShaderRelease::Unity6000_6 => serialized::VERIFIED_FORMAT,
+            ShaderRelease::Unity6000_0 => serialized::FileFormat::of_release("6000.0.71f1")
+                .expect("6000.0.71f1 has a file format"),
+        }
+    }
+
     /// The Player's layout of `Shader`.
     pub fn tree(self) -> Result<&'static TypeTree> {
         match self {
@@ -725,7 +734,8 @@ pub fn bake_shader(
     compiler: &mut dyn SnippetCompiler,
 ) -> Result<Baked> {
     let (data, externals) = bake_shader_object(artifact, project_settings, sources, compiler)?;
-    let file = serialized::write(
+    let file = serialized::write_in(
+        project_settings.release.format(),
         &[serialized::Object {
             local_id: SHADER_LOCAL_ID,
             tree: project_settings.release.tree()?,

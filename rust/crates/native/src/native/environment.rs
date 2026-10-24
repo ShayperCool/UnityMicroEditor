@@ -91,6 +91,11 @@ pub fn native_environment_fingerprint(project: &str, editor: &str) -> Result<Str
     let mut payload = format!("{}\0{editor}\0", engine.environment_revision).into_bytes();
     payload.extend_from_slice(&data);
     payload.extend_from_slice(&engine.worker.initialize(Some(&environment)));
+    // What the tool imports and bakes itself depends on its code.
+    if super::native_scene::writer() != super::native_scene::Writer::Worker {
+        payload.extend_from_slice(b"\0own\0");
+        payload.extend_from_slice(super::native_scene::own_writer_identity().as_bytes());
+    }
     Ok(sha256(&payload))
 }
 

@@ -248,10 +248,7 @@ pub fn collect_shader_source_requirements(
     let canonical = lexpath::eval_symlinks(project)
         .map_err(|e| super::session::path_error(project, e))
         .and_then(|resolved| lexpath::abs(&resolved))?;
-    if !valid_shader_source(source)
-        || !source.starts_with("Assets/")
-        || lexpath::ext(source) != ".shader"
-    {
+    if !valid_shader_source(source) || lexpath::ext(source) != ".shader" {
         bail!("Shader source path is invalid: {source}");
     }
     let mut closure = Closure {

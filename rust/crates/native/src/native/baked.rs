@@ -99,14 +99,17 @@ impl NativeProjectImporter {
             if dependency.is_empty() {
                 dependency = built_paths.get(&external.guid).cloned().unwrap_or_default();
             }
-            if lower_ext(&dependency) != ".shader" || !dependency.starts_with("Assets/") {
+            if lower_ext(&dependency) != ".shader"
+                || !(dependency.starts_with("Assets/") || dependency.starts_with("Packages/"))
+            {
                 return Err(anyhow::Error::from(Unsupported(format!(
                     "reference to {} {}, which is not a baked source",
                     external.guid, dependency
                 )))
                 .context(format!("bake native {logical}")));
             }
-            let current = resolve_project_import_source(&self.opts.project, &dependency)
+            let current = self
+                .baked_source(&dependency)
                 .and_then(|source| read_file(&source))
                 .map(|data| sha256(&data))?;
             let published = self
@@ -343,7 +346,7 @@ impl NativeProjectImporter {
         let Some(entry) = self.entries.get(guid) else {
             return false;
         };
-        resolve_project_import_source(&self.opts.project, logical)
+        self.baked_source(logical)
             .and_then(|source| Ok((file_sha(&source)?, file_sha(&format!("{source}.meta"))?)))
             .is_ok_and(|(source, meta)| source == entry.source_sha256 && meta == entry.meta_sha256)
             && self
@@ -375,7 +378,7 @@ impl NativeProjectImporter {
         let mut visited = BTreeSet::from([logical.to_string()]);
         let mut pending = vec![logical.to_string()];
         while let Some(next) = pending.pop() {
-            let Ok(source) = resolve_project_import_source(&self.opts.project, &next) else {
+            let Ok(source) = self.baked_source(&next) else {
                 continue;
             };
             let data = read_file(&source)?;
