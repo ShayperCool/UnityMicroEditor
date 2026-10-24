@@ -316,9 +316,18 @@ description's settings and the engine's default bone masses; Main's two
 equal the worker's but for `m_AvatarSize`, which the tool takes over the
 release's tree with the controllers' rule and which comes out larger. The
 Player only reserves that much before reading (`ChainedAllocator::Reserve`)
-and takes more if it needs to. A humanoid avatar is refused. Not
-imported yet: clips with events or curves of their own, embedded
-materials (`materialImportMode` 1 and 2 without a mapping), blend shapes,
+and takes more if it needs to. A humanoid avatar is refused. A model's own materials (`model/material.rs`), where the `.meta` maps
+none to a project material, are made in a URP project as URP's material
+description preprocessor makes them: URP Lit, opaque or premultiplied
+transparent by the description's opacity (or one less its transparency),
+the base colour from the diffuse texture and factor or the diffuse colour
+(to gamma space in a linear project), the normal map with its scale, the
+emission (its keyword and realtime emissive flag with a factor above
+zero), the smoothness from the shininess; a texture is the source of its
+file name beside the model or in a `Textures` folder on the way up to
+`Assets`; the material's file ID hashes its name. A built-in pipeline
+project's are not made yet (its renderers take the default material). Not
+imported yet: clips with events or curves of their own, blend shapes,
 humanoid avatars and clips, lights and cameras of a model.
 
 ### Baked lighting

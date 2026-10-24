@@ -2,6 +2,7 @@
 //! importer makes of a file, read through `ufbx`.
 mod avatar;
 mod hierarchy;
+mod material;
 mod mesh;
 mod settings;
 mod space;
@@ -464,6 +465,31 @@ pub fn import(path: &Path, settings: &Settings) -> Result<Imported> {
     } else if settings.animation_type == 3 && settings.create_avatar {
         imported.refused.push("avatar: a humanoid rig".to_string());
     }
+    // The materials the import makes of the file's own, by name.
+    let mut embedded: HashMap<String, i64> = HashMap::new();
+    if settings.import_materials {
+        let project = path
+            .ancestors()
+            .find(|dir| dir.join("Assets").is_dir() && dir.join("ProjectSettings").is_dir())
+            .unwrap_or(Path::new("."));
+        let context = material::Context::of_project(project, path);
+        for fbx_material in scene.materials.iter() {
+            let name = sanitize(&fbx_material.element.name);
+            if embedded.contains_key(&name) || settings.external_materials.contains_key(&name) {
+                continue;
+            }
+            let id = ids.of(21, "Material", &name, &name);
+            match material::document(fbx_material, id, &context) {
+                Some(document) => {
+                    imported.documents.push(document);
+                    embedded.insert(name, id);
+                }
+                None => imported.refused.push(format!(
+                    "material {name}: the materials a model makes in a project without URP"
+                )),
+            }
+        }
+    }
     // The hierarchy, named in the `.meta`'s tables as the root and the
     // nodes' unique names.
     let rig = matches!(settings.animation_type, 2 | 3);
@@ -508,7 +534,7 @@ pub fn import(path: &Path, settings: &Settings) -> Result<Imported> {
                     .as_ref()
                     .map_or(1, |m| m.materials.len().max(1));
                 let materials = (0..slots)
-                    .map(|slot| settings.material(node.fbx, slot))
+                    .map(|slot| settings.material(node.fbx, slot, &embedded))
                     .collect();
                 Some(match skin {
                     None => hierarchy::Renderer {
@@ -552,7 +578,9 @@ pub fn import(path: &Path, settings: &Settings) -> Result<Imported> {
             animator,
         });
     }
-    imported.documents = hierarchy::documents(&placed, &settings.guid);
+    imported
+        .documents
+        .extend(hierarchy::documents(&placed, &settings.guid));
     if settings.import_animation && settings.animation_type != 0 {
         let animated: Vec<take::Animated<'_>> = nodes
             .iter()

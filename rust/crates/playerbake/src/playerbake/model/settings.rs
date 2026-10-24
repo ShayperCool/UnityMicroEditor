@@ -290,9 +290,14 @@ impl Settings {
 
 impl Settings {
     /// The material of a node's slot: one the `.meta` maps its material's
-    /// name to, else the engine's default material. The materials an import
-    /// makes of the file's own are not made yet.
-    pub fn material(&self, node: &ufbx::Node, slot: usize) -> Value {
+    /// name to, the one the import makes of it, else the engine's default
+    /// material.
+    pub fn material(
+        &self,
+        node: &ufbx::Node,
+        slot: usize,
+        embedded: &HashMap<String, i64>,
+    ) -> Value {
         let name = node
             .materials
             .get(slot)
@@ -303,8 +308,15 @@ impl Settings {
                     .and_then(|m| m.materials.get(slot).map(|m| m.element.name.to_string()))
             })
             .unwrap_or_default();
-        match self.external_materials.get(&name) {
-            Some(reference) => reference.clone(),
+        if let Some(reference) = self.external_materials.get(&name) {
+            return reference.clone();
+        }
+        match embedded.get(&name) {
+            Some(id) => serde_json::json!({
+                "fileID": id.to_string(),
+                "guid": self.guid,
+                "type": "3"
+            }),
             None => serde_json::json!({
                 "fileID": "10303",
                 "guid": "0000000000000000f000000000000000",
