@@ -134,6 +134,26 @@ fn fit(tree: &TypeTree, value: Val) -> Val {
     at(tree, 0, value)
 }
 
+/// Every pointer of a value, as file and path IDs.
+fn pointers_of(value: &Val, found: &mut impl FnMut(i64, i64)) {
+    match value {
+        Val::Map(fields) => {
+            if let (Some(Val::I(file)), Some(Val::I(path))) =
+                (value.field("m_FileID"), value.field("m_PathID"))
+                && fields.len() == 2
+            {
+                found(*file, *path);
+                return;
+            }
+            for (_, field) in fields {
+                pointers_of(field, found);
+            }
+        }
+        Val::Seq(items) => items.iter().for_each(|item| pointers_of(item, found)),
+        _ => {}
+    }
+}
+
 pub fn write_closure(
     library: &Library,
     tags: &Tags,
@@ -348,6 +368,83 @@ pub fn write_closure_baking(
         }
         order.push(guid.clone());
         loaded.insert(guid, source);
+    }
+    // Of a model a build holds the objects the closure refers to and what
+    // they refer to within the model, as it holds objects, not files: a
+    // mesh another source uses does not bring the model's hierarchy along.
+    let models: Vec<String> = loaded
+        .keys()
+        .filter(|guid| {
+            !roots.contains(&guid.as_str())
+                && sources.path(guid).is_some_and(|path| {
+                    path.extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("fbx"))
+                })
+        })
+        .cloned()
+        .collect();
+    if !models.is_empty() {
+        let mut wanted: HashMap<String, HashSet<i64>> = HashMap::new();
+        for (guid, source) in &loaded {
+            let Source::Yaml(documents) = source else {
+                continue;
+            };
+            for document in documents.iter().filter(|d| written(d)) {
+                for reference in dependencies(library, &renames, sources, document) {
+                    if !reference.guid.is_empty() && reference.guid != *guid {
+                        wanted
+                            .entry(reference.guid)
+                            .or_default()
+                            .insert(reference.file_id);
+                    }
+                }
+                let made = document
+                    .file_id
+                    .parse::<i64>()
+                    .ok()
+                    .and_then(|id| prebuilt.get(&(guid.clone(), id)));
+                if let Some(made) = made {
+                    pointers_of(&made.value, &mut |file, path| {
+                        if let Some(external) = (file > 0)
+                            .then(|| made.externals.get(file as usize - 1))
+                            .flatten()
+                        {
+                            wanted
+                                .entry(external.guid.clone())
+                                .or_default()
+                                .insert(path);
+                        }
+                    });
+                }
+            }
+        }
+        for model in models {
+            let mut keep = wanted.remove(&model).unwrap_or_default();
+            let Some(Source::Yaml(documents)) = loaded.get_mut(&model) else {
+                continue;
+            };
+            loop {
+                let before = keep.len();
+                for document in documents.iter() {
+                    if !document
+                        .file_id
+                        .parse::<i64>()
+                        .is_ok_and(|id| keep.contains(&id))
+                    {
+                        continue;
+                    }
+                    for reference in dependencies(library, &renames, sources, document) {
+                        if reference.guid.is_empty() || reference.guid == model {
+                            keep.insert(reference.file_id);
+                        }
+                    }
+                }
+                if keep.len() == before {
+                    break;
+                }
+            }
+            documents.retain(|d| d.file_id.parse::<i64>().is_ok_and(|id| keep.contains(&id)));
+        }
     }
     // The objects of the Editor's built-in resources the sources name are
     // written beside them, as a build copies them; their shaders stay

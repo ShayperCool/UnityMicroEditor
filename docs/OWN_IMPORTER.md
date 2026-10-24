@@ -248,8 +248,32 @@ F <release>]` prints the file and what the tool imports of it):
   stream, colours and UVs in the second, the skin in the third (indices
   alone with one bone per vertex).
 - File IDs from the `.meta`'s `fileIDToRecycleName` (before 2019.3) or
-  `internalIDToNameTable` by class and name, new ones as the format before
-  2019.3 numbers them.
+  `internalIDToNameTable` by class and name; in a `.meta` of the format
+  before 2019.3 a new object takes its class's next free ID (`class *
+  100000 + 2k`). Otherwise the importer hashes: `XXH64("Type:<class>-><key>
+  <n>")` read as a signed integer, `n` counting IDs already taken. A game
+  object's key is its path with the root renamed `root` below
+  `//RootNode` (`//RootNode/root/a/b`), a component's that path plus `/`
+  and its class; a mesh's the file's name of its node; a clip's the stored
+  `internalID`, else the take's name; the avatar is `9000000`. Names are
+  made unique among siblings (`nodeNameCollisionStrategy` 1: the repeats,
+  from the last, take the first free `name 1`, `name 2`) or across the file
+  (0, the format before: passes over the nodes sorted by name, depth and
+  parent path), children sorted by name with numbers by value
+  (`sortHierarchyByName`). The file's single top node is the root unless
+  the hierarchy is kept, it is a bone or a humanoid's extra root is
+  wanted. Worked out from the Editor's code and checked against 6000.0
+  imports (268 objects) and every reference of Dungeon to its models:
+  4737 of 5023 reproduced, the rest prefab overrides of nodes the models
+  no longer have and clips the tool refuses.
+- The hierarchy (`model/hierarchy.rs`): a game object and transform per
+  node, a mesh filter and renderer or a skinned renderer (its bones, root
+  bone and bounds), an animator on a rig's root with its avatar; the
+  materials the `.meta`'s `externalObjects` map, else the engine's default
+  material. A prefab instance of a model is unpacked from these documents;
+  a closure keeps of a model only the objects referred to and what they
+  refer to within it, as a build holds objects (Main: no object the
+  worker's file lacks).
 
 Main of Bouncemasters: the 33 meshes it uses have the worker's vertices and
 triangles (positions within float rounding), the skinned ones their bind
@@ -276,9 +300,9 @@ equal the worker's but for `m_AvatarSize`, which the tool takes over the
 release's tree with the controllers' rule and which comes out larger. The
 Player only reserves that much before reading (`ChainedAllocator::Reserve`)
 and takes more if it needs to. A humanoid avatar is refused. Not
-imported yet: the model's hierarchy as objects (for prefab instances of a
-model), clips with events or curves of their own, embedded materials, blend
-shapes, the new-style file IDs of models without a recorded table.
+imported yet: clips with events or curves of their own, embedded
+materials (`materialImportMode` 1 and 2 without a mapping), blend shapes,
+humanoid avatars and clips, lights and cameras of a model.
 
 ### Baked lighting
 

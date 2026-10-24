@@ -103,10 +103,13 @@ pub fn clip(
     clip: &ClipSettings,
     space: &Space,
 ) -> Option<Map<String, Value>> {
+    // A take the file no longer has: the file's first, as the importer
+    // falls back to it.
     let stack = scene
         .anim_stacks
         .iter()
-        .find(|stack| stack.element.name.as_ref() == clip.take.as_str())?;
+        .find(|stack| stack.element.name.as_ref() == clip.take.as_str())
+        .or_else(|| scene.anim_stacks.iter().next())?;
     let rate = match scene.settings.frames_per_second {
         rate if rate > 0.0 => rate,
         _ => 30.0,

@@ -1,6 +1,7 @@
 //! Models (`.fbx`) imported without the Editor: what the Editor's model
 //! importer makes of a file, read through `ufbx`.
 mod avatar;
+mod hierarchy;
 mod mesh;
 mod settings;
 mod space;
@@ -28,65 +29,221 @@ fn load_options() -> ufbx::LoadOpts<'static> {
 /// A node of the model as Unity names it.
 struct Node<'a> {
     fbx: &'a ufbx::Node,
+    /// The node's name in the model: the file's, sanitized and told apart
+    /// from the names it shares; the root's is the file's name.
     name: String,
+    /// The file's name of the node, sanitized; empty for a root the import
+    /// makes.
+    original: String,
     /// The path below the model's root, `a/b/c`; empty for the root.
     path: String,
+    /// The path the importer hashes for the node's IDs, the root renamed
+    /// `root` under `//RootNode`.
+    key: String,
     parent: Option<usize>,
 }
 
-/// The nodes of a model in the importer's order, the root first. A file
-/// whose scene holds one node at its top has that node as the model's
-/// root; the root is named after the file. A name met again is told apart
-/// by a number, in order of the hierarchy.
-fn nodes<'a>(scene: &'a ufbx::Scene, file_name: &str) -> Vec<Node<'a>> {
-    let mut root: &ufbx::Node = &scene.root_node;
-    if root.children.len() == 1 && root.mesh.is_none() {
-        root = &root.children[0];
+/// `ModelImporter::SanitizeName`: control characters become `_`.
+fn sanitize(name: &str) -> String {
+    name.chars()
+        .map(|c| if (c as u32) < 0x20 { '_' } else { c })
+        .collect()
+}
+
+/// Names that order as `SemiNumericCompare` orders them: without case, runs
+/// of digits by their value.
+fn natural(name: &str) -> Vec<(u8, u128, String)> {
+    let mut parts = Vec::new();
+    let mut chars = name.chars().peekable();
+    while let Some(&c) = chars.peek() {
+        if c.is_ascii_digit() {
+            let mut digits = String::new();
+            while let Some(&d) = chars.peek().filter(|d| d.is_ascii_digit()) {
+                digits.push(d);
+                chars.next();
+            }
+            parts.push((0, digits.parse().unwrap_or(u128::MAX), String::new()));
+        } else {
+            chars.next();
+            parts.push((1, 0, c.to_lowercase().collect()));
+        }
     }
-    let mut nodes = vec![Node {
-        fbx: root,
-        name: file_name.to_string(),
-        path: String::new(),
-        parent: None,
-    }];
-    let mut seen: HashMap<String, usize> = HashMap::new();
-    let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
+    parts
+}
+
+/// The file's nodes below its scene root, in pre-order, with their parents
+/// (positions in the list) and names made unique as the import makes them:
+/// among siblings (`nodeNameCollisionStrategy` 1), the first keeping its
+/// name and the others, from the last, taking the first free `name 1`,
+/// `name 2`, ...; or across the file (0), by passes over the nodes sorted by
+/// name, depth and parent path until no name repeats.
+fn file_nodes<'a>(
+    scene: &'a ufbx::Scene,
+    settings: &Settings,
+) -> (Vec<&'a ufbx::Node>, Vec<Option<usize>>, Vec<String>) {
+    let mut list: Vec<&ufbx::Node> = Vec::new();
+    let mut parents: Vec<Option<usize>> = Vec::new();
     fn walk<'a>(
         node: &'a ufbx::Node,
-        parent: usize,
-        nodes: &mut Vec<Node<'a>>,
-        seen: &mut HashMap<String, usize>,
-        taken: &mut std::collections::HashSet<String>,
+        parent: Option<usize>,
+        list: &mut Vec<&'a ufbx::Node>,
+        parents: &mut Vec<Option<usize>>,
     ) {
+        list.push(node);
+        parents.push(parent);
+        let index = list.len() - 1;
         for child in node.children.iter() {
-            let base = child.element.name.to_string();
-            let mut name = base.clone();
-            if taken.contains(&name) {
-                let count = seen.entry(base.clone()).or_insert(0);
-                loop {
-                    *count += 1;
-                    name = format!("{base} {count}");
-                    if !taken.contains(&name) {
-                        break;
-                    }
+            walk(child, Some(index), list, parents);
+        }
+    }
+    for top in scene.root_node.children.iter() {
+        walk(top, None, &mut list, &mut parents);
+    }
+    let mut names: Vec<String> = list
+        .iter()
+        .map(|node| sanitize(&node.element.name))
+        .collect();
+    if settings.name_collisions == 1 {
+        let mut groups: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
+        for (index, parent) in parents.iter().enumerate() {
+            groups.entry(*parent).or_default().push(index);
+        }
+        for siblings in groups.values() {
+            let mut seen: std::collections::HashSet<String> = Default::default();
+            let mut repeats = Vec::new();
+            for &index in siblings {
+                if !seen.insert(names[index].clone()) {
+                    repeats.push(index);
                 }
             }
-            taken.insert(name.clone());
+            for &index in repeats.iter().rev() {
+                let mut count = 1;
+                let mut name = format!("{} {count}", names[index]);
+                while seen.contains(&name) {
+                    count += 1;
+                    name = format!("{} {count}", names[index]);
+                }
+                seen.insert(name.clone());
+                names[index] = name;
+            }
+        }
+    } else {
+        loop {
+            let path = |index: usize, names: &[String]| {
+                let mut parts = Vec::new();
+                let mut at = parents[index];
+                while let Some(parent) = at {
+                    parts.push(names[parent].clone());
+                    at = parents[parent];
+                }
+                parts.reverse();
+                let depth = parts.len();
+                (
+                    depth,
+                    parts.iter().map(|p| format!("/{p}")).collect::<String>(),
+                )
+            };
+            let mut order: Vec<(Vec<u8>, usize, Vec<u8>, usize)> = (0..list.len())
+                .map(|index| {
+                    let (depth, above) = path(index, &names);
+                    (
+                        names[index].as_bytes().to_vec(),
+                        depth,
+                        above.into_bytes(),
+                        index,
+                    )
+                })
+                .collect();
+            order.sort_by(|a, b| (&a.0, a.1, &a.2).cmp(&(&b.0, b.1, &b.2)));
+            let mut changed = false;
+            let mut count = 0;
+            for at in 1..order.len() {
+                if order[at].0 == order[at - 1].0 {
+                    count += 1;
+                    let index = order[at].3;
+                    names[index] = format!("{} {count}", names[index]);
+                    changed = true;
+                } else {
+                    count = 0;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+    (list, parents, names)
+}
+
+/// The nodes of a model in the importer's order, the root first. The single
+/// node at the top of a file is the model's root unless the import keeps
+/// the hierarchy, it is a bone or a humanoid's extra root is wanted;
+/// otherwise the import makes a root above the top nodes. The root is
+/// named after the file; children are sorted by name when the import says
+/// so.
+fn nodes<'a>(scene: &'a ufbx::Scene, file_name: &str, settings: &Settings) -> Vec<Node<'a>> {
+    let (list, parents, names) = file_nodes(scene, settings);
+    let tops: Vec<usize> = (0..list.len()).filter(|&i| parents[i].is_none()).collect();
+    let collapse = !settings.preserve_hierarchy
+        && tops.len() == 1
+        && list[tops[0]].attrib_type != ufbx::ElementType::Bone
+        && !settings.extra_root;
+    let (root_fbx, root_original, mut pending): (&ufbx::Node, String, Vec<usize>) = if collapse {
+        let top = tops[0];
+        let children = (0..list.len())
+            .filter(|&i| parents[i] == Some(top))
+            .collect();
+        (list[top], sanitize(&list[top].element.name), children)
+    } else {
+        (&scene.root_node, String::new(), tops)
+    };
+    let sort = |children: &mut Vec<usize>| {
+        if settings.sort_by_name {
+            children.sort_by_key(|&i| natural(&names[i]));
+        }
+    };
+    sort(&mut pending);
+    let mut nodes = vec![Node {
+        fbx: root_fbx,
+        name: file_name.to_string(),
+        original: root_original,
+        path: String::new(),
+        key: "//RootNode/root".to_string(),
+        parent: None,
+    }];
+    fn walk<'a>(
+        children: Vec<usize>,
+        parent: usize,
+        nodes: &mut Vec<Node<'a>>,
+        list: &[&'a ufbx::Node],
+        parents: &[Option<usize>],
+        names: &[String],
+        sort: &dyn Fn(&mut Vec<usize>),
+    ) {
+        for child in children {
+            let name = names[child].clone();
             let path = match nodes[parent].path.as_str() {
                 "" => name.clone(),
                 above => format!("{above}/{name}"),
             };
+            let key = format!("{}/{name}", nodes[parent].key);
             nodes.push(Node {
-                fbx: child,
+                fbx: list[child],
                 name,
+                original: sanitize(&list[child].element.name),
                 path,
+                key,
                 parent: Some(parent),
             });
             let index = nodes.len() - 1;
-            walk(child, index, nodes, seen, taken);
+            let mut below: Vec<usize> = (0..list.len())
+                .filter(|&i| parents[i] == Some(child))
+                .collect();
+            sort(&mut below);
+            walk(below, index, nodes, list, parents, names, sort);
         }
     }
-    walk(root, 0, &mut nodes, &mut seen, &mut taken);
+    walk(pending, 0, &mut nodes, &list, &parents, &names, &sort);
     nodes
 }
 
@@ -94,24 +251,30 @@ fn nodes<'a>(scene: &'a ufbx::Scene, file_name: &str) -> Vec<Node<'a>> {
 /// by file ID and class.
 pub struct Imported {
     pub objects: Vec<(i64, i64, Val)>,
+    /// The model's hierarchy as the Editor's objects of its prefab.
+    pub documents: Vec<crate::yaml::Document>,
     /// What the tool does not import yet, by object.
     pub refused: Vec<String>,
 }
 
-/// The file IDs of a model's objects.
+/// The file IDs of a model's objects: as the `.meta`'s table records them;
+/// in a `.meta` of the format before 2019.3, the class's next free ID;
+/// otherwise the importer's hash of the object's class and key
+/// (`XXH64("Type:<class>-><key><n>")`, `n` counting IDs already taken).
 struct Ids<'a> {
     settings: &'a Settings,
     used: std::collections::HashSet<i64>,
 }
 
 impl Ids<'_> {
-    fn of(&mut self, class: i64, name: &str) -> Result<i64> {
+    /// `name` is the object's name in a recorded table, `key` what the
+    /// importer hashes.
+    fn of(&mut self, class: i64, class_name: &str, name: &str, key: &str) -> i64 {
         if let Some(&id) = self.settings.recorded.get(&(class, name.to_string())) {
             self.used.insert(id);
-            return Ok(id);
+            return id;
         }
         if self.settings.legacy_ids {
-            // The next free ID of the class, as the importer gave them.
             let mut id = class * 100_000;
             while self.used.contains(&id)
                 || self.settings.recorded.values().any(|known| *known == id)
@@ -119,9 +282,17 @@ impl Ids<'_> {
                 id += 2;
             }
             self.used.insert(id);
-            return Ok(id);
+            return id;
         }
-        bail!("the file ID of {name}, a model's object of class {class}")
+        let mut n = 0;
+        loop {
+            let text = format!("Type:{class_name}->{key}{n}");
+            let id = xxhash_rust::xxh64::xxh64(text.as_bytes(), 0) as i64;
+            if self.used.insert(id) {
+                return id;
+            }
+            n += 1;
+        }
     }
 }
 
@@ -139,7 +310,7 @@ pub fn import(path: &Path, settings: &Settings) -> Result<Imported> {
         1.0
     };
     let space = space::Space::new(settings.global_scale * unit);
-    let nodes = nodes(&scene, &file_name);
+    let nodes = nodes(&scene, &file_name, settings);
     let by_element: HashMap<u32, usize> = nodes
         .iter()
         .enumerate()
@@ -151,9 +322,13 @@ pub fn import(path: &Path, settings: &Settings) -> Result<Imported> {
     };
     let mut imported = Imported {
         objects: Vec::new(),
+        documents: Vec::new(),
         refused: Vec::new(),
     };
-    for node in &nodes {
+    // Each mesh node's mesh, its bones and root bone, and its bounds.
+    type Skinned = Option<(Vec<usize>, usize)>;
+    let mut meshes: HashMap<usize, (i64, Skinned, hierarchy::Bounds)> = HashMap::new();
+    for (index, node) in nodes.iter().enumerate() {
         let Some(mesh) = node.fbx.mesh.as_ref() else {
             continue;
         };
@@ -193,22 +368,47 @@ pub fn import(path: &Path, settings: &Settings) -> Result<Imported> {
                         None => break,
                     }
                 }
-                Some(mesh::Skin {
-                    paths,
-                    root: nodes[root].path.clone(),
-                    bind_poses,
-                })
+                Some((
+                    mesh::Skin {
+                        paths,
+                        root: nodes[root].path.clone(),
+                        bind_poses,
+                    },
+                    bones,
+                    root,
+                ))
             }
         };
-        // A mesh is named after its node; the root's after the node the
-        // file has there, not after the file.
-        let name = match node.parent {
-            None => node.fbx.element.name.to_string(),
-            Some(_) => node.name.clone(),
-        };
-        match mesh::build(&name, node.fbx, mesh, settings, &space, skin.as_ref()) {
+        // A mesh is named after the file's name of its node.
+        let name = node.original.clone();
+        match mesh::build(
+            &name,
+            node.fbx,
+            mesh,
+            settings,
+            &space,
+            skin.as_ref().map(|(skin, ..)| skin),
+        ) {
             Ok(value) => {
-                let id = ids.of(MESH, &name)?;
+                let id = ids.of(MESH, "Mesh", &name, &name);
+                let bounds = value
+                    .field("m_LocalAABB")
+                    .map(|b| {
+                        let v = |name: &str| {
+                            let field = |axis: &str| match b.field(name).and_then(|f| f.field(axis))
+                            {
+                                Some(Val::F(x)) => *x,
+                                _ => 0.0,
+                            };
+                            [field("x"), field("y"), field("z")]
+                        };
+                        (v("m_Center"), v("m_Extent"))
+                    })
+                    .unwrap_or_default();
+                meshes.insert(
+                    index,
+                    (id, skin.map(|(_, bones, root)| (bones, root)), bounds),
+                );
                 imported.objects.push((id, MESH, value));
             }
             Err(error) => imported
@@ -250,7 +450,12 @@ pub fn import(path: &Path, settings: &Settings) -> Result<Imported> {
                 }
             })
             .collect();
-        let id = ids.of(AVATAR, "//RootNode")?;
+        // An avatar's ID is the class's first, not a hash.
+        let id = settings
+            .recorded
+            .get(&(AVATAR, "//RootNode".to_string()))
+            .copied()
+            .unwrap_or(AVATAR * 100_000);
         imported.objects.push((
             id,
             AVATAR,
@@ -259,6 +464,95 @@ pub fn import(path: &Path, settings: &Settings) -> Result<Imported> {
     } else if settings.animation_type == 3 && settings.create_avatar {
         imported.refused.push("avatar: a humanoid rig".to_string());
     }
+    // The hierarchy, named in the `.meta`'s tables as the root and the
+    // nodes' unique names.
+    let rig = matches!(settings.animation_type, 2 | 3);
+    let avatar_id = imported
+        .objects
+        .iter()
+        .find(|(_, class, _)| *class == AVATAR)
+        .map(|(id, ..)| *id);
+    let mut placed = Vec::with_capacity(nodes.len());
+    for (index, node) in nodes.iter().enumerate() {
+        let key = match node.parent {
+            None => "//RootNode".to_string(),
+            Some(_) => node.name.clone(),
+        };
+        let t = &node.fbx.local_transform;
+        let (position, rotation, scale) = match node.parent {
+            None => ([0.0; 3], [0.0, 0.0, 0.0, 1.0], [1.0; 3]),
+            Some(_) => (
+                space.position([
+                    t.translation.x as f32,
+                    t.translation.y as f32,
+                    t.translation.z as f32,
+                ]),
+                space.rotation([
+                    t.rotation.x as f32,
+                    t.rotation.y as f32,
+                    t.rotation.z as f32,
+                    t.rotation.w as f32,
+                ]),
+                [t.scale.x as f32, t.scale.y as f32, t.scale.z as f32],
+            ),
+        };
+        let component = |class: &str| format!("{}/{class}", node.key);
+        let game_object = ids.of(1, "GameObject", &key, &node.key);
+        let transform = ids.of(4, "Transform", &key, &component("Transform"));
+        let renderer = match meshes.remove(&index) {
+            None => None,
+            Some((mesh, skin, bounds)) => {
+                let slots = node
+                    .fbx
+                    .mesh
+                    .as_ref()
+                    .map_or(1, |m| m.materials.len().max(1));
+                let materials = (0..slots)
+                    .map(|slot| settings.material(node.fbx, slot))
+                    .collect();
+                Some(match skin {
+                    None => hierarchy::Renderer {
+                        filter: Some(ids.of(33, "MeshFilter", &key, &component("MeshFilter"))),
+                        renderer: ids.of(23, "MeshRenderer", &key, &component("MeshRenderer")),
+                        mesh,
+                        materials,
+                        skin: None,
+                    },
+                    Some((bones, root)) => hierarchy::Renderer {
+                        filter: None,
+                        renderer: ids.of(
+                            137,
+                            "SkinnedMeshRenderer",
+                            &key,
+                            &component("SkinnedMeshRenderer"),
+                        ),
+                        mesh,
+                        materials,
+                        skin: Some((bones, Some(root), bounds)),
+                    },
+                })
+            }
+        };
+        let animator = match (node.parent, rig) {
+            (None, true) if settings.create_avatar => Some((
+                ids.of(95, "Animator", &key, &component("Animator")),
+                avatar_id,
+            )),
+            _ => None,
+        };
+        placed.push(hierarchy::Placed {
+            game_object,
+            transform,
+            name: node.name.clone(),
+            position,
+            rotation,
+            scale,
+            parent: node.parent,
+            renderer,
+            animator,
+        });
+    }
+    imported.documents = hierarchy::documents(&placed, &settings.guid);
     if settings.import_animation && settings.animation_type != 0 {
         let animated: Vec<take::Animated<'_>> = nodes
             .iter()
@@ -285,7 +579,10 @@ pub fn import(path: &Path, settings: &Settings) -> Result<Imported> {
                 &crate::playerbake::clip::NoScripts,
             ) {
                 Ok(baked) => {
-                    let id = ids.of(CLIP, &clip.name)?;
+                    let id = match clip.internal_id {
+                        0 => ids.of(CLIP, "AnimationClip", &clip.name, &sanitize(&clip.take)),
+                        id => id,
+                    };
                     imported.objects.push((id, CLIP, baked.value));
                 }
                 Err(error) => imported
@@ -317,7 +614,11 @@ pub fn clips(path: &Path, settings: &Settings) -> Result<Vec<(i64, String, bool)
     };
     let mut out = Vec::new();
     for clip in listed {
-        out.push((ids.of(CLIP, &clip.name)?, clip.name, clip.loop_time));
+        let id = match clip.internal_id {
+            0 => ids.of(CLIP, "AnimationClip", &clip.name, &sanitize(&clip.take)),
+            id => id,
+        };
+        out.push((id, clip.name, clip.loop_time));
     }
     Ok(out)
 }
@@ -444,4 +745,66 @@ pub fn inspect(path: &std::path::Path) -> Result<String> {
         )?;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings(meta: &str) -> Settings {
+        Settings::read(meta).unwrap()
+    }
+
+    #[test]
+    fn hashed_ids_follow_the_importer() {
+        let settings = settings("guid: 0\nModelImporter:\n  internalIDToNameTable: []\n");
+        let mut ids = Ids {
+            settings: &settings,
+            used: Default::default(),
+        };
+        // The root of every model with hashed IDs, and gas_tanks' renderer
+        // of `gas_tanks.Prop_Mid` (Dungeon).
+        assert_eq!(
+            ids.of(1, "GameObject", "//RootNode", "//RootNode/root"),
+            919132149155446097
+        );
+        assert_eq!(
+            ids.of(4, "Transform", "//RootNode", "//RootNode/root/Transform"),
+            -8679921383154817045
+        );
+        assert_eq!(
+            ids.of(
+                23,
+                "MeshRenderer",
+                "gas_tanks.Prop_Mid",
+                "//RootNode/root/gas_tanks.Prop_Mid/MeshRenderer"
+            ),
+            -3372668875357190546
+        );
+        // A key taken again counts up.
+        let again = ids.of(1, "GameObject", "//RootNode", "//RootNode/root");
+        assert_ne!(again, 919132149155446097);
+    }
+
+    #[test]
+    fn recorded_and_legacy_ids_come_first() {
+        let settings = settings(
+            "guid: 0\nModelImporter:\n  fileIDToRecycleName:\n    100000: //RootNode\n    4300002: great_ice\n",
+        );
+        let mut ids = Ids {
+            settings: &settings,
+            used: Default::default(),
+        };
+        assert_eq!(ids.of(43, "Mesh", "great_ice", "great_ice"), 4300002);
+        assert_eq!(ids.of(43, "Mesh", "aisberg", "aisberg"), 4300000);
+        assert_eq!(ids.of(43, "Mesh", "other", "other"), 4300004);
+    }
+
+    #[test]
+    fn names_sort_with_numbers_by_value() {
+        let mut names = vec!["b10", "B2", "a", "b1"];
+        names.sort_by_key(|n| natural(n));
+        assert_eq!(names, ["a", "b1", "B2", "b10"]);
+        assert_eq!(sanitize("a\tb"), "a_b");
+    }
 }

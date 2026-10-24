@@ -206,13 +206,14 @@ pub(super) fn load(path: &Path, sources: &Sources) -> Result<Option<Animation>> 
     Ok(Some(animation))
 }
 
-/// The objects of a model the tool imports: its meshes.
+/// The objects of a model the tool imports: its hierarchy as a prefab's
+/// documents, and its meshes, clips and avatar made beside them.
 fn model(path: &Path) -> Result<Animation> {
     let meta = std::fs::read_to_string(format!("{}.meta", path.display()))?;
     let settings = super::model::Settings::read(&meta)?;
     let imported = super::model::import(path, &settings)?;
     let mut animation = Animation {
-        documents: Vec::new(),
+        documents: imported.documents,
         prebuilt: Vec::new(),
     };
     for (file_id, class_id, value) in imported.objects {

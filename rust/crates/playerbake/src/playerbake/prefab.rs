@@ -274,9 +274,17 @@ impl Unpacked {
         let path = sources
             .path(guid)
             .with_context(|| format!("no source prefab with GUID {guid}"))?;
-        let documents = ume_base::yaml::parse_unity_yaml_lexical(
-            &std::fs::read(path).with_context(|| format!("read {}", path.display()))?,
-        )?;
+        // A model is a prefab of the hierarchy its import makes.
+        let documents = match path.extension() {
+            Some(extension) if extension.eq_ignore_ascii_case("fbx") => {
+                let meta = std::fs::read_to_string(format!("{}.meta", path.display()))?;
+                let settings = super::model::Settings::read(&meta)?;
+                super::model::import(path, &settings)?.documents
+            }
+            _ => ume_base::yaml::parse_unity_yaml_lexical(
+                &std::fs::read(path).with_context(|| format!("read {}", path.display()))?,
+            )?,
+        };
         let unpacked = Arc::new(self.unpack(sources, documents)?);
         self.pending.remove(guid);
         self.prefabs.insert(guid.to_string(), unpacked.clone());

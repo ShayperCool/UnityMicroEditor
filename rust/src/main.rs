@@ -455,6 +455,18 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                 };
                 println!("object {id} class {class} {name:?}");
             }
+            for document in &imported.documents {
+                println!(
+                    "document {} {} {}",
+                    document.file_id,
+                    document.type_name,
+                    document
+                        .data
+                        .get("m_Name")
+                        .map(|n| n.to_string())
+                        .unwrap_or_default()
+                );
+            }
             for refusal in &imported.refused {
                 println!("refused {refusal}");
             }
