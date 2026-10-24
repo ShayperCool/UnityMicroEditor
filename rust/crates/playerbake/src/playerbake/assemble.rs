@@ -672,6 +672,19 @@ pub fn write_closure_baking(
                     } else {
                         None
                     };
+                    // An asset's own script object whose script the Player lacks
+                    // (URP's Editor-only `AssetVersion` beside a material) is left
+                    // out, as a build leaves it out.
+                    if document.class_id == 114
+                        && script.is_none()
+                        && document
+                            .data
+                            .get("m_GameObject")
+                            .and_then(Reference::from_value)
+                            .is_none_or(|owner| owner.file_id == 0)
+                    {
+                        continue;
+                    }
                     let mut resolve = |reference: &Reference| -> Result<Option<(i32, i64)>> {
                         let owner = if reference.guid.is_empty() {
                             guid
@@ -1394,6 +1407,9 @@ fn pointer_to(file: i32, local: i64) -> Val {
 }
 
 fn load(path: &Path, guid: &str, sources: &Sources) -> Result<Option<Source>> {
+    if let Some(documents) = sources.imported(guid) {
+        return Ok(Some(Source::Yaml(documents.clone())));
+    }
     let extension = path
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())

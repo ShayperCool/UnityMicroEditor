@@ -326,6 +326,11 @@ pub fn write_game_managers(
     }
     if let Some(player) = values.get_mut(&managers::PLAYER) {
         managers::settle_player_value(player, quality_names);
+        // A host preloads nothing of the game, as the Editor's host build
+        // clears the preloaded assets: the session brings the game's content.
+        if let Some(field) = player.field_mut("preloadedAssets") {
+            *field = Val::Seq(Vec::new());
+        }
     }
     if let Some(build) = values.get_mut(&BUILD_SETTINGS) {
         if let Some(field) = build.field_mut("scenes") {

@@ -227,7 +227,8 @@ impl NativeProjectImporter {
         let assembled = playerbake::write_scene_closure(
             &library,
             &playerbake::Tags::of_project(root)?,
-            &playerbake::Sources::of_project(root)?,
+            &playerbake::Sources::of_project(root)?
+                .with_imported(super::scripted_imports::kept(&self.opts.project)),
             &roots,
             None,
             format,
@@ -677,7 +678,8 @@ impl NativeProjectImporter {
         let assembled = playerbake::write_scene_closure(
             &library,
             &playerbake::Tags::of_project(root)?,
-            &playerbake::Sources::of_project(root)?,
+            &playerbake::Sources::of_project(root)?
+                .with_imported(super::scripted_imports::kept(&self.opts.project)),
             &roots,
             Some(&scene_guid),
             format,

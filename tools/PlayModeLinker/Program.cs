@@ -1103,6 +1103,15 @@ sealed class StandIns
             il.Emit(OpCodes.Ldarg_0);
             il.Emit(OpCodes.Call, baseConstructor);
         }
+        // What the bridge keeps of a made object (`new SerializedObject(target)`): the public
+        // static `Construct` of the type's class, with the instance first.
+        var answer = FindSupport(type, constructor, "Construct");
+        if (answer != null)
+        {
+            for (var index = 0; index <= constructor.Parameters.Count; index++) il.Emit(OpCodes.Ldarg, index);
+            il.Emit(OpCodes.Call, module.ImportReference(answer));
+            report.SupportedMembers++;
+        }
         il.Emit(OpCodes.Ret);
     }
 

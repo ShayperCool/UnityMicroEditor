@@ -223,7 +223,7 @@ pub fn assemble_host(
             sysutil::join(&[&data, "resources.assets"]),
             playerbake::plain_file(version, &[], &[], &[])?,
         )?;
-        write_bootstrap_scene(version, &data)?;
+        write_bootstrap_scene(version, &data, build_scenes(project).len())?;
         write_proof(project, editor, version, &data, packages)?;
         let assembled = AssembledHost {
             player: sysutil::join(&[output, HOST_EXECUTABLE]),
@@ -599,7 +599,7 @@ fn write_managers(
         .collect();
     scripts.extend(&completed.scripts);
     let derived = DerivedManagers {
-        scenes: vec![BOOTSTRAP_SCENE.into()],
+        scenes: build_scenes(project),
         graphics_apis: vec![17],
         scripts,
         resources: completed.resources.clone(),
@@ -621,6 +621,8 @@ fn write_managers(
 pub struct CompletedPlayer {
     pub scripts: usize,
     pub resources: usize,
+    /// Sources a scripted importer imported.
+    pub imported: usize,
     /// Scripts not laid out and resources not written, with the reason.
     pub refused: Vec<(String, String)>,
     pub seconds: f64,
@@ -713,9 +715,21 @@ pub fn complete_player(
     let preloaded: Vec<(i64, i64)> = default_scripts.iter().map(|&id| (1, id)).collect();
     let mut objects = vec![(1, 0, preload_data(&preloaded))];
     let mut written = Completed::default();
+    // The sources of scripted importers, imported by the game's Editor code
+    // that the Player runs.
+    let sources = playerbake::Sources::of_project(root)?;
+    let (imported, failed) = super::scripted_imports::import_scripted(
+        ctx,
+        project,
+        player,
+        &sources,
+        &sysutil::join(&[&sysutil::dir(&sysutil::dir(player)), "scripted-imports"]),
+    )?;
+    completed.imported = imported.len();
+    completed.refused.extend(failed);
+    let sources = sources.with_imported(imported);
     // A script has a `MonoScript` where Unity imports one: the class a `.cs`
     // source of its name declares, and the classes of a plugin's assembly.
-    let sources = playerbake::Sources::of_project(root)?;
     let mut script_files: HashMap<String, Vec<&str>> = HashMap::new();
     let mut plugins: BTreeSet<String> = BTreeSet::new();
     for (guid, path) in sources.all() {
@@ -882,6 +896,40 @@ pub fn complete_player(
     Ok(Some(completed))
 }
 
+/// The scenes of a host's build: its bootstrap scene, then for each enabled
+/// scene of the project's Build Settings after the first an empty scene of
+/// the same name at the same build index, which the session builds the
+/// authored scene into when the game loads it by name, path or index
+/// (`RawProjectContent`, which looks for the `/BuildScenes/` folder).
+fn build_scenes(project: &str) -> Vec<String> {
+    let mut scenes = vec![BOOTSTRAP_SCENE.to_string()];
+    let path = sysutil::join(&[project, "ProjectSettings/EditorBuildSettings.asset"]);
+    let documents = std::fs::read(&path)
+        .ok()
+        .and_then(|data| crate::yaml::parse_unity_yaml_lexical(&data).ok())
+        .unwrap_or_default();
+    let enabled: Vec<String> = documents
+        .first()
+        .and_then(|document| document.data.get("m_Scenes"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|scene| scene.get("enabled").and_then(serde_json::Value::as_str) == Some("1"))
+        .filter_map(|scene| scene.get("path").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect();
+    for (index, path) in enabled.iter().enumerate().skip(1) {
+        let name = Path::new(path)
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        scenes.push(format!(
+            "Assets/UnityMicroEditorGenerated/BuildScenes/{index}/{name}.unity"
+        ));
+    }
+    scenes
+}
+
 /// The name a host's bootstrap scene has in its build settings.
 pub const BOOTSTRAP_SCENE: &str = "Assets/UnityMicroEditorGenerated/Bootstrap.unity";
 
@@ -933,10 +981,10 @@ fn hex16(text: &str) -> [u8; 16] {
     bytes
 }
 
-/// `level0`: a scene of nothing but its settings, the engine pack's samples
+/// `level0` and the stand-ins after it: a scene of nothing but its settings, the engine pack's samples
 /// with their references cleared, which the Player loads at start before
 /// the session loads its own.
-fn write_bootstrap_scene(version: &str, data: &str) -> Result<()> {
+fn write_bootstrap_scene(version: &str, data: &str, scenes: usize) -> Result<()> {
     let library = playerbake::Library::of_release(version)
         .with_context(|| format!("no engine pack of Unity {version}"))??;
     let mut types = Vec::new();
@@ -952,10 +1000,11 @@ fn write_bootstrap_scene(version: &str, data: &str) -> Result<()> {
         types.push((kind.tree.class_id, hash));
         objects.push((local_id, types.len() - 1, kind.tree.encode(&value)?));
     }
-    std::fs::write(
-        sysutil::join(&[data, "level0"]),
-        playerbake::plain_file(version, &types, &objects, &[])?,
-    )?;
+    // The stand-ins of the Build Settings scenes are the same empty scene.
+    let scene = playerbake::plain_file(version, &types, &objects, &[])?;
+    for index in 0..scenes.max(1) {
+        std::fs::write(sysutil::join(&[data, &format!("level{index}")]), &scene)?;
+    }
     Ok(())
 }
 

@@ -814,11 +814,26 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
         ["engine-pack", version, output, files @ ..] => {
             // A release's pack of engine classes from files the engine wrote.
             use unity_micro_editor::playerbake::{FileFormat, Library};
-            let paths: Vec<&Path> = files.iter().map(Path::new).collect();
+            // `FILE#96,1102` takes those native classes of a file alone.
             let mut library = Library::default();
-            for path in paths {
-                if let Err(error) = library.add(&fs::read(path)?) {
-                    eprintln!("{} skipped: {error:#}", path.display());
+            for file in files {
+                let (path, classes) = match file.split_once('#') {
+                    Some((path, classes)) => (path, Some(classes)),
+                    None => (*file, None),
+                };
+                let data = fs::read(path)?;
+                let added = match classes {
+                    Some(classes) => {
+                        let ids: Vec<i32> = classes
+                            .split(',')
+                            .map(|id| id.parse())
+                            .collect::<std::result::Result<_, _>>()?;
+                        library.add_classes(&data, &ids)
+                    }
+                    None => library.add(&data),
+                };
+                if let Err(error) = added {
+                    eprintln!("{path} skipped: {error:#}");
                 }
             }
             let format = FileFormat {

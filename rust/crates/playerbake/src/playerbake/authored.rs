@@ -164,6 +164,23 @@ impl Library {
         Ok(())
     }
 
+    /// Takes the given native classes of a file, which may hold what `add`
+    /// refuses beside them (scripts of other files).
+    pub fn add_classes(&mut self, file: &[u8], class_ids: &[i32]) -> Result<()> {
+        for &class_id in class_ids {
+            for object in super::serialized::read_of_class(file, class_id)? {
+                let Ok(sample) = object.tree.decode(&object.data) else {
+                    continue;
+                };
+                self.classes.entry(class_id).or_insert(Kind {
+                    tree: object.tree.clone(),
+                    sample,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Takes the trees and samples of script classes from their layouts, and
     /// makes their `MonoScript`s. The execution order is that of a
     /// `MonoScript` read before, or zero.
@@ -990,6 +1007,8 @@ fn reference_object(rid: i64, class: &str, namespace: &str, assembly: &str, data
 /// `Assets`, `Packages` and the package cache.
 pub struct Sources {
     paths: HashMap<String, std::path::PathBuf>,
+    /// The objects scripted importers made of their sources, by GUID.
+    imported: HashMap<String, Vec<Document>>,
 }
 
 impl Sources {
@@ -1024,7 +1043,10 @@ impl Sources {
                 }
             }
         }
-        Ok(Sources { paths })
+        Ok(Sources {
+            paths,
+            imported: HashMap::new(),
+        })
     }
 
     /// The former names of the script fields of every C# source.
@@ -1041,6 +1063,17 @@ impl Sources {
 
     pub fn path(&self, guid: &str) -> Option<&Path> {
         self.paths.get(guid).map(std::path::PathBuf::as_path)
+    }
+
+    /// The sources with the objects their scripted importers made, which are
+    /// written as those objects.
+    pub fn with_imported(mut self, imported: HashMap<String, Vec<Document>>) -> Self {
+        self.imported = imported;
+        self
+    }
+
+    pub fn imported(&self, guid: &str) -> Option<&Vec<Document>> {
+        self.imported.get(guid)
     }
 
     /// Every source with its GUID, in the order of their paths.
@@ -1090,6 +1123,22 @@ impl Sources {
             .collect();
         found.sort();
         found.first().map(|guid| guid.to_string())
+    }
+}
+
+/// The file ID an importer gives an object it adds under an identifier
+/// (`AssetImportContext.AddObjectToAsset`): XXH64 of `Type:<class>-><identifier><n>`
+/// with the first `n` from 0 that no object of the asset has yet, the class
+/// being the engine's (`MonoBehaviour` for a script's object).
+pub fn imported_file_id(class: &str, identifier: &str, taken: &mut HashSet<i64>) -> i64 {
+    let mut index = 0u64;
+    loop {
+        let key = format!("Type:{class}->{identifier}{index}");
+        let id = xxhash_rust::xxh64::xxh64(key.as_bytes(), 0) as i64;
+        if taken.insert(id) {
+            return id;
+        }
+        index += 1;
     }
 }
 
@@ -1248,6 +1297,21 @@ mod tests {
                 .script_class("0123456789abcdef0123456789abcdef")
                 .as_deref(),
             Some("SRF.UI.Scaler")
+        );
+    }
+
+    #[test]
+    fn an_imported_object_takes_the_file_id_the_editor_gives_it() {
+        // A certificate the scripted importer of com.azur.user-profile adds,
+        // as Bouncemasters' assets name it.
+        let mut taken = HashSet::new();
+        assert_eq!(
+            imported_file_id("MonoBehaviour", "certificate", &mut taken),
+            -3788438877219332964
+        );
+        assert_ne!(
+            imported_file_id("MonoBehaviour", "certificate", &mut taken),
+            -3788438877219332964
         );
     }
 

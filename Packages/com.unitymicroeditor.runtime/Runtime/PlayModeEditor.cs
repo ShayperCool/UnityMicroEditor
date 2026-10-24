@@ -387,11 +387,14 @@ namespace UnityMicroEditor.PlayModeEditor
     /// </summary>
     public static class UnityEditor_SerializedObject
     {
+        /// <summary>A serialized object of an object in memory (a scripted importer's), whose properties are its fields.</summary>
+        public static void Construct(object self, UnityEngine.Object target) => Serialized.Bind(self, target);
         public static void Update(object self) { }
         public static bool UpdateIfRequiredOrScript(object self) => false;
-        public static bool ApplyModifiedProperties(object self) => false;
-        public static bool ApplyModifiedPropertiesWithoutUndo(object self) => false;
+        public static bool ApplyModifiedProperties(object self) => Serialized.Bound(self);
+        public static bool ApplyModifiedPropertiesWithoutUndo(object self) => Serialized.Bound(self);
         public static object FindProperty(object self, string propertyPath) => Serialized.Find(self, propertyPath);
+        public static UnityEngine.Object get_targetObject(object self) => Serialized.Target(self);
     }
 
     public static class UnityEditor_SerializedProperty
@@ -414,14 +417,24 @@ namespace UnityMicroEditor.PlayModeEditor
             return Text;
         }
 
-        public static bool get_boolValue(object self) => Serialized.Of(self).Value == "1";
-        public static int get_intValue(object self) =>
-            int.TryParse(Serialized.Of(self).Value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out int value) ? value : 0;
-        public static long get_longValue(object self) =>
-            long.TryParse(Serialized.Of(self).Value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out long value) ? value : 0;
-        public static float get_floatValue(object self) =>
-            float.TryParse(Serialized.Of(self).Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float value) ? value : 0;
-        public static string get_stringValue(object self) => Serialized.Of(self).Value;
+        public static bool get_boolValue(object self) => Serialized.Field(self, out object value) ? value is bool flag && flag : Serialized.Of(self).Value == "1";
+        public static void set_boolValue(object self, bool value) => Serialized.Set(self, value);
+        public static void set_intValue(object self, int value) => Serialized.Set(self, value);
+        public static void set_longValue(object self, long value) => Serialized.Set(self, value);
+        public static void set_floatValue(object self, float value) => Serialized.Set(self, value);
+        public static void set_doubleValue(object self, double value) => Serialized.Set(self, value);
+        public static void set_stringValue(object self, string value) => Serialized.Set(self, value);
+        public static void set_objectReferenceValue(object self, UnityEngine.Object value) => Serialized.Set(self, value);
+        public static int get_intValue(object self) => Serialized.Field(self, out object field)
+            ? Convert.ToInt32(field, System.Globalization.CultureInfo.InvariantCulture)
+            : int.TryParse(Serialized.Of(self).Value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out int value) ? value : 0;
+        public static long get_longValue(object self) => Serialized.Field(self, out object field)
+            ? Convert.ToInt64(field, System.Globalization.CultureInfo.InvariantCulture)
+            : long.TryParse(Serialized.Of(self).Value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out long value) ? value : 0;
+        public static float get_floatValue(object self) => Serialized.Field(self, out object field)
+            ? Convert.ToSingle(field, System.Globalization.CultureInfo.InvariantCulture)
+            : float.TryParse(Serialized.Of(self).Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float value) ? value : 0;
+        public static string get_stringValue(object self) => Serialized.Field(self, out object value) ? value as string : Serialized.Of(self).Value;
 
         /// <summary>The asset a reference names by its GUID, loaded as the asset database loads it.</summary>
         public static UnityEngine.Object get_objectReferenceValue(object self)
@@ -455,6 +468,8 @@ namespace UnityMicroEditor.PlayModeEditor
 
         internal static object Find(object serializedObject, string name)
         {
+            if (serializedObject != null && name != null && targets.TryGetValue(serializedObject, out var target))
+                return FindField(target, name);
             if (serializedObject == null || name == null || !objects.TryGetValue(serializedObject, out var values)
                 || !values.TryGetValue(name, out string value)) return null;
             object made = New("UnityEditor.SerializedProperty");
@@ -464,6 +479,58 @@ namespace UnityMicroEditor.PlayModeEditor
 
         internal static KeyValuePair<string, string> Of(object property) =>
             property != null && properties.TryGetValue(property, out Holder holder) ? holder.Property : new KeyValuePair<string, string>(string.Empty, string.Empty);
+
+        static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, UnityEngine.Object> targets =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<object, UnityEngine.Object>();
+        static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, FieldOf> fields =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<object, FieldOf>();
+
+        sealed class FieldOf { internal object Owner; internal FieldInfo Field; }
+
+        internal static void Bind(object serializedObject, UnityEngine.Object target)
+        {
+            if (serializedObject != null && target != null) targets.Add(serializedObject, target);
+        }
+
+        internal static bool Bound(object serializedObject) => serializedObject != null && targets.TryGetValue(serializedObject, out _);
+
+        internal static UnityEngine.Object Target(object serializedObject) =>
+            serializedObject != null && targets.TryGetValue(serializedObject, out var target) ? target : null;
+
+        /// <summary>The field a property of an object in memory names: by its path of field names, through the bases.</summary>
+        static object FindField(UnityEngine.Object target, string path)
+        {
+            object owner = target;
+            FieldInfo field = null;
+            string[] parts = path.Split('.');
+            for (int index = 0; index < parts.Length; index++)
+            {
+                if (index > 0) owner = field.GetValue(owner);
+                if (owner == null) return null;
+                field = null;
+                for (Type type = owner.GetType(); type != null && field == null; type = type.BaseType)
+                    field = type.GetField(parts[index], BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+                if (field == null) return null;
+            }
+            object made = New("UnityEditor.SerializedProperty");
+            if (made != null) fields.Add(made, new FieldOf { Owner = owner, Field = field });
+            return made;
+        }
+
+        internal static bool Field(object property, out object value)
+        {
+            value = null;
+            if (property == null || !fields.TryGetValue(property, out FieldOf of)) return false;
+            value = of.Field.GetValue(of.Owner);
+            return true;
+        }
+
+        internal static void Set(object property, object value)
+        {
+            if (property == null || !fields.TryGetValue(property, out FieldOf of)) return;
+            Type type = of.Field.FieldType;
+            of.Field.SetValue(of.Owner, value == null || type.IsInstanceOfType(value) ? value : Convert.ChangeType(value, type, System.Globalization.CultureInfo.InvariantCulture));
+        }
 
         /// <summary>An instance of a stand-in type of the Editor, made without its constructor.</summary>
         internal static object New(string fullName)

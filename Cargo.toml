@@ -31,7 +31,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision", "raw_value"] }
 libc = "0.2"
 sha2 = "0.10"
-xxhash-rust = { version = "0.8", features = ["xxh32", "xxh3"] }
+xxhash-rust = { version = "0.8", features = ["xxh32", "xxh3", "xxh64"] }
 yaml-rust2 = "0.13"
 tempfile = "3"
 png = { version = "0.18.1", default-features = false }

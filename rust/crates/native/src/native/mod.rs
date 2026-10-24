@@ -22,6 +22,7 @@ mod probe;
 mod project_shaders;
 mod scene_worker;
 mod scripted;
+mod scripted_imports;
 mod shader_compiler;
 mod support;
 
