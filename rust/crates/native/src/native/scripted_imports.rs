@@ -186,6 +186,10 @@ fn documents(sources: &Sources, answer: &Value) -> Result<Vec<Document>> {
     Ok(documents)
 }
 
+/// The documents of each source imported, by GUID, and the sources that
+/// failed with the reason.
+pub type ScriptedImports = (HashMap<String, Vec<Document>>, Vec<(String, String)>);
+
 /// Runs the scripted importers of the project's sources in `player`, a
 /// Player of Play mode code, and gives the documents of each source they
 /// import, and those that failed with the reason.
@@ -195,7 +199,7 @@ pub fn import_scripted(
     player: &str,
     sources: &Sources,
     directory: &str,
-) -> Result<(HashMap<String, Vec<Document>>, Vec<(String, String)>)> {
+) -> Result<ScriptedImports> {
     let wanted = pending(sources);
     let mut imported = HashMap::new();
     let mut refused = Vec::new();
