@@ -1,0 +1,1520 @@
+//! `AnimatorController` (class 91): the authored state machine graph to the
+//! Player's `ControllerConstant`.
+//!
+//! The Editor objects of a `.controller` file (state machines, states,
+//! transitions, blend trees) do not exist in a Player. A build flattens them:
+//! every layer's states become one array, entry and exit nodes become selector
+//! states, motions become blend tree node arrays over a clip list, and names
+//! become CRC-32 hashes with a hash-to-string table beside them.
+//!
+//! State machine behaviours are the exception: they stay objects. The
+//! controller lists them and records, per state and per state machine, which
+//! entries of the list it runs.
+use super::{
+    controller_tree, crc32, freeform,
+    mask::{Mask, mask_of},
+    serialized::External,
+    source::{flag, float, get, int, list, object, text},
+    typetree::{TypeTree, Val},
+    unsupported,
+};
+use crate::yaml::Document;
+use anyhow::{Result, bail};
+use serde_json::{Map, Value};
+use std::collections::{BTreeMap, HashMap};
+
+/// Transition targets at or above this value address a selector state.
+const SELECTOR_BASE: u64 = 30000;
+const NONE: u64 = 0xffff_ffff;
+/// The bits of the human pose mask each `AvatarMaskBodyPart` owns, in the
+/// enum's order, as the pinned engine clears them for a disabled part.
+const BODY_PART_BITS: [[u32; 3]; 13] = [
+    [0x1, 0, 0],
+    [0x3fe, 0xc000_0000, 0x1],
+    [0x3f_fc00, 0, 0x6],
+    [0x3fc0_0000, 0, 0x78],
+    [0xc000_0000, 0x3f, 0x780],
+    [0, 0x7fc0, 0x7800],
+    [0, 0xff_8000, 0x7_8000],
+    [0, 0x1000_0000, 0],
+    [0, 0x2000_0000, 0],
+    [0, 0x100_0000, 0],
+    [0, 0x200_0000, 0],
+    [0, 0x400_0000, 0],
+    [0, 0x800_0000, 0],
+];
+
+/// The size of the constant as the engine lays it out in memory, which a
+/// controller states so that the Player can reserve it before reading.
+///
+/// The engine builds the constant as one block. A structure is laid out as
+/// C++ lays it out. Where the serialized form has an array, memory holds a
+/// 32-bit count and a pointer; a pointer is sixteen bytes in the build that
+/// takes the size, an offset and a pointer for debugging. What a pointer
+/// leads to is appended to the block, at its own alignment, when the field
+/// is reached: depth first, in the order of the serialized fields.
+struct Blob<'a> {
+    tree: &'a TypeTree,
+    size: u64,
+}
+
+const POINTER: (u64, u64) = (16, 8);
+
+impl Blob<'_> {
+    fn push(&mut self, size: u64, align: u64) {
+        self.size = self.size.next_multiple_of(align.max(1)) + size;
+    }
+
+    /// Size and alignment of a node as a member of a structure.
+    fn member(&self, index: usize) -> Result<(u64, u64)> {
+        let node = &self.tree.nodes[index];
+        if self.tree.children(index).is_empty() {
+            let Ok(size) = u64::try_from(node.size) else {
+                bail!("controller constant field {} has no size", node.name);
+            };
+            return Ok((size, size));
+        }
+        if node.type_name == "OffsetPtr" {
+            return Ok(POINTER);
+        }
+        let (mut size, mut align) = (0u64, 1u64);
+        for child in self.tree.children(index) {
+            let parts = match self.tree.element(child) {
+                Some(_) if self.tree.nodes[child].type_name != "OffsetPtr" => {
+                    vec![(4, 4), POINTER]
+                }
+                _ => vec![self.member(child)?],
+            };
+            for (part, part_align) in parts {
+                size = size.next_multiple_of(part_align.max(1)) + part;
+                align = align.max(part_align);
+            }
+        }
+        Ok((size.next_multiple_of(align), align))
+    }
+
+    /// Whether the engine makes the structure a pointer of `owner` leads
+    /// to. It leaves out a mask without transforms and the blend data of
+    /// another kind of node than the node is.
+    fn made(name: &str, owner: &Val, pointee: &Val) -> bool {
+        let number = |field: &str| match owner.field(field) {
+            Some(Val::U(number)) => *number,
+            Some(Val::I(number)) => *number as u64,
+            _ => 0,
+        };
+        match name {
+            "m_SkeletonMask" => {
+                matches!(pointee.field("m_Data"), Some(Val::Seq(items)) if !items.is_empty())
+            }
+            "m_Blend1dData" => number("m_BlendType") == 0 && number("m_ClipID") == u32::MAX as u64,
+            "m_Blend2dData" => matches!(number("m_BlendType"), 1..=3),
+            "m_BlendDirectData" => number("m_BlendType") == 4,
+            _ => true,
+        }
+    }
+
+    /// Appends what the members of a structure point to.
+    fn walk(&mut self, index: usize, value: &Val) -> Result<()> {
+        for child in self.tree.children(index) {
+            let node = &self.tree.nodes[child];
+            let field = value.field(&node.name).unwrap_or(&Val::Zero);
+            if node.type_name == "OffsetPtr" {
+                let pointee = self.tree.children(child)[0];
+                if Self::made(&node.name, value, field) {
+                    let (size, align) = self.member(pointee)?;
+                    self.push(size, align);
+                    self.walk(pointee, field)?;
+                }
+            } else if let Some((_, element)) = self.tree.element(child) {
+                let items = match field {
+                    Val::Seq(items) => items.as_slice(),
+                    _ => &[],
+                };
+                if items.is_empty() {
+                    continue;
+                }
+                let (size, align) = self.member(element)?;
+                self.push(size * items.len() as u64, align);
+                if self.tree.nodes[element].type_name == "OffsetPtr" {
+                    let pointee = self.tree.children(element)[0];
+                    let (size, align) = self.member(pointee)?;
+                    for item in items {
+                        self.push(size, align);
+                        self.walk(pointee, item)?;
+                    }
+                } else if !self.tree.children(element).is_empty() {
+                    for item in items {
+                        self.walk(element, item)?;
+                    }
+                }
+            } else if !self.tree.children(child).is_empty() {
+                self.walk(child, field)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The size in memory of a controller constant given as its serialized
+/// value.
+fn constant_size(constant: &Val) -> Result<u64> {
+    constant_size_in(controller_tree()?, constant)
+}
+
+/// States a controller's size for the layout of a release's tree, whose
+/// structures may have other members than the pinned engine's.
+pub(super) fn settle_size(tree: &TypeTree, controller: &mut Val) -> Result<()> {
+    let size = match controller.field("m_ControllerSize") {
+        Some(Val::U(0)) | None => return Ok(()),
+        Some(_) => constant_size_in(tree, controller.field("m_Controller").unwrap_or(&Val::Zero))?,
+    };
+    if let Some(field) = controller.field_mut("m_ControllerSize") {
+        *field = Val::U(size);
+    }
+    Ok(())
+}
+
+fn constant_size_in(tree: &TypeTree, constant: &Val) -> Result<u64> {
+    let Some(root) = tree
+        .children(0)
+        .into_iter()
+        .find(|&child| tree.nodes[child].name == "m_Controller")
+    else {
+        bail!("controller type tree has no constant");
+    };
+    let mut blob = Blob { tree, size: 0 };
+    let (size, align) = blob.member(root)?;
+    blob.push(size, align);
+    blob.walk(root, constant)?;
+    Ok(blob.size)
+}
+
+/// What a controller needs to know about a clip it plays.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipFacts {
+    pub looping: bool,
+    /// The clip's project path, such as `Assets/Run.anim`.
+    pub path: String,
+    pub name: String,
+}
+
+/// The script of a state machine behaviour, as far as the controller
+/// depends on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BehaviourScript {
+    /// Whether the class or a base class of the project overrides
+    /// `OnStateMachineEnter` or `OnStateMachineExit`, which a controller
+    /// then runs on the main thread.
+    pub overrides_state_machine_callbacks: bool,
+}
+
+/// The other sources a controller's Player data is derived from.
+pub trait ControllerSources {
+    fn clip(&self, guid: &str, file_id: &str) -> Result<ClipFacts>;
+    fn mask(&self, guid: &str) -> Result<Mask>;
+    /// The script of a state machine behaviour, by script GUID. `None` is a
+    /// script the project does not have: the engine drops such a behaviour.
+    fn behaviour(&self, guid: &str) -> Result<Option<BehaviourScript>> {
+        Err(unsupported(format!(
+            "state machine behaviour of script {guid}"
+        )))
+    }
+}
+
+/// A baked `AnimatorController` object and what has to travel with it.
+pub struct Controller {
+    /// The object encoded with the pinned engine's tree.
+    pub data: Vec<u8>,
+    /// The object's fields, for a release's own tree.
+    pub value: Val,
+    /// The assets the controller refers to.
+    pub externals: Vec<External>,
+    /// The file IDs of the behaviours the controller points to, each once:
+    /// objects of its source a build keeps beside it.
+    pub behaviours: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Reference {
+    file_id: String,
+    guid: String,
+}
+
+fn reference(value: &Value) -> Result<Option<Reference>> {
+    let map = match value {
+        Value::Null => return Ok(None),
+        Value::Object(map) => map,
+        _ => bail!("expected an object reference"),
+    };
+    let file_id = text(get(map, "fileID"))?;
+    if file_id.is_empty() || file_id == "0" {
+        return Ok(None);
+    }
+    Ok(Some(Reference {
+        file_id,
+        guid: text(get(map, "guid"))?.to_ascii_lowercase(),
+    }))
+}
+
+/// The engine writes a dot in a state or state machine name as an underscore,
+/// since a dot separates the parts of a path.
+fn clean(name: &str) -> String {
+    name.replace('.', "_")
+}
+
+struct Machine {
+    file_id: String,
+    name: String,
+    path: String,
+    parent: Option<usize>,
+}
+
+struct State {
+    file_id: String,
+    machine: usize,
+    name: String,
+    path: String,
+}
+
+/// Where a transition leads, with the names the engine hashes for it.
+struct Target {
+    destination: u64,
+    name: String,
+    path: String,
+}
+
+struct Builder<'a> {
+    documents: HashMap<&'a str, &'a Document>,
+    sources: &'a dyn ControllerSources,
+    names: BTreeMap<u32, String>,
+    /// Every clip use, in the engine's order; a node refers to the first use.
+    clips: Vec<Reference>,
+    externals: Vec<External>,
+    machines: Vec<Machine>,
+    states: Vec<State>,
+    /// The scripts of the behaviours met so far, by GUID, with the position
+    /// of each in `scripts`; `None` for one the project does not have.
+    script_guids: Vec<(String, Option<usize>)>,
+    scripts: Vec<BehaviourScript>,
+}
+
+/// One entry of a behaviour list: the behaviour's document and its script.
+#[derive(Clone)]
+struct Attached {
+    file_id: String,
+    script: usize,
+}
+
+impl<'a> Builder<'a> {
+    fn id(&mut self, name: &str) -> u64 {
+        let hash = crc32(name);
+        self.names.entry(hash).or_insert_with(|| name.to_string());
+        hash as u64
+    }
+
+    fn document(&self, file_id: &str, class_id: i64, what: &str) -> Result<&'a Map<String, Value>> {
+        match self.documents.get(file_id) {
+            Some(document) if document.class_id == class_id && !document.stripped => {
+                Ok(&document.data)
+            }
+            _ => bail!("{what} {file_id} is missing from the controller"),
+        }
+    }
+
+    fn local(&self, value: &Value, what: &str) -> Result<Option<String>> {
+        match reference(value)? {
+            None => Ok(None),
+            Some(target) if target.guid.is_empty() => Ok(Some(target.file_id)),
+            Some(_) => Err(unsupported(format!("{what} in another asset"))),
+        }
+    }
+
+    fn script(&mut self, guid: &str) -> Result<Option<usize>> {
+        if let Some((_, known)) = self.script_guids.iter().find(|(known, _)| known == guid) {
+            return Ok(*known);
+        }
+        let position = match self.sources.behaviour(guid)? {
+            Some(script) => {
+                self.scripts.push(script);
+                Some(self.scripts.len() - 1)
+            }
+            None => None,
+        };
+        self.script_guids.push((guid.to_string(), position));
+        Ok(position)
+    }
+
+    /// The behaviours of a state or state machine that the engine keeps. An
+    /// entry that is empty, leads nowhere or has no script is dropped.
+    fn attached(&mut self, fields: &Map<String, Value>) -> Result<Vec<Attached>> {
+        let key = "m_StateMachineBehaviours";
+        let mut result = Vec::new();
+        for item in list(get(fields, key), key)? {
+            let Some(file_id) = self.local(item, "state machine behaviour")? else {
+                continue;
+            };
+            let Some(document) = self
+                .documents
+                .get(file_id.as_str())
+                .filter(|document| document.class_id == 114)
+            else {
+                continue;
+            };
+            if document.stripped {
+                return Err(unsupported("state machine behaviour of a prefab"));
+            }
+            let Some(script) = reference(get(&document.data, "m_Script"))? else {
+                continue;
+            };
+            // Every script asset holds its MonoScript at this file ID.
+            if script.file_id != "11500000" || script.guid.is_empty() {
+                return Err(unsupported(
+                    "state machine behaviour whose script is not a source file",
+                ));
+            }
+            if let Some(script) = self.script(&script.guid)? {
+                result.push(Attached { file_id, script });
+            }
+        }
+        Ok(result)
+    }
+
+    /// Collects a state machine and its children in the engine's order: a
+    /// machine's own states, then each child machine in turn.
+    fn collect(
+        &mut self,
+        file_id: &str,
+        name: String,
+        path: String,
+        parent: Option<usize>,
+    ) -> Result<()> {
+        if self
+            .machines
+            .iter()
+            .any(|machine| machine.file_id == file_id)
+        {
+            bail!("state machine {file_id} is used twice");
+        }
+        if self.machines.len() >= 4096 {
+            return Err(unsupported("more state machines than the baker bounds"));
+        }
+        let fields = self.document(file_id, 1107, "state machine")?;
+        let index = self.machines.len();
+        self.machines.push(Machine {
+            file_id: file_id.into(),
+            name: name.clone(),
+            path: path.clone(),
+            parent,
+        });
+        let mut own = Vec::new();
+        for child in list(get(fields, "m_ChildStates"), "m_ChildStates")? {
+            let child = object(child, "m_ChildStates")?;
+            let Some(state) = self.local(get(child, "m_State"), "state")? else {
+                continue;
+            };
+            let state_fields = self.document(&state, 1102, "state")?;
+            let state_name = clean(&text(get(state_fields, "m_Name"))?);
+            own.push(State {
+                path: format!("{path}.{state_name}"),
+                file_id: state,
+                machine: index,
+                name: state_name,
+            });
+        }
+        // The root machine's default state trades places with state zero.
+        if parent.is_none()
+            && let Some(default) = self.local(get(fields, "m_DefaultState"), "default state")?
+            && let Some(position) = own.iter().position(|state| state.file_id == default)
+        {
+            own.swap(0, position);
+        }
+        self.states.extend(own);
+        for child in list(get(fields, "m_ChildStateMachines"), "m_ChildStateMachines")? {
+            let child = object(child, "m_ChildStateMachines")?;
+            let Some(machine) = self.local(get(child, "m_StateMachine"), "state machine")? else {
+                continue;
+            };
+            let child_fields = self.document(&machine, 1107, "state machine")?;
+            let child_name = clean(&text(get(child_fields, "m_Name"))?);
+            self.collect(
+                &machine,
+                child_name.clone(),
+                format!("{path}.{child_name}"),
+                Some(index),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn state_index(&self, file_id: &str, first: usize) -> Option<usize> {
+        self.states[first..]
+            .iter()
+            .position(|state| state.file_id == file_id)
+            .map(|index| index + first)
+    }
+
+    fn machine_index(&self, file_id: &str, first: usize) -> Option<usize> {
+        self.machines[first..]
+            .iter()
+            .position(|machine| machine.file_id == file_id)
+            .map(|index| index + first)
+    }
+
+    /// Resolves a transition's destination. `owner` is the machine whose exit
+    /// an exit transition takes; indices are relative to the layer's first
+    /// state and machine.
+    fn target(
+        &self,
+        fields: &Map<String, Value>,
+        owner: usize,
+        first_state: usize,
+        first_machine: usize,
+    ) -> Result<Target> {
+        if let Some(state) = self.local(get(fields, "m_DstState"), "destination state")? {
+            let Some(index) = self.state_index(&state, first_state) else {
+                bail!("transition leads to state {state} outside its layer");
+            };
+            return Ok(Target {
+                destination: (index - first_state) as u64,
+                name: self.states[index].name.clone(),
+                path: self.states[index].path.clone(),
+            });
+        }
+        if let Some(machine) =
+            self.local(get(fields, "m_DstStateMachine"), "destination machine")?
+        {
+            let Some(index) = self.machine_index(&machine, first_machine) else {
+                bail!("transition leads to state machine {machine} outside its layer");
+            };
+            return Ok(Target {
+                destination: SELECTOR_BASE + 2 * (index - first_machine) as u64,
+                name: self.machines[index].name.clone(),
+                // The engine names a machine destination like an exit.
+                path: "Exit".into(),
+            });
+        }
+        if flag(get(fields, "m_IsExit"), "transition")? {
+            return Ok(Target {
+                destination: SELECTOR_BASE + 2 * (owner - first_machine) as u64 + 1,
+                name: "Exit".into(),
+                path: "Exit".into(),
+            });
+        }
+        Err(unsupported("transition without a destination"))
+    }
+
+    /// The transitions the engine keeps: muted ones are dropped, and once any
+    /// is solo only the solo ones remain.
+    fn active(&self, value: &Value, class_id: i64) -> Result<Vec<&'a Map<String, Value>>> {
+        let mut transitions = Vec::new();
+        for item in list(value, "transitions")? {
+            let Some(file_id) = self.local(item, "transition")? else {
+                continue;
+            };
+            let fields = self.document(&file_id, class_id, "transition")?;
+            if !flag(get(fields, "m_Mute"), "transition")? {
+                transitions.push(fields);
+            }
+        }
+        let mut solo = Vec::new();
+        for fields in &transitions {
+            if flag(get(fields, "m_Solo"), "transition")? {
+                solo.push(*fields);
+            }
+        }
+        Ok(if solo.is_empty() { transitions } else { solo })
+    }
+
+    fn conditions(&mut self, fields: &Map<String, Value>) -> Result<Val> {
+        let mut result = Vec::new();
+        for item in list(get(fields, "m_Conditions"), "m_Conditions")? {
+            let condition = object(item, "m_Conditions")?;
+            let event = text(get(condition, "m_ConditionEvent"))?;
+            result.push(Val::map([
+                (
+                    "m_ConditionMode",
+                    Val::I(int(get(condition, "m_ConditionMode"), "condition")?),
+                ),
+                ("m_EventID", Val::U(self.id(&event))),
+                (
+                    "m_EventThreshold",
+                    // Unity's own spelling of the authored field.
+                    Val::F(float(get(condition, "m_EventTreshold"), "condition")?),
+                ),
+            ]));
+        }
+        Ok(Val::Seq(result))
+    }
+
+    fn state_transition(
+        &mut self,
+        fields: &Map<String, Value>,
+        source: (&str, &str),
+        target: Target,
+    ) -> Result<Val> {
+        let name = text(get(fields, "m_Name"))?;
+        let user = if name.is_empty() { 0 } else { self.id(&name) };
+        let number = |key: &str| float(get(fields, key), "transition");
+        let boolean = |key: &str| flag(get(fields, key), "transition");
+        Ok(Val::map([
+            ("m_ConditionConstantArray", self.conditions(fields)?),
+            ("m_DestinationState", Val::U(target.destination)),
+            (
+                "m_FullPathID",
+                Val::U(self.id(&format!("{} -> {}", source.1, target.path))),
+            ),
+            (
+                "m_ID",
+                Val::U(self.id(&format!("{} -> {}", source.0, target.name))),
+            ),
+            ("m_UserID", Val::U(user)),
+            (
+                "m_TransitionDuration",
+                Val::F(number("m_TransitionDuration")?),
+            ),
+            ("m_TransitionOffset", Val::F(number("m_TransitionOffset")?)),
+            ("m_ExitTime", Val::F(number("m_ExitTime")?)),
+            ("m_HasExitTime", Val::Bool(boolean("m_HasExitTime")?)),
+            (
+                "m_HasFixedDuration",
+                Val::Bool(boolean("m_HasFixedDuration")?),
+            ),
+            (
+                "m_InterruptionSource",
+                Val::I(int(get(fields, "m_InterruptionSource"), "transition")?),
+            ),
+            (
+                "m_OrderedInterruption",
+                Val::Bool(boolean("m_OrderedInterruption")?),
+            ),
+            (
+                "m_CanTransitionToSelf",
+                Val::Bool(boolean("m_CanTransitionToSelf")?),
+            ),
+        ]))
+    }
+
+    fn selector_transition(&mut self, fields: &Map<String, Value>, target: &Target) -> Result<Val> {
+        Ok(Val::map([
+            ("m_Destination", Val::U(target.destination)),
+            ("m_ConditionConstantArray", self.conditions(fields)?),
+        ]))
+    }
+
+    fn clip_reference(&self, value: &Value) -> Result<Option<Reference>> {
+        match reference(value)? {
+            Some(target) if !target.guid.is_empty() => Ok(Some(target)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Records every clip use of a motion, in node order.
+    fn register_clips(&mut self, motion: &Value, depth: usize) -> Result<()> {
+        if depth > 64 {
+            return Err(unsupported(
+                "blend trees nested deeper than the baker bounds",
+            ));
+        }
+        if let Some(clip) = self.clip_reference(motion)? {
+            self.clips.push(clip);
+        } else if let Some(tree) = self.local(motion, "motion")? {
+            let fields = self.document(&tree, 206, "blend tree")?;
+            for child in list(get(fields, "m_Childs"), "m_Childs")? {
+                self.register_clips(get(object(child, "m_Childs")?, "m_Motion"), depth + 1)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn leaf(
+        &mut self,
+        clip: &Reference,
+        time_scale: f32,
+        cycle_offset: f32,
+        mirror: bool,
+        child: bool,
+    ) -> Result<(Val, bool)> {
+        let Some(index) = self.clips.iter().position(|used| used == clip) else {
+            bail!("clip {} was not registered", clip.guid);
+        };
+        let facts = self.sources.clip(&clip.guid, &clip.file_id)?;
+        if child {
+            // The engine also records a blend tree child under this label.
+            self.id(&format!("{}{}", facts.path, facts.name));
+        }
+        Ok((
+            Val::map([
+                ("m_BlendEventID", Val::U(NONE)),
+                ("m_BlendEventYID", Val::U(NONE)),
+                ("m_ClipID", Val::U(index as u64)),
+                ("m_Duration", Val::F(1.0 / time_scale)),
+                ("m_CycleOffset", Val::F(cycle_offset)),
+                ("m_Mirror", Val::Bool(mirror)),
+            ]),
+            facts.looping,
+        ))
+    }
+
+    /// Appends the nodes of a blend tree in preorder and reports whether all
+    /// of its clips loop.
+    fn tree_nodes(&mut self, file_id: &str, nodes: &mut Vec<Val>) -> Result<bool> {
+        let fields = self.document(file_id, 206, "blend tree")?;
+        let kind = int(get(fields, "m_BlendType"), "blend tree")?;
+        if !(0..=4).contains(&kind) {
+            bail!("blend tree {file_id} has an unknown blend type");
+        }
+        let parameter = self.id(&text(get(fields, "m_BlendParameter"))?);
+        let parameter_y = self.id(&text(get(fields, "m_BlendParameterY"))?);
+        let own = nodes.len();
+        nodes.push(Val::Zero);
+        let (mut indices, mut thresholds, mut positions, mut direct) =
+            (Vec::new(), Vec::new(), Vec::<[f32; 2]>::new(), Vec::new());
+        let mut looping = true;
+        for child in list(get(fields, "m_Childs"), "m_Childs")? {
+            let child = object(child, "m_Childs")?;
+            let motion = get(child, "m_Motion");
+            let direct_name = text(get(child, "m_DirectBlendParameter"))?;
+            let direct_id = self.id(&direct_name);
+            let index = nodes.len();
+            if let Some(clip) = self.clip_reference(motion)? {
+                let (node, loops) = self.leaf(
+                    &clip,
+                    float(get(child, "m_TimeScale"), "blend tree child")?,
+                    float(get(child, "m_CycleOffset"), "blend tree child")?,
+                    flag(get(child, "m_Mirror"), "blend tree child")?,
+                    true,
+                )?;
+                nodes.push(node);
+                looping &= loops;
+            } else if let Some(tree) = self.local(motion, "motion")? {
+                looping &= self.tree_nodes(&tree, nodes)?;
+            } else {
+                // A child without a motion leaves no node.
+                continue;
+            }
+            indices.push(Val::U(index as u64));
+            thresholds.push(Val::F(float(
+                get(child, "m_Threshold"),
+                "blend tree child",
+            )?));
+            let position = object(get(child, "m_Position"), "blend tree child position");
+            if (1..=3).contains(&kind) {
+                let position = position?;
+                positions.push([
+                    float(get(position, "x"), "blend tree child")?,
+                    float(get(position, "y"), "blend tree child")?,
+                ]);
+            }
+            if kind == 4 {
+                direct.push(Val::U(direct_id));
+            }
+        }
+        let planar = (1..=3).contains(&kind);
+        let point = |[x, y]: [f32; 2]| Val::map([("x", Val::F(x)), ("y", Val::F(y))]);
+        let mut planar_data = vec![(
+            "m_ChildPositionArray",
+            Val::Seq(positions.iter().copied().map(point).collect()),
+        )];
+        if kind == 2 || kind == 3 {
+            let table = freeform::precompute(kind == 2, &positions);
+            planar_data.extend([
+                ("m_ChildMagnitudeArray", Val::floats(table.magnitudes)),
+                (
+                    "m_ChildPairVectorArray",
+                    Val::Seq(table.pair_vectors.into_iter().map(point).collect()),
+                ),
+                ("m_ChildPairAvgMagInvArray", Val::floats(table.pair_scales)),
+                (
+                    "m_ChildNeighborListArray",
+                    Val::Seq(
+                        table
+                            .neighbors
+                            .into_iter()
+                            .map(|list| {
+                                Val::map([(
+                                    "m_NeighborArray",
+                                    Val::Seq(list.into_iter().map(|i| Val::U(i as u64)).collect()),
+                                )])
+                            })
+                            .collect(),
+                    ),
+                ),
+            ]);
+        }
+        nodes[own] = Val::map([
+            ("m_BlendType", Val::I(kind)),
+            (
+                "m_BlendEventID",
+                Val::U(if kind == 4 { NONE } else { parameter }),
+            ),
+            (
+                "m_BlendEventYID",
+                Val::U(if planar { parameter_y } else { NONE }),
+            ),
+            ("m_ChildIndices", Val::Seq(indices)),
+            (
+                "m_Blend1dData",
+                Val::map([(
+                    "m_ChildThresholdArray",
+                    Val::Seq(if kind == 0 { thresholds } else { Vec::new() }),
+                )]),
+            ),
+            (
+                "m_Blend2dData",
+                Val::Map(
+                    planar_data
+                        .into_iter()
+                        .map(|(name, value)| (name.into(), value))
+                        .collect(),
+                ),
+            ),
+            (
+                "m_BlendDirectData",
+                Val::map([
+                    ("m_ChildBlendEventIDArray", Val::Seq(direct)),
+                    (
+                        "m_NormalizedBlendValues",
+                        Val::Bool(
+                            kind == 4
+                                && flag(get(fields, "m_NormalizedBlendValues"), "blend tree")?,
+                        ),
+                    ),
+                ]),
+            ),
+            ("m_ClipID", Val::U(NONE)),
+        ]);
+        Ok(looping)
+    }
+
+    /// A state's motion as a blend tree constant; `None` when it has none.
+    fn motion(&mut self, motion: &Value) -> Result<Option<(Val, bool)>> {
+        let mut nodes = Vec::new();
+        let looping = if let Some(clip) = self.clip_reference(motion)? {
+            let (node, looping) = self.leaf(&clip, 1.0, 0.0, false, false)?;
+            nodes.push(node);
+            looping
+        } else if let Some(tree) = self.local(motion, "motion")? {
+            self.tree_nodes(&tree, &mut nodes)?
+        } else {
+            return Ok(None);
+        };
+        Ok(Some((
+            Val::map([("m_NodeArray", Val::Seq(nodes))]),
+            looping,
+        )))
+    }
+}
+
+struct Layer<'a> {
+    fields: &'a Map<String, Value>,
+    name: String,
+    /// The layer whose state machine this one follows, if it is synced.
+    synced: Option<usize>,
+    /// The first state and machine of the layer's own state machine.
+    first_state: usize,
+    first_machine: usize,
+    state_count: usize,
+    machine_count: usize,
+    machine_index: usize,
+}
+
+/// Which entries of the controller's behaviour list each state and state
+/// machine runs.
+#[derive(Default)]
+struct BehaviourTable {
+    list: Vec<Attached>,
+    /// Start and length of a run of `indices`, by path hash and layer.
+    ranges: BTreeMap<(u32, usize), (usize, usize)>,
+    indices: Vec<u32>,
+    /// Whether a state machine has a behaviour that follows its entry or
+    /// exit, which keeps the engine from evaluating the controller on a
+    /// worker thread.
+    machine_callbacks: bool,
+}
+
+impl BehaviourTable {
+    /// Appends behaviours to the list and returns their positions. Nothing
+    /// is shared: every reference gets an entry of its own.
+    fn append(&mut self, attached: Vec<Attached>) -> Vec<u32> {
+        let first = self.list.len() as u32;
+        self.list.extend(attached);
+        (first..self.list.len() as u32).collect()
+    }
+
+    fn record(&mut self, path: &str, layer: usize, run: &[u32]) -> Result<()> {
+        if run.is_empty() {
+            return Ok(());
+        }
+        let range = (self.indices.len(), run.len());
+        if self.ranges.insert((crc32(path), layer), range).is_some() {
+            return Err(unsupported(format!(
+                "state machine behaviours of two objects at {path}"
+            )));
+        }
+        self.indices.extend_from_slice(run);
+        Ok(())
+    }
+}
+
+/// Lists the behaviours layer by layer. A layer's state machines come first,
+/// parents before children, each with its own behaviours. Its states follow:
+/// a state runs the behaviours of every state machine around it, outermost
+/// first, and then its own.
+fn behaviour_table(builder: &mut Builder<'_>, layers: &[Layer<'_>]) -> Result<BehaviourTable> {
+    let mut table = BehaviourTable::default();
+    for (index, layer) in layers.iter().enumerate() {
+        // A synced layer walks the state machine it follows and replaces
+        // each state's own behaviours.
+        let source = layer.synced.map_or(layer, |source| &layers[source]);
+        let mut replaced = HashMap::new();
+        if layer.synced.is_some() {
+            for item in list(get(layer.fields, "m_Behaviours"), "m_Behaviours")? {
+                let entry = object(item, "m_Behaviours")?;
+                if let Some(state) = reference(get(entry, "m_State"))?
+                    && !replaced.contains_key(&state.file_id)
+                {
+                    replaced.insert(state.file_id, builder.attached(entry)?);
+                }
+            }
+        }
+        let machines = source.first_machine..source.first_machine + source.machine_count;
+        let mut runs: Vec<Vec<u32>> = Vec::new();
+        for machine in machines.clone() {
+            let fields =
+                builder.document(&builder.machines[machine].file_id, 1107, "state machine")?;
+            let attached = builder.attached(fields)?;
+            table.machine_callbacks |= attached.iter().any(|behaviour| {
+                builder.scripts[behaviour.script].overrides_state_machine_callbacks
+            });
+            let run = table.append(attached);
+            table.record(&builder.machines[machine].path, index, &run)?;
+            runs.push(run);
+        }
+        for machine in machines.clone() {
+            let mut inherited = Vec::new();
+            let mut ancestor = Some(machine);
+            while let Some(position) = ancestor {
+                inherited.splice(0..0, runs[position - machines.start].iter().copied());
+                ancestor = builder.machines[position].parent;
+            }
+            // In authored order: the default state is not moved here.
+            for state in authored_states(builder, machine)? {
+                let fields = builder.document(&state, 1102, "state")?;
+                let attached = if layer.synced.is_some() {
+                    replaced.get(&state).cloned().unwrap_or_default()
+                } else {
+                    builder.attached(fields)?
+                };
+                let mut run = inherited.clone();
+                run.extend(table.append(attached));
+                let name = clean(&text(get(fields, "m_Name"))?);
+                let path = format!("{}.{name}", builder.machines[machine].path);
+                table.record(&path, index, &run)?;
+            }
+        }
+    }
+    Ok(table)
+}
+
+/// The position of an asset among the external references.
+fn external(externals: &mut Vec<External>, guid: &str) -> usize {
+    match externals.iter().position(|known| known.guid == guid) {
+        Some(position) => position,
+        None => {
+            externals.push(External {
+                guid: guid.to_string(),
+                path: String::new(),
+            });
+            externals.len() - 1
+        }
+    }
+}
+
+/// The serialized `AnimatorController` object, its behaviours and the assets
+/// they refer to.
+pub fn bake_controller_object(
+    documents: &[Document],
+    sources: &dyn ControllerSources,
+) -> Result<Controller> {
+    let mut by_id = HashMap::new();
+    for document in documents {
+        by_id.insert(document.file_id.as_str(), document);
+    }
+    let mut controllers = documents.iter().filter(|document| document.class_id == 91);
+    let (Some(controller), None) = (controllers.next(), controllers.next()) else {
+        bail!("controller source does not hold exactly one AnimatorController");
+    };
+    let fields = &controller.data;
+    let mut builder = Builder {
+        documents: by_id,
+        sources,
+        names: BTreeMap::new(),
+        clips: Vec::new(),
+        externals: Vec::new(),
+        machines: Vec::new(),
+        states: Vec::new(),
+        script_guids: Vec::new(),
+        scripts: Vec::new(),
+    };
+    builder.id("GravityWeight");
+
+    let mut layers: Vec<Layer<'_>> = Vec::new();
+    let authored = list(get(fields, "m_AnimatorLayers"), "m_AnimatorLayers")?;
+    let mut machine_count = 0;
+    for item in authored {
+        let layer = object(item, "m_AnimatorLayers")?;
+        let name = text(get(layer, "m_Name"))?;
+        let synced = int(get(layer, "m_SyncedLayerIndex"), "layer")?;
+        let (first_state, first_machine) = (builder.states.len(), builder.machines.len());
+        let mut entry = Layer {
+            fields: layer,
+            name,
+            synced: None,
+            first_state,
+            first_machine,
+            state_count: 0,
+            machine_count: 0,
+            machine_index: 0,
+        };
+        if synced >= 0 {
+            let Some(source) = layers.get(synced as usize) else {
+                return Err(unsupported("layer synced to a later layer"));
+            };
+            if source.synced.is_some() {
+                return Err(unsupported("layer synced to a synced layer"));
+            }
+            entry.synced = Some(synced as usize);
+        } else {
+            let Some(root) = builder.local(get(layer, "m_StateMachine"), "layer state machine")?
+            else {
+                return Err(unsupported("layer without a state machine"));
+            };
+            // Paths start at the root state machine's own name, which the
+            // Editor keeps equal to the layer's and, unlike the names below
+            // it, writes with its dots.
+            let fields = builder.document(&root, 1107, "state machine")?;
+            let root_name = text(get(fields, "m_Name"))?;
+            builder.collect(&root, root_name.clone(), root_name, None)?;
+            entry.state_count = builder.states.len() - first_state;
+            entry.machine_count = builder.machines.len() - first_machine;
+            entry.machine_index = machine_count;
+            machine_count += 1;
+        }
+        layers.push(entry);
+    }
+
+    // The clip list holds every use, layer by layer in authored state order.
+    for index in 0..layers.len() {
+        let layer = &layers[index];
+        if let Some(source) = layer.synced {
+            let overrides = overrides(layer.fields)?;
+            let source = &layers[source];
+            for machine in source.first_machine..source.first_machine + source.machine_count {
+                for state in authored_states(&builder, machine)? {
+                    if let Some(motion) = overrides.get(&state) {
+                        builder.register_clips(motion, 0)?;
+                    }
+                }
+            }
+        } else {
+            for machine in layer.first_machine..layer.first_machine + layer.machine_count {
+                for state in authored_states(&builder, machine)? {
+                    let fields = builder.document(&state, 1102, "state")?;
+                    builder.register_clips(get(fields, "m_Motion"), 0)?;
+                }
+            }
+        }
+    }
+
+    let mut layer_constants = Vec::new();
+    let mut machine_constants = Vec::new();
+    for (index, layer) in layers.iter().enumerate() {
+        let source = layer.synced.map_or(layer, |source| &layers[source]);
+        let synced: Vec<usize> = (0..layers.len())
+            .filter(|&other| layers[other].synced == Some(layer.synced.unwrap_or(index)))
+            .collect();
+        let order = match layer.synced {
+            Some(_) => synced.iter().position(|&other| other == index).unwrap() + 1,
+            None => 0,
+        };
+        let mut body = [0xffff_ffffu32, 0xffff_ffff, 0x7_ffff];
+        let mut skeleton = Vec::new();
+        // A layer takes the mask's content into its own constant, so a mask
+        // stored in the controller's file is read from there. An ID that
+        // leads to no mask is no mask, as the engine finds it.
+        let mask = match reference(get(layer.fields, "m_Mask"))? {
+            None => None,
+            Some(mask) if mask.guid.is_empty() => {
+                match builder.documents.get(mask.file_id.as_str()) {
+                    Some(document) if document.class_id == 319 && !document.stripped => {
+                        Some(mask_of(&document.data)?)
+                    }
+                    _ => None,
+                }
+            }
+            Some(mask) => Some(sources.mask(&mask.guid)?),
+        };
+        match mask {
+            None => {}
+            Some(mask) => {
+                if mask.body_parts.len() != BODY_PART_BITS.len() {
+                    return Err(unsupported("avatar mask with an unknown set of body parts"));
+                }
+                for (active, bits) in mask.body_parts.iter().zip(BODY_PART_BITS) {
+                    if !active {
+                        for (word, cleared) in body.iter_mut().zip(bits) {
+                            *word &= !cleared;
+                        }
+                    }
+                }
+                for (path, weight) in &mask.transforms {
+                    skeleton.push(Val::map([
+                        ("m_PathHash", Val::U(crc32(path) as u64)),
+                        ("m_Weight", Val::F(*weight)),
+                    ]));
+                }
+            }
+        }
+        layer_constants.push(Val::map([
+            ("m_StateMachineIndex", Val::U(source.machine_index as u64)),
+            ("m_StateMachineSynchronizedLayerIndex", Val::U(order as u64)),
+            (
+                "m_BodyMask",
+                Val::map([
+                    ("word0", Val::U(body[0] as u64)),
+                    ("word1", Val::U(body[1] as u64)),
+                    ("word2", Val::U(body[2] as u64)),
+                ]),
+            ),
+            ("m_SkeletonMask", Val::map([("m_Data", Val::Seq(skeleton))])),
+            ("m_Binding", Val::U(builder.id(&layer.name))),
+            (
+                "(int&)m_LayerBlendingMode",
+                Val::I(int(get(layer.fields, "m_BlendingMode"), "layer")?),
+            ),
+            (
+                "m_DefaultWeight",
+                Val::F(float(get(layer.fields, "m_DefaultWeight"), "layer")?),
+            ),
+            (
+                "m_IKPass",
+                Val::Bool(flag(get(layer.fields, "m_IKPass"), "layer")?),
+            ),
+            (
+                "m_SyncedLayerAffectsTiming",
+                Val::Bool(flag(
+                    get(layer.fields, "m_SyncedLayerAffectsTiming"),
+                    "layer",
+                )?),
+            ),
+        ]));
+        if layer.synced.is_some() {
+            continue;
+        }
+        let mut synced_overrides = Vec::new();
+        for &other in &synced {
+            synced_overrides.push(overrides(layers[other].fields)?);
+        }
+        machine_constants.push(machine_constant(
+            &mut builder,
+            layer,
+            &synced_overrides,
+            flag(get(fields, "m_EvaluateTransitionsOnStart"), "controller")?,
+        )?);
+    }
+
+    let (mut values, mut floats, mut ints, mut bools) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for item in list(get(fields, "m_AnimatorParameters"), "m_AnimatorParameters")? {
+        let parameter = object(item, "m_AnimatorParameters")?;
+        let kind = int(get(parameter, "m_Type"), "parameter")?;
+        let index = match kind {
+            1 => {
+                floats.push(Val::F(float(
+                    get(parameter, "m_DefaultFloat"),
+                    "parameter",
+                )?));
+                floats.len() - 1
+            }
+            3 => {
+                ints.push(Val::I(int(get(parameter, "m_DefaultInt"), "parameter")?));
+                ints.len() - 1
+            }
+            // A trigger is stored with the booleans.
+            4 | 9 => {
+                bools.push(Val::Bool(flag(
+                    get(parameter, "m_DefaultBool"),
+                    "parameter",
+                )?));
+                bools.len() - 1
+            }
+            _ => bail!("controller parameter has an unknown type {kind}"),
+        };
+        let name = text(get(parameter, "m_Name"))?;
+        values.push(Val::map([
+            ("m_ID", Val::U(builder.id(&name))),
+            ("m_Type", Val::I(kind)),
+            ("m_Index", Val::U(index as u64)),
+        ]));
+    }
+
+    let mut clips = Vec::new();
+    for clip in builder.clips.clone() {
+        let position = external(&mut builder.externals, &clip.guid);
+        let Ok(path_id) = clip.file_id.parse::<i64>() else {
+            bail!("clip reference has an invalid file ID");
+        };
+        clips.push(Val::map([
+            ("m_FileID", Val::I(position as i64 + 1)),
+            ("m_PathID", Val::I(path_id)),
+        ]));
+    }
+    let table = behaviour_table(&mut builder, &layers)?;
+    let ranges = table
+        .ranges
+        .iter()
+        .map(|(&(state, layer), &(start, count))| {
+            Val::map([
+                (
+                    "first",
+                    Val::map([
+                        ("m_StateID", Val::U(state as u64)),
+                        ("m_LayerIndex", Val::I(layer as i64)),
+                    ]),
+                ),
+                (
+                    "second",
+                    Val::map([
+                        ("m_StartIndex", Val::U(start as u64)),
+                        ("m_Count", Val::U(count as u64)),
+                    ]),
+                ),
+            ])
+        })
+        .collect();
+    let (mut pointers, mut behaviours) = (Vec::new(), Vec::<String>::new());
+    for attached in &table.list {
+        let Ok(path_id) = attached.file_id.parse::<i64>() else {
+            bail!("state machine behaviour has an invalid file ID");
+        };
+        pointers.push(Val::map([("m_PathID", Val::I(path_id))]));
+        if !behaviours.contains(&attached.file_id) {
+            behaviours.push(attached.file_id.clone());
+        }
+    }
+    let names = builder
+        .names
+        .iter()
+        .map(|(hash, name)| {
+            Val::map([
+                ("first", Val::U(*hash as u64)),
+                ("second", Val::Str(name.clone())),
+            ])
+        })
+        .collect();
+    let evaluate = flag(get(fields, "m_EvaluateTransitionsOnStart"), "controller")?;
+    let has_layers = !layer_constants.is_empty();
+    let constant = Val::map([
+        ("m_LayerArray", Val::Seq(layer_constants)),
+        ("m_StateMachineArray", Val::Seq(machine_constants)),
+        ("m_Values", Val::map([("m_ValueArray", Val::Seq(values))])),
+        (
+            "m_DefaultValues",
+            Val::map([
+                ("m_FloatValues", Val::Seq(floats)),
+                ("m_IntValues", Val::Seq(ints)),
+                ("m_BoolValues", Val::Seq(bools)),
+            ]),
+        ),
+    ]);
+    // The Player reserves this much for the constant before reading it. A
+    // controller without layers states none.
+    let reserve = if has_layers {
+        constant_size(&constant)?
+    } else {
+        0
+    };
+    let object = Val::map([
+        ("m_Name", Val::Str(text(get(fields, "m_Name"))?)),
+        ("m_EvaluateTransitionsOnStart", Val::Bool(evaluate)),
+        ("m_ControllerSize", Val::U(reserve)),
+        ("m_Controller", constant),
+        ("m_TOS", Val::Seq(names)),
+        ("m_AnimationClips", Val::Seq(clips)),
+        (
+            "m_StateMachineBehaviourVectorDescription",
+            Val::map([
+                ("m_StateMachineBehaviourRanges", Val::Seq(ranges)),
+                (
+                    "m_StateMachineBehaviourIndices",
+                    Val::Seq(table.indices.iter().map(|&i| Val::U(i as u64)).collect()),
+                ),
+            ]),
+        ),
+        ("m_StateMachineBehaviours", Val::Seq(pointers)),
+        (
+            "m_MultiThreadedStateMachine",
+            Val::Bool(!table.machine_callbacks),
+        ),
+    ]);
+    Ok(Controller {
+        data: controller_tree()?.encode(&object)?,
+        value: object,
+        externals: builder.externals,
+        behaviours,
+    })
+}
+
+/// A synced layer's replacement motions, by state file ID.
+fn overrides(layer: &Map<String, Value>) -> Result<HashMap<String, &Value>> {
+    let mut result = HashMap::new();
+    for item in list(get(layer, "m_Motions"), "m_Motions")? {
+        let entry = object(item, "m_Motions")?;
+        if let Some(state) = reference(get(entry, "m_State"))? {
+            result.insert(state.file_id, get(entry, "m_Motion"));
+        }
+    }
+    Ok(result)
+}
+
+/// A machine's states in the order the file lists them.
+fn authored_states(builder: &Builder<'_>, machine: usize) -> Result<Vec<String>> {
+    let fields = builder.document(&builder.machines[machine].file_id, 1107, "state machine")?;
+    let mut result = Vec::new();
+    for child in list(get(fields, "m_ChildStates"), "m_ChildStates")? {
+        if let Some(state) =
+            builder.local(get(object(child, "m_ChildStates")?, "m_State"), "state")?
+        {
+            result.push(state);
+        }
+    }
+    Ok(result)
+}
+
+fn machine_constant(
+    builder: &mut Builder<'_>,
+    layer: &Layer<'_>,
+    synced: &[HashMap<String, &Value>],
+    evaluate: bool,
+) -> Result<Val> {
+    let (first_state, first_machine) = (layer.first_state, layer.first_machine);
+    let mut states = Vec::new();
+    for index in first_state..first_state + layer.state_count {
+        let (file_id, machine, name, path) = {
+            let state = &builder.states[index];
+            (
+                state.file_id.clone(),
+                state.machine,
+                state.name.clone(),
+                state.path.clone(),
+            )
+        };
+        let fields = builder.document(&file_id, 1102, "state")?;
+        let mut transitions = Vec::new();
+        for transition in builder.active(get(fields, "m_Transitions"), 1101)? {
+            let target = builder.target(transition, machine, first_state, first_machine)?;
+            transitions.push(builder.state_transition(transition, (&name, &path), target)?);
+        }
+        let (mut indices, mut trees) = (Vec::new(), Vec::new());
+        let mut looping = true;
+        let base = builder.motion(get(fields, "m_Motion"))?;
+        let replaced = synced.iter().map(|layer| layer.get(&file_id).copied());
+        for (position, motion) in std::iter::once(base)
+            .chain(
+                replaced
+                    .map(|motion| motion.map_or(Ok(None), |motion| builder.motion(motion)))
+                    .collect::<Result<Vec<_>>>()?,
+            )
+            .enumerate()
+        {
+            match motion {
+                Some((tree, loops)) => {
+                    indices.push(Val::I(trees.len() as i64));
+                    trees.push(tree);
+                    if position == 0 {
+                        looping = loops;
+                    }
+                }
+                None => indices.push(Val::I(-1)),
+            }
+        }
+        let machine_name = builder.machines[machine].name.clone();
+        let parameter = |builder: &mut Builder<'_>, active: &str, name: &str| -> Result<Val> {
+            Ok(Val::U(if flag(get(fields, active), "state")? {
+                let name = text(get(fields, name))?;
+                builder.id(&name)
+            } else {
+                0
+            }))
+        };
+        let tag = text(get(fields, "m_Tag"))?;
+        states.push(Val::map([
+            ("m_TransitionConstantArray", Val::Seq(transitions)),
+            ("m_BlendTreeConstantIndexArray", Val::Seq(indices)),
+            ("m_BlendTreeConstantArray", Val::Seq(trees)),
+            ("m_NameID", Val::U(builder.id(&name))),
+            (
+                "m_PathID",
+                Val::U(builder.id(&format!("{machine_name}.{name}"))),
+            ),
+            ("m_FullPathID", Val::U(builder.id(&path))),
+            ("m_TagID", Val::U(builder.id(&tag))),
+            (
+                "m_SpeedParamID",
+                parameter(builder, "m_SpeedParameterActive", "m_SpeedParameter")?,
+            ),
+            (
+                "m_MirrorParamID",
+                parameter(builder, "m_MirrorParameterActive", "m_MirrorParameter")?,
+            ),
+            (
+                "m_CycleOffsetParamID",
+                parameter(
+                    builder,
+                    "m_CycleOffsetParameterActive",
+                    "m_CycleOffsetParameter",
+                )?,
+            ),
+            (
+                "m_TimeParamID",
+                parameter(builder, "m_TimeParameterActive", "m_TimeParameter")?,
+            ),
+            ("m_Speed", Val::F(float(get(fields, "m_Speed"), "state")?)),
+            (
+                "m_CycleOffset",
+                Val::F(float(get(fields, "m_CycleOffset"), "state")?),
+            ),
+            (
+                "m_IKOnFeet",
+                Val::Bool(flag(get(fields, "m_IKOnFeet"), "state")?),
+            ),
+            (
+                "m_WriteDefaultValues",
+                Val::Bool(flag(get(fields, "m_WriteDefaultValues"), "state")?),
+            ),
+            ("m_Loop", Val::Bool(looping)),
+            (
+                "m_Mirror",
+                Val::Bool(flag(get(fields, "m_Mirror"), "state")?),
+            ),
+        ]));
+    }
+
+    let root = builder.document(
+        &builder.machines[first_machine].file_id,
+        1107,
+        "state machine",
+    )?;
+    let mut any = Vec::new();
+    for transition in builder.active(get(root, "m_AnyStateTransitions"), 1101)? {
+        let target = builder.target(transition, first_machine, first_state, first_machine)?;
+        let path = target.path.clone();
+        any.push(builder.state_transition(
+            transition,
+            ("AnyState", "Entry"),
+            Target { path, ..target },
+        )?);
+    }
+
+    let mut selectors = Vec::new();
+    for machine in first_machine..first_machine + layer.machine_count {
+        let (file_id, parent, path) = {
+            let entry = &builder.machines[machine];
+            (entry.file_id.clone(), entry.parent, entry.path.clone())
+        };
+        let fields = builder.document(&file_id, 1107, "state machine")?;
+        let mut entry = Vec::new();
+        for transition in builder.active(get(fields, "m_EntryTransitions"), 1109)? {
+            let target = builder.target(transition, machine, first_state, first_machine)?;
+            entry.push(builder.selector_transition(transition, &target)?);
+        }
+        // The entry node always ends in the default state, or in nothing.
+        let default = match builder.local(get(fields, "m_DefaultState"), "default state")? {
+            Some(default) => builder
+                .state_index(&default, first_state)
+                .map_or(NONE, |index| (index - first_state) as u64),
+            None => NONE,
+        };
+        entry.push(Val::map([("m_Destination", Val::U(default))]));
+        let mut exit = Vec::new();
+        match parent {
+            None => exit.push(Val::map([("m_Destination", Val::U(SELECTOR_BASE))])),
+            Some(parent) => {
+                let parent_fields =
+                    builder.document(&builder.machines[parent].file_id, 1107, "state machine")?;
+                for pair in pairs(get(parent_fields, "m_StateMachineTransitions"))? {
+                    if reference(pair.0)?.is_some_and(|owner| owner.file_id == file_id) {
+                        for transition in builder.active(pair.1, 1109)? {
+                            let target =
+                                builder.target(transition, parent, first_state, first_machine)?;
+                            exit.push(builder.selector_transition(transition, &target)?);
+                        }
+                    }
+                }
+                // An exit nothing leads out of ends in the default state of
+                // the machine around it.
+                if exit.is_empty() {
+                    let default =
+                        builder.local(get(parent_fields, "m_DefaultState"), "default state")?;
+                    let Some(index) =
+                        default.and_then(|default| builder.state_index(&default, first_state))
+                    else {
+                        return Err(unsupported(
+                            "state machine without exit transitions inside one without a default state",
+                        ));
+                    };
+                    exit.push(Val::map([(
+                        "m_Destination",
+                        Val::U((index - first_state) as u64),
+                    )]));
+                }
+            }
+        }
+        let hash = crc32(&path) as u64;
+        for (transitions, is_entry) in [(entry, true), (exit, false)] {
+            selectors.push(Val::map([
+                ("m_TransitionConstantArray", Val::Seq(transitions)),
+                ("m_FullPathID", Val::U(hash)),
+                ("m_IsEntry", Val::Bool(is_entry)),
+            ]));
+        }
+    }
+    Ok(Val::map([
+        ("m_StateConstantArray", Val::Seq(states)),
+        ("m_AnyStateTransitionConstantArray", Val::Seq(any)),
+        ("m_SelectorStateConstantArray", Val::Seq(selectors)),
+        ("m_SynchronizedLayerCount", Val::U(1 + synced.len() as u64)),
+        ("m_EvaluateTransitionsOnStart", Val::Bool(evaluate)),
+    ]))
+}
+
+/// The entries of a serialized map: `first`/`second` pairs.
+fn pairs(value: &Value) -> Result<Vec<(&Value, &Value)>> {
+    let mut result = Vec::new();
+    // Unity writes an empty map as `{}`.
+    if matches!(value, Value::Object(map) if map.is_empty()) {
+        return Ok(result);
+    }
+    for item in list(value, "map")? {
+        let pair = object(item, "map")?;
+        result.push((get(pair, "first"), get(pair, "second")));
+    }
+    Ok(result)
+}
+
+/// Reads what a controller needs from an authored `.anim` source.
+pub fn read_clip_facts(yaml: &[u8], path: &str) -> Result<ClipFacts> {
+    let documents = crate::yaml::parse_unity_yaml_lexical(yaml)?;
+    let Some(clip) = documents.iter().find(|document| document.class_id == 74) else {
+        bail!("animation source does not hold an AnimationClip");
+    };
+    let looping = match get(&clip.data, "m_AnimationClipSettings") {
+        Value::Object(settings) => flag(get(settings, "m_LoopTime"), "animation clip")?,
+        _ => false,
+    };
+    Ok(ClipFacts {
+        looping,
+        path: path.to_string(),
+        name: text(get(&clip.data, "m_Name"))?,
+    })
+}

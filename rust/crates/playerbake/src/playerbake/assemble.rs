@@ -1,6 +1,7 @@
 //! One Player file holding a set of sources and everything they refer to,
 //! written by the tool: the counterpart of the file of a scene's
 //! dependencies that Unity's worker writes with `WriteSerializedFile`.
+use super::animation::Prebuilt;
 use super::{
     FileFormat, Object,
     authored::{Library, MONO_SCRIPT, Reference, Sources, Tags, convert},
@@ -89,6 +90,48 @@ fn map_pointers(value: &mut Val, map: &mut impl FnMut(i64, i64) -> (i64, i64)) {
         Val::Seq(items) => items.iter_mut().for_each(|item| map_pointers(item, map)),
         _ => {}
     }
+}
+
+/// A value made for the pinned engine, as a release's tree lays it out:
+/// the fields the release lacks are left out; those it adds are written
+/// empty, as `encode` writes a missing field.
+fn fit(tree: &TypeTree, value: Val) -> Val {
+    fn at(tree: &TypeTree, index: usize, value: Val) -> Val {
+        match value {
+            Val::Map(fields) => {
+                let children = tree.children(index);
+                if tree.nodes[index].type_name == "OffsetPtr" && children.len() == 1 {
+                    return at(tree, children[0], Val::Map(fields));
+                }
+                if tree.nodes[index].type_name.starts_with("PPtr<") || children.is_empty() {
+                    return Val::Map(fields);
+                }
+                Val::Map(
+                    fields
+                        .into_iter()
+                        .filter_map(|(name, field)| {
+                            let child = children
+                                .iter()
+                                .copied()
+                                .find(|&child| tree.nodes[child].name == *name)?;
+                            Some((name, at(tree, child, field)))
+                        })
+                        .collect(),
+                )
+            }
+            Val::Seq(items) => match tree.element(index) {
+                Some((_, element)) => Val::Seq(
+                    items
+                        .into_iter()
+                        .map(|item| at(tree, element, item))
+                        .collect(),
+                ),
+                None => Val::Seq(items),
+            },
+            other => other,
+        }
+    }
+    at(tree, 0, value)
 }
 
 pub fn write_closure(
@@ -199,6 +242,9 @@ pub fn write_closure_baking(
     let mut seen: HashSet<String> = queue.iter().cloned().collect();
     let mut unpacked = super::prefab::Unpacked::default();
     let renames = sources.renames();
+    // The Player objects a build derives from animation sources, by source
+    // and file ID.
+    let mut prebuilt: HashMap<(String, i64), Prebuilt> = HashMap::new();
     // Sources the tool does not write, but shaders, which the session
     // publishes: references to them are written empty.
     let mut left_out: HashSet<String> = HashSet::new();
@@ -211,6 +257,12 @@ pub fn write_closure_baking(
                 .push((guid, "no source with this GUID".into()));
             continue;
         };
+        // A folder is an Editor object (`DefaultAsset`): a Player's
+        // reference to it is empty.
+        if path.is_dir() {
+            left_out.insert(guid);
+            continue;
+        }
         let baked = match (shaders, is_shader(path)) {
             (Some(bake), true) => Some(bake(&guid)),
             _ => None,
@@ -233,7 +285,8 @@ pub fn write_closure_baking(
             }
             continue;
         }
-        let source = match load(path, &guid, sources).and_then(|source| match source {
+        let source = match load(path, &guid, sources, &mut prebuilt).and_then(|source| match source
+        {
             Some(Source::Yaml(documents)) => {
                 let mut documents = unpacked.unpack(sources, documents)?;
                 legacy_ui_scripts(&mut documents, library, sources, &mut legacy_ui);
@@ -265,6 +318,16 @@ pub fn write_closure_baking(
         // lacks does (a font asset's `m_SourceFontFile_EditorRef`).
         if let Source::Yaml(documents) = &source {
             for document in documents.iter().filter(|d| written(d)) {
+                let made = document
+                    .file_id
+                    .parse::<i64>()
+                    .ok()
+                    .and_then(|id| prebuilt.get(&(guid.clone(), id)));
+                for external in made.into_iter().flat_map(|object| &object.externals) {
+                    if !engine_resource(&external.guid) && seen.insert(external.guid.clone()) {
+                        queue.push_back(external.guid.clone());
+                    }
+                }
                 for reference in dependencies(library, &renames, sources, document) {
                     if !reference.guid.is_empty()
                         && !engine_resource(&reference.guid)
@@ -713,6 +776,58 @@ pub fn write_closure_baking(
                         };
                         Ok(Some((position as i32 + 1, reference.file_id)))
                     };
+                    if let Ok(file_id) = document.file_id.parse::<i64>()
+                        && let Some(made) = prebuilt.get(&(guid.clone(), file_id))
+                    {
+                        let Some(kind) = library.class(document.class_id as i32) else {
+                            failed = Some(format!("no type tree of class {}", document.type_name));
+                            continue;
+                        };
+                        let mut value = fit(&kind.tree, made.value.clone());
+                        if document.class_id == 91 {
+                            super::controller::settle_size(&kind.tree, &mut value)?;
+                        }
+                        let mut error = None;
+                        map_pointers(&mut value, &mut |file, path| {
+                            if file == 0 && path == 0 {
+                                return (0, 0);
+                            }
+                            let owner = match file {
+                                0 => String::new(),
+                                n => match made.externals.get(n as usize - 1) {
+                                    Some(external) => external.guid.clone(),
+                                    None => {
+                                        error = Some(format!("a pointer into file {n}"));
+                                        return (0, 0);
+                                    }
+                                },
+                            };
+                            let reference = Reference {
+                                file_id: path,
+                                guid: owner,
+                                kind: 0,
+                            };
+                            match resolve(&reference) {
+                                Ok(Some((file, path))) => (file as i64, path),
+                                Ok(None) => (0, 0),
+                                Err(why) => {
+                                    error = Some(format!("{why:#}"));
+                                    (0, 0)
+                                }
+                            }
+                        });
+                        if let Some(why) = error {
+                            failed = Some(format!("{} {}: {why}", document.type_name, file_id));
+                            continue;
+                        }
+                        objects.push((
+                            ids[&(guid.clone(), file_id)],
+                            kind.tree.clone(),
+                            value,
+                            None,
+                        ));
+                        continue;
+                    }
                     match convert(
                         library,
                         tags,
@@ -1406,9 +1521,20 @@ fn pointer_to(file: i32, local: i64) -> Val {
     ])
 }
 
-fn load(path: &Path, guid: &str, sources: &Sources) -> Result<Option<Source>> {
+fn load(
+    path: &Path,
+    guid: &str,
+    sources: &Sources,
+    prebuilt: &mut HashMap<(String, i64), Prebuilt>,
+) -> Result<Option<Source>> {
     if let Some(documents) = sources.imported(guid) {
         return Ok(Some(Source::Yaml(documents.clone())));
+    }
+    if let Some(animation) = super::animation::load(path, sources)? {
+        for (file_id, object) in animation.prebuilt {
+            prebuilt.insert((guid.to_string(), file_id), object);
+        }
+        return Ok(Some(Source::Yaml(animation.documents)));
     }
     let extension = path
         .extension()
@@ -1426,7 +1552,11 @@ fn load(path: &Path, guid: &str, sources: &Sources) -> Result<Option<Source>> {
         let settings = super::font::importer_settings(&meta, "TrueTypeFontImporter")?;
         return Ok(Some(Source::Yaml(super::font::documents(path, &settings)?)));
     }
-    if meta.windows(19).any(|w| w == b"TextScriptImporter:") {
+    // The Editor picks the importer by the extension, whatever the `.meta`
+    // names (a `.skel.bytes` of Spine whose `.meta` says `DefaultImporter`).
+    if meta.windows(19).any(|w| w == b"TextScriptImporter:")
+        || TEXT_ASSET_EXTENSIONS.contains(&extension.as_str())
+    {
         return Ok(Some(Source::Text(path.to_path_buf())));
     }
     if meta.windows(14).any(|w| w == b"AudioImporter:") {
@@ -1444,6 +1574,11 @@ fn load(path: &Path, guid: &str, sources: &Sources) -> Result<Option<Source>> {
     }
     Ok(None)
 }
+
+/// The extensions `TextScriptImporter` imports, as the manual lists them.
+const TEXT_ASSET_EXTENSIONS: [&str; 9] = [
+    "txt", "html", "htm", "xml", "bytes", "json", "csv", "yaml", "fnt",
+];
 
 /// The GUIDs of the `UnityEngine.UI.dll` that held uGUI's scripts before
 /// uGUI was a package (Unity 2019.2), which prefabs made then still name:

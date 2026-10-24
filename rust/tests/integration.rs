@@ -4,6 +4,7 @@ mod authoring;
 mod formats;
 mod graph;
 mod mcp;
+mod mecanim;
 mod regressions;
 mod runtimeartifact;
 mod shader;

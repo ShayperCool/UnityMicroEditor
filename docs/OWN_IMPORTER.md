@@ -184,6 +184,37 @@ Texture` the Player fills. They go through the authored conversion as the
 documents a font asset would hold. Main: the 6 fonts equal but for which of
 the identical materials and textures of the same name each pairs with.
 
+### Animation
+
+A build derives a Player's `AnimationClip`, `AnimatorController`,
+`AnimatorOverrideController` and `AvatarMask` from their sources; the
+Editor's state machines, states, transitions and blend trees have no Player
+objects. The bakers of the raw scene path did this for 6000.6.3f1, verified
+byte for byte against AssetBundles the engine built (the fixtures under
+`rust/tests/testdata/playerbake`, `rust/tests/mecanim.rs`); they came back
+from the history (`bba0f19^`) as `clip`, `controller`, `mask`,
+`override_controller`, `humanoid`, `binding`, `weighted` and `freeform`,
+now making values instead of files. `animation.rs` puts them into a
+closure: a source's Player object stands among its documents as a document
+of its class and file ID without fields, made beside it with pointers into
+the source itself and into the sources it names (clips, scripts, objects of
+object curves), which the closure resolves as it resolves a document's. A
+controller's state machine behaviours stay documents, written as any
+behaviour is; a mask stored in its file is published beside it. A value
+made for 6000.6 is laid out by the release's tree: fields the release lacks
+are left out (6000.6 added `m_EvaluateTransitionsOnStart` and the
+`ValueArray`'s `m_EntityIdValues`), and a controller's `m_ControllerSize`,
+the constant's size in memory, is taken again over the release's
+structures.
+
+Main of Bouncemasters for 6000.0: the three clips of `.anim` sources equal
+to the worker's; the three controllers that play them equal but for the
+order of the name table `m_TOS`, which the engine writes in the order of its
+hash table (the Player reads it into a map). Controllers that play clips of
+models are refused until models are imported. A behaviour's class overrides
+`OnStateMachineEnter` or `OnStateMachineExit` when its source declares such
+an override; one inherited from another class of the project is not seen.
+
 ### Audio
 
 An `AudioImporter` source becomes an `AudioClip` whose samples the

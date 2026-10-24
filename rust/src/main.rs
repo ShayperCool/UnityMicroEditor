@@ -443,6 +443,23 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                 }
             }
         }
+        // A type tree as the engine's own files store one (`engine/type-*.bin`).
+        ["tree", file] => {
+            let data: &'static [u8] = Box::leak(fs::read(file)?.into_boxed_slice());
+            let tree = unity_micro_editor::playerbake::TypeTree::parse(data)?;
+            for node in &tree.nodes {
+                println!(
+                    "{}{} {} size={} v={} flags={} meta={:#x}",
+                    "  ".repeat(node.level as usize),
+                    node.type_name,
+                    node.name,
+                    node.size,
+                    node.version,
+                    node.type_flags,
+                    node.meta
+                );
+            }
+        }
         ["trees", file] => {
             let data = fs::read(file)?;
             let (objects, _) =
