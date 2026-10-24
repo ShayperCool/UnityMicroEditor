@@ -221,6 +221,20 @@ its snapshots, the effects and every snapshot value moved into the mixer's
 `AudioMixerConstant`. Main's mixer, three groups and snapshot for 6000.0
 equal the worker's, so the pack's sample constant no longer stands in.
 
+### Baked lighting
+
+A scene's `LightingData.asset` is a binary file of Editor objects: the
+`LightingDataAsset` and the `LightProbes` it names (`lighting.rs`). The
+closure writes the probes as an object of its own, laid out by the Player's
+tree; the scene's `LightmapSettings` takes the probes, the lightmaps, their
+mode and the Enlighten scene mapping from the asset, each renderer of
+`m_LightmappedRendererDataIDs` its lightmap index and scale and offset (an
+object of a prefab instance found by the instance's and the object's IDs
+together, as unpacking numbers it), each light its baking output and each
+reflection probe its baked cubemap. Main's `LightProbes` equals the
+worker's. Not written yet: the Enlighten data of realtime global
+illumination (`m_EnlightenData`) and the ambient probe of a bake.
+
 ### Audio
 
 An `AudioImporter` source becomes an `AudioClip` whose samples the

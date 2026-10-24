@@ -14,6 +14,7 @@ mod font;
 mod freeform;
 mod game_files;
 mod humanoid;
+mod lighting;
 mod managers;
 mod mask;
 mod mixer;

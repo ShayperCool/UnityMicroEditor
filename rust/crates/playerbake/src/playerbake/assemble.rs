@@ -289,6 +289,7 @@ pub fn write_closure_baking(
         {
             Some(Source::Yaml(documents)) => {
                 let mut documents = unpacked.unpack(sources, documents)?;
+                super::lighting::settle_scene(&mut documents, sources)?;
                 legacy_ui_scripts(&mut documents, library, sources, &mut legacy_ui);
                 Ok(Some(Source::Yaml(documents)))
             }
@@ -1530,7 +1531,11 @@ fn load(
     if let Some(documents) = sources.imported(guid) {
         return Ok(Some(Source::Yaml(documents.clone())));
     }
-    if let Some(animation) = super::animation::load(path, sources)? {
+    let derived = match super::animation::load(path, sources)? {
+        Some(animation) => Some(animation),
+        None => super::lighting::load(path)?,
+    };
+    if let Some(animation) = derived {
         for (file_id, object) in animation.prebuilt {
             prebuilt.insert((guid.to_string(), file_id), object);
         }

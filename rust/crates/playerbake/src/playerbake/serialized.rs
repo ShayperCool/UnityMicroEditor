@@ -439,6 +439,14 @@ pub fn external_paths(file: &[u8]) -> Result<Vec<String>> {
     Ok(read_objects(file, Some(i32::MIN))?.1)
 }
 
+/// The GUIDs of the files a file refers to, in the order of its external
+/// references, as an Editor asset names them.
+pub fn external_guids(file: &[u8]) -> Result<Vec<String>> {
+    Ok(read_objects(file, Some(GUIDS_ONLY))?.1)
+}
+
+const GUIDS_ONLY: i32 = i32::MIN + 1;
+
 fn read_objects(file: &[u8], only: Option<i32>) -> Result<(Vec<Read>, Vec<String>)> {
     let be32 = |at: usize| {
         file.get(at..at + 4)
@@ -571,7 +579,7 @@ fn read_objects(file: &[u8], only: Option<i32>) -> Result<(Vec<Read>, Vec<String
         });
     }
     // Only the external references of a file are asked for.
-    let names_only = only == Some(i32::MIN);
+    let names_only = only == Some(i32::MIN) || only == Some(GUIDS_ONLY);
     if only.is_some() && !names_only {
         return Ok((objects, Vec::new()));
     }
@@ -600,13 +608,28 @@ fn read_objects(file: &[u8], only: Option<i32>) -> Result<(Vec<Read>, Vec<String
         bail!("SerializedFile external reference count is invalid");
     }
     let mut externals = Vec::with_capacity(external_count);
+    let mut guids = Vec::with_capacity(external_count);
     for _ in 0..external_count {
         // An unused asset path, a GUID and a type precede the path name.
         while take(&mut at, 1)?[0] != 0 {}
-        take(&mut at, 20)?;
+        let guid = take(&mut at, 20)?;
+        // Each word of the GUID little-endian, its text the word's digits
+        // in reverse.
+        guids.push(
+            guid[..16]
+                .chunks(4)
+                .map(|word| {
+                    let word = u32::from_le_bytes(word.try_into().unwrap());
+                    format!("{word:08x}").chars().rev().collect::<String>()
+                })
+                .collect::<String>(),
+        );
         let start = at;
         while take(&mut at, 1)?[0] != 0 {}
         externals.push(String::from_utf8_lossy(&file[start..at - 1]).into_owned());
+    }
+    if only == Some(GUIDS_ONLY) {
+        return Ok((objects, guids));
     }
     if names_only {
         return Ok((objects, externals));
