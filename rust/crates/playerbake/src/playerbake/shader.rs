@@ -35,7 +35,7 @@ pub const COMPUTE_SHADER_CLASS: i32 = 72;
 pub const COMPUTE_SHADER_LOCAL_ID: i64 = 7_200_000;
 pub use link::{
     NoShaders, ShaderDependency, ShaderLinks, ShaderPass, ShaderPointer, ShaderSources,
-    read_shader_links,
+    read_shader_links, read_shader_links_of,
 };
 
 /// The local file ID of the `Shader` object of a `.shader` asset.
@@ -58,6 +58,8 @@ pub fn shader_tree() -> Result<&'static TypeTree> {
 /// request, in its order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnippetRequest {
+    /// The release whose compiler is asked.
+    pub release: ShaderRelease,
     /// The program source as the importer prepared it. It need not be text.
     pub source: Vec<u8>,
     pub asset_directory: String,
@@ -134,6 +136,17 @@ impl SnippetRequest {
         wire_list(&mut out, &self.disabled);
         wire_int(&mut out, self.keywords_off as i32);
         wire_text(&mut out, self.constants.as_bytes());
+        // 6000.0's request ends in the flags (32 bits), the language, the
+        // graphics API, the requirements, the stages and the start line.
+        if self.release == ShaderRelease::Unity6000_0 {
+            wire_int(&mut out, self.flags as i32);
+            wire_int(&mut out, self.language);
+            wire_int(&mut out, self.platform as i32);
+            wire_long(&mut out, self.requirements);
+            wire_int(&mut out, self.program_mask as i32);
+            wire_int(&mut out, self.start_line);
+            return out;
+        }
         wire_long(&mut out, self.flags);
         wire_int(&mut out, self.language);
         wire_int(&mut out, self.program);
@@ -540,9 +553,46 @@ pub struct ShaderMaterialUse {
     pub instancing: bool,
 }
 
+/// The release a shader is baked for: the Player's layout of `Shader`, the
+/// compiler's requests and the tables of programs differ between them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ShaderRelease {
+    /// 6000.0.71f1.
+    Unity6000_0,
+    /// 6000.6.3f1, the verified release.
+    #[default]
+    Unity6000_6,
+}
+
+impl ShaderRelease {
+    pub fn of(unity_version: &str) -> Option<Self> {
+        match unity_version {
+            "6000.0.71f1" => Some(ShaderRelease::Unity6000_0),
+            version if version == crate::ENGINE_VERSION => Some(ShaderRelease::Unity6000_6),
+            _ => None,
+        }
+    }
+
+    /// The Player's layout of `Shader`.
+    pub fn tree(self) -> Result<&'static TypeTree> {
+        match self {
+            ShaderRelease::Unity6000_6 => shader_tree(),
+            ShaderRelease::Unity6000_0 => SHADER_TREE_6000_0
+                .as_ref()
+                .map_err(|error| anyhow!("6000.0 Shader type tree: {error}")),
+        }
+    }
+}
+
+static SHADER_TREE_6000_0: LazyLock<Result<TypeTree, String>> = LazyLock::new(|| {
+    TypeTree::parse(&include_bytes!("engine/6000.0.71f1/type-48.bin")[..])
+        .map_err(|error| error.to_string())
+});
+
 /// What a bake takes from the project beside the shader itself.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ShaderProject {
+    pub release: ShaderRelease,
     /// The graphics APIs of the build by compiler platform number (OpenGL
     /// Core is 15, Vulkan 18). Their order does not matter.
     pub platforms: Vec<u32>,
@@ -678,7 +728,7 @@ pub fn bake_shader(
     let file = serialized::write(
         &[serialized::Object {
             local_id: SHADER_LOCAL_ID,
-            tree: shader_tree()?,
+            tree: project_settings.release.tree()?,
             data,
             script: None,
             script_file: 0,
@@ -701,7 +751,7 @@ pub fn bake_shader_object(
     compiler: &mut dyn SnippetCompiler,
 ) -> Result<(Vec<u8>, Vec<serialized::External>)> {
     let artifact = read_shader_artifact(artifact)?;
-    let tree = shader_tree()?;
+    let tree = project_settings.release.tree()?;
     let mut value = project(tree, 0, &artifact.value)?;
     let externals = object::assemble(
         &artifact.value,

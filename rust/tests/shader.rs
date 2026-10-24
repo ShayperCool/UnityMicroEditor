@@ -260,6 +260,7 @@ fn fixture_names() -> Vec<String> {
 
 fn bake_fixture(name: &str, settings: ShaderSettings) -> anyhow::Result<Vec<u8>> {
     let project = ShaderProject {
+        release: Default::default(),
         platforms: vec![15, 18],
         settings,
         materials: materials(&fixtures().join(format!("{name}.materials"))),
@@ -309,6 +310,7 @@ impl ShaderSources for Published {
 
 fn bake_linked(name: &str, sources: &dyn ShaderSources) -> anyhow::Result<playerbake::Baked> {
     let project = ShaderProject {
+        release: Default::default(),
         platforms: vec![15, 18],
         settings: ShaderSettings::default(),
         materials: materials(&fixtures().join(format!("{name}.materials"))),
@@ -392,6 +394,7 @@ impl SnippetCompiler for Complaining {
 fn a_program_the_compiler_complains_about_is_refused() {
     let name = "s01_unlit";
     let project = ShaderProject {
+        release: Default::default(),
         platforms: vec![15, 18],
         settings: ShaderSettings::default(),
         materials: Vec::new(),
@@ -418,6 +421,7 @@ fn a_program_the_compiler_complains_about_is_refused() {
 fn baked_shader_is_a_content_file_with_the_authored_identity() {
     let name = &fixture_names()[0];
     let project = ShaderProject {
+        release: Default::default(),
         platforms: vec![15, 18],
         settings: ShaderSettings::default(),
         materials: materials(&fixtures().join(format!("{name}.materials"))),
@@ -593,6 +597,7 @@ fn shader_corpus_matches_the_engine_build() {
             let artifact = fs::read(root.join(format!("{name}.artifact.bin"))).unwrap();
             let expected = fs::read(root.join(format!("{name}.shader.bin"))).unwrap();
             let project = ShaderProject {
+                release: Default::default(),
                 platforms: platforms.clone(),
                 settings: settings.clone(),
                 materials: materials(&root.join(format!("{name}.materials"))),

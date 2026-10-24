@@ -6,13 +6,21 @@
 //! `SaveGpuProgramToDataWithoutParameters`,
 //! `SerializedProgram::DeduplicateParameters`, `SubProgramBlobWriter::Flush`)
 //! and confirmed against its builds.
-use super::SnippetReply;
+use super::{ShaderRelease, SnippetReply};
 use crate::playerbake::{typetree::Val, unsupported};
 use anyhow::{Result, bail};
 use std::{borrow::Cow, collections::HashMap};
 
-/// The revision of the entry layouts in the pinned engine.
+/// The revision of the entry layouts in the pinned engine, and in 6000.0.
 const LAYOUT: u32 = 0x0c13_82ea;
+const LAYOUT_6000_0: u32 = 0x0c0a_75ba;
+
+fn layout(release: ShaderRelease) -> u32 {
+    match release {
+        ShaderRelease::Unity6000_0 => LAYOUT_6000_0,
+        ShaderRelease::Unity6000_6 => LAYOUT,
+    }
+}
 
 /// Where a program finds a resource: a packed description and a slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -185,8 +193,16 @@ impl Parameters {
     }
 }
 
-/// Reads the reflection lines of a compiled program.
-pub(super) fn reflect(reply: &SnippetReply) -> Result<Reflection> {
+/// Reads the reflection lines of a compiled program. 6000.0 names a
+/// binding by its index alone.
+pub(super) fn reflect(reply: &SnippetReply, release: ShaderRelease) -> Result<Reflection> {
+    let old = release == ShaderRelease::Unity6000_0;
+    let slot = |fields: &[&str], at: usize| -> Result<Binding> {
+        Ok(Binding {
+            encoded: 0,
+            slot: number(fields, at)?,
+        })
+    };
     let mut parameters = Parameters::default();
     let mut channels: Vec<(i32, i32)> = Vec::new();
     let mut sources = 0u32;
@@ -264,6 +280,38 @@ pub(super) fn reflect(reply: &SnippetReply) -> Result<Reflection> {
                         });
                     }
                 }
+            }
+            "cbbind:" if old => parameters.bindings.push(BufferBinding {
+                name: name(&fields)?,
+                binding: slot(&fields, 1)?,
+            }),
+            "texbind:" if old => parameters.textures.push(Texture {
+                name: name(&fields)?,
+                binding: slot(&fields, 1)?,
+                sampler: slot(&fields, 2)?,
+                multisampled: number(&fields, 3)? != 0,
+                dim: number(&fields, 4)?,
+            }),
+            "sampler:" if old => parameters.samplers.push(Sampler {
+                sampler: number(&fields, 0)?,
+                binding: slot(&fields, 1)?,
+            }),
+            "uavbind:" if old => {
+                let index = slot(&fields, 1)?;
+                parameters.accesses.push(Access {
+                    name: name(&fields)?,
+                    binding: index,
+                    original: slot(&fields, 2)?,
+                });
+            }
+            "bufferbind:" if old => {
+                let array = number(&fields, 2)? as i32;
+                parameters.data.push(Data {
+                    name: name(&fields)?,
+                    binding: slot(&fields, 1)?,
+                    array: if array > 0 { array as u32 } else { 1 },
+                    resource: 0,
+                });
             }
             "cbbind:" => parameters.bindings.push(BufferBinding {
                 name: name(&fields)?,
@@ -356,9 +404,12 @@ fn put_binding(out: &mut Vec<u8>, binding: Binding) {
 
 impl Parameters {
     /// The parameter entry of a program.
-    pub(super) fn entry(&self) -> Vec<u8> {
+    pub(super) fn entry(&self, release: ShaderRelease) -> Vec<u8> {
+        if release == ShaderRelease::Unity6000_0 {
+            return self.entry_6000_0();
+        }
         let mut out = Vec::new();
-        put(&mut out, LAYOUT);
+        put(&mut out, layout(release));
         put(&mut out, self.buffers.len() as u32 + 1);
         // The constants outside any buffer lead as a buffer without a name.
         put_text(&mut out, b"");
@@ -418,17 +469,84 @@ impl Parameters {
     }
 }
 
+impl Parameters {
+    /// The parameter entry of 6000.0: each buffer (the constants outside any
+    /// first, without a name) with its vectors and matrices in one list,
+    /// each as its type, rows, columns, whether it is a matrix, its array
+    /// size and offset, then the buffer's structures; after the buffers its
+    /// textures. A program's own structures and textures are not confirmed
+    /// against a build yet.
+    fn entry_6000_0(&self) -> Vec<u8> {
+        fn constants(out: &mut Vec<u8>, vectors: &[Constant], matrices: &[Constant]) {
+            put(out, (vectors.len() + matrices.len()) as u32);
+            for vector in vectors {
+                put_text(out, vector.name.as_bytes());
+                put(out, vector.kind);
+                put(out, 1);
+                put(out, vector.dim);
+                put(out, 0);
+                put(out, vector.array);
+                put(out, vector.offset);
+            }
+            for matrix in matrices {
+                put_text(out, matrix.name.as_bytes());
+                put(out, matrix.kind);
+                put(out, matrix.dim);
+                put(out, 4);
+                put(out, 1);
+                put(out, matrix.array);
+                put(out, matrix.offset);
+            }
+        }
+        let mut out = Vec::new();
+        put(&mut out, LAYOUT_6000_0);
+        put(&mut out, self.buffers.len() as u32 + 1);
+        put_text(&mut out, b"");
+        put(&mut out, 0);
+        constants(&mut out, &self.vectors, &self.matrices);
+        put(&mut out, 0);
+        for buffer in &self.buffers {
+            put_text(&mut out, buffer.name.as_bytes());
+            put(&mut out, buffer.size);
+            constants(&mut out, &buffer.vectors, &buffer.matrices);
+            put(&mut out, buffer.structures.len() as u32);
+            for structure in &buffer.structures {
+                put_text(&mut out, structure.name.as_bytes());
+                put(&mut out, structure.offset);
+                put(&mut out, structure.array);
+                put(&mut out, structure.size);
+                constants(&mut out, &structure.vectors, &structure.matrices);
+            }
+        }
+        // A texture: a word every build seen leaves zero, its index, its
+        // sampler's and its dimension above its multisampling bit.
+        put(&mut out, self.textures.len() as u32);
+        for texture in &self.textures {
+            put_text(&mut out, texture.name.as_bytes());
+            put(&mut out, 0);
+            put(&mut out, texture.binding.slot);
+            put(&mut out, texture.sampler.slot);
+            put(
+                &mut out,
+                (texture.dim & 255) << 1 | texture.multisampled as u32,
+            );
+        }
+        out
+    }
+}
+
 /// The program entry: its kind, keywords, code and vertex inputs. The
 /// keywords are listed in byte order of their names.
 pub(super) fn program(
     reply: &SnippetReply,
     reflection: &Reflection,
     keywords: &[String],
+    release: ShaderRelease,
 ) -> Vec<u8> {
     let mut sorted: Vec<&[u8]> = keywords.iter().map(|keyword| keyword.as_bytes()).collect();
     sorted.sort_unstable();
     let mut out = Vec::new();
-    put(&mut out, LAYOUT);
+    put(&mut out, layout(release));
     put(&mut out, reply.program_type as u32);
     for value in reflection.statistics {
         put(&mut out, value);
@@ -604,13 +722,23 @@ fn binding_value(binding: Binding) -> Val {
     ])
 }
 
-fn constant_value(constant: &Constant, index: Val, dimension: &'static str) -> Val {
+/// The field a constant's place in its buffer is named by.
+fn offset_field(release: ShaderRelease) -> &'static str {
+    match release {
+        ShaderRelease::Unity6000_0 => "m_Index",
+        ShaderRelease::Unity6000_6 => "m_OffsetInConstantBuffer",
+    }
+}
+
+fn constant_value(
+    constant: &Constant,
+    index: Val,
+    dimension: &'static str,
+    release: ShaderRelease,
+) -> Val {
     map([
         ("m_NameIndex", index),
-        (
-            "m_OffsetInConstantBuffer",
-            Val::I(constant.offset as i32 as i64),
-        ),
+        (offset_field(release), Val::I(constant.offset as i32 as i64)),
         ("m_ArraySize", Val::I(constant.array as i32 as i64)),
         ("m_Type", signed_byte(constant.kind)),
         (dimension, signed_byte(constant.dim)),
@@ -620,7 +748,9 @@ fn constant_value(constant: &Constant, index: Val, dimension: &'static str) -> V
 impl Parameters {
     /// The common parameters of a pass as the object holds them, and the
     /// pass's table of their names, sorted by name.
-    pub(super) fn value(&self) -> (Val, Val) {
+    pub(super) fn value(&self, release: ShaderRelease) -> (Val, Val) {
+        let old = release == ShaderRelease::Unity6000_0;
+        let slot = |binding: Binding| Val::I(binding.slot as i32 as i64);
         let mut names = Names(Vec::new());
         // The engine numbers all names before it writes any, in this order.
         let vectors: Vec<Val> = self.vectors.iter().map(|c| names.index(&c.name)).collect();
@@ -633,12 +763,12 @@ impl Parameters {
             let vectors: Vec<Val> = buffer
                 .vectors
                 .iter()
-                .map(|c| constant_value(c, names.index(&c.name), "m_Dim"))
+                .map(|c| constant_value(c, names.index(&c.name), "m_Dim", release))
                 .collect();
             let matrices: Vec<Val> = buffer
                 .matrices
                 .iter()
-                .map(|c| constant_value(c, names.index(&c.name), "m_RowCount"))
+                .map(|c| constant_value(c, names.index(&c.name), "m_RowCount", release))
                 .collect();
             let structures: Vec<Val> = buffer
                 .structures
@@ -650,17 +780,17 @@ impl Parameters {
                 let vectors: Vec<Val> = structure
                     .vectors
                     .iter()
-                    .map(|c| constant_value(c, names.index(&c.name), "m_Dim"))
+                    .map(|c| constant_value(c, names.index(&c.name), "m_Dim", release))
                     .collect();
                 let matrices: Vec<Val> = structure
                     .matrices
                     .iter()
-                    .map(|c| constant_value(c, names.index(&c.name), "m_RowCount"))
+                    .map(|c| constant_value(c, names.index(&c.name), "m_RowCount", release))
                     .collect();
                 structure_values.push(map([
                     ("m_NameIndex", index),
                     (
-                        "m_OffsetInConstantBuffer",
+                        offset_field(release),
                         Val::I(structure.offset as i32 as i64),
                     ),
                     ("m_ArraySize", Val::I(structure.array as i32 as i64)),
@@ -681,25 +811,35 @@ impl Parameters {
         let bindings: Vec<Val> = self
             .bindings
             .iter()
-            .map(|binding| {
-                map([
+            .map(|binding| match old {
+                true => map([
+                    ("m_NameIndex", names.index(&binding.name)),
+                    ("m_Index", slot(binding.binding)),
+                    ("m_ArraySize", Val::I(1)),
+                ]),
+                false => map([
                     ("m_NameIndex", names.index(&binding.name)),
                     ("m_Binding", binding_value(binding.binding)),
                     ("m_ArraySize", Val::I(1)),
                     ("m_ResourceType", Val::I(1)),
-                ])
+                ]),
             })
             .collect();
         let data: Vec<Val> = self
             .data
             .iter()
-            .map(|data| {
-                map([
+            .map(|data| match old {
+                true => map([
+                    ("m_NameIndex", names.index(&data.name)),
+                    ("m_Index", slot(data.binding)),
+                    ("m_ArraySize", Val::I(data.array as i32 as i64)),
+                ]),
+                false => map([
                     ("m_NameIndex", names.index(&data.name)),
                     ("m_Binding", binding_value(data.binding)),
                     ("m_ArraySize", Val::I(data.array as i32 as i64)),
                     ("m_ResourceType", Val::I(data.resource as i32 as i64)),
-                ])
+                ]),
             })
             .collect();
         let value = map([
@@ -709,7 +849,7 @@ impl Parameters {
                     self.vectors
                         .iter()
                         .zip(vectors)
-                        .map(|(c, index)| constant_value(c, index, "m_Dim"))
+                        .map(|(c, index)| constant_value(c, index, "m_Dim", release))
                         .collect(),
                 ),
             ),
@@ -719,7 +859,7 @@ impl Parameters {
                     self.matrices
                         .iter()
                         .zip(matrices)
-                        .map(|(c, index)| constant_value(c, index, "m_RowCount"))
+                        .map(|(c, index)| constant_value(c, index, "m_RowCount", release))
                         .collect(),
                 ),
             ),
@@ -729,14 +869,21 @@ impl Parameters {
                     self.textures
                         .iter()
                         .zip(textures)
-                        .map(|(texture, index)| {
-                            map([
+                        .map(|(texture, index)| match old {
+                            true => map([
+                                ("m_NameIndex", index),
+                                ("m_Index", slot(texture.binding)),
+                                ("m_SamplerIndex", slot(texture.sampler)),
+                                ("m_MultiSampled", Val::Bool(texture.multisampled)),
+                                ("m_Dim", signed_byte(texture.dim)),
+                            ]),
+                            false => map([
                                 ("m_NameIndex", index),
                                 ("m_Binding", binding_value(texture.binding)),
                                 ("m_SamplerBinding", binding_value(texture.sampler)),
                                 ("m_MultiSampled", Val::Bool(texture.multisampled)),
                                 ("m_Dim", signed_byte(texture.dim)),
-                            ])
+                            ]),
                         })
                         .collect(),
                 ),
@@ -750,12 +897,17 @@ impl Parameters {
                     self.accesses
                         .iter()
                         .zip(accesses)
-                        .map(|(access, index)| {
-                            map([
+                        .map(|(access, index)| match old {
+                            true => map([
+                                ("m_NameIndex", index),
+                                ("m_Index", slot(access.binding)),
+                                ("m_OriginalIndex", slot(access.original)),
+                            ]),
+                            false => map([
                                 ("m_NameIndex", index),
                                 ("m_Binding", binding_value(access.binding)),
                                 ("m_OriginalBinding", binding_value(access.original)),
-                            ])
+                            ]),
                         })
                         .collect(),
                 ),
@@ -765,11 +917,15 @@ impl Parameters {
                 Val::Seq(
                     self.samplers
                         .iter()
-                        .map(|sampler| {
-                            map([
+                        .map(|sampler| match old {
+                            true => map([
+                                ("sampler", Val::U(sampler.sampler as u64)),
+                                ("bindPoint", slot(sampler.binding)),
+                            ]),
+                            false => map([
                                 ("sampler", Val::U(sampler.sampler as u64)),
                                 ("m_Binding", binding_value(sampler.binding)),
-                            ])
+                            ]),
                         })
                         .collect(),
                 ),

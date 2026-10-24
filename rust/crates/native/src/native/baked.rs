@@ -187,7 +187,7 @@ const SHADER_SETTINGS: [&str; 3] = [
 
 /// How a material source uses its shader: the keywords it enables, valid for
 /// the shader or not, and whether it asks for instancing variants.
-fn material_use(path: &str, source: &[u8]) -> Result<playerbake::ShaderMaterialUse> {
+pub fn material_use(path: &str, source: &[u8]) -> Result<playerbake::ShaderMaterialUse> {
     let text = String::from_utf8_lossy(source);
     let mut usage = playerbake::ShaderMaterialUse::default();
     let mut listing = false;
@@ -205,6 +205,13 @@ fn material_use(path: &str, source: &[u8]) -> Result<playerbake::ShaderMaterialU
             continue;
         }
         listing = false;
+        // A material saved before 2021.2 names its keywords on one line.
+        if let Some(keywords) = trimmed.strip_prefix("m_ShaderKeywords:") {
+            usage
+                .keywords
+                .extend(keywords.split_whitespace().map(str::to_string));
+            continue;
+        }
         if let Some(value) = trimmed.strip_prefix("m_EnableInstancingVariants:") {
             usage.instancing = value.trim() != "0";
         }
@@ -431,6 +438,7 @@ impl NativeProjectImporter {
         };
         let player = settings("ProjectSettings/ProjectSettings.asset")?;
         let project = playerbake::ShaderProject {
+            release: Default::default(),
             platforms: playerbake::shader_platforms(&player)?,
             settings: playerbake::ShaderSettings::read(
                 &player,

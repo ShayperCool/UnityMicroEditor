@@ -5,6 +5,7 @@
 mod artifact;
 pub(crate) mod artifactdb;
 mod baked;
+pub use baked::material_use as shader_material_use;
 mod build_settings;
 mod built_store;
 mod context;

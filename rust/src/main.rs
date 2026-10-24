@@ -433,6 +433,160 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
             }
             println!("equal {equal} of {total}");
         }
+        [
+            "shader-bake",
+            "--editor",
+            editor,
+            "--project",
+            project,
+            "--source",
+            source,
+            "--reference",
+            reference,
+            assets @ ..,
+        ] => {
+            // Each source imported and baked by the tool, against the
+            // Player object the worker built of it (`DIR/<name>.objects`,
+            // with the materials that use it in `DIR/<name>.users`). The
+            // compiler runs in `project`; the settings and materials are
+            // read from the project `source`.
+            use unity_micro_editor::playerbake::{self as bake, shaderlab};
+            let ctx = unity_micro_editor::cancel::Context::background();
+            let logs = std::env::temp_dir().join(format!("ume-shader-bake-{}", std::process::id()));
+            let mut compiler = unity_micro_editor::native::ShaderCompiler::start(
+                &ctx,
+                editor,
+                project,
+                &logs.to_string_lossy(),
+            )?;
+            let editor_tree = shaderlab::editor_shader_tree("6000.0.71f1")
+                .ok_or_else(|| anyhow::anyhow!("no Editor Shader tree"))?;
+            let setting =
+                |name: &str| fs::read_to_string(Path::new(source).join(name)).unwrap_or_default();
+            let player = setting("ProjectSettings/ProjectSettings.asset");
+            let settings = bake::ShaderSettings::read(
+                &player,
+                &setting("ProjectSettings/GraphicsSettings.asset"),
+                &setting("ProjectSettings/QualitySettings.asset"),
+                &setting("Packages/manifest.json"),
+            )?;
+            let platforms = bake::shader_platforms(&player)?;
+            // The project's shaders by name, from the assets given.
+            let mut shader_names = std::collections::HashMap::new();
+            for item in assets {
+                let (asset, physical) = item.split_once('=').unwrap_or((item, item));
+                let physical = Path::new(project).join(physical);
+                if let Ok(text) = fs::read_to_string(&physical)
+                    && let Some(name) = text
+                        .split_once("Shader")
+                        .and_then(|(_, rest)| rest.split('"').nth(1))
+                {
+                    shader_names.insert(name.to_string(), (asset.to_string(), physical.clone()));
+                }
+            }
+            let (mut equal, mut total) = (0, 0);
+            for item in assets {
+                let (asset, physical) = item.split_once('=').unwrap_or((item, item));
+                total += 1;
+                let name = asset.replace(['/', ' '], "_");
+                let result = (|| -> Result<bool> {
+                    let physical = Path::new(project).join(physical);
+                    let text = fs::read_to_string(&physical)?;
+                    let meta = fs::read(format!("{}.meta", physical.display()))?;
+                    let guid = String::from_utf8_lossy(&meta)
+                        .lines()
+                        .find_map(|l| l.strip_prefix("guid: ").map(|g| g.trim().to_string()))
+                        .unwrap_or_default();
+                    let request = shaderlab::PreprocessRequest::standalone(asset, text);
+                    let reply = compiler.preprocess(&request)?;
+                    let value = editor_tree
+                        .val_of_json(&shaderlab::editor_object(&reply, &request, &guid, &meta)?)?;
+                    let artifact = bake::write_in(
+                        bake::FileFormat::of_release("6000.0.71f1").unwrap(),
+                        &[bake::Object {
+                            local_id: bake::SHADER_LOCAL_ID,
+                            tree: &editor_tree,
+                            data: editor_tree.encode(&value)?,
+                            script: None,
+                            script_file: 0,
+                        }],
+                        &[],
+                    )?;
+                    let users =
+                        fs::read_to_string(Path::new(reference).join(format!("{name}.users")))
+                            .unwrap_or_default();
+                    let mut materials = Vec::new();
+                    for user in users.trim().split(',').filter(|u| !u.is_empty()) {
+                        let file = Path::new(source).join(user);
+                        if let Ok(data) = fs::read(&file) {
+                            materials.push(unity_micro_editor::native::shader_material_use(
+                                user, &data,
+                            )?);
+                        }
+                    }
+                    let shader_project = bake::ShaderProject {
+                        release: bake::ShaderRelease::Unity6000_0,
+                        platforms: platforms.clone(),
+                        settings: settings.clone(),
+                        materials,
+                    };
+                    let others = ProjectShaders {
+                        names: shader_names.clone(),
+                        editor: editor.to_string(),
+                        directory: project.to_string(),
+                        project: bake::ShaderProject {
+                            materials: Vec::new(),
+                            ..shader_project.clone()
+                        },
+                        tree: &editor_tree,
+                        found: Default::default(),
+                        depth: Default::default(),
+                    };
+                    let (ours, _) = bake::bake_shader_object(
+                        &artifact,
+                        &shader_project,
+                        &others,
+                        &mut compiler,
+                    )?;
+                    let reference_file =
+                        fs::read(Path::new(reference).join(format!("{name}.objects")))?;
+                    let theirs = bake::read_serialized_of_class(&reference_file, 48)?
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("no reference Shader"))?;
+                    if let Some(dir) = std::env::var_os("UME_SHADER_DUMP") {
+                        let file = bake::write_in(
+                            bake::FileFormat::of_release("6000.0.71f1").unwrap(),
+                            &[bake::Object {
+                                local_id: bake::SHADER_LOCAL_ID,
+                                tree: bake::ShaderRelease::Unity6000_0.tree()?,
+                                data: ours.clone(),
+                                script: None,
+                                script_file: 0,
+                            }],
+                            &[],
+                        )?;
+                        fs::write(Path::new(&dir).join(format!("{name}.objects")), file)?;
+                    }
+                    if ours == theirs.data {
+                        return Ok(true);
+                    }
+                    let at = ours.iter().zip(&theirs.data).position(|(a, b)| a != b);
+                    println!(
+                        "{asset}: {} bytes against {}, first difference at {at:?}",
+                        ours.len(),
+                        theirs.data.len()
+                    );
+                    Ok(false)
+                })();
+                match result {
+                    Ok(true) => equal += 1,
+                    Ok(false) => {}
+                    Err(error) => println!("{asset}: {error:#}"),
+                }
+            }
+            println!("equal {equal} of {total}");
+        }
         ["script-layouts", project, editor, player, output] => {
             let ctx = unity_micro_editor::mcp::signal_context()?;
             let layouts =
@@ -1014,4 +1168,89 @@ fn run_game_managers(args: Vec<String>) -> Result<()> {
     serde_json::to_writer_pretty(io::stdout().lock(), &reports)?;
     println!();
     Ok(())
+}
+
+/// The shaders of a project by name, baked on demand by the tool's own
+/// import and baker, for a shader that takes passes of or falls back on
+/// them (`player-file shader-bake`).
+struct ProjectShaders<'a> {
+    names: std::collections::HashMap<String, (String, std::path::PathBuf)>,
+    /// The installation and the directory the compilers run in.
+    editor: String,
+    directory: String,
+    project: unity_micro_editor::playerbake::ShaderProject,
+    tree: &'a unity_micro_editor::playerbake::TypeTree,
+    found: std::cell::RefCell<
+        std::collections::HashMap<String, Option<unity_micro_editor::playerbake::ShaderDependency>>,
+    >,
+    depth: std::cell::Cell<usize>,
+}
+
+impl ProjectShaders<'_> {
+    /// The shader's Player object, baked.
+    fn bake(&self, logical: &str, physical: &std::path::Path) -> Result<(Vec<u8>, String)> {
+        use unity_micro_editor::playerbake::{self as bake, shaderlab};
+        let text = fs::read_to_string(physical)?;
+        let meta = fs::read(format!("{}.meta", physical.display()))?;
+        let guid = String::from_utf8_lossy(&meta)
+            .lines()
+            .find_map(|l| l.strip_prefix("guid: ").map(|g| g.trim().to_string()))
+            .unwrap_or_default();
+        let request = shaderlab::PreprocessRequest::standalone(logical, text);
+        // Each bake has a compiler of its own: it may bake what it refers to.
+        let logs = std::env::temp_dir().join(format!("ume-shader-bake-{}", std::process::id()));
+        let mut compiler = unity_micro_editor::native::ShaderCompiler::start(
+            &unity_micro_editor::cancel::Context::background(),
+            &self.editor,
+            &self.directory,
+            &logs.to_string_lossy(),
+        )?;
+        let reply = compiler.preprocess(&request)?;
+        let value = self
+            .tree
+            .val_of_json(&shaderlab::editor_object(&reply, &request, &guid, &meta)?)?;
+        let artifact = bake::write_in(
+            bake::FileFormat::of_release("6000.0.71f1").unwrap(),
+            &[bake::Object {
+                local_id: bake::SHADER_LOCAL_ID,
+                tree: self.tree,
+                data: self.tree.encode(&value)?,
+                script: None,
+                script_file: 0,
+            }],
+            &[],
+        )?;
+        let (data, _) = bake::bake_shader_object(&artifact, &self.project, self, &mut compiler)?;
+        Ok((data, guid))
+    }
+}
+
+impl unity_micro_editor::playerbake::ShaderSources for ProjectShaders<'_> {
+    fn shader(
+        &self,
+        name: &str,
+    ) -> Result<Option<unity_micro_editor::playerbake::ShaderDependency>> {
+        use unity_micro_editor::playerbake as bake;
+        if let Some(known) = self.found.borrow().get(name) {
+            return Ok(known.clone());
+        }
+        let Some((logical, physical)) = self.names.get(name).cloned() else {
+            return Ok(None);
+        };
+        if self.depth.get() > 4 {
+            anyhow::bail!("shaders refer to each other too deeply at {name}");
+        }
+        self.depth.set(self.depth.get() + 1);
+        let baked = self.bake(&logical, &physical);
+        self.depth.set(self.depth.get() - 1);
+        let (data, guid) = baked?;
+        let dependency = bake::ShaderDependency {
+            pointer: bake::ShaderPointer::External { guid },
+            links: bake::read_shader_links_of(bake::ShaderRelease::Unity6000_0, &data)?,
+        };
+        self.found
+            .borrow_mut()
+            .insert(name.to_string(), Some(dependency.clone()));
+        Ok(Some(dependency))
+    }
 }

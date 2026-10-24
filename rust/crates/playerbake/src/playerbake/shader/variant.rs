@@ -70,6 +70,39 @@ const DEFINES: [&str; 39] = [
 ];
 /// The defines a program is told about when they are off.
 const SETTINGS_DEPENDENT: u64 = 0x7_fef9_df59;
+/// The defines of 6000.0, in the order its requests list them: those of
+/// 6000.6 it knows, each one told about when it is off.
+const DEFINES_6000_0: [&str; 29] = [
+    "UNITY_NO_DXT5nm",
+    "UNITY_ENABLE_REFLECTION_BUFFERS",
+    "UNITY_FRAMEBUFFER_FETCH_AVAILABLE",
+    "UNITY_METAL_SHADOWS_USE_POINT_FILTERING",
+    "UNITY_NO_SCREENSPACE_SHADOWS",
+    "UNITY_USE_DITHER_MASK_FOR_ALPHABLENDED_SHADOWS",
+    "UNITY_PBS_USE_BRDF1",
+    "UNITY_PBS_USE_BRDF2",
+    "UNITY_PBS_USE_BRDF3",
+    "UNITY_SPECCUBE_BOX_PROJECTION",
+    "UNITY_SPECCUBE_BLENDING",
+    "UNITY_ENABLE_DETAIL_NORMALMAP",
+    "SHADER_API_DESKTOP",
+    "UNITY_HARDWARE_TIER1",
+    "UNITY_HARDWARE_TIER2",
+    "UNITY_HARDWARE_TIER3",
+    "UNITY_COLORSPACE_GAMMA",
+    "UNITY_LIGHT_PROBE_PROXY_VOLUME",
+    "UNITY_LIGHTMAP_DLDR_ENCODING",
+    "UNITY_LIGHTMAP_RGBM_ENCODING",
+    "UNITY_LIGHTMAP_FULL_HDR",
+    "UNITY_VIRTUAL_TEXTURING",
+    "UNITY_PRETRANSFORM_TO_DISPLAY_ORIENTATION",
+    "UNITY_ASTC_NORMALMAP_ENCODING",
+    "SHADER_API_GLES30",
+    "SHADER_API_GLES31",
+    "SHADER_API_GLES32",
+    "UNITY_UNIFIED_SHADER_PRECISION_MODEL",
+    "UNITY_PLATFORM_SUPPORTS_DEPTH_FETCH",
+];
 /// The stages a program can be told apart by; the engine skips the sixth.
 const STAGE_DEFINES: [(usize, &str); 6] = [
     (0, "SHADER_STAGE_VERTEX"),
@@ -230,14 +263,24 @@ impl Snippet {
             start_line: number(value, "m_StartLine")? as i32,
             stages: number(value, "m_TypesMask")? as u32,
             language: number(value, "m_Language")? as i32,
-            toolchains: sequence(value, "m_PerAPICompilerToolchain")?
-                .iter()
-                .any(|toolchain| !matches!(toolchain, Val::U(0) | Val::I(0) | Val::Zero)),
+            // 6000.0 has no compiler toolchains and no pruned keywords.
+            toolchains: match value.field("m_PerAPICompilerToolchain") {
+                Some(_) => sequence(value, "m_PerAPICompilerToolchain")?
+                    .iter()
+                    .any(|toolchain| !matches!(toolchain, Val::U(0) | Val::I(0) | Val::Zero)),
+                None => false,
+            },
             global: groups(value, "m_VariantsUserGlobal")?,
             local: groups(value, "m_VariantsUserLocal")?,
             builtin: groups(value, "m_VariantsBuiltin")?,
             pruned: (0..STAGES)
-                .map(|stage| strings(value, &format!("m_PrunedKeywords{stage}")))
+                .map(|stage| {
+                    let name = format!("m_PrunedKeywords{stage}");
+                    match value.field(&name) {
+                        Some(_) => strings(value, &name),
+                        None => Ok(Vec::new()),
+                    }
+                })
                 .collect::<Result<_>>()?,
             dynamic: strings(value, "m_DynamicBranchKeywords")?,
             requirements: number(value, "m_BaseRequirements")? as u64,
@@ -275,6 +318,7 @@ struct Pass<'a> {
 }
 
 struct Shader<'a> {
+    release: super::ShaderRelease,
     name: &'a str,
     keywords: Vec<String>,
     snippets: BTreeMap<i64, Snippet>,
@@ -779,10 +823,23 @@ fn request(
     bits: u64,
     requirements: u64,
 ) -> SnippetRequest {
-    let mut enabled: Vec<String> = (0..DEFINES.len())
-        .filter(|&bit| bits >> bit & 1 != 0)
-        .map(|bit| DEFINES[bit].to_string())
-        .collect();
+    let on = |name: &str| {
+        DEFINES
+            .iter()
+            .position(|define| *define == name)
+            .is_some_and(|bit| bits >> bit & 1 != 0)
+    };
+    let mut enabled: Vec<String> = match shader.release {
+        super::ShaderRelease::Unity6000_0 => DEFINES_6000_0
+            .iter()
+            .filter(|name| on(name))
+            .map(|name| name.to_string())
+            .collect(),
+        super::ShaderRelease::Unity6000_6 => (0..DEFINES.len())
+            .filter(|&bit| bits >> bit & 1 != 0)
+            .map(|bit| DEFINES[bit].to_string())
+            .collect(),
+    };
     if let Some(define) = pass_define(pass.light_mode) {
         enabled.push(define.to_string());
     }
@@ -795,11 +852,19 @@ fn request(
     );
     disabled.extend(snippet.pruned[0].iter().cloned());
     let keywords_off = disabled.len();
-    disabled.extend(
-        (0..DEFINES.len())
-            .filter(|&bit| bits >> bit & 1 == 0 && SETTINGS_DEPENDENT >> bit & 1 != 0)
-            .map(|bit| DEFINES[bit].to_string()),
-    );
+    match shader.release {
+        super::ShaderRelease::Unity6000_0 => disabled.extend(
+            DEFINES_6000_0
+                .iter()
+                .filter(|name| !on(name))
+                .map(|name| name.to_string()),
+        ),
+        super::ShaderRelease::Unity6000_6 => disabled.extend(
+            (0..DEFINES.len())
+                .filter(|&bit| bits >> bit & 1 == 0 && SETTINGS_DEPENDENT >> bit & 1 != 0)
+                .map(|bit| DEFINES[bit].to_string()),
+        ),
+    }
     // Each stage is told which of its own keywords are off.
     let mut constants = String::new();
     for (stage, define) in STAGE_DEFINES {
@@ -820,7 +885,12 @@ fn request(
         }
     }
     constants.push_str(&declarations(&disabled[keywords_off..], None));
+    // 6000.0 declares nothing for the compiler to prepend.
+    if shader.release == super::ShaderRelease::Unity6000_0 {
+        constants.clear();
+    }
     SnippetRequest {
+        release: shader.release,
         source: snippet.code.clone(),
         asset_directory: snippet.asset_directory.clone(),
         asset_name: snippet.asset_name.clone(),
@@ -974,6 +1044,7 @@ pub(super) fn plan(artifact: &Val, project: &ShaderProject) -> Result<Vec<PassPl
         }
     }
     let shader = Shader {
+        release: project.release,
         name: text(parsed, "m_Name")?,
         keywords,
         snippets,

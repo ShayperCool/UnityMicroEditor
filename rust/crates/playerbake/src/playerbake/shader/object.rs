@@ -38,6 +38,10 @@ fn compile_pass(
     tables: &mut BTreeMap<u32, blob::Table>,
     compiler: &mut dyn SnippetCompiler,
 ) -> Result<Compiled> {
+    let release = variants
+        .first()
+        .map(|v| v.request.release)
+        .unwrap_or_default();
     let mut replies = Vec::with_capacity(variants.len());
     let mut reflections = Vec::with_capacity(variants.len());
     for variant in variants {
@@ -50,7 +54,7 @@ fn compile_pass(
                 blob::error_text(&reply.lines)
             )));
         }
-        reflections.push(blob::reflect(&reply)?);
+        reflections.push(blob::reflect(&reply, release)?);
         replies.push(reply);
     }
     // What all programs of the pass read moves out of them.
@@ -58,7 +62,7 @@ fn compile_pass(
         .iter()
         .map(|reflection| reflection.parameters.clone())
         .collect();
-    let (common, names) = blob::share(&mut parameters)?.value();
+    let (common, names) = blob::share(&mut parameters)?.value(release);
     let mut compiled = Compiled {
         common,
         names,
@@ -71,13 +75,17 @@ fn compile_pass(
         let Some(table) = tables.get_mut(&variant.request.platform) else {
             bail!("shader variant is compiled for a graphics API outside the build");
         };
-        parameter_indices.push(table.add_parameters(parameters.entry()));
+        parameter_indices.push(table.add_parameters(parameters.entry(release)));
     }
     for (index, variant) in variants.iter().enumerate() {
         let (reply, reflection) = (&replies[index], &reflections[index]);
         let table = tables.get_mut(&variant.request.platform).unwrap();
-        let program =
-            table.add_program(blob::program(reply, reflection, &variant.request.keywords));
+        let program = table.add_program(blob::program(
+            reply,
+            reflection,
+            &variant.request.keywords,
+            release,
+        ));
         let mut keywords = Vec::with_capacity(variant.request.keywords.len());
         for keyword in &variant.request.keywords {
             let Some(position) = keyword_names.iter().position(|name| name == keyword) else {
@@ -132,7 +140,7 @@ pub(super) fn assemble(
     }
     // A build ties a shader to its fallback and to the shaders of the
     // passes it uses: the object lists them and takes over their keywords.
-    let links = link::resolve(parsed, sources)?;
+    let links = link::resolve(parsed, sources, project.release)?;
     let keyword_names: Vec<String> = sequence(parsed, "m_KeywordNames")?
         .iter()
         .map(|name| match name {

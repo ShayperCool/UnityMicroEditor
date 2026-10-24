@@ -44,9 +44,10 @@ pub use serialized::{
 pub use shader::{
     COMPUTE_SHADER_CLASS, COMPUTE_SHADER_LOCAL_ID, FogKeep, LightmapKeep, NoShaders,
     SHADER_LOCAL_ID, ShaderDependency, ShaderLinks, ShaderMaterialUse, ShaderPass, ShaderPointer,
-    ShaderProject, ShaderSettings, ShaderSources, ShaderTier, SnippetCompiler, SnippetReply,
-    SnippetRequest, WIRE_MARKER, bake_shader, bake_shader_object, names_render_pipeline,
-    read_shader_artifact, read_shader_links, shader_platforms, shader_tree, verify_shader_programs,
+    ShaderProject, ShaderRelease, ShaderSettings, ShaderSources, ShaderTier, SnippetCompiler,
+    SnippetReply, SnippetRequest, WIRE_MARKER, bake_shader, bake_shader_object,
+    names_render_pipeline, read_shader_artifact, read_shader_links, read_shader_links_of,
+    shader_platforms, shader_tree, verify_shader_programs,
 };
 pub use shader_names::read_shader_names;
 pub use typetree::{TypeTree, Val};

@@ -130,7 +130,13 @@ fn passes(parsed: &Val) -> Result<Vec<ShaderPass>> {
 /// Reads what a referring shader takes from a `Shader` object in the Player
 /// form.
 pub fn read_shader_links(object: &[u8]) -> Result<ShaderLinks> {
-    let value = shader_tree()?.decode(object)?;
+    read_shader_links_of(super::ShaderRelease::Unity6000_6, object)
+}
+
+/// The same of an object baked for a release.
+pub fn read_shader_links_of(release: super::ShaderRelease, object: &[u8]) -> Result<ShaderLinks> {
+    let _ = shader_tree;
+    let value = release.tree()?.decode(object)?;
     let parsed = value
         .field("m_ParsedForm")
         .ok_or_else(|| anyhow!("Shader object lacks its parsed form"))?;
@@ -152,7 +158,11 @@ pub(super) struct Links {
 }
 
 /// Resolves the fallback and the used passes of a parsed shader.
-pub(super) fn resolve(parsed: &Val, sources: &dyn ShaderSources) -> Result<Links> {
+pub(super) fn resolve(
+    parsed: &Val,
+    sources: &dyn ShaderSources,
+    release: super::ShaderRelease,
+) -> Result<Links> {
     let mut keywords = keyword_table(parsed)?;
     let find = |name: &str, what: &str| -> Result<ShaderDependency> {
         sources.shader(name)?.ok_or_else(|| {
@@ -216,7 +226,15 @@ pub(super) fn resolve(parsed: &Val, sources: &dyn ShaderSources) -> Result<Links
     let mut fallback = text(parsed, "m_FallbackName")?.to_string();
     let mut first = true;
     while !fallback.is_empty() && !names.contains(&fallback) {
-        let dependency = find(&fallback, "the fallback")?;
+        // 6000.0 lists no fallback it finds no source of (a built-in shader,
+        // which the Player finds by name).
+        let dependency = match release {
+            super::ShaderRelease::Unity6000_0 => match sources.shader(&fallback)? {
+                Some(dependency) => dependency,
+                None => break,
+            },
+            super::ShaderRelease::Unity6000_6 => find(&fallback, "the fallback")?,
+        };
         if first {
             // The fallback brings all its keywords, its own fallbacks'
             // among them.
@@ -243,7 +261,7 @@ pub(super) fn resolve(parsed: &Val, sources: &dyn ShaderSources) -> Result<Links
                 .any(|(name, _)| !keywords.iter().any(|(known, _)| known == name))
         })
         .count();
-    if adding > 1 {
+    if adding > 1 && release == super::ShaderRelease::Unity6000_6 {
         return Err(unsupported(
             "a shader whose keywords are extended by more than one other shader",
         ));
