@@ -501,13 +501,15 @@ pub fn convert(
         Vec::new()
     } else {
         set(&mut value, "image data", Val::Bytes(Vec::new()));
+        // No pixels name no stream.
+        let path = if data.is_empty() { "" } else { stream.0 };
         set(
             &mut value,
             "m_StreamData",
             Val::map([
-                ("offset", Val::U(stream.1)),
+                ("offset", Val::U(if data.is_empty() { 0 } else { stream.1 })),
                 ("size", Val::U(data.len() as u64)),
-                ("path", Val::Str(stream.0.to_string())),
+                ("path", Val::Str(path.to_string())),
             ]),
         );
         data

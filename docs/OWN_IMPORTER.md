@@ -171,6 +171,22 @@ Main without the worker's file: the 49 compressed and 38 scaled textures are
 written too (refused sources 155 to 63); 584 of 588 textures equal, the other
 four images of the same name paired the other way.
 
+### Every engine class, with its defaults
+
+`tools/ReferenceCapture/ClassCapture.cs`, run once per release with a
+licensed Editor in an empty project, writes a game object of every engine
+component (each in a prefab of its own) and the engine's asset classes the
+Editor can make (physics materials, cubemaps, texture arrays, render
+textures, lighting settings, terrain data, ...) with their defaults in the
+Player format with their trees. The packs of 6000.0 and 6000.6 take the
+classes they lacked from it (135 classes instead of 46 in 6000.0's), the
+samples they had kept. A texture without pixels (a font's empty texture)
+names no stream, as the worker writes it: a stream of no bytes failed the
+Player's asynchronous upload (`AsyncResourceUpload failed`, ten times in a
+Bouncemasters session, four left, from resources written before). A font
+whose `.meta` records no names takes its family name from its `name`
+table, as the importer does (TextMesh Pro's Liberation Sans).
+
 ### Other images, power-of-two scaling and mipmaps
 
 A PNG is read with `png`; the other formats the importer takes (JPEG,

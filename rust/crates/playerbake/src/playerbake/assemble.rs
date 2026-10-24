@@ -971,8 +971,14 @@ pub fn write_closure_baking(
                                 converted.value.field("m_IsReadable"),
                                 Some(Val::Bool(true) | Val::U(1) | Val::I(1))
                             );
+                            // A texture without pixels (a font's empty texture)
+                            // names no stream: the Player would read nothing
+                            // and fail the upload.
                             if document.class_id == texture::TEXTURE_2D as i64
                                 && !readable
+                                && converted.value.field("image data").is_some_and(
+                                    |data| !matches!(data, Val::Bytes(b) if b.is_empty()),
+                                )
                                 && let Some(Val::Bytes(pixels)) = converted
                                     .value
                                     .field_mut("image data")

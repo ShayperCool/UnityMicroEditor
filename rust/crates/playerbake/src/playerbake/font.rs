@@ -24,6 +24,48 @@ struct Metrics {
     line_gap: i16,
 }
 
+/// The font's family name (`name` table, name ID 1): the Windows Unicode
+/// record if it has one, else the Macintosh Roman one.
+fn family_name(data: &[u8]) -> Option<String> {
+    let u16_at = |at: usize| -> Option<u16> {
+        Some(u16::from_be_bytes(data.get(at..at + 2)?.try_into().ok()?))
+    };
+    let tables = u16_at(4)? as usize;
+    let table = (0..tables).find_map(|i| {
+        let at = 12 + 16 * i;
+        if data.get(at..at + 4)? != b"name" {
+            return None;
+        }
+        Some(u32::from_be_bytes(data.get(at + 8..at + 12)?.try_into().ok()?) as usize)
+    })?;
+    let count = u16_at(table + 2)? as usize;
+    let strings = table + u16_at(table + 4)? as usize;
+    let mut mac = None;
+    for i in 0..count {
+        let record = table + 6 + 12 * i;
+        let (platform, encoding, name_id) =
+            (u16_at(record)?, u16_at(record + 2)?, u16_at(record + 6)?);
+        if name_id != 1 {
+            continue;
+        }
+        let length = u16_at(record + 8)? as usize;
+        let offset = u16_at(record + 10)? as usize;
+        let bytes = data.get(strings + offset..strings + offset + length)?;
+        match (platform, encoding) {
+            (3, 1) | (0, _) => {
+                let units: Vec<u16> = bytes
+                    .chunks(2)
+                    .map(|c| u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)]))
+                    .collect();
+                return String::from_utf16(&units).ok();
+            }
+            (1, 0) => mac = Some(bytes.iter().map(|&b| b as char).collect()),
+            _ => {}
+        }
+    }
+    mac
+}
+
 fn metrics(data: &[u8]) -> Result<Metrics> {
     let u16_at = |at: usize| -> Result<u16> {
         Ok(u16::from_be_bytes(
@@ -92,9 +134,12 @@ pub fn documents(path: &Path, meta: &Map<String, Value>) -> Result<Vec<Document>
         .file_stem()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+    // The names the importer recorded, or the font's own family name.
     let names = match setting("fontNames") {
-        Some(Value::Array(names)) => names.clone(),
-        _ => Vec::new(),
+        Some(Value::Array(names)) if !names.is_empty() => names.clone(),
+        _ => family_name(&data)
+            .map(|family| vec![Value::String(family)])
+            .unwrap_or_default(),
     };
     let fallbacks = match setting("fallbackFontReferences") {
         Some(Value::Array(references)) => references.clone(),
