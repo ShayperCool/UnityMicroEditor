@@ -724,7 +724,7 @@ fn derive(documents: &[Document]) -> Result<Derived> {
                         "m_StartSnapshot",
                     )?;
                 }
-                let value = Val::map([
+                Val::map([
                     ("m_Name", name),
                     (
                         "m_OutputGroup",
@@ -749,8 +749,7 @@ fn derive(documents: &[Document]) -> Result<Derived> {
                     ),
                     ("m_UpdateMode", number("int", fields, "m_UpdateMode")?),
                     ("m_MixerConstant", constant.clone()),
-                ]);
-                value
+                ])
             }
             GROUP => {
                 let mut children = Vec::new();
@@ -758,7 +757,7 @@ fn derive(documents: &[Document]) -> Result<Derived> {
                     of_class(local(child, "m_Children")?, GROUP, "m_Children")?;
                     children.push(references.pointer(child, "m_Children")?);
                 }
-                let value = Val::map([
+                Val::map([
                     ("m_Name", name),
                     (
                         "m_AudioMixer",
@@ -766,20 +765,16 @@ fn derive(documents: &[Document]) -> Result<Derived> {
                     ),
                     ("m_GroupID", guid_of(document, "m_GroupID")?.val()),
                     ("m_Children", Val::Seq(children)),
-                ]);
-                value
+                ])
             }
-            SNAPSHOT => {
-                let value = Val::map([
-                    ("m_Name", name),
-                    (
-                        "m_AudioMixer",
-                        references.pointer(get(fields, "m_AudioMixer"), "m_AudioMixer")?,
-                    ),
-                    ("m_SnapshotID", guid_of(document, "m_SnapshotID")?.val()),
-                ]);
-                value
-            }
+            SNAPSHOT => Val::map([
+                ("m_Name", name),
+                (
+                    "m_AudioMixer",
+                    references.pointer(get(fields, "m_AudioMixer"), "m_AudioMixer")?,
+                ),
+                ("m_SnapshotID", guid_of(document, "m_SnapshotID")?.val()),
+            ]),
             _ => continue,
         };
         objects.push(MixerObject {
