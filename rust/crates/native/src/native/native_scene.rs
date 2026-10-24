@@ -11,7 +11,7 @@ use super::{
 };
 use crate::{
     cancel::Context,
-    playerbake,
+    playerbake::{self, Unsupported},
     project::{
         BUILTIN_RESOURCE_GUID, NativeContentDependency, NativeContentFile, NativeContentObject,
         NativeScene, NativeSceneAlias, NativeSceneFile, NeedsNativeScene,
@@ -52,9 +52,55 @@ pub(super) enum Writer {
     OwnOnly,
 }
 
+/// The assemblies of a Player whose scripts it finds only on its main
+/// thread: those its data lists (`ScriptingAssemblies.json`) that no script
+/// of its build names (`globalgamemanagers.assets`). A Player resolves a
+/// script's assembly by name once and keeps it; its build's scripts load
+/// on the main thread at its start, so it knows their assemblies before
+/// any content loads. A content file loads on threads the scripting
+/// runtime does not know, where finding an assembly the first time crashes
+/// the Player (`mono_assembly_loaded`). Assemblies compiled for Play mode
+/// alone (Editor code) and those added after the host build are such.
+fn cold_assemblies(player: &str) -> Vec<String> {
+    static KNOWN: std::sync::LazyLock<std::sync::Mutex<BTreeMap<String, Vec<String>>>> =
+        std::sync::LazyLock::new(Default::default);
+    if let Some(known) = KNOWN.lock().unwrap().get(player) {
+        return known.clone();
+    }
+    let data = crate::compiler::player_data(player);
+    let read = |name: &str| std::fs::read(sysutil::join(&[&data, name])).unwrap_or_default();
+    #[derive(serde::Deserialize, Default)]
+    struct Assemblies {
+        #[serde(default)]
+        names: Vec<String>,
+    }
+    let listed: Assemblies =
+        serde_json::from_slice(&read("ScriptingAssemblies.json")).unwrap_or_default();
+    let registered = read("globalgamemanagers.assets");
+    let cold: Vec<String> = listed
+        .names
+        .iter()
+        .map(|name| name.strip_suffix(".dll").unwrap_or(name).to_string())
+        .filter(|name| !registered.is_empty() && !names_text(&registered, name))
+        .collect();
+    KNOWN
+        .lock()
+        .unwrap()
+        .insert(player.to_string(), cold.clone());
+    cold
+}
+
+/// Whether a file holds `text` as a serialized string: its length, then
+/// its bytes.
+fn names_text(file: &[u8], text: &str) -> bool {
+    let mut pattern = (text.len() as u32).to_le_bytes().to_vec();
+    pattern.extend_from_slice(text.as_bytes());
+    file.windows(pattern.len()).any(|window| window == pattern)
+}
+
 /// What the tool's own writer writes depends on its code: the hash of the
 /// running program, taken once.
-fn own_writer_identity() -> &'static str {
+pub(super) fn own_writer_identity() -> &'static str {
     static IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     IDENTITY.get_or_init(|| {
         std::env::current_exe()
@@ -117,6 +163,24 @@ pub struct NativeAssets {
 }
 
 impl NativeProjectImporter {
+    /// Refuses a file that names a script of an assembly the Player finds
+    /// only on its main thread ([`cold_assemblies`]): loading it would crash
+    /// the Player.
+    fn refuse_cold_scripts(&self, file: &[u8]) -> Result<()> {
+        if self.opts.player.is_empty() {
+            return Ok(());
+        }
+        if let Some(assembly) = cold_assemblies(&self.opts.player)
+            .iter()
+            .find(|assembly| names_text(file, assembly))
+        {
+            bail!(Unsupported(format!(
+                "content with a script of {assembly}, an assembly the host Player's build does not register, which the Player cannot find while it loads content"
+            )));
+        }
+        Ok(())
+    }
+
     /// Writes `assets` (logical paths) in the Player format with what they
     /// refer to, as a scene's dependencies are written, and no scene: what a
     /// Player of Play mode code asks for by path while it runs. A worker of
@@ -267,6 +331,7 @@ impl NativeProjectImporter {
             objects,
             wanted,
         } = written;
+        self.refuse_cold_scripts(&file)?;
         let file_sha = sha256(&file);
         let guid = sha256(format!("ume-native-assets\0{file_sha}").as_bytes())[..32].to_string();
         let directory = sysutil::join(&[
@@ -439,6 +504,9 @@ impl NativeProjectImporter {
                 (scene, dependencies, resources)
             }
         };
+        for file in [&dependencies.file, &scene.file] {
+            self.refuse_cold_scripts(file)?;
+        }
         let dependencies_guid =
             sha256(format!("ume-native-scene-dependencies\0{key}").as_bytes())[..32].to_string();
         let file_sha = sha256(&dependencies.file);
@@ -835,5 +903,20 @@ impl NativeProjectImporter {
             },
             written.resources,
         ))
+    }
+}
+
+#[cfg(test)]
+mod cold_script_tests {
+    use super::names_text;
+
+    #[test]
+    fn a_serialized_name_is_found_by_its_length_and_bytes() {
+        let mut file = b"\x01\x02".to_vec();
+        file.extend_from_slice(&20u32.to_le_bytes());
+        file.extend_from_slice(b"Modules.Spine.Editor");
+        assert!(names_text(&file, "Modules.Spine.Editor"));
+        // A longer name that starts with it is another name.
+        assert!(!names_text(&file, "Modules.Spine"));
     }
 }
