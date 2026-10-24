@@ -24,7 +24,8 @@ pub use texture::decode_png;
 mod typetree;
 
 pub use assemble::{
-    Assembled, ShaderBaker, external_path, write_closure, write_closure_baking, write_scene_closure,
+    Assembled, ScriptsElsewhere, ShaderBaker, external_path, write_closure, write_closure_baking,
+    write_scene_closure,
 };
 pub use authored::{
     Converted, Kind, Library, MONO_SCRIPT, Reference, Renames, Resolve, Sources, Tags, Written,

@@ -35,9 +35,16 @@ What the host is made of:
   importer enables them for the Linux Player, by the rules of managed plugins
   (both forms of `.meta`).
 - **Streaming assets.** `Assets/StreamingAssets`, and an Addressables runtime
-  with an empty catalog (`aa/settings.json`, `aa/catalog.json`) where the
-  project has the package: the session serves addressable assets from their
-  sources, and the package only has to initialize.
+  with an empty catalog where the project has the package: the session serves
+  addressable assets from their sources, and the package only has to
+  initialize. Addressables 2 reads only a binary catalog unless the project
+  defines `ENABLE_JSON_CATALOG`, so `aa/catalog.bin` is written in its
+  `BinaryStorageBuffer` form: a header stamped with the Player's Mono hash of
+  `"ContentCatalogData"` (the 64-bit form of the .NET Framework's
+  `String.GetHashCode`, 233015618) and version 2, no keys, the instance and
+  scene providers. `aa/settings.json` names the build target the code is
+  compiled for (`Android` with `--compile-for Android`), which Addressables
+  checks the data against.
 - **`globalgamemanagers`** (`playerbake::write_game_managers`), from the
   release's manager pack and the project's `ProjectSettings`.
 - **`Resources/unity_builtin_extra`**: the built-in shaders the build needs,
@@ -49,9 +56,14 @@ What the host is made of:
 Once the preparation has compiled the project into its copy of the host, it
 completes it (`complete_player`, a hook of `compiler::prepare`):
 
-- every script class of the Player's assemblies gets its `MonoScript` in
+- every script that Unity imports a `MonoScript` for gets one in
   `globalgamemanagers.assets`, which `MonoManager.m_Scripts` lists after the
-  default resources' scripts. The Player loads them at its start on its main
+  default resources' scripts: the class a `.cs` source of its name declares
+  (in its namespace, after a byte order mark if the file starts with one),
+  and the classes of a plugin's assembly. Another class gets none, as in a
+  build: a `MonoScript` of UniTask's `AsyncParticleUpdateJobScheduledTrigger`
+  (declared in `MonoBehaviourMessagesTriggers.cs`) has the Player check its
+  messages and log a script error. The Player loads them at its start on its main
   thread, so content that names a script of any compiled assembly loads on a
   load thread without the crash described in
   [UNITY_RELEASES.md](UNITY_RELEASES.md);
@@ -61,7 +73,21 @@ completes it (`complete_player`, a hook of `compiler::prepare`):
   `Resources` folder, without extension, in lower case (a prefab by its root);
 - the shaders they use are imported and baked by the tool into that file
   (`native::project_shaders`), as a build holds them, and `ScriptMapper`
-  names them.
+  names them; their scripts are those of `globalgamemanagers.assets`, which
+  the file refers to (`playerbake::ScriptsElsewhere`): a `MonoScript` a
+  build's other file holds is not found by the Player, whose behaviours
+  then have none.
+
+What writing `resources.assets` brought up in Bouncemasters:
+
+- `ProjectContext.prefab` holds an instance of a prefab the project lacks
+  (`Facebook`). A build leaves a missing prefab's instance out and keeps the
+  rest; references to its objects are empty, and a transform lists no child
+  that was not written (the Player follows every entry of `m_Children` and
+  crashed in `Transform::SetSiblingIndexInternal`).
+- SRDebugger's prefabs name uGUI's scripts by the GUID of Unity 5's
+  `GUISystem/UnityEngine.UI.dll` (`f5f67c52d1564df4a8936ccd202a3bd8`),
+  pointed at the package's scripts as the later one is.
 
 ### The manager pack
 

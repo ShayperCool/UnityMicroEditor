@@ -160,8 +160,21 @@ pub fn write_scene_closure(
         stream_name,
         builtin_extra,
         None,
+        None,
     )
 }
+
+/// The `MonoScript`s of another file of a build, by class (`Namespace.Class`)
+/// and local ID, and the path the file is named by: the scripts a build
+/// keeps in `globalgamemanagers.assets`, which its other files refer to.
+pub struct ScriptsElsewhere<'a> {
+    pub path: &'a str,
+    pub scripts: &'a HashMap<String, i64>,
+}
+
+/// How an external reference to another file of a build is told apart from
+/// the GUID of a source.
+const ELSEWHERE: &str = "file:";
 
 /// The same, with the shaders the sources name baked into the file by
 /// `shaders`, as a build holds them, where a session publishes them apart.
@@ -176,6 +189,7 @@ pub fn write_closure_baking(
     stream_name: &str,
     builtin_extra: Option<&Path>,
     shaders: Option<ShaderBaker<'_>>,
+    elsewhere: Option<ScriptsElsewhere<'_>>,
 ) -> Result<Assembled> {
     let mut assembled = Assembled::default();
     // Sources by GUID, in the order they are reached.
@@ -792,11 +806,55 @@ pub fn write_closure_baking(
             }
         }
     }
+    // Scripts another file of the build holds are taken from it.
+    let mut moved: HashMap<i64, (i64, i64)> = HashMap::new();
+    let mut moved_names: HashMap<i64, String> = HashMap::new();
+    if let Some(elsewhere) = &elsewhere {
+        let marker = format!("{ELSEWHERE}{}", elsewhere.path);
+        for (id, tree, value, _) in &objects {
+            if tree.class_id != MONO_SCRIPT {
+                continue;
+            }
+            let text = |name: &str| match value.field(name) {
+                Some(Val::Str(text)) => text.clone(),
+                _ => String::new(),
+            };
+            let name = super::full_name(&text("m_Namespace"), &text("m_ClassName"));
+            if let Some(&other) = elsewhere.scripts.get(&name) {
+                let position = match externals.iter().position(|g| *g == marker) {
+                    Some(position) => position,
+                    None => {
+                        externals.push(marker.clone());
+                        externals.len() - 1
+                    }
+                };
+                moved.insert(*id, (position as i64 + 1, other));
+                moved_names.insert(*id, name);
+            }
+        }
+        objects.retain(|(id, ..)| !moved.contains_key(id));
+        for (_, _, value, _) in objects.iter_mut() {
+            map_pointers(value, &mut |file, path| match (file, moved.get(&path)) {
+                (0, Some(&elsewhere)) => elsewhere,
+                _ => (file, path),
+            });
+        }
+    }
     // A reference to an object that was not written is empty, as a build
     // leaves a reference to a missing object.
     let present: HashSet<i64> = objects.iter().map(|(id, ..)| *id).collect();
-    for (_, _, value, _) in objects.iter_mut() {
+    for (_, tree, value, _) in objects.iter_mut() {
         clear_missing(value, &present);
+        // A transform lists no child that was not written (the root of a
+        // missing prefab's instance): the Player follows every entry.
+        if matches!(tree.class_id, 4 | 224)
+            && let Some(Val::Seq(children)) = value.field_mut("m_Children")
+        {
+            children.retain(|child| {
+                !matches!(child.field("m_PathID"), Some(Val::I(0)))
+                    || !matches!(child.field("m_FileID"), Some(Val::I(0)))
+            });
+        }
     }
     // Where each object comes from.
     let origin: HashMap<i64, (String, i64)> = ids
@@ -804,20 +862,22 @@ pub fn write_closure_baking(
         .map(|((guid, file_id), local)| (*local, (guid.clone(), *file_id)))
         .collect();
     // The class of a script-backed object, by its MonoScript's names.
-    let script_names: HashMap<i64, String> = objects
-        .iter()
-        .filter(|(_, tree, ..)| tree.class_id == MONO_SCRIPT)
-        .map(|(id, _, value, _)| {
-            let text = |name: &str| match value.field(name) {
-                Some(Val::Str(text)) => text.clone(),
-                _ => String::new(),
-            };
-            (
-                *id,
-                super::full_name(&text("m_Namespace"), &text("m_ClassName")),
-            )
-        })
-        .collect();
+    let mut script_names: HashMap<i64, String> = moved_names;
+    script_names.extend(
+        objects
+            .iter()
+            .filter(|(_, tree, ..)| tree.class_id == MONO_SCRIPT)
+            .map(|(id, _, value, _)| {
+                let text = |name: &str| match value.field(name) {
+                    Some(Val::Str(text)) => text.clone(),
+                    _ => String::new(),
+                };
+                (
+                    *id,
+                    super::full_name(&text("m_Namespace"), &text("m_ClassName")),
+                )
+            }),
+    );
     let in_scene = |id: i64, tree: &TypeTree| -> bool {
         scene.is_some_and(|scene| {
             origin.get(&id).is_some_and(|(guid, _)| guid == scene)
@@ -830,9 +890,15 @@ pub fn write_closure_baking(
     let paths = |guids: &[String]| -> Vec<super::External> {
         guids
             .iter()
-            .map(|guid| super::External {
-                guid: guid.clone(),
-                path: external_path(guid),
+            .map(|guid| match guid.strip_prefix(ELSEWHERE) {
+                Some(path) => super::External {
+                    guid: String::new(),
+                    path: path.to_string(),
+                },
+                None => super::External {
+                    guid: guid.clone(),
+                    path: external_path(guid),
+                },
             })
             .collect()
     };
@@ -888,12 +954,16 @@ pub fn write_closure_baking(
     let written: Vec<Object<'_>> = objects
         .iter()
         .map(|(local_id, tree, value, script)| {
+            let (script_file, script) = match script.and_then(|id| moved.get(&id)) {
+                Some(&(file, other)) => (file as i32, Some(other)),
+                None => (0, *script),
+            };
             Ok(Object {
                 local_id: *local_id,
                 tree,
                 data: tree.encode_with(value, trees_of(local_id))?,
-                script: *script,
-                script_file: 0,
+                script,
+                script_file,
             })
         })
         .collect::<Result<_>>()?;
@@ -1359,9 +1429,13 @@ fn load(path: &Path, guid: &str, sources: &Sources) -> Result<Option<Source>> {
     Ok(None)
 }
 
-/// The GUID of the `UnityEngine.UI.dll` that held uGUI's scripts before uGUI
-/// was a package (Unity 2019.2), which prefabs made then still name.
-const LEGACY_UI_ASSEMBLY: &str = "f70555f144d8491a825f0804e09c671c";
+/// The GUIDs of the `UnityEngine.UI.dll` that held uGUI's scripts before
+/// uGUI was a package (Unity 2019.2), which prefabs made then still name:
+/// that of the Editor's extension of Unity 5 (`GUISystem`) and the later one.
+const LEGACY_UI_ASSEMBLIES: [&str; 2] = [
+    "f5f67c52d1564df4a8936ccd202a3bd8",
+    "f70555f144d8491a825f0804e09c671c",
+];
 
 /// Points the references of documents to scripts of the old
 /// `UnityEngine.UI.dll` at the package's scripts of the same classes, as the
@@ -1381,8 +1455,10 @@ fn legacy_ui_scripts(
     ) {
         match value {
             serde_json::Value::Object(fields) => {
-                if fields.get("guid").and_then(serde_json::Value::as_str)
-                    == Some(LEGACY_UI_ASSEMBLY)
+                if fields
+                    .get("guid")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|guid| LEGACY_UI_ASSEMBLIES.contains(&guid))
                     && let Some(file_id) = fields
                         .get("fileID")
                         .and_then(serde_json::Value::as_str)

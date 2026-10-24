@@ -356,7 +356,8 @@ field's declared type, the classes those hold in turn) under `managed`.
 Localization's settings and three locales against the worker's: equal.
 
 A reference to a script of the `UnityEngine.UI.dll` uGUI was before it was
-a package (`f70555f144d8491a825f0804e09c671c`, a prefab of then) names the
+a package (`f70555f144d8491a825f0804e09c671c`, or Unity 5's
+`f5f67c52d1564df4a8936ccd202a3bd8`, which SRDebugger's prefabs name) names the
 class by its file ID; it is pointed at the package's script of that class
 (`Image.cs`, ...), as the Editor finds it.
 

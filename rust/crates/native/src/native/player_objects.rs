@@ -1271,9 +1271,13 @@ pub fn write_player_objects(ctx: &Context, build: &Build) -> Result<PlayerObject
     bail!("the build of {} did not settle", build.target)
 }
 
-/// The GUID of the UnityEngine.UI.dll that held uGUI's scripts before uGUI was
-/// a package (Unity 2019.2), which prefabs made then still name.
-const LEGACY_UI_ASSEMBLY: &str = "f70555f144d8491a825f0804e09c671c";
+/// The GUIDs of the UnityEngine.UI.dll that held uGUI's scripts before uGUI
+/// was a package (Unity 2019.2), which prefabs made then still name: that
+/// of Unity 5's `GUISystem` extension and the later one.
+const LEGACY_UI_ASSEMBLIES: [&str; 2] = [
+    "f5f67c52d1564df4a8936ccd202a3bd8",
+    "f70555f144d8491a825f0804e09c671c",
+];
 /// The GUID of `Text.cs` of the `com.unity.ugui` package, one script of
 /// the assembly those scripts are compiled into now.
 const UI_TEXT_SCRIPT: &str = "5f7201a12d95ffc409449d95f23cf332";
@@ -1346,7 +1350,7 @@ pub(super) fn scene_closure(
                     // a package: by the GUID of its UnityEngine.UI.dll and the hash
                     // of its class. The Editor ties it to the package's script, for
                     // which the worker needs the package's assembly with its scripts.
-                    if guid == LEGACY_UI_ASSEMBLY {
+                    if LEGACY_UI_ASSEMBLIES.contains(&guid.as_str()) {
                         self.scripts.insert(UI_TEXT_SCRIPT.to_string());
                         continue;
                     }

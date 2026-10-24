@@ -423,12 +423,20 @@ fn copy_streaming_assets(project: &str, streaming: &str) -> Result<()> {
     };
     let aa = sysutil::join(&[streaming, "aa"]);
     sysutil::mkdir_all(&aa)?;
+    // Addressables checks the data against the platform its code is
+    // compiled for, a device's where the project compiles for one.
+    let target = match crate::sourcegraph::compile_for_group(project)?.as_deref() {
+        Some("Android") => "Android",
+        Some("iPhone") => "iOS",
+        Some("WebGL") => "WebGL",
+        _ => "StandaloneLinux64",
+    };
     let settings = serde_json::json!({
-        "m_buildTarget": "StandaloneLinux64",
+        "m_buildTarget": target,
         "m_SettingsHash": "",
         "m_CatalogLocations": [{
             "m_Keys": ["AddressablesMainContentCatalog"],
-            "m_InternalId": "{UnityEngine.AddressableAssets.Addressables.RuntimePath}/catalog.json",
+            "m_InternalId": "{UnityEngine.AddressableAssets.Addressables.RuntimePath}/catalog.bin",
             "m_Provider": "UnityEngine.AddressableAssets.ResourceProviders.ContentCatalogProvider",
             "m_Dependencies": [],
             "m_ResourceType": {
@@ -450,49 +458,83 @@ fn copy_streaming_assets(project: &str, streaming: &str) -> Result<()> {
         sysutil::join(&[&aa, "settings.json"]),
         serde_json::to_vec(&settings)?,
     )?;
-    // A catalog of no keys: an empty bucket table and no entries.
-    let empty = base64_encode(&0u32.to_le_bytes());
-    let catalog = serde_json::json!({
-        "m_LocatorId": "AddressablesMainContentCatalog",
-        "m_BuildResultHash": "",
-        "m_InstanceProviderData": {"m_Id": "UnityEngine.ResourceManagement.ResourceProviders.InstanceProvider", "m_ObjectType": {"m_AssemblyName": "Unity.ResourceManager, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null", "m_ClassName": "UnityEngine.ResourceManagement.ResourceProviders.InstanceProvider"}, "m_Data": ""},
-        "m_SceneProviderData": {"m_Id": "UnityEngine.ResourceManagement.ResourceProviders.SceneProvider", "m_ObjectType": {"m_AssemblyName": "Unity.ResourceManager, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null", "m_ClassName": "UnityEngine.ResourceManagement.ResourceProviders.SceneProvider"}, "m_Data": ""},
-        "m_ResourceProviderData": [],
-        "m_ProviderIds": [],
-        "m_InternalIds": [],
-        "m_KeyDataString": empty,
-        "m_BucketDataString": empty,
-        "m_EntryDataString": empty,
-        "m_ExtraDataString": "",
-        "m_resourceTypes": [],
-        "m_InternalIdPrefixes": []
-    });
-    std::fs::write(
-        sysutil::join(&[&aa, "catalog.json"]),
-        serde_json::to_vec(&catalog)?,
-    )?;
+    std::fs::write(sysutil::join(&[&aa, "catalog.bin"]), empty_catalog())?;
     Ok(())
 }
 
-fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let b = [
-            chunk[0],
-            chunk.get(1).copied().unwrap_or(0),
-            chunk.get(2).copied().unwrap_or(0),
-        ];
-        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
-        for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(TABLE[(n >> (18 - 6 * i) & 63) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
+/// A content catalog of no keys in the binary form Addressables 2 reads
+/// (`ContentCatalogData` over a `BinaryStorageBuffer`): its header (the
+/// Mono hash of the class name, version 2), an empty key table, the
+/// locator's name, the instance and scene providers and no resource
+/// providers. Offsets point past a string's or array's size.
+fn empty_catalog() -> Vec<u8> {
+    const RESOURCE_MANAGER: &str =
+        "Unity.ResourceManager, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null";
+    let mut out = vec![0u8; 32];
+    // The keys, reserved after the header.
+    out.extend_from_slice(&0u32.to_le_bytes());
+    let keys = out.len() as u32;
+    let string = |out: &mut Vec<u8>, text: &str| -> u32 {
+        out.extend_from_slice(&(text.len() as u32).to_le_bytes());
+        let at = out.len() as u32;
+        out.extend_from_slice(text.as_bytes());
+        at
+    };
+    let id = string(&mut out, "AddressablesMainContentCatalog");
+    let provider = |out: &mut Vec<u8>, class: &str| -> u32 {
+        let name = string(out, class);
+        let assembly = string(out, RESOURCE_MANAGER);
+        let type_at = out.len() as u32;
+        out.extend_from_slice(&assembly.to_le_bytes());
+        out.extend_from_slice(&name.to_le_bytes());
+        let at = out.len() as u32;
+        out.extend_from_slice(&name.to_le_bytes());
+        out.extend_from_slice(&type_at.to_le_bytes());
+        out.extend_from_slice(&u32::MAX.to_le_bytes());
+        at
+    };
+    let instance = provider(
+        &mut out,
+        "UnityEngine.ResourceManagement.ResourceProviders.InstanceProvider",
+    );
+    let scene = provider(
+        &mut out,
+        "UnityEngine.ResourceManagement.ResourceProviders.SceneProvider",
+    );
+    out.extend_from_slice(&0u32.to_le_bytes());
+    let providers = out.len() as u32;
+    let build = string(&mut out, "");
+    let header = [
+        mono_string_hash("ContentCatalogData") as u32,
+        2,
+        keys,
+        id,
+        instance,
+        scene,
+        providers,
+        build,
+    ];
+    for (index, word) in header.iter().enumerate() {
+        out[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
     }
     out
+}
+
+/// `String.GetHashCode` of the Player's Mono (the 64-bit form of the .NET
+/// Framework's), which Addressables stamps its catalogs with.
+fn mono_string_hash(text: &str) -> i32 {
+    let chars: Vec<i32> = text.encode_utf16().map(i32::from).collect();
+    let (mut first, mut second) = (5381i32, 5381i32);
+    let mut at = 0;
+    while at < chars.len() {
+        first = (first.wrapping_shl(5).wrapping_add(first)) ^ chars[at];
+        if at + 1 >= chars.len() {
+            break;
+        }
+        second = (second.wrapping_shl(5).wrapping_add(second)) ^ chars[at + 1];
+        at += 2;
+    }
+    first.wrapping_add(second.wrapping_mul(1_566_083_941))
 }
 
 /// The `MonoScript`s of the Player's default resources, by path ID, which
@@ -671,8 +713,49 @@ pub fn complete_player(
     let preloaded: Vec<(i64, i64)> = default_scripts.iter().map(|&id| (1, id)).collect();
     let mut objects = vec![(1, 0, preload_data(&preloaded))];
     let mut written = Completed::default();
-    for (index, (_, script)) in library.script_objects().into_iter().enumerate() {
+    // A script has a `MonoScript` where Unity imports one: the class a `.cs`
+    // source of its name declares, and the classes of a plugin's assembly.
+    let sources = playerbake::Sources::of_project(root)?;
+    let mut script_files: HashMap<String, Vec<&str>> = HashMap::new();
+    let mut plugins: BTreeSet<String> = BTreeSet::new();
+    for (guid, path) in sources.all() {
+        let stem = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        match path.extension().and_then(|extension| extension.to_str()) {
+            Some("cs") => script_files.entry(stem).or_default().push(guid),
+            Some("dll") => {
+                plugins.insert(stem);
+            }
+            _ => {}
+        }
+    }
+    let imported = |full_name: &str, script: &Val| -> bool {
+        let assembly = match script.field("m_AssemblyName") {
+            Some(Val::Str(name)) => name.strip_suffix(".dll").unwrap_or(name).to_string(),
+            _ => String::new(),
+        };
+        if plugins.contains(&assembly) {
+            return true;
+        }
+        let short = full_name.rsplit('.').next().unwrap_or(full_name);
+        script_files.get(short).is_some_and(|guids| {
+            guids
+                .iter()
+                .any(|guid| sources.script_class(guid).as_deref() == Some(full_name))
+        })
+    };
+    let scripts: Vec<(&str, &Val)> = library
+        .script_objects()
+        .into_iter()
+        .filter(|(name, script)| imported(name, script))
+        .collect();
+    // The other files of the build take their scripts from this one.
+    let mut held_scripts: HashMap<String, i64> = HashMap::new();
+    for (index, (name, script)) in scripts.into_iter().enumerate() {
         let local_id = index as i64 + 2;
+        held_scripts.insert(name.to_string(), local_id);
         objects.push((local_id, 1, script_kind.tree.encode(script)?));
         written
             .scripts
@@ -693,7 +776,6 @@ pub fn complete_player(
         )?,
     )?;
     // The resources.
-    let sources = playerbake::Sources::of_project(root)?;
     let mut named: Vec<(String, String)> = Vec::new();
     for (guid, path) in sources.all() {
         let relative = path.strip_prefix(root).unwrap_or(path);
@@ -730,6 +812,10 @@ pub fn complete_player(
             "resources.assets.resS",
             Some(Path::new(&builtin_extra)),
             Some(&bake),
+            Some(playerbake::ScriptsElsewhere {
+                path: "globalgamemanagers.assets",
+                scripts: &held_scripts,
+            }),
         )?;
         let _ = std::fs::remove_dir_all(&logs);
         for (local_id, class, guid, _) in &assembled.objects {
@@ -1438,9 +1524,12 @@ mod tests {
     }
 
     #[test]
-    fn base64_pads_as_the_standard_alphabet_does() {
-        assert_eq!(base64_encode(&[0, 0, 0, 0]), "AAAAAA==");
-        assert_eq!(base64_encode(b"Man"), "TWFu");
+    fn a_catalog_is_stamped_with_the_hash_mono_gives_its_class_name() {
+        // As an Addressables 2.7 build of Bouncemasters stamps catalog.bin.
+        assert_eq!(mono_string_hash("ContentCatalogData"), 233015618);
+        let catalog = empty_catalog();
+        assert_eq!(&catalog[..8], &[0x42, 0x89, 0xe3, 0x0d, 2, 0, 0, 0]);
+        assert_eq!(&catalog[8..12], &36u32.to_le_bytes());
     }
 
     #[test]

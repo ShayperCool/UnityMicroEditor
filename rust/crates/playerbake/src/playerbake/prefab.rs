@@ -122,6 +122,12 @@ impl Unpacked {
                 }
             }
         }
+        // An instance of a prefab the project lacks is a missing prefab,
+        // which a build leaves out: references to its objects are empty.
+        instances.retain(|instance| {
+            reference(&instance.data, "m_SourcePrefab")
+                .is_none_or(|source| source.guid.is_empty() || sources.path(&source.guid).is_some())
+        });
         let mut merged: Vec<Document> = Vec::new();
         for instance in &instances {
             merged.extend(self.instance(sources, instance)?);

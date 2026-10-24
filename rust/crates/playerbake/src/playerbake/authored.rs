@@ -1060,6 +1060,8 @@ impl Sources {
         let path = self.path(guid)?;
         let class = path.file_stem()?.to_string_lossy().into_owned();
         let text = std::fs::read_to_string(path).ok()?;
+        // A source may start with a byte order mark.
+        let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
         let namespace = text
             .lines()
             .map(str::trim_start)
@@ -1224,6 +1226,30 @@ pub fn write_source(
 mod tests {
     use super::*;
     use crate::playerbake::serialized::{Object, write};
+
+    #[test]
+    fn a_script_class_is_named_by_its_namespace_after_a_byte_order_mark() {
+        let project = tempfile::tempdir().unwrap();
+        let assets = project.path().join("Assets");
+        std::fs::create_dir_all(&assets).unwrap();
+        std::fs::write(
+            assets.join("Scaler.cs"),
+            "\u{feff}namespace SRF.UI\n{\n    public class Scaler {}\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            assets.join("Scaler.cs.meta"),
+            "fileFormatVersion: 2\nguid: 0123456789abcdef0123456789abcdef\n",
+        )
+        .unwrap();
+        let sources = Sources::of_project(project.path()).unwrap();
+        assert_eq!(
+            sources
+                .script_class("0123456789abcdef0123456789abcdef")
+                .as_deref(),
+            Some("SRF.UI.Scaler")
+        );
+    }
 
     #[test]
     fn tags_are_numbered_as_a_build_numbers_them() {
