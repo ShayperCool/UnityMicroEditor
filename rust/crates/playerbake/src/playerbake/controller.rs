@@ -175,12 +175,18 @@ pub(super) fn settle_size(tree: &TypeTree, controller: &mut Val) -> Result<()> {
 }
 
 fn constant_size_in(tree: &TypeTree, constant: &Val) -> Result<u64> {
+    blob_size(tree, "m_Controller", constant)
+}
+
+/// The size in memory of the block a field of an object's tree describes
+/// (a controller's or an avatar's constant), given its serialized value.
+pub fn blob_size(tree: &TypeTree, field: &str, constant: &Val) -> Result<u64> {
     let Some(root) = tree
         .children(0)
         .into_iter()
-        .find(|&child| tree.nodes[child].name == "m_Controller")
+        .find(|&child| tree.nodes[child].name == field)
     else {
-        bail!("controller type tree has no constant");
+        bail!("the type tree has no {field}");
     };
     let mut blob = Blob { tree, size: 0 };
     let (size, align) = blob.member(root)?;

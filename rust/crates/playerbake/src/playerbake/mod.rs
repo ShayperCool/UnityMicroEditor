@@ -50,7 +50,7 @@ pub use clip::{
 };
 pub use compare::{Difference, Inspected, compare as compare_files, inspect as inspect_file};
 pub use controller::{
-    BehaviourScript, ClipFacts, Controller, ControllerSources, bake_controller_object,
+    BehaviourScript, ClipFacts, Controller, ControllerSources, bake_controller_object, blob_size,
     read_clip_facts,
 };
 pub use freeform::{Freeform, precompute as precompute_freeform};

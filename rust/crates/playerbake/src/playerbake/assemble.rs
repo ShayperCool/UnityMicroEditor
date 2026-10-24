@@ -788,6 +788,17 @@ pub fn write_closure_baking(
                         if document.class_id == 91 {
                             super::controller::settle_size(&kind.tree, &mut value)?;
                         }
+                        // An avatar states its constant's size in memory.
+                        if document.class_id == 90 {
+                            let size = super::controller::blob_size(
+                                &kind.tree,
+                                "m_Avatar",
+                                value.field("m_Avatar").unwrap_or(&Val::Zero),
+                            )?;
+                            if let Some(field) = value.field_mut("m_AvatarSize") {
+                                *field = Val::U(size);
+                            }
+                        }
                         let mut error = None;
                         map_pointers(&mut value, &mut |file, path| {
                             if file == 0 && path == 0 {

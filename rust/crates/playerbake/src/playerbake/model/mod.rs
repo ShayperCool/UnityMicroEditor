@@ -1,5 +1,6 @@
 //! Models (`.fbx`) imported without the Editor: what the Editor's model
 //! importer makes of a file, read through `ufbx`.
+mod avatar;
 mod mesh;
 mod settings;
 mod space;
@@ -13,6 +14,7 @@ use std::{collections::HashMap, fmt::Write as _, path::Path};
 
 const MESH: i64 = 43;
 const CLIP: i64 = 74;
+const AVATAR: i64 = 90;
 
 /// How the file is read: as the Editor's importer has it, a node's origin
 /// moves to its pivot and its geometry the other way.
@@ -213,6 +215,49 @@ pub fn import(path: &Path, settings: &Settings) -> Result<Imported> {
                 .refused
                 .push(format!("mesh {}: {error:#}", node.name)),
         }
+    }
+    // A generic rig's avatar, of every node.
+    if settings.animation_type == 2 && settings.create_avatar {
+        let bones: Vec<avatar::Bone> = nodes
+            .iter()
+            .map(|node| {
+                let t = &node.fbx.local_transform;
+                avatar::Bone {
+                    path: node.path.clone(),
+                    name: match node.parent {
+                        None => String::new(),
+                        Some(_) => node.name.clone(),
+                    },
+                    parent: node.parent.map_or(-1, |p| p as i64),
+                    transform: match node.parent {
+                        // The root stays where the model is placed.
+                        None => ([0.0; 3], [0.0, 0.0, 0.0, 1.0], [1.0; 3]),
+                        Some(_) => (
+                            space.position([
+                                t.translation.x as f32,
+                                t.translation.y as f32,
+                                t.translation.z as f32,
+                            ]),
+                            space.rotation([
+                                t.rotation.x as f32,
+                                t.rotation.y as f32,
+                                t.rotation.z as f32,
+                                t.rotation.w as f32,
+                            ]),
+                            [t.scale.x as f32, t.scale.y as f32, t.scale.z as f32],
+                        ),
+                    },
+                }
+            })
+            .collect();
+        let id = ids.of(AVATAR, "//RootNode")?;
+        imported.objects.push((
+            id,
+            AVATAR,
+            avatar::generic(&file_name, &bones, &settings.human),
+        ));
+    } else if settings.animation_type == 3 && settings.create_avatar {
+        imported.refused.push("avatar: a humanoid rig".to_string());
     }
     if settings.import_animation && settings.animation_type != 0 {
         let animated: Vec<take::Animated<'_>> = nodes

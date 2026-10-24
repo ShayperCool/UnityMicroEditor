@@ -468,7 +468,17 @@ fn run_player_file(args: Vec<String>) -> Result<()> {
                     let kind = library
                         .class(*class as i32)
                         .ok_or_else(|| anyhow::anyhow!("no tree of class {class}"))?;
-                    data.push((*id, kind.tree.clone(), kind.tree.encode(value)?));
+                    let mut value = value.clone();
+                    if *class == 90 {
+                        let size = unity_micro_editor::playerbake::blob_size(
+                            &kind.tree,
+                            "m_Avatar",
+                            value.field("m_Avatar").unwrap(),
+                        )?;
+                        *value.field_mut("m_AvatarSize").unwrap() =
+                            unity_micro_editor::playerbake::Val::U(size);
+                    }
+                    data.push((*id, kind.tree.clone(), kind.tree.encode(&value)?));
                 }
                 for (id, tree, bytes) in &data {
                     objects.push(unity_micro_editor::playerbake::Object {

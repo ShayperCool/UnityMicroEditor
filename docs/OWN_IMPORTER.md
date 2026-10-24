@@ -267,10 +267,17 @@ sloped through its neighbours; the clip baker makes the Player's clip of
 it, and a controller that plays it takes its name and loop from the
 `.meta`. The importer reduces those keys (`animationCompression`), which
 the tool does not: Main's two takes play as the worker's do within 0.003
-(its reduction's tolerance) at every frame, with about twice the keys. Not
+(its reduction's tolerance) at every frame, with about twice the keys. A
+generic rig's avatar (`model/avatar.rs`) holds every node as its skeleton
+(by the CRC-32 of its path, the name IDs by that of its name), the nodes'
+local transforms as its pose and an empty human part with the
+description's settings and the engine's default bone masses; Main's two
+equal the worker's but for `m_AvatarSize`, which the tool takes over the
+release's tree with the controllers' rule and which comes out larger. The
+Player only reserves that much before reading (`ChainedAllocator::Reserve`)
+and takes more if it needs to. A humanoid avatar is refused. Not
 imported yet: the model's hierarchy as objects (for prefab instances of a
-model), its avatar (an `Animator` of a generic rig plays without one),
-clips with events or curves of their own, embedded materials, blend
+model), clips with events or curves of their own, embedded materials, blend
 shapes, the new-style file IDs of models without a recorded table.
 
 ### Baked lighting

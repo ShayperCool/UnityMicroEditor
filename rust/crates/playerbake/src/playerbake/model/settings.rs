@@ -59,6 +59,10 @@ pub struct Settings {
     /// `animationType`: 0 none, 1 legacy, 2 generic, 3 humanoid.
     pub animation_type: i64,
     pub import_animation: bool,
+    /// Whether the import makes an avatar of the model: `avatarSetup` 1, or
+    /// before it `copyAvatar` 0 with a rig.
+    pub create_avatar: bool,
+    pub human: super::avatar::Description,
     /// The clips of the takes; empty for one clip per take.
     pub clips: Vec<ClipSettings>,
     /// `animationCompression`: 0 off, 1 keyframe reduction, 2 and 3 more.
@@ -168,7 +172,29 @@ impl Settings {
                 });
             }
         }
+        let description = |key: &str, default: f64| {
+            number(find(importer, &["humanDescription", key])).unwrap_or(default)
+        };
+        let human = super::avatar::Description {
+            arm_twist: description("armTwist", 0.5) as f32,
+            fore_arm_twist: description("foreArmTwist", 0.5) as f32,
+            upper_leg_twist: description("upperLegTwist", 0.5) as f32,
+            leg_twist: description("legTwist", 0.5) as f32,
+            arm_stretch: description("armStretch", 0.05) as f32,
+            leg_stretch: description("legStretch", 0.05) as f32,
+            feet_spacing: description("feetSpacing", 0.0) as f32,
+            global_scale: get(&["meshes", "globalScale"]).unwrap_or(1.0) as f32,
+            has_translation_dof: description("hasTranslationDoF", 0.0) != 0.0,
+            has_extra_root: description("hasExtraRoot", 0.0) != 0.0,
+            skeleton_has_parents: description("skeletonHasParents", 1.0) != 0.0,
+        };
+        let create_avatar = match get(&["avatarSetup"]) {
+            Some(setup) => setup == 1.0,
+            None => !flag(&["copyAvatar"], false),
+        };
         Ok(Self {
+            create_avatar,
+            human,
             clips,
             animation_compression: get(&["animations", "animationCompression"]).unwrap_or(1.0)
                 as i64,
